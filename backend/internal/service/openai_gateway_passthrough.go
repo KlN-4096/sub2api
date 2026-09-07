@@ -709,6 +709,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	// 与请求体 client_metadata 共享同一份 IDs（与非透传路径相同的相对位置：
 	// 会话隔离之后、终态身份收口之前）。
 	applyStagedCodexFingerprintHeaders(c, account, req.Header)
+	applyCodexFingerprintConvergenceHeaders(c, codexAccountIdentitySource(c, account), req.Header)
 	// 终态收口：透传路径的 OAuth 与非透传完全一致，同样强制统一出站身份
 	// （User-Agent / originator / version 同源自洽），客户端自报身份不会到达上游。
 	if account.UsesOpenAICodexProtocol() {
