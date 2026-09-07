@@ -1,0 +1,133 @@
+name: Sync upstream into klno
+
+# 上游 Wei-Shaw/sub2api 发新版标签后，把 klno 分支 rebase 到新标签、跑定向测试、
+# 打 <上游标签>-klno.N 标签并触发 release.yml 出包；同时检查 codex-rs 身份相关源码是否变动。
+# 冲突或测试失败不会推送任何东西，只开 issue。
+
+on:
+  schedule:
+    - cron: '17 3 * * *' # UTC，每天一次
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: '指定上游标签（留空=最新 vX.Y.Z）'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+env:
+  UPSTREAM_REPO: Wei-Shaw/sub2api
+  FORK_BRANCH: klno
+  CODEX_PINNED_COMMIT: 16ff14c
+  CODEX_IDENTITY_PATHS: >-
+    codex-rs/codex-api/src/requests/headers.rs
+    codex-rs/codex-api/src/endpoint/responses.rs
+    codex-rs/core/src/responses_metadata.rs
+    codex-rs/core/src/client.rs
+    codex-rs/core/src/session/session.rs
+    codex-rs/core/src/state/auto_compact_window.rs
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.FORK_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve upstream tag
+        id: up
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --tags --force upstream
+          if [ -n "${{ inputs.upstream_tag }}" ]; then
+            latest="${{ inputs.upstream_tag }}"
+          else
+            latest=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          fi
+          base=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${FORK_BRANCH}" | sed -E 's/-klno\.[0-9]+$//')
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "upstream latest=$latest, klno base=$base"
+
+      - name: Rebase klno onto upstream tag
+        id: rebase
+        if: steps.up.outputs.latest != steps.up.outputs.base
+        run: |
+          set -euo pipefail
+          git config user.name "klno-sync-bot"
+          git config user.email "klno-sync-bot@users.noreply.github.com"
+          if git rebase --onto "${{ steps.up.outputs.latest }}" "${{ steps.up.outputs.base }}" "${FORK_BRANCH}"; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U > /tmp/conflicts.txt || true
+            git rebase --abort
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open issue on conflict
+        if: steps.rebase.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          body=$(printf 'rebase klno (%s) onto %s 冲突，需要人工处理。\n\n冲突文件：\n```\n%s\n```' "${{ steps.up.outputs.base }}" "${{ steps.up.outputs.latest }}" "$(cat /tmp/conflicts.txt)")
+          gh issue create --title "sync-upstream: rebase onto ${{ steps.up.outputs.latest }} conflicts" --body "$body"
+          exit 1
+
+      - name: Setup Go
+        if: steps.up.outputs.latest != steps.up.outputs.base
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Build and targeted tests
+        if: steps.up.outputs.latest != steps.up.outputs.base
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          go build ./...
+          go test ./internal/service -count=1 -run 'CodexFingerprintConvergence|CodexAccountIdentity|CodexFingerprint|OAuthPassthrough|BuildOpenAIWSHeaders|SetupTokenCompat|IngressSession' 2>&1 | grep -vE '"level":"(DEBUG|INFO|WARN)"' | tail -20
+
+      - name: Push rebased branch and tag, trigger release
+        if: steps.up.outputs.latest != steps.up.outputs.base
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git push --force-with-lease origin "${FORK_BRANCH}"
+          n=1
+          while git ls-remote --exit-code --tags origin "refs/tags/${{ steps.up.outputs.latest }}-klno.${n}" >/dev/null 2>&1; do n=$((n+1)); done
+          tag="${{ steps.up.outputs.latest }}-klno.${n}"
+          git tag -a "$tag" -m "klno build on upstream ${{ steps.up.outputs.latest }}"
+          git push origin "$tag"
+          # GITHUB_TOKEN 推的 tag 不会触发 release.yml，改用 workflow_dispatch（该事件不受限制）
+          gh workflow run release.yml --ref "$tag" -f tag="$tag"
+          echo "released $tag"
+
+      - name: Check codex-rs identity sources for drift
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone -q --filter=blob:none https://github.com/openai/codex.git /tmp/codex
+          cd /tmp/codex
+          head=$(git rev-parse --short HEAD)
+          changed=$(git diff --stat "${CODEX_PINNED_COMMIT}" HEAD -- ${CODEX_IDENTITY_PATHS} | tail -1 || true)
+          if [ -n "$changed" ]; then
+            title="codex-rs identity sources changed since ${CODEX_PINNED_COMMIT} (now ${head})"
+            if ! gh issue list --search "in:title \"$title\"" --state open --repo "${GITHUB_REPOSITORY}" | grep -q .; then
+              body=$(printf '被跟踪的 codex-rs 身份相关文件相对固定提交 %s 有变动（当前 %s）：\n\n```\n%s\n```\n\n请核对 backend/internal/service/openai_codex_fingerprint_convergence.go 的恒等式是否仍成立，确认后更新 CODEX_PINNED_COMMIT。' "${CODEX_PINNED_COMMIT}" "${head}" "$(git diff --stat "${CODEX_PINNED_COMMIT}" HEAD -- ${CODEX_IDENTITY_PATHS})")
+              gh issue create --repo "${GITHUB_REPOSITORY}" --title "$title" --body "$body"
+            fi
+          else
+            echo "codex identity sources unchanged since ${CODEX_PINNED_COMMIT}"
+          fi
