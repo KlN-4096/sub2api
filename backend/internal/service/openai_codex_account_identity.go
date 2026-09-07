@@ -96,14 +96,23 @@ func scopeCodexAccountIdentityValue(account *Account, apiKeyID int64, kind, raw 
 	if raw == "" || namespace == "" {
 		return raw
 	}
-	return deriveStableUUIDv4(fmt.Sprintf(
+	// klno 实验性指纹收敛：window 类 "<thread>:<n>" 形态按 thread 派生并保留序号
+	if derived, ok := deriveCodexConvergenceWindowValue(account, apiKeyID, kind, raw); ok {
+		return derived
+	}
+	seed := fmt.Sprintf(
 		"sub2api:codex-account-identity:%s:user:%d:account:%s:kind:%s:value:%s",
 		codexAccountIdentityNamespaceVersion,
 		apiKeyID,
 		namespace,
 		kind,
 		raw,
-	))
+	)
+	// klno 实验性指纹收敛：原始值为 UUIDv7 时保持 v7 形态（见 openai_codex_fingerprint_convergence.go）
+	if derived, ok := deriveCodexConvergenceIdentityValue(account, seed, raw); ok {
+		return derived
+	}
+	return deriveStableUUIDv4(seed)
 }
 
 var codexAccountIdentityFields = []struct {
@@ -138,6 +147,10 @@ func applyCodexAccountIdentityFields(values map[string]any, account *Account, ap
 			values[field.name] = next
 			changed = true
 		}
+	}
+	// klno 实验性指纹收敛：root_turn_id / parent_* / context_window_id 与同类字段同源派生
+	if applyCodexConvergenceIdentityFields(values, account, apiKeyID) {
+		changed = true
 	}
 	return changed
 }
