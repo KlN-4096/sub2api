@@ -3,6 +3,8 @@ name: Sync upstream into klno
 # 上游 Wei-Shaw/sub2api 发新版标签后，把 klno 分支 rebase 到新标签、跑定向测试、
 # 打 <上游标签>-klno.N 标签并触发 release.yml 出包；同时检查 codex-rs 身份相关源码是否变动。
 # 冲突、测试失败、codex-rs 漂移都只让 run 失败（GitHub 邮件通知），不推送任何东西；fork 未开 issues。
+# 每次运行还会把默认分支 main 重建成 upstream/main + 本文件：GitHub 的定时 workflow 只从默认
+# 分支触发，main 只是 cron 的宿主，没人同步它就会一直落后（仓库首页那条 "N commits behind"）。
 
 on:
   schedule:
@@ -109,6 +111,28 @@ jobs:
           # GITHUB_TOKEN 推的 tag 不会触发 release.yml，改用 workflow_dispatch；必须显式 --repo，否则 gh 会从 upstream remote 解析成上游仓库（403）
           gh workflow run release.yml --repo "${GITHUB_REPOSITORY}" --ref "$tag" -f tag="$tag"
           echo "released $tag"
+
+      - name: Resync default branch onto upstream
+        run: |
+          set -euo pipefail
+          git fetch --force origin main
+          git fetch --force upstream main
+          behind=$(git rev-list --count origin/main..upstream/main)
+          if [ "$behind" -eq 0 ]; then
+            echo "default branch already level with upstream/main"
+            exit 0
+          fi
+          # main 只承担一个职责：给 cron 当宿主。重建成 upstream/main + klno 那份本文件，
+          # 不保留 release.yml 推来的 "chore: sync VERSION to *-klno.*"——那是 klno 的版本号，
+          # 留在镜像分支上只会每次跟上游的 VERSION 打架。
+          git config user.name "klno-sync-bot"
+          git config user.email "klno-sync-bot@users.noreply.github.com"
+          git checkout -B main upstream/main
+          git checkout "${FORK_BRANCH}" -- .github/workflows/sync-upstream.yml
+          git commit -q -m "ci: host sync-upstream workflow on the default branch" || true
+          test -f .github/workflows/sync-upstream.yml # 丢了这个文件 cron 就停了
+          git push --force-with-lease origin main
+          echo "default branch resynced onto upstream/main ($(git rev-parse --short upstream/main)), was $behind behind"
 
       - name: Check codex-rs identity sources for drift
         run: |
