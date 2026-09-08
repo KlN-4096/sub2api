@@ -106,8 +106,8 @@ jobs:
           tag="${{ steps.up.outputs.latest }}-klno.${n}"
           git tag -a "$tag" -m "klno build on upstream ${{ steps.up.outputs.latest }}"
           git push origin "$tag"
-          # GITHUB_TOKEN 推的 tag 不会触发 release.yml，改用 workflow_dispatch（该事件不受限制）
-          gh workflow run release.yml --ref "$tag" -f tag="$tag"
+          # GITHUB_TOKEN 推的 tag 不会触发 release.yml，改用 workflow_dispatch；必须显式 --repo，否则 gh 会从 upstream remote 解析成上游仓库（403）
+          gh workflow run release.yml --repo "${GITHUB_REPOSITORY}" --ref "$tag" -f tag="$tag"
           echo "released $tag"
 
       - name: Check codex-rs identity sources for drift
