@@ -175,6 +175,10 @@ var codexConvergenceBodyToHeader = [][2]string{
 	{"session_id", "session-id"},
 	{"thread_id", "thread-id"},
 	{"x-codex-parent-thread-id", "x-codex-parent-thread-id"},
+	// 子代理标记同样两侧同源（responses_metadata.rs 的 client_metadata() 与
+	// compatibility_headers() 都写它）。中继剥掉头后只剩体内那份，会出现
+	// 「体内声明子代理、头上没有」的自相矛盾——正是收敛要消除的形态。
+	{"x-openai-subagent", "x-openai-subagent"},
 }
 
 const codexConvergenceStagedBodyIdentityContextKey = "codex_convergence_body_identity"

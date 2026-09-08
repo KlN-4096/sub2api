@@ -400,6 +400,15 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchRequest(ctx context.Context
 			req.Header.Set("X-Codex-Turn-Metadata", turnMetadata)
 		}
 		applyCodexAccountIdentityHeaders(req.Header, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
+		// 设备指纹收敛只作用于已有的 turn-metadata：真实客户端在该端点只发
+		// x-codex-turn-metadata 与 originator（codex-rs ext/web-search/src/tool.rs 的
+		// search_request_headers），不发会话头，故不能补入 Responses 的那一套。
+		// 不做收敛时 installation_id 仍是按客户端原值派生的，与推理面的固定设备不一致。
+		if ids := resolveCodexFingerprintIDsFromRequest(c, account, nil); ids != nil {
+			rewriteCodexTurnMetadataFields(req.Header, map[string]any{
+				"installation_id": ids.installationID,
+			}, ids)
+		}
 		canonical := resolveCodexOutboundIdentity("")
 		if version := openAIAlphaSearchInboundHeader(c, "Version"); version != "" {
 			req.Header.Set("Version", version)

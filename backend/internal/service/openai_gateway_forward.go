@@ -524,29 +524,34 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		// Account namespace is orthogonal to fingerprint convergence: preserve
 		// each client's identity cardinality, but never reuse it across OAuth
 		// credentials after scheduler failover.
+		// compact 形态只跳过请求体侧：真实 Codex 的 compact 请求体同样没有 client_metadata
+		// （codex-rs core/src/client.rs 的 compact 请求结构无该字段），但出站头照发
+		// x-codex-installation-id 与 session-id / thread-id（同文件 compact_conversation_history
+		// 的 extra_headers）。故头侧的 IDs 解析与暂存不能跟着体侧一起跳过，否则同一账号的
+		// compact 请求会带着另一套按客户端原值派生的设备身份出站。
 		var fpIDs *codexFingerprintIDs
-		if !isCompactRequest {
+		if isCompactRequest {
+			fpIDs = resolveCodexFingerprintIDsFromRequest(c, account, nil)
+		} else {
 			fpIDs = resolveCodexFingerprintIDsWithBody(c, account, nil, decoded["client_metadata"])
 		}
 		if !isCompactRequest && applyCodexAccountIdentityClientMetadataMap(decoded, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c)) {
 			markDecodedModified()
 		}
-		stageCodexFingerprintIDs(c, nil)
-		// 指纹收敛：一次性解析收敛 ID，请求体和出站头共享同一份 IDs（保证 turn_id 等随机字段一致）。
-		// fingerprintIDs 在此处解析，后续 buildUpstreamRequest 中使用同一份。
-		if !isCompactRequest {
-			if fpIDs != nil {
-				if applyCodexFingerprintClientMetadata(decoded, fpIDs) {
-					markDecodedModified()
-				}
+		// 指纹收敛：请求体和出站头共享同一份 IDs（保证 turn_id 等随机字段一致）。
+		if !isCompactRequest && fpIDs != nil {
+			if applyCodexFingerprintClientMetadata(decoded, fpIDs) {
+				markDecodedModified()
 			}
-			// 将 fpIDs 存入 gin context，供 buildUpstreamRequest 中头改写使用。
-			// 无条件覆写（含 nil）：failover 从收敛账号切到 off 账号时，上一
-			// 账号的 IDs 不得残留（stageCodexFingerprintIDs 注释）。
-			stageCodexFingerprintIDs(c, fpIDs)
+		}
+		// 将 fpIDs 存入 gin context，供 buildUpstreamRequest 中头改写使用。
+		// 无条件覆写（含 nil）：failover 从收敛账号切到 off 账号时，上一
+		// 账号的 IDs 不得残留（stageCodexFingerprintIDs 注释）。
+		stageCodexFingerprintIDs(c, fpIDs)
+		if !isCompactRequest {
 			// klno 指纹收敛：暂存体内已派生的会话身份，供出站头在入站没有连字符会话头时
 			// 重建。排在指纹改写之后，否则 session/full 模式会存下一份过期的 session。
-			// compact 形态整段跳过：那时体内还是客户端原值，不能拿来当出站头。
+			// compact 形态跳过：那时体内还是客户端原值，不能拿来当出站头。
 			stageCodexConvergenceBodyIdentityMap(c, codexAccountIdentitySource(c, account), decoded)
 		}
 		if codexResult.NormalizedModel != "" {

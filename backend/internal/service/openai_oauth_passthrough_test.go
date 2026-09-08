@@ -2287,7 +2287,13 @@ func TestOpenAIGatewayService_CodexFingerprintCompactDoesNotRewriteBodyCacheKeyO
 	require.Equal(t, "body-session", gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
 	require.Equal(t, "body-session", gjson.GetBytes(upstream.lastBody, "client_metadata.session_id").String())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "client_metadata.x-codex-installation-id").Exists())
-	require.Empty(t, upstream.lastReq.Header.Get("x-codex-window-id"))
+	// 头侧与体侧相反：真实 compact 照发 x-codex-window-id（codex-rs
+	// core/src/client.rs:653 的 build_responses_compatibility_headers →
+	// responses_metadata.rs:348），所以头必须收敛。要保证的是它来自本轮解析的
+	// IDs，而不是上一轮暂存的 staleIDs 被顺手复用。
+	windowID := upstream.lastReq.Header.Get("x-codex-window-id")
+	require.NotEmpty(t, windowID)
+	require.NotEqual(t, staleIDs.windowID, windowID)
 }
 
 func TestOpenAIGatewayService_CodexFingerprintMessagesBridgeDoesNotInjectBodyPromptCacheKey(t *testing.T) {
