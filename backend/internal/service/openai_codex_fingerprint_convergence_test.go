@@ -613,16 +613,16 @@ func convRunPassthrough(t *testing.T, account *Account, body []byte, stripInboun
 			c.Request.Header.Del(name)
 		}
 	}
+	fp := resolveCodexFingerprintIDsWithBody(c, account, nil, gjson.GetBytes(body, "client_metadata"))
 	scoped, _, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77)
 	require.NoError(t, err)
-	stageCodexConvergenceBodyIdentityRaw(c, account, scoped)
-	fp := resolveCodexFingerprintIDsFromRequest(c, account, nil)
 	if fp != nil {
 		next, _, fpErr := applyCodexFingerprintClientMetadataRaw(scoped, fp)
 		require.NoError(t, fpErr)
 		scoped = next
 		stageCodexFingerprintIDs(c, fp)
 	}
+	stageCodexConvergenceBodyIdentityRaw(c, account, scoped)
 	req, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), c, account, scoped, "tok")
 	require.NoError(t, err)
 	return req.Header, scoped
@@ -775,10 +775,8 @@ func TestCodexFingerprintConvergence_R3WSAppliesDeviceMode(t *testing.T) {
 
 	rawBody := convTestBody(t)
 	c := newConvTestContext(t, rawBody)
-	scoped, _, err := applyCodexAccountIdentityClientMetadataRaw(rawBody, account, 77)
+	_, err := applyCodexIdentityToWSPayload(c, account, rawBody)
 	require.NoError(t, err)
-	// 独立 WS 入口目前只做到这一步（见 openai_ws_forwarder_ingress.go / v2 adapter）
-	applyCodexFingerprintToWSPayload(c, account, scoped)
 
 	wsHeaders, _, err := svc.buildOpenAIWSHeaders(context.Background(), c, account, "tok",
 		OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2},

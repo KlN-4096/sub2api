@@ -761,21 +761,11 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			firstClientMessage = aliasedBody
 		}
 	}
-	accountScopedFirst, accountScoped, scopeErr := applyCodexAccountIdentityClientMetadataRaw(firstClientMessage, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
-	if scopeErr != nil {
-		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket identity metadata", scopeErr)
+	identityFirst, identityErr := applyCodexIdentityToWSPayload(c, account, firstClientMessage)
+	if identityErr != nil {
+		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket identity metadata", identityErr)
 	}
-	if accountScoped {
-		firstClientMessage = accountScopedFirst
-	}
-	// klno 指纹收敛：与 HTTP 路径同一套分段——先按模式改写体内 client_metadata 并暂存 IDs
-	// （漏了这步 device 模式在直连 WS 上不生效），再暂存体内会话身份供握手头重建。
-	fingerprintFirst, fingerprintErr := applyCodexFingerprintToWSPayload(c, account, firstClientMessage)
-	if fingerprintErr != nil {
-		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket fingerprint metadata", fingerprintErr)
-	}
-	firstClientMessage = fingerprintFirst
-	stageCodexConvergenceBodyIdentityRaw(c, codexAccountIdentitySource(c, account), firstClientMessage)
+	firstClientMessage = identityFirst
 	usageMeta := newOpenAIWSPassthroughUsageMeta(initialRequestModel, firstClientMessage)
 	updatedFirst, blocked, policyErr := s.applyOpenAIFastPolicyToWSResponseCreate(ctx, account, capturedSessionModel, firstClientMessage)
 	if policyErr != nil {
@@ -1022,7 +1012,13 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					payload = aliasedBody
 				}
 			}
-			if isResponseCreate || eventType == "session.update" {
+			if isResponseCreate {
+				identityPayload, identityErr := applyCodexIdentityToWSPayload(c, account, payload)
+				if identityErr != nil {
+					return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket identity metadata", identityErr)
+				}
+				payload = identityPayload
+			} else if eventType == "session.update" {
 				accountScopedPayload, accountScoped, scopeErr := applyCodexAccountIdentityClientMetadataRaw(payload, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 				if scopeErr != nil {
 					return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket identity metadata", scopeErr)

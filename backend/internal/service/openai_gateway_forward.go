@@ -524,6 +524,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		// Account namespace is orthogonal to fingerprint convergence: preserve
 		// each client's identity cardinality, but never reuse it across OAuth
 		// credentials after scheduler failover.
+		var fpIDs *codexFingerprintIDs
+		if !isCompactRequest {
+			fpIDs = resolveCodexFingerprintIDsWithBody(c, account, nil, decoded["client_metadata"])
+		}
 		if !isCompactRequest && applyCodexAccountIdentityClientMetadataMap(decoded, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c)) {
 			markDecodedModified()
 		}
@@ -531,7 +535,6 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		// 指纹收敛：一次性解析收敛 ID，请求体和出站头共享同一份 IDs（保证 turn_id 等随机字段一致）。
 		// fingerprintIDs 在此处解析，后续 buildUpstreamRequest 中使用同一份。
 		if !isCompactRequest {
-			fpIDs := resolveCodexFingerprintIDsFromRequest(c, account, nil)
 			if fpIDs != nil {
 				if applyCodexFingerprintClientMetadata(decoded, fpIDs) {
 					markDecodedModified()
