@@ -2,7 +2,7 @@ name: Sync upstream into klno
 
 # 上游 Wei-Shaw/sub2api 发新版标签后，把 klno 分支 rebase 到新标签、跑定向测试、
 # 打 <上游标签>-klno.N 标签并触发 release.yml 出包；同时检查 codex-rs 身份相关源码是否变动。
-# 冲突或测试失败不会推送任何东西，只开 issue。
+# 冲突、测试失败、codex-rs 漂移都只让 run 失败（GitHub 邮件通知），不推送任何东西；fork 未开 issues。
 
 on:
   schedule:
@@ -16,13 +16,12 @@ on:
 
 permissions:
   contents: write
-  issues: write
   actions: write
 
 env:
   UPSTREAM_REPO: Wei-Shaw/sub2api
   FORK_BRANCH: klno
-  CODEX_PINNED_COMMIT: 16ff14c
+  CODEX_PINNED_COMMIT: e763730
   CODEX_IDENTITY_PATHS: >-
     codex-rs/codex-api/src/requests/headers.rs
     codex-rs/codex-api/src/endpoint/responses.rs
@@ -73,13 +72,12 @@ jobs:
             echo "conflict=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Open issue on conflict
+      - name: Fail on conflict
         if: steps.rebase.outputs.conflict == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          body=$(printf 'rebase klno (%s) onto %s 冲突，需要人工处理。\n\n冲突文件：\n```\n%s\n```' "${{ steps.up.outputs.base }}" "${{ steps.up.outputs.latest }}" "$(cat /tmp/conflicts.txt)")
-          gh issue create --title "sync-upstream: rebase onto ${{ steps.up.outputs.latest }} conflicts" --body "$body"
+          echo "::error title=sync-upstream conflict::rebase klno (${{ steps.up.outputs.base }}) onto ${{ steps.up.outputs.latest }} 冲突，需要人工处理：$(tr '
+' ' ' < /tmp/conflicts.txt)"
+          cat /tmp/conflicts.txt
           exit 1
 
       - name: Setup Go
@@ -114,8 +112,6 @@ jobs:
           echo "released $tag"
 
       - name: Check codex-rs identity sources for drift
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           git clone -q --filter=blob:none https://github.com/openai/codex.git /tmp/codex
@@ -123,11 +119,8 @@ jobs:
           head=$(git rev-parse --short HEAD)
           changed=$(git diff --stat "${CODEX_PINNED_COMMIT}" HEAD -- ${CODEX_IDENTITY_PATHS} | tail -1 || true)
           if [ -n "$changed" ]; then
-            title="codex-rs identity sources changed since ${CODEX_PINNED_COMMIT} (now ${head})"
-            if ! gh issue list --search "in:title \"$title\"" --state open --repo "${GITHUB_REPOSITORY}" | grep -q .; then
-              body=$(printf '被跟踪的 codex-rs 身份相关文件相对固定提交 %s 有变动（当前 %s）：\n\n```\n%s\n```\n\n请核对 backend/internal/service/openai_codex_fingerprint_convergence.go 的恒等式是否仍成立，确认后更新 CODEX_PINNED_COMMIT。' "${CODEX_PINNED_COMMIT}" "${head}" "$(git diff --stat "${CODEX_PINNED_COMMIT}" HEAD -- ${CODEX_IDENTITY_PATHS})")
-              gh issue create --repo "${GITHUB_REPOSITORY}" --title "$title" --body "$body"
-            fi
-          else
-            echo "codex identity sources unchanged since ${CODEX_PINNED_COMMIT}"
+            git diff --stat "${CODEX_PINNED_COMMIT}" HEAD -- ${CODEX_IDENTITY_PATHS}
+            echo "::error title=codex-rs identity drift::被跟踪的 codex-rs 身份文件相对 ${CODEX_PINNED_COMMIT} 有变动（当前 ${head}），请核对 openai_codex_fingerprint_convergence.go 的恒等式，确认后更新 CODEX_PINNED_COMMIT。"
+            exit 1
           fi
+          echo "codex identity sources unchanged since ${CODEX_PINNED_COMMIT}"
