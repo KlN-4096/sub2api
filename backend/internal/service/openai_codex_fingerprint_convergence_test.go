@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/gin-gonic/gin"
@@ -210,17 +211,27 @@ func TestCodexFingerprintConvergence_UnifiedAcrossCarriers(t *testing.T) {
 // 帧一次），必须落到同一身份：真实客户端一条连接内两者同源自一份 CodexResponsesMetadata。
 func TestCodexFingerprintConvergence_WSFramePayloadMatchesHandshakeHeaders(t *testing.T) {
 	svc := &OpenAIGatewayService{}
+	// 双开，与 pro1 线上配置一致：device 模式会替换 installation，握手与帧两侧
+	// 必须同时被替换成同一个值。
 	account := convTestAccount(true)
+	account.Extra[codexFingerprintModeExtraKey] = string(codexFingerprintDevice)
+	account.Extra[codexFingerprintSeedExtraKey] = "0d3c4d0e-5a7b-4d6e-8f90-1a2b3c4d5e6f"
+	wantInstall := resolveConvergedInstallationID(account, "0d3c4d0e-5a7b-4d6e-8f90-1a2b3c4d5e6f")
+	require.NotEmpty(t, wantInstall)
 	rawBody := convTestBody(t)
 	c := newConvTestContext(t, rawBody)
 
-	// 生产顺序：先建连（握手头），再发帧。
+	// 生产顺序：帧身份先落（原生 WS 入口 openai_ws_forwarder_ingress.go:323 的
+	// applyCodexIdentityToWSPayload 早于 :767 的握手构造；HTTP→WS 桥接则由
+	// forwardOpenAI 在 forwardOpenAIWSV2 之前 stage），握手头再读暂存的同一份 IDs。
+	// 顺序不能反：stagedCodexFingerprintIDs 在未暂存时返回 nil 且不惰性求值，
+	// 先建连会让握手漏掉 device 收敛。
+	payload, err := applyCodexIdentityToWSPayload(c, account, rawBody)
+	require.NoError(t, err)
+
 	wsHeaders, _, err := svc.buildOpenAIWSHeaders(context.Background(), c, account, "tok",
 		OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2},
 		true, "", convTestTurnMetadata(), convTestSession, "", "")
-	require.NoError(t, err)
-
-	payload, err := applyCodexIdentityToWSPayload(c, account, rawBody)
 	require.NoError(t, err)
 	cm := gjson.ParseBytes(payload).Get("client_metadata")
 	require.True(t, cm.IsObject(), "帧内应有 client_metadata")
@@ -238,6 +249,33 @@ func TestCodexFingerprintConvergence_WSFramePayloadMatchesHandshakeHeaders(t *te
 		"握手头与帧内 installation 必须同源")
 	require.Equal(t, wsHeaders.Get("session-id"), gjson.ParseBytes(payload).Get("prompt_cache_key").String(),
 		"帧内 prompt_cache_key 必须等于握手头 session-id")
+	require.Equal(t, wantInstall, wsHeaders.Get("x-codex-installation-id"),
+		"双开时握手头必须落到 device 模式的账号固定 installation")
+}
+
+// codex 复核四 #2：x-openai-memgen-request 与 x-responsesapi-include-timing-metrics
+// 加白名单时只接到了 HTTP 两张表，WS 用的是独立的入站头拷贝列表，漏掉后走 WS 的
+// 请求会让上游看到一个「从不做记忆整合、从不开计时」的客户端。真实 WS 握手条件性
+// 携带这两个头：前者出自 build_responses_compatibility_headers（codex-rs
+// core/src/client.rs:817，被 build_websocket_headers 于 :1252 extend），
+// 后者由 build_websocket_headers 直接插入（同文件 :1262）。
+func TestCodexFingerprintConvergence_WSHandshakeForwardsCompatibilityHeaders(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := convTestAccount(true)
+	rawBody := convTestBody(t)
+	c := newConvTestContext(t, rawBody)
+	c.Request.Header.Set("x-openai-memgen-request", "true")
+	c.Request.Header.Set("x-responsesapi-include-timing-metrics", "true")
+
+	wsHeaders, _, err := svc.buildOpenAIWSHeaders(context.Background(), c, account, "tok",
+		OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2},
+		true, "", convTestTurnMetadata(), convTestSession, "", "")
+	require.NoError(t, err)
+
+	for _, name := range []string{"x-openai-memgen-request", "x-responsesapi-include-timing-metrics"} {
+		require.Equal(t, "true", wsHeaders.Get(name), "WS 握手必须转发 %s（HTTP 白名单已放行）", name)
+		require.True(t, openaiAllowedHeaders[name], "HTTP 白名单也必须放行 %s，两条路径不得漂移", name)
+	}
 }
 
 // 开关关闭：出站与上游 v0.2.2 完全一致（HTTP 不带三个头、下划线别名走旧隔离哈希、
@@ -829,8 +867,13 @@ func TestCodexFingerprintConvergence_R3WSAppliesDeviceMode(t *testing.T) {
 func TestCodexFingerprint_ImagesOAuthMatchesResponsesDeviceIdentity(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
+	// 双开：pro1 线上就是 device 收敛 + 实验指纹收敛同时开启，两个开关会互相经过
+	// 同一批改写点，只测单开会漏掉组合下的漂移。
 	newAccount := func() *Account {
-		a := newTestOAuthAccount(4501, map[string]any{codexFingerprintModeExtraKey: "device"})
+		a := newTestOAuthAccount(4501, map[string]any{
+			codexFingerprintModeExtraKey:        "device",
+			codexFingerprintConvergenceExtraKey: true,
+		})
 		a.Name = "oauth-images"
 		a.Status = StatusActive
 		a.Schedulable = true
@@ -881,7 +924,11 @@ func TestCodexFingerprint_ImagesOAuthMatchesResponsesDeviceIdentity(t *testing.T
 func TestCodexFingerprint_AlphaSearchConvergesTurnMetadataDeviceOnly(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	account := newTestOAuthAccount(4502, map[string]any{codexFingerprintModeExtraKey: "device"})
+	// 双开，与 pro1 线上配置一致。
+	account := newTestOAuthAccount(4502, map[string]any{
+		codexFingerprintModeExtraKey:        "device",
+		codexFingerprintConvergenceExtraKey: true,
+	})
 	account.Name = "oauth-search"
 	account.Status = StatusActive
 	account.Schedulable = true
@@ -914,4 +961,108 @@ func TestCodexFingerprint_AlphaSearchConvergesTurnMetadataDeviceOnly(t *testing.
 	require.Empty(t, reqA.Header.Get("session-id"))
 	require.Empty(t, reqA.Header.Get("thread-id"))
 	require.Empty(t, reqA.Header.Get("x-client-request-id"))
+}
+
+// codex 复核四 #1：真实客户端的搜索请求体 id 就是会话 ID，与随请求发出的
+// turn-metadata.session_id 同源（codex-rs ext/web-search/src/tool.rs 的 handle_call：
+// SearchRequest.id = self.session_id，extra_headers 取自同一 session）。账号隔离与指纹
+// 收敛只改写头里的 turn-metadata，body.id 会停在客户端原值上——同一个请求两套会话身份。
+func TestCodexFingerprint_AlphaSearchBodyIDFollowsTurnMetadataSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	account := newTestOAuthAccount(4503, map[string]any{
+		codexFingerprintModeExtraKey:        "device",
+		codexFingerprintConvergenceExtraKey: true,
+	})
+	account.Name = "oauth-search-body"
+	account.Status = StatusActive
+	account.Schedulable = true
+	account.Concurrency = 1
+	account.Credentials = map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"}
+
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, toolCorrector: NewCodexToolCorrector()}
+	run := func(bodyID string) (*http.Request, string) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/alpha/search", bytes.NewReader(nil))
+		c.Request.Header.Set("originator", "codex-tui")
+		c.Request.Header.Set("X-Codex-Turn-Metadata",
+			`{"installation_id":"client-install-A","session_id":"session-client-A"}`)
+		req, err := svc.buildOpenAIAlphaSearchRequest(context.Background(), c,
+			account, []byte(`{"id":"`+bodyID+`","query":"x"}`), "oauth-token")
+		require.NoError(t, err)
+		require.NotNil(t, req.Body)
+		sent, err := io.ReadAll(req.Body)
+		require.NoError(t, err)
+		return req, gjson.GetBytes(sent, "id").String()
+	}
+
+	// 同源：body.id == 入站 turn-metadata.session_id，必须跟着一起派生。
+	req, sentID := run("session-client-A")
+	outSession := gjson.Get(req.Header.Get("X-Codex-Turn-Metadata"), "session_id").String()
+	require.NotEmpty(t, outSession)
+	require.NotEqual(t, "session-client-A", outSession, "出站 turn-metadata 会话必须被派生")
+	t.Logf("body.id=%s turn-metadata.session_id=%s", sentID, outSession)
+	require.Equal(t, outSession, sentID, "body.id 必须与出站 turn-metadata.session_id 同源")
+
+	// 非同源：SearchRequest.id 允许是任意自定义值，无法证明同源时不得盲改。
+	_, customID := run("not-a-session-id")
+	require.Equal(t, "not-a-session-id", customID, "无法证明同源的自定义 id 必须原样透传")
+}
+
+// codex 复核四 #4：compact 头侧指纹解析在非透传路径已修（openai_gateway_forward.go
+// 的 isCompactRequest 分支），透传路径的同一处判断被漏掉，导致透传开启时 compact
+// 请求仍带着按客户端原值派生的另一套设备身份出站。
+func TestCodexFingerprint_PassthroughCompactMatchesResponsesDeviceIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	newAccount := func() *Account {
+		a := newTestOAuthAccount(4504, map[string]any{
+			codexFingerprintModeExtraKey:        "device",
+			codexFingerprintConvergenceExtraKey: true,
+		})
+		a.Name = "oauth-passthrough-compact"
+		a.Status = StatusActive
+		a.Schedulable = true
+		a.Concurrency = 1
+		a.Credentials = map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"}
+		return a
+	}
+	newCtx := func(path string) *gin.Context {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, path, bytes.NewReader(nil))
+		c.Request.Header.Set("User-Agent", "codex-tui/0.153.4")
+		c.Request.Header.Set("originator", "codex-tui")
+		c.Request.Header.Set("x-codex-installation-id", "client-install-A")
+		return c
+	}
+	newSvc := func() (*OpenAIGatewayService, *httpUpstreamRecorder) {
+		up := &httpUpstreamRecorder{resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"resp_1","object":"response","status":"completed","output":[],"usage":{}}`)),
+		}}
+		return &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: up, toolCorrector: NewCodexToolCorrector()}, up
+	}
+
+	body := []byte(`{"model":"gpt-5.4","stream":false,"instructions":"i","input":[{"type":"message","role":"user","content":"hi"}]}`)
+
+	svcResp, respUp := newSvc()
+	_, _ = svcResp.forwardOpenAIPassthrough(context.Background(), newCtx("/v1/responses"),
+		newAccount(), body, body, "gpt-5.4", false, nil, false, time.Now())
+	require.NotNil(t, respUp.lastReq, "透传推理入口必须真正发出上游请求")
+
+	svcCompact, compactUp := newSvc()
+	_, _ = svcCompact.forwardOpenAIPassthrough(context.Background(), newCtx("/v1/responses/compact"),
+		newAccount(), body, body, "gpt-5.4", false, nil, false, time.Now())
+	require.NotNil(t, compactUp.lastReq, "透传 compact 入口必须真正发出上游请求")
+
+	install := compactUp.lastReq.Header.Get("x-codex-installation-id")
+	t.Logf("passthrough compact install=%s responses install=%s",
+		install, respUp.lastReq.Header.Get("x-codex-installation-id"))
+	require.NotEmpty(t, install)
+	require.NotEqual(t, "client-install-A", install, "device 模式下不得沿用客户端自带的安装标识")
+	require.Equal(t, respUp.lastReq.Header.Get("x-codex-installation-id"), install,
+		"透传 compact 与透传推理必须收敛到同一台设备")
 }

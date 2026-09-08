@@ -180,8 +180,15 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		}
 		reqStream = gjson.GetBytes(body, "stream").Bool()
 
+		// compact 形态只跳过请求体侧：真实 Codex 的 compact 请求体同样没有
+		// client_metadata，但出站头照发 x-codex-installation-id 与 session-id /
+		// thread-id，故头侧的 IDs 解析与暂存不能跟着体侧一起跳过，否则同一账号的
+		// compact 请求会带着另一套按客户端原值派生的设备身份出站。
+		// 与非透传路径同一处理（openai_gateway_forward.go 的 isCompactRequest 分支）。
 		var fpIDs *codexFingerprintIDs
-		if !isOpenAIResponsesCompactPath(c) {
+		if isOpenAIResponsesCompactPath(c) {
+			fpIDs = resolveCodexFingerprintIDsFromRequest(c, account, nil)
+		} else {
 			fpIDs = resolveCodexFingerprintIDsWithBody(c, account, nil, gjson.GetBytes(body, "client_metadata"))
 		}
 		accountScopedBody, accountScoped, scopeErr := applyCodexAccountIdentityClientMetadataRaw(body, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
@@ -191,23 +198,21 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		if accountScoped {
 			body = accountScopedBody
 		}
-		stageCodexFingerprintIDs(c, nil)
-		// 指纹收敛：与非透传路径同门控（仅 OAuth、legacy compact 形态跳过）。
+		// 指纹收敛：与非透传路径同门控（仅 OAuth、legacy compact 形态跳过体侧）。
 		// 一次性解析收敛 ID：请求体 client_metadata 在此改写（raw 字节外科
 		// 手术，透传热路径禁全量 Unmarshal），出站头改写由请求构造器读取
 		// context 中的同一份 IDs 完成（turn_id 等随机字段两侧必须一致）。
-		if !isOpenAIResponsesCompactPath(c) {
-			if fpIDs != nil {
-				fpBody, fpChanged, fpErr := applyCodexFingerprintClientMetadataRaw(body, fpIDs)
-				if fpErr != nil {
-					return nil, fpErr
-				}
-				if fpChanged {
-					body = fpBody
-				}
+		if !isOpenAIResponsesCompactPath(c) && fpIDs != nil {
+			fpBody, fpChanged, fpErr := applyCodexFingerprintClientMetadataRaw(body, fpIDs)
+			if fpErr != nil {
+				return nil, fpErr
 			}
-			stageCodexFingerprintIDs(c, fpIDs)
+			if fpChanged {
+				body = fpBody
+			}
 		}
+		// 无条件覆写（含 nil）：failover 从收敛账号切到 off 账号时，上一账号的 IDs 不得残留。
+		stageCodexFingerprintIDs(c, fpIDs)
 		// klno 指纹收敛：暂存体内已派生的会话身份，供出站头在入站没有连字符会话头时重建。
 		// 必须排在指纹改写之后——session/full 模式会重写体内 session_id，暂存早于它就会
 		// 存下一份过期的值。

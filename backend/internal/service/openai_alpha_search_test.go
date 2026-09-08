@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type alphaSearchAccountStateRepo struct {
@@ -101,7 +102,14 @@ func TestForwardAlphaSearchOAuthPreservesWire(t *testing.T) {
 		scopeCodexAccountIdentityValue(account, 0, "turn", "search-turn"),
 		gjson.Get(upstream.lastReq.Header.Get("X-Codex-Turn-Metadata"), "turn_id").String(),
 	)
-	require.JSONEq(t, string(body), string(upstream.lastBody))
+	// SearchRequest.id 就是会话 ID，与随请求发出的 turn-metadata.session_id 同源
+	// （codex-rs ext/web-search/src/tool.rs 的 handle_call）。上面已断言头侧 session
+	// 被账号 scope，body.id 必须跟着走，否则同一请求带两套会话身份出站。
+	// 其余字段（含 future_field）仍逐字保留。
+	wantBody, err := sjson.SetBytes(body, "id",
+		scopeCodexAccountIdentityValue(account, 0, "session", "search-session"))
+	require.NoError(t, err)
+	require.JSONEq(t, string(wantBody), string(upstream.lastBody))
 }
 
 func TestForwardAlphaSearchPATUsesResponsesWebSearchFallback(t *testing.T) {

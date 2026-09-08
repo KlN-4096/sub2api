@@ -109,6 +109,13 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 			"session-id",
 			"thread-id",
 			"x-client-request-id",
+			// 真实 WS 握手同样条件性携带这两个头：前者来自
+			// build_responses_compatibility_headers（codex-rs core/src/client.rs:817），
+			// 后者由 build_websocket_headers 直接插入（同文件 :1262）。HTTP 两张白名单
+			// 已放行，WS 用的是这份独立拷贝列表，漏掉会让上游只在 WS 上看到一个
+			// 「从不做记忆整合、从不开计时」的客户端。
+			"x-openai-memgen-request",
+			"x-responsesapi-include-timing-metrics",
 		} {
 			if value := c.Request.Header.Get(name); strings.TrimSpace(value) != "" {
 				headers.Set(name, value)
