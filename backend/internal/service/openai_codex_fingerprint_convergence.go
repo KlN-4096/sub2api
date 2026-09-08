@@ -8,14 +8,16 @@ package service
 //     （codex-api/src/requests/headers.rs build_session_headers）、x-codex-parent-thread-id、
 //     x-openai-subagent（core/src/responses_metadata.rs、core/src/client.rs:793）。WS 路径本就转发。
 //  2. x-client-request-id 恒等于 thread-id（codex-api/src/endpoint/responses.rs:120、core/src/client.rs:1245）。
-//  3. 补出 session-id 后，不再发真客户端不存在的 session_id / conversation_id 下划线别名；
-//     补不出（入站无会话头）时保留上游别名，否则请求会零会话身份出站。
-//  4. root_turn_id / parent_turn_id 与 turn_id 同类派生；parent_thread_id / forked_from_thread_id 与
+//  3. 入站没有连字符会话头时（apikey 中继会剥掉它们），从请求体 client_metadata 里那一份
+//     已派生的 session_id / thread_id / x-codex-parent-thread-id 重建，与直连形态逐字节相同。
+//  4. 补出 session-id 后，不再发真客户端不存在的 session_id / conversation_id 下划线别名；
+//     仍补不出（体内也没有）时保留上游别名，否则请求会零会话身份出站。
+//  5. root_turn_id / parent_turn_id 与 turn_id 同类派生；parent_thread_id / forked_from_thread_id 与
 //     thread 同类；context_window_id 单独一类（core/src/session/mod.rs current_window：它是
 //     AutoCompactWindowIds.window_id，v7）；x-codex-window-id / window_id 真实形态是
 //     "<thread_id>:<window_number>"（同一函数 format!("{thread_id}:{window_number}")），
 //     派生为 "<派生 thread_id>:<window_number>"，保持与 thread-id 的可见关联。
-//  5. 原始值为 UUIDv7 时派生结果保持 v7 并保留 48 位时间戳（codex 的 session/thread/turn/window
+//  6. 原始值为 UUIDv7 时派生结果保持 v7 并保留 48 位时间戳（codex 的 session/thread/turn/window
 //     均为 Uuid::now_v7；installation_id 为 v4，派生仍为 v4）。
 //
 // 开关关闭时以上全部不生效，出站与上游完全一致。开启开关会让该账号的 v7 类身份一次性轮换。
@@ -28,6 +30,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/tidwall/gjson"
 )
 
 const codexFingerprintConvergenceExtraKey = "codex_experimental_fingerprint_convergence"
@@ -83,20 +86,34 @@ func applyCodexConvergenceIdentityFields(values map[string]any, account *Account
 	return changed
 }
 
-// codex 的 window_id 形态："<thread uuid>:<window_number>"。
-var codexConvergenceWindowIDPattern = regexp.MustCompile(`^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):([0-9]+)$`)
+const codexConvergenceUUIDPattern = `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`
 
-// deriveCodexConvergenceWindowValue 由 scopeCodexAccountIdentityValue 调用：开关开启且 window 类
-// 原始值形如 "<thread>:<n>" 时，thread 部分按 thread 类派生、序号原样保留。
-func deriveCodexConvergenceWindowValue(account *Account, apiKeyID int64, kind, raw string) (string, bool) {
-	if kind != "window" || !codexFingerprintConvergenceEnabled(account) {
+// codex 的 window_id 形态："<thread uuid>:<window_number>"。
+var codexConvergenceWindowIDPattern = regexp.MustCompile(`^(` + codexConvergenceUUIDPattern + `):([0-9]+)$`)
+
+// codex 的子代理 prompt_cache_key 形态："<session_source>:<parent_thread_id>"
+// （core/src/client.rs:512 format!("{source}:{parent_thread_id}")，另有
+// guardian/review_session.rs:304 的 "guardian:{parent_thread_id}"）。
+var codexConvergencePromptCacheKeyPattern = regexp.MustCompile(`^([A-Za-z0-9_-]{1,64}):(` + codexConvergenceUUIDPattern + `)$`)
+
+// deriveCodexConvergenceCompositeValue 由 scopeCodexAccountIdentityValue 调用：开关开启且原始值
+// 是 codex 的复合形态时，只派生其中的 UUID 部分、保留整体形态。整串直接哈希会压成一个裸
+// UUID，而真客户端在这两个分支上从不发裸 UUID。
+func deriveCodexConvergenceCompositeValue(account *Account, apiKeyID int64, kind, raw string) (string, bool) {
+	if !codexFingerprintConvergenceEnabled(account) {
 		return "", false
 	}
-	m := codexConvergenceWindowIDPattern.FindStringSubmatch(raw)
-	if m == nil {
-		return "", false
+	switch kind {
+	case "window": // "<thread>:<n>"：thread 部分按 thread 类派生，序号原样保留
+		if m := codexConvergenceWindowIDPattern.FindStringSubmatch(raw); m != nil {
+			return scopeCodexAccountIdentityValue(account, apiKeyID, "thread", m[1]) + ":" + m[2], true
+		}
+	case "prompt-cache": // "<source>:<parent_thread>"：source 原样，thread 部分按 thread 类派生
+		if m := codexConvergencePromptCacheKeyPattern.FindStringSubmatch(raw); m != nil {
+			return m[1] + ":" + scopeCodexAccountIdentityValue(account, apiKeyID, "thread", m[2]), true
+		}
 	}
-	return scopeCodexAccountIdentityValue(account, apiKeyID, "thread", m[1]) + ":" + m[2], true
+	return "", false
 }
 
 // deriveCodexConvergenceIdentityValue 由 scopeCodexAccountIdentityValue 调用：开关开启且原始值是
@@ -116,6 +133,89 @@ func deriveCodexConvergenceIdentityValue(account *Account, seed, raw string) (st
 	derived[6] = (derived[6] & 0x0f) | 0x70
 	derived[8] = (derived[8] & 0x3f) | 0x80
 	return derived.String(), true
+}
+
+// 体内会话身份 -> 出站头名。真客户端两侧同源：CodexResponsesMetadata 既写 client_metadata
+// 又建连字符头（core/src/responses_metadata.rs、codex-api/src/requests/headers.rs）。
+var codexConvergenceBodyToHeader = [][2]string{
+	{"session_id", "session-id"},
+	{"thread_id", "thread-id"},
+	{"x-codex-parent-thread-id", "x-codex-parent-thread-id"},
+}
+
+const codexConvergenceStagedBodyIdentityContextKey = "codex_convergence_body_identity"
+
+// codexConvergenceStagedBodyIdentity 是请求体命名空间化之后暂存的会话身份。带 accountID：
+// failover 到另一账号、而新账号那条路径跳过暂存（如 compact 形态）时，旧账号的派生值不得
+// 被读走用于新账号的出站头。
+type codexConvergenceStagedBodyIdentity struct {
+	accountID int64
+	headers   map[string]string
+}
+
+// stageCodexConvergenceBodyIdentityMap 在 applyCodexAccountIdentityClientMetadataMap 之后调用
+// （非透传路径）。传入的必须是已命名空间化的 body。
+func stageCodexConvergenceBodyIdentityMap(c *gin.Context, account *Account, body map[string]any) {
+	if !codexFingerprintConvergenceEnabled(account) || body == nil {
+		return
+	}
+	clientMetadata, _ := body["client_metadata"].(map[string]any)
+	staged := map[string]string{}
+	for _, pair := range codexConvergenceBodyToHeader {
+		value, _ := clientMetadata[pair[0]].(string)
+		setCodexConvergenceStagedValue(staged, pair[1], value)
+	}
+	promptCacheKey, _ := body["prompt_cache_key"].(string)
+	stageCodexConvergenceBodyIdentity(c, account, staged, promptCacheKey)
+}
+
+// stageCodexConvergenceBodyIdentityRaw 是透传/WS 热路径的等价物：gjson 只取这几个字段，
+// 不整体 Unmarshal 可能有数 MB 的请求体。
+func stageCodexConvergenceBodyIdentityRaw(c *gin.Context, account *Account, body []byte) {
+	if !codexFingerprintConvergenceEnabled(account) || len(body) == 0 {
+		return
+	}
+	clientMetadata := gjson.GetBytes(body, "client_metadata")
+	staged := map[string]string{}
+	for _, pair := range codexConvergenceBodyToHeader {
+		setCodexConvergenceStagedValue(staged, pair[1], clientMetadata.Get(pair[0]).String())
+	}
+	stageCodexConvergenceBodyIdentity(c, account, staged, gjson.GetBytes(body, "prompt_cache_key").String())
+}
+
+func setCodexConvergenceStagedValue(staged map[string]string, name, value string) {
+	if trimmed := strings.TrimSpace(value); trimmed != "" {
+		staged[name] = trimmed
+	}
+}
+
+func stageCodexConvergenceBodyIdentity(c *gin.Context, account *Account, staged map[string]string, promptCacheKey string) {
+	// 体内没有 client_metadata 但有 prompt_cache_key 时，它就是会话键：真客户端的
+	// prompt_cache_key 默认返回 session_id（core/src/client.rs:515），二者恒等。出站头取同
+	// 一份值，避免头按 kind="session"、请求体按 kind="prompt-cache" 各自派生出两个不同 UUID。
+	// 复合形态（子代理分支）除外——那时它本就不等于 session_id。
+	if staged["session-id"] == "" && !codexConvergencePromptCacheKeyPattern.MatchString(strings.TrimSpace(promptCacheKey)) {
+		setCodexConvergenceStagedValue(staged, "session-id", promptCacheKey)
+	}
+	if c == nil || account == nil || len(staged) == 0 {
+		return
+	}
+	c.Set(codexConvergenceStagedBodyIdentityContextKey, codexConvergenceStagedBodyIdentity{accountID: account.ID, headers: staged})
+}
+
+func stagedCodexConvergenceBodyIdentity(c *gin.Context, account *Account) map[string]string {
+	if c == nil || account == nil {
+		return nil
+	}
+	value, ok := c.Get(codexConvergenceStagedBodyIdentityContextKey)
+	if !ok {
+		return nil
+	}
+	staged, ok := value.(codexConvergenceStagedBodyIdentity)
+	if !ok || staged.accountID != account.ID {
+		return nil
+	}
+	return staged.headers
 }
 
 // 真客户端恒发、上游 HTTP 白名单未放行的头；kind 为空表示原样透传（值不是身份 ID）。
@@ -140,31 +240,36 @@ func applyCodexFingerprintConvergenceHeaders(c *gin.Context, account *Account, h
 	if c != nil && c.Request != nil {
 		inbound = c.Request.Header
 	}
+	staged := stagedCodexConvergenceBodyIdentity(c, account)
 	// 1) 补齐被丢弃的头；WS 路径已转发并派生过的保持不动
-	if inbound != nil {
-		for _, field := range codexConvergenceInboundHeaders {
-			if headers.Get(field.name) != "" {
-				continue
-			}
-			raw := strings.TrimSpace(inbound.Get(field.name))
-			if raw == "" {
-				continue
-			}
-			if field.kind == "" {
-				headers.Set(field.name, raw)
-				continue
-			}
-			headers.Set(field.name, scopeCodexAccountIdentityValue(account, apiKeyID, field.kind, raw))
+	for _, field := range codexConvergenceInboundHeaders {
+		if headers.Get(field.name) != "" {
+			continue
 		}
+		// 优先复用请求体里那一份已派生的值：既补上中继剥掉的连字符头（现网 31.108 的
+		// apikey 中继会剥掉 session-id / thread-id / x-codex-parent-thread-id，只留体内
+		// client_metadata），又保证出站头与 client_metadata / prompt_cache_key 同源同值。
+		if value := staged[field.name]; value != "" {
+			headers.Set(field.name, value)
+			continue
+		}
+		raw := strings.TrimSpace(inbound.Get(field.name))
+		if raw == "" {
+			continue
+		}
+		if field.kind == "" {
+			headers.Set(field.name, raw)
+			continue
+		}
+		headers.Set(field.name, scopeCodexAccountIdentityValue(account, apiKeyID, field.kind, raw))
 	}
 	// 2) x-client-request-id == thread-id
 	if threadID := strings.TrimSpace(headers.Get("thread-id")); threadID != "" {
 		headers.Set("x-client-request-id", threadID)
 	}
-	// 3) 真客户端没有的下划线别名。仅在确实补出了 session-id 时才删：入站没带会话头的
-	// 客户端（现网 Codex Desktop 一条都不带）补不出连字符头，此时删别名会让请求出站
-	// 零会话身份——真 Codex 客户端不存在这种形态，且上游据此做缓存亲和，删掉会打散
-	// 路由（现网 pro1 HTTP 命中率 96% → 22%）。
+	// 3) 真客户端没有的下划线别名。仅在确实补出了 session-id 时才删：入站和请求体都拿不到
+	// 会话身份时补不出连字符头，此时删别名会让请求零会话身份出站——真 Codex 客户端不存在
+	// 这种形态，且上游据此做缓存亲和，删掉会打散路由（现网 pro1 HTTP 命中率 96% → 22%）。
 	if strings.TrimSpace(headers.Get("session-id")) != "" {
 		headers.Del("session_id")
 		headers.Del("conversation_id")
