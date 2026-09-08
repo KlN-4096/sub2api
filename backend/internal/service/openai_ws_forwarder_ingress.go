@@ -320,21 +320,11 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			normalized = next
 		}
 		accountIdentitySourceRaw := append([]byte(nil), normalized...)
-		accountScopedPayload, accountScoped, scopeErr := applyCodexAccountIdentityClientMetadataRaw(normalized, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
-		if scopeErr != nil {
-			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket identity metadata", scopeErr)
+		identityPayload, identityErr := applyCodexIdentityToWSPayload(c, account, normalized)
+		if identityErr != nil {
+			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket identity metadata", identityErr)
 		}
-		if accountScoped {
-			normalized = accountScopedPayload
-		}
-		// klno 指纹收敛：与 HTTP 路径同一套分段——先按模式改写体内 client_metadata 并暂存
-		// IDs（漏了这步 device 模式在直连 WS 上不生效），再暂存体内会话身份供握手头重建。
-		fingerprintPayload, fingerprintErr := applyCodexFingerprintToWSPayload(c, account, normalized)
-		if fingerprintErr != nil {
-			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket fingerprint metadata", fingerprintErr)
-		}
-		normalized = fingerprintPayload
-		stageCodexConvergenceBodyIdentityRaw(c, codexAccountIdentitySource(c, account), normalized)
+		normalized = identityPayload
 		if responsesLite {
 			litePayload, _, liteErr := normalizeOpenAIResponsesLitePayloadForAccount(normalized, account)
 			if liteErr != nil {
