@@ -272,6 +272,9 @@ type codexFingerprintIDs struct {
 	turnStartedAtUnixMs           int64
 	originalBodySessionID         string
 	originalBodySessionIDCaptured bool
+	// klno 实验性指纹收敛开关；开启时体内没有 client_metadata 也认 prompt_cache_key 是
+	// 会话默认值。关闭时保持上游行为：证明不了是默认值就不碰这个键。
+	convergence bool
 }
 
 // resolveCodexFingerprintIDs 按收敛模式计算出站 ID 集合。
@@ -292,6 +295,7 @@ func resolveCodexFingerprintIDs(account *Account, clientSessionID string, mode c
 		accountID:           account.ID,
 		mode:                mode,
 		turnStartedAtUnixMs: time.Now().UnixMilli(),
+		convergence:         codexFingerprintConvergenceEnabled(account),
 	}
 
 	ids.installationID = resolveConvergedInstallationID(account, seed)
@@ -417,6 +421,12 @@ func applyCodexFingerprintClientMetadata(reqBody map[string]any, ids *codexFinge
 	}
 
 	captureCodexFingerprintOriginalBodySessionID(ids, reqBody["client_metadata"])
+	// 收敛开启时，client_metadata 缺失或没带 session_id 就退回 prompt_cache_key，理由同 Raw 变体。
+	if ids != nil && ids.convergence && ids.originalBodySessionID == "" {
+		if promptCacheKey, ok := reqBody["prompt_cache_key"].(string); ok {
+			ids.originalBodySessionID = strings.TrimSpace(promptCacheKey)
+		}
+	}
 	existing, _ := reqBody["client_metadata"].(map[string]any)
 	if existing == nil {
 		existing = make(map[string]any)
@@ -550,6 +560,12 @@ func applyCodexFingerprintClientMetadataRaw(body []byte, ids *codexFingerprintID
 		if err := json.Unmarshal([]byte(cm.Raw), &existing); err != nil {
 			return body, false, fmt.Errorf("decode client_metadata for fingerprint: %w", err)
 		}
+	} else if ids != nil && ids.convergence {
+		// 收敛开启时，体内没有 client_metadata 则 prompt_cache_key 就是会话默认值
+		// （core/src/client.rs:515 prompt_cache_key() 默认返回 session_id）。不认它的话，
+		// session/full 模式会把出站 session 头改成收敛常量、body 缓存键却原样留着，两者对不上。
+		// 收敛关闭时保持上游行为：证明不了是默认值就不碰这个键。
+		captureCodexFingerprintOriginalBodySessionIDRaw(ids, gjson.GetBytes(body, "prompt_cache_key"))
 	} else {
 		captureCodexFingerprintOriginalBodySessionIDRaw(ids, gjson.Result{})
 	}

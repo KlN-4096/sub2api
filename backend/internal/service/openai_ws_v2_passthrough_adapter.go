@@ -768,6 +768,8 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if accountScoped {
 		firstClientMessage = accountScopedFirst
 	}
+	// klno 指纹收敛：暂存体内已派生的会话身份，供握手头在入站没有连字符会话头时重建。
+	stageCodexConvergenceBodyIdentityRaw(c, codexAccountIdentitySource(c, account), firstClientMessage)
 	usageMeta := newOpenAIWSPassthroughUsageMeta(initialRequestModel, firstClientMessage)
 	updatedFirst, blocked, policyErr := s.applyOpenAIFastPolicyToWSResponseCreate(ctx, account, capturedSessionModel, firstClientMessage)
 	if policyErr != nil {

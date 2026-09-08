@@ -3,6 +3,7 @@ name: Sync upstream into klno
 # 上游 Wei-Shaw/sub2api 发新版标签后，把 klno 分支 rebase 到新标签、跑定向测试、
 # 打 <上游标签>-klno.N 标签并触发 release.yml 出包；同时检查 codex-rs 身份相关源码是否变动。
 # 冲突、测试失败、codex-rs 漂移都只让 run 失败（GitHub 邮件通知），不推送任何东西；fork 未开 issues。
+# 所以漂移检查必须排在推分支/推标签/触发 release 之前——排在后面等于包已经发出去才报错。
 # 每次运行还会把默认分支 main 重建成 upstream/main + 本文件：GitHub 的定时 workflow 只从默认
 # 分支触发，main 只是 cron 的宿主，没人同步它就会一直落后（仓库首页那条 "N commits behind"）。
 
@@ -96,6 +97,20 @@ jobs:
           go build ./...
           go test ./internal/service -count=1 -run 'CodexFingerprintConvergence|CodexAccountIdentity|CodexFingerprint|OAuthPassthrough|BuildOpenAIWSHeaders|SetupTokenCompat|IngressSession' 2>&1 | grep -vE '"level":"(DEBUG|INFO|WARN)"' | tail -20
 
+      - name: Check codex-rs identity sources for drift
+        run: |
+          set -euo pipefail
+          git clone -q --filter=blob:none https://github.com/openai/codex.git /tmp/codex
+          cd /tmp/codex
+          head=$(git rev-parse --short HEAD)
+          changed=$(git diff --stat "${CODEX_PINNED_COMMIT}" HEAD -- ${CODEX_IDENTITY_PATHS} | tail -1 || true)
+          if [ -n "$changed" ]; then
+            git diff --stat "${CODEX_PINNED_COMMIT}" HEAD -- ${CODEX_IDENTITY_PATHS}
+            echo "::error title=codex-rs identity drift::被跟踪的 codex-rs 身份文件相对 ${CODEX_PINNED_COMMIT} 有变动（当前 ${head}），请核对 openai_codex_fingerprint_convergence.go 的恒等式，确认后更新 CODEX_PINNED_COMMIT。"
+            exit 1
+          fi
+          echo "codex identity sources unchanged since ${CODEX_PINNED_COMMIT}"
+
       - name: Push rebased branch and tag, trigger release
         if: steps.up.outputs.latest != steps.up.outputs.base
         env:
@@ -133,17 +148,3 @@ jobs:
           test -f .github/workflows/sync-upstream.yml # 丢了这个文件 cron 就停了
           git push --force-with-lease origin main
           echo "default branch resynced onto upstream/main ($(git rev-parse --short upstream/main)), was $behind behind"
-
-      - name: Check codex-rs identity sources for drift
-        run: |
-          set -euo pipefail
-          git clone -q --filter=blob:none https://github.com/openai/codex.git /tmp/codex
-          cd /tmp/codex
-          head=$(git rev-parse --short HEAD)
-          changed=$(git diff --stat "${CODEX_PINNED_COMMIT}" HEAD -- ${CODEX_IDENTITY_PATHS} | tail -1 || true)
-          if [ -n "$changed" ]; then
-            git diff --stat "${CODEX_PINNED_COMMIT}" HEAD -- ${CODEX_IDENTITY_PATHS}
-            echo "::error title=codex-rs identity drift::被跟踪的 codex-rs 身份文件相对 ${CODEX_PINNED_COMMIT} 有变动（当前 ${head}），请核对 openai_codex_fingerprint_convergence.go 的恒等式，确认后更新 CODEX_PINNED_COMMIT。"
-            exit 1
-          fi
-          echo "codex identity sources unchanged since ${CODEX_PINNED_COMMIT}"
