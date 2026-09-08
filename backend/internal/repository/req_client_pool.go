@@ -98,3 +98,22 @@ func CreatePrivacyReqClient(proxyURL string) (*req.Client, error) {
 		Impersonate: true, // Enable Chrome TLS fingerprint impersonation
 	})
 }
+
+// CreateCodexBackendReqClient 供 Codex 客户端面的 chatgpt.com/backend-api 请求
+// （额度查询等）使用，刻意不做浏览器伪装。
+//
+// ImpersonateChrome 改的不只是 TLS：它同时设置 HelloChrome_120 指纹、Chrome 的
+// HTTP/2 SETTINGS 帧与头顺序，以及 sec-ch-ua / sec-ch-ua-platform="macOS" /
+// user-agent=Chrome 120 on macOS 一整套公共头。用在这里会让同一个账号在额度面
+// 自报「macOS 上的 Chrome」、在推理面自报 codex-tui，两者互相矛盾。
+//
+// 真实 Codex 走 reqwest 直连该端点，只发 User-Agent + Authorization +
+// ChatGPT-Account-Id（codex-rs backend-client/src/client.rs 的 headers()）。
+// 实测该端点对非浏览器指纹不做拦截，故这里用普通客户端。
+// 共享池按 Impersonate 分 key，因此不会影响 CreatePrivacyReqClient 的实例。
+func CreateCodexBackendReqClient(proxyURL string) (*req.Client, error) {
+	return getSharedReqClient(reqClientOptions{
+		ProxyURL: proxyURL,
+		Timeout:  30 * time.Second,
+	})
+}
