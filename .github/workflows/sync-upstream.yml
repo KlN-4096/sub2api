@@ -75,8 +75,7 @@ jobs:
       - name: Fail on conflict
         if: steps.rebase.outputs.conflict == 'true'
         run: |
-          echo "::error title=sync-upstream conflict::rebase klno (${{ steps.up.outputs.base }}) onto ${{ steps.up.outputs.latest }} 冲突，需要人工处理：$(tr '
-' ' ' < /tmp/conflicts.txt)"
+          echo "::error title=sync-upstream conflict::rebase klno (${{ steps.up.outputs.base }}) onto ${{ steps.up.outputs.latest }} 冲突，需要人工处理，冲突文件见本步骤日志"
           cat /tmp/conflicts.txt
           exit 1
 
