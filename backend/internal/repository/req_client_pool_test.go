@@ -140,3 +140,43 @@ func TestInstrumentReqClientRecordsDependency(t *testing.T) {
 	header := collector.HeaderValue(time.Now(), "bypass")
 	require.True(t, strings.Contains(header, "dep_http;dur="), header)
 }
+
+// Codex 客户端面（额度查询）不得带浏览器指纹：ImpersonateChrome 会连带
+// sec-ch-ua / sec-ch-ua-platform="macOS" / Chrome UA 一整套公共头，与推理面
+// 自报的 codex-tui 身份互相矛盾。对照 CreatePrivacyReqClient 确保本用例有区分力。
+func TestCreateCodexBackendReqClientSendsNoBrowserFingerprint(t *testing.T) {
+	capture := func(build func(string) (*req.Client, error)) http.Header {
+		var got http.Header
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.Header.Clone()
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+		c, err := build("")
+		if err != nil {
+			t.Fatalf("build client: %v", err)
+		}
+		if _, err := c.R().Get(srv.URL); err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		return got
+	}
+
+	browserOnly := []string{"sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "upgrade-insecure-requests"}
+
+	codex := capture(CreateCodexBackendReqClient)
+	for _, h := range browserOnly {
+		if v := codex.Get(h); v != "" {
+			t.Errorf("codex backend client 不应发浏览器头 %s=%q", h, v)
+		}
+	}
+	if ua := codex.Get("User-Agent"); strings.Contains(ua, "Chrome") {
+		t.Errorf("codex backend client 不应自报 Chrome UA: %q", ua)
+	}
+
+	// 区分力对照：隐私设置那条路径仍然是 Chrome 伪装。
+	privacy := capture(CreatePrivacyReqClient)
+	if privacy.Get("sec-ch-ua") == "" {
+		t.Fatal("对照组失效：CreatePrivacyReqClient 未发 sec-ch-ua，本用例无法证明差异")
+	}
+}

@@ -317,7 +317,11 @@ func TestNormalizeCodexClientVersion(t *testing.T) {
 }
 
 func TestBuildCodexCLIUserAgent(t *testing.T) {
-	require.Equal(t, openai.CodexDefaultOriginator+"/0.200.1"+codexCLIUserAgentSuffix, buildCodexCLIUserAgent("0.200.1"))
+	// 尾部客户端标识组与首段同版本：真实客户端两处是同一个版本声明的两个出口。
+	require.Equal(t,
+		openai.CodexDefaultOriginator+"/0.200.1"+codexCLIUserAgentSuffix+
+			" ("+openai.CodexDefaultOriginator+"; 0.200.1)",
+		buildCodexCLIUserAgent("0.200.1"))
 	// 非法版本号必须回退到内置 UA，不能拼出畸形身份。
 	require.Equal(t, codexCLIUserAgent, buildCodexCLIUserAgent("bogus version"))
 	require.Equal(t, codexCLIUserAgent, buildCodexCLIUserAgent(""))
