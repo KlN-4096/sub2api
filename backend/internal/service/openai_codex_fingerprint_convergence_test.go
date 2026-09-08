@@ -505,3 +505,92 @@ func TestCodexFingerprintConvergence_RootSessionKeepsThreadIdentity(t *testing.T
 		scopeCodexAccountIdentityValue(off, 77, "thread", convTestSession),
 		"开关关闭时保持上游行为：session / thread 仍各自独立派生")
 }
+
+// astra 复核 #1：入站带连字符会话头、但请求体只有 prompt_cache_key（没有 client_metadata）。
+// 此时 session 头取缓存键派生值、thread 头取入站派生值、turn-metadata 又是第三种，身份分裂。
+func TestCodexFingerprintConvergence_AstraNoClientMetadataWithInboundHeaders(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := convTestAccount(true)
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-5.5", "stream": true, "prompt_cache_key": convTestSession,
+		"input": []any{map[string]any{"type": "message", "role": "user", "content": "hi"}},
+	})
+	require.NoError(t, err)
+
+	scopedRaw, _, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77)
+	require.NoError(t, err)
+	c := newConvTestContext(t, body) // 入站保留 session-id / thread-id
+	stageCodexConvergenceBodyIdentityRaw(c, account, scopedRaw)
+	req, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), c, account, scopedRaw, "tok")
+	require.NoError(t, err)
+
+	h := req.Header
+	meta := gjson.Parse(h.Get("x-codex-turn-metadata"))
+	t.Logf("session-id=%s thread-id=%s meta.session_id=%s meta.thread_id=%s pck=%s",
+		h.Get("session-id"), h.Get("thread-id"), meta.Get("session_id").String(),
+		meta.Get("thread_id").String(), gjson.GetBytes(scopedRaw, "prompt_cache_key").String())
+	require.Equal(t, h.Get("session-id"), h.Get("thread-id"), "根会话 session-id 应等于 thread-id")
+	require.Equal(t, h.Get("session-id"), meta.Get("session_id").String(), "session-id 应等于 turn-metadata.session_id")
+	require.Equal(t, h.Get("session-id"), gjson.GetBytes(scopedRaw, "prompt_cache_key").String(), "session-id 应等于 body prompt_cache_key")
+}
+
+// astra 复核 #2：session/full 模式下，中继剥头且体内只有 prompt_cache_key 时，
+// 指纹模块把 session 头改成收敛常量，body 缓存键却因为"证明不了它是默认值"没跟着改。
+func TestCodexFingerprintConvergence_AstraSessionModeSyncsPromptCacheKey(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := convTestAccount(true)
+	account.Extra[codexFingerprintModeExtraKey] = string(codexFingerprintSession)
+	account.Extra[codexFingerprintSeedExtraKey] = "0d3c4d0e-5a7b-4d6e-8f90-1a2b3c4d5e6f"
+
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-5.5", "stream": true, "prompt_cache_key": convTestSession,
+		"input": []any{map[string]any{"type": "message", "role": "user", "content": "hi"}},
+	})
+	require.NoError(t, err)
+
+	c := newConvTestContext(t, body)
+	for _, name := range []string{"session-id", "thread-id", "x-client-request-id", "x-codex-parent-thread-id"} {
+		c.Request.Header.Del(name)
+	}
+	scopedRaw, _, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77)
+	require.NoError(t, err)
+	fp := resolveCodexFingerprintIDsFromRequest(account, c.Request.Header)
+	require.NotNil(t, fp)
+	fpRaw, _, err := applyCodexFingerprintClientMetadataRaw(scopedRaw, fp)
+	require.NoError(t, err)
+	stageCodexFingerprintIDs(c, fp)
+	stageCodexConvergenceBodyIdentityRaw(c, account, fpRaw)
+
+	req, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), c, account, fpRaw, "tok")
+	require.NoError(t, err)
+	t.Logf("session-id=%s pck=%s", req.Header.Get("session-id"), gjson.GetBytes(fpRaw, "prompt_cache_key").String())
+	require.Equal(t, req.Header.Get("session-id"), gjson.GetBytes(fpRaw, "prompt_cache_key").String(),
+		"session 模式下出站 session-id 必须与 body prompt_cache_key 同值")
+}
+
+// astra 复核 #3：出站头里的 x-codex-turn-metadata 已经被命名空间化过，带着同一份
+// session_id / thread_id。连字符头补不出来时应当从它重建——这条不依赖任何调用点接线，
+// 所以 WS 之类的路径漏接暂存也仍然能出会话头。
+func TestCodexFingerprintConvergence_AstraRebuildsFromTurnMetadataHeader(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := convTestAccount(true)
+	rawBody := convTestBody(t)
+
+	c := newConvTestContext(t, rawBody)
+	for _, name := range []string{"session-id", "thread-id", "x-client-request-id", "x-codex-parent-thread-id"} {
+		c.Request.Header.Del(name)
+	}
+	// 不调用 stageCodexConvergenceBodyIdentity*，模拟调用点漏接暂存。
+	wsHeaders, _, err := svc.buildOpenAIWSHeaders(context.Background(), c, account, "tok",
+		OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2},
+		true, "", convTestTurnMetadata(), convTestSession, "", "")
+	require.NoError(t, err)
+
+	meta := gjson.Parse(wsHeaders.Get("x-codex-turn-metadata"))
+	require.True(t, meta.IsObject())
+	t.Logf("session-id=%q thread-id=%q meta.session_id=%s",
+		wsHeaders.Get("session-id"), wsHeaders.Get("thread-id"), meta.Get("session_id").String())
+	require.Equal(t, meta.Get("session_id").String(), wsHeaders.Get("session-id"), "session-id 应从 turn-metadata 重建")
+	require.Equal(t, meta.Get("thread_id").String(), wsHeaders.Get("thread-id"), "thread-id 应从 turn-metadata 重建")
+	require.Equal(t, wsHeaders.Get("thread-id"), wsHeaders.Get("x-client-request-id"))
+}

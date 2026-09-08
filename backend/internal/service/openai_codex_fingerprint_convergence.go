@@ -8,8 +8,9 @@ package service
 //     （codex-api/src/requests/headers.rs build_session_headers）、x-codex-parent-thread-id、
 //     x-openai-subagent（core/src/responses_metadata.rs、core/src/client.rs:793）。WS 路径本就转发。
 //  2. x-client-request-id 恒等于 thread-id（codex-api/src/endpoint/responses.rs:120、core/src/client.rs:1245）。
-//  3. 入站没有连字符会话头时（apikey 中继会剥掉它们），从请求体 client_metadata 里那一份
-//     已派生的 session_id / thread_id / x-codex-parent-thread-id 重建，与直连形态逐字节相同。
+//  3. 入站没有连字符会话头时（apikey 中继会剥掉它们），依次从请求体 client_metadata、出站
+//     x-codex-turn-metadata 里那一份已派生的 session_id / thread_id / parent_thread_id 重建，
+//     与直连形态逐字节相同。
 //  4. 补出 session-id 后，不再发真客户端不存在的 session_id / conversation_id 下划线别名；
 //     仍补不出（体内也没有）时保留上游别名，否则请求会零会话身份出站。
 //  5. root_turn_id / parent_turn_id 与 turn_id 同类派生；parent_thread_id / forked_from_thread_id 与
@@ -86,14 +87,19 @@ func applyCodexConvergenceIdentityFields(values map[string]any, account *Account
 	return changed
 }
 
-// codexConvergenceSeedKind 由 scopeCodexAccountIdentityValue 调用：开关开启时 session 类
-// 并入 thread 类。根会话的 session_id 就是根线程的 ID（core/src/session/session.rs:791
-// session_id = SessionId::from(thread_id)），两类各自派生会让相等的原始值变成两个不同的
-// UUID——上游看到的每个请求都成了"子代理线程"形态，真客户端不存在这种形态。原始值本就
-// 不同（子代理：session_id 取根线程 ID）时派生结果仍然不同，关系两侧都保住。
+// codexConvergenceSeedKind 由 scopeCodexAccountIdentityValue 调用：开关开启时把整个"会话族"
+// 并成一类。codex 里这三者本就是同一个 UUID——根会话的 session_id 就是根线程的 ID
+// （core/src/session/session.rs:791 SessionId::from(thread_id)），prompt_cache_key 默认又直接
+// 返回 session_id（core/src/client.rs:515）。分成三类各自派生，相等的原始值会变成三个不同的
+// UUID：上游看到的每个请求都成了"子代理线程"，而且头、体、turn-metadata 三处对不上。
+// 原始值本就不同（子代理的 thread_id、显式 prompt_cache_key override）时派生结果仍然不同，
+// 关系两侧都保住。复合形态的 prompt_cache_key 在这之前已被 composite 分支接走。
 func codexConvergenceSeedKind(account *Account, kind string) string {
-	if kind == "session" && codexFingerprintConvergenceEnabled(account) {
-		return "thread"
+	switch kind {
+	case "session", "prompt-cache":
+		if codexFingerprintConvergenceEnabled(account) {
+			return "thread"
+		}
 	}
 	return kind
 }
@@ -241,6 +247,29 @@ var codexConvergenceInboundHeaders = []struct {
 	{name: "x-openai-subagent", kind: ""},
 }
 
+// codexConvergenceTurnMetadataIdentity 从出站 x-codex-turn-metadata 里取会话身份。该头到这里
+// 已被 applyCodexAccountIdentityHeaders 命名空间化过，与请求体 client_metadata 同源同值，
+// 直接复用不再派生。它是最后一道兜底：不需要调用点显式暂存就能用上。
+func codexConvergenceTurnMetadataIdentity(headers http.Header) map[string]string {
+	raw := strings.TrimSpace(headers.Get(openAIWSTurnMetadataHeader))
+	if raw == "" {
+		return nil
+	}
+	metadata := gjson.Parse(raw)
+	if !metadata.IsObject() {
+		return nil
+	}
+	values := map[string]string{}
+	for _, pair := range codexConvergenceBodyToHeader {
+		setCodexConvergenceStagedValue(values, pair[1], metadata.Get(pair[0]).String())
+	}
+	// turn-metadata 里父线程用的是 parent_thread_id（responses_metadata.rs PARENT_THREAD_ID_KEY）
+	if values["x-codex-parent-thread-id"] == "" {
+		setCodexConvergenceStagedValue(values, "x-codex-parent-thread-id", metadata.Get("parent_thread_id").String())
+	}
+	return values
+}
+
 // applyCodexFingerprintConvergenceHeaders 在 applyStagedCodexFingerprintHeaders 之后、终态身份收口
 // 之前调用（HTTP / 透传 / WS 三处相同相对位置）。
 func applyCodexFingerprintConvergenceHeaders(c *gin.Context, account *Account, headers http.Header) {
@@ -253,27 +282,31 @@ func applyCodexFingerprintConvergenceHeaders(c *gin.Context, account *Account, h
 		inbound = c.Request.Header
 	}
 	staged := stagedCodexConvergenceBodyIdentity(c, account)
-	// 1) 补齐被丢弃的头；WS 路径已转发并派生过的保持不动
+	fromTurnMetadata := codexConvergenceTurnMetadataIdentity(headers)
+	// 1) 补齐被丢弃的头；WS 路径已转发并派生过的保持不动。
+	// 取值顺序：入站头 > 请求体暂存 > 出站 turn-metadata。后两者都是已派生的值，直接复用；
+	// 它们存在的意义是中继会剥掉连字符头（现网 31.108 的 apikey 中继就剥 session-id /
+	// thread-id / x-codex-parent-thread-id，只留体内 client_metadata 和 turn-metadata）。
+	// turn-metadata 这一路不依赖任何调用点接线，所以某条路径漏接暂存时仍然能补出头来。
 	for _, field := range codexConvergenceInboundHeaders {
 		if headers.Get(field.name) != "" {
 			continue
 		}
-		// 优先复用请求体里那一份已派生的值：既补上中继剥掉的连字符头（现网 31.108 的
-		// apikey 中继会剥掉 session-id / thread-id / x-codex-parent-thread-id，只留体内
-		// client_metadata），又保证出站头与 client_metadata / prompt_cache_key 同源同值。
+		if raw := strings.TrimSpace(inbound.Get(field.name)); raw != "" {
+			if field.kind == "" {
+				headers.Set(field.name, raw)
+			} else {
+				headers.Set(field.name, scopeCodexAccountIdentityValue(account, apiKeyID, field.kind, raw))
+			}
+			continue
+		}
 		if value := staged[field.name]; value != "" {
 			headers.Set(field.name, value)
 			continue
 		}
-		raw := strings.TrimSpace(inbound.Get(field.name))
-		if raw == "" {
-			continue
+		if value := fromTurnMetadata[field.name]; value != "" {
+			headers.Set(field.name, value)
 		}
-		if field.kind == "" {
-			headers.Set(field.name, raw)
-			continue
-		}
-		headers.Set(field.name, scopeCodexAccountIdentityValue(account, apiKeyID, field.kind, raw))
 	}
 	// 2) x-client-request-id == thread-id
 	if threadID := strings.TrimSpace(headers.Get("thread-id")); threadID != "" {
