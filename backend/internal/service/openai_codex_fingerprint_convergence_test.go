@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -785,4 +787,97 @@ func TestCodexFingerprintConvergence_R3WSAppliesDeviceMode(t *testing.T) {
 	t.Logf("ws installation=%s want=%s", wsHeaders.Get("x-codex-installation-id"), wantInstall)
 	require.Equal(t, wantInstall, wsHeaders.Get("x-codex-installation-id"),
 		"独立 WS 入口也必须应用 device 模式的账号固定 installation")
+}
+
+// 图片接口自建 Responses 请求体，走的是独立入口。回归：该入口曾漏接指纹 ID 暂存，
+// 导致同一账号的图片请求带着按客户端原值派生的另一套设备身份出站——而真实 Codex 的
+// 图片与推理请求同属一个客户端进程，安装标识必然相同。
+func TestCodexFingerprint_ImagesOAuthMatchesResponsesDeviceIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	newAccount := func() *Account {
+		a := newTestOAuthAccount(4501, map[string]any{codexFingerprintModeExtraKey: "device"})
+		a.Name = "oauth-images"
+		a.Status = StatusActive
+		a.Schedulable = true
+		a.Concurrency = 1
+		a.Credentials = map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"}
+		return a
+	}
+	newCtx := func(path string) *gin.Context {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, path, bytes.NewReader(nil))
+		c.Request.Header.Set("User-Agent", "codex-tui/0.153.4")
+		c.Request.Header.Set("originator", "codex-tui")
+		// 客户端自带的安装标识：不收敛时只会被账号 scope，得到与推理面不同的另一套设备身份。
+		c.Request.Header.Set("x-codex-installation-id", "client-install-A")
+		return c
+	}
+	newSvc := func(respBody string) (*OpenAIGatewayService, *httpUpstreamRecorder) {
+		up := &httpUpstreamRecorder{resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(respBody)),
+		}}
+		return &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: up, toolCorrector: NewCodexToolCorrector()}, up
+	}
+
+	// 两条路径都只断言出站请求头；响应体是否可解析与本用例无关。
+	svcResp, respUp := newSvc(`{"id":"resp_1","object":"response","status":"completed","output":[]}`)
+	_, _ = svcResp.Forward(context.Background(), newCtx("/v1/responses"), newAccount(),
+		[]byte(`{"model":"gpt-5.4","stream":false,"input":[{"type":"message","role":"user","content":"hi"}]}`))
+	require.NotNil(t, respUp.lastReq, "推理入口必须真正发出上游请求")
+
+	svcImg, imgUp := newSvc(`{"id":"resp_2","object":"response","status":"completed","output":[]}`)
+	_, _ = svcImg.forwardOpenAIImagesOAuth(context.Background(), newCtx("/v1/images/generations"), newAccount(),
+		&OpenAIImagesRequest{Endpoint: "generations", Model: "gpt-image-2", Prompt: "a cat"}, "")
+	require.NotNil(t, imgUp.lastReq, "图片入口必须真正发出上游请求")
+
+	install := imgUp.lastReq.Header.Get("x-codex-installation-id")
+	require.NotEmpty(t, install)
+	require.NotEqual(t, "client-install-A", install, "device 模式下不得沿用客户端自带的安装标识")
+	require.Equal(t, respUp.lastReq.Header.Get("x-codex-installation-id"), install,
+		"图片入口与推理入口必须收敛到同一台设备")
+}
+
+// /alpha/search 只对已有的 turn-metadata 做设备收敛。边界依据：真实客户端在该端点
+// 只发 x-codex-turn-metadata 与 originator（codex-rs ext/web-search/src/tool.rs 的
+// search_request_headers），不发会话头，故不能顺手补入 Responses 的那一套。
+func TestCodexFingerprint_AlphaSearchConvergesTurnMetadataDeviceOnly(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	account := newTestOAuthAccount(4502, map[string]any{codexFingerprintModeExtraKey: "device"})
+	account.Name = "oauth-search"
+	account.Status = StatusActive
+	account.Schedulable = true
+	account.Concurrency = 1
+	account.Credentials = map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"}
+
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, toolCorrector: NewCodexToolCorrector()}
+	// 单看「结果 != 客户端原值」不足以证明收敛：账号 scope 本身就会改掉原值，但它是按原值
+	// 派生的，每个客户端各不相同。device 收敛的定义是不同客户端落到同一台设备，故这里用
+	// 两个不同的客户端安装标识跑两遍比对。
+	run := func(clientInstall string) *http.Request {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/alpha/search", bytes.NewReader(nil))
+		c.Request.Header.Set("originator", "codex-tui")
+		c.Request.Header.Set("X-Codex-Turn-Metadata",
+			`{"installation_id":"`+clientInstall+`","session_id":"session-`+clientInstall+`"}`)
+		req, err := svc.buildOpenAIAlphaSearchRequest(context.Background(), c, account, []byte(`{"query":"x"}`), "oauth-token")
+		require.NoError(t, err)
+		return req
+	}
+
+	reqA, reqB := run("client-install-A"), run("client-install-B")
+	installA := gjson.Get(reqA.Header.Get("X-Codex-Turn-Metadata"), "installation_id").String()
+	installB := gjson.Get(reqB.Header.Get("X-Codex-Turn-Metadata"), "installation_id").String()
+	require.NotEmpty(t, installA)
+	require.NotEqual(t, "client-install-A", installA, "不得原样透传客户端安装标识")
+	require.Equal(t, installA, installB, "device 模式下不同客户端必须收敛到同一台设备")
+	// 边界：不得补入 Responses 的会话头。
+	require.Empty(t, reqA.Header.Get("session-id"))
+	require.Empty(t, reqA.Header.Get("thread-id"))
+	require.Empty(t, reqA.Header.Get("x-client-request-id"))
 }
