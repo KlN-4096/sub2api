@@ -594,3 +594,115 @@ func TestCodexFingerprintConvergence_AstraRebuildsFromTurnMetadataHeader(t *test
 	require.Equal(t, meta.Get("thread_id").String(), wsHeaders.Get("thread-id"), "thread-id 应从 turn-metadata 重建")
 	require.Equal(t, wsHeaders.Get("thread-id"), wsHeaders.Get("x-client-request-id"))
 }
+
+func convSessionModeAccount(t *testing.T) *Account {
+	t.Helper()
+	account := convTestAccount(true)
+	account.Extra[codexFingerprintModeExtraKey] = string(codexFingerprintSession)
+	account.Extra[codexFingerprintSeedExtraKey] = "0d3c4d0e-5a7b-4d6e-8f90-1a2b3c4d5e6f"
+	return account
+}
+
+// 按 forwardOpenAIPassthrough 的真实分段顺序驱动透传路径，返回出站头和最终 body。
+func convRunPassthrough(t *testing.T, account *Account, body []byte, stripInbound bool) (http.Header, []byte) {
+	t.Helper()
+	svc := &OpenAIGatewayService{}
+	c := newConvTestContext(t, body)
+	if stripInbound {
+		for _, name := range []string{"session-id", "thread-id", "x-client-request-id", "x-codex-parent-thread-id"} {
+			c.Request.Header.Del(name)
+		}
+	}
+	scoped, _, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77)
+	require.NoError(t, err)
+	stageCodexConvergenceBodyIdentityRaw(c, account, scoped)
+	fp := resolveCodexFingerprintIDsFromRequest(account, c.Request.Header)
+	if fp != nil {
+		next, _, fpErr := applyCodexFingerprintClientMetadataRaw(scoped, fp)
+		require.NoError(t, fpErr)
+		scoped = next
+		stageCodexFingerprintIDs(c, fp)
+	}
+	req, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), c, account, scoped, "tok")
+	require.NoError(t, err)
+	return req.Header, scoped
+}
+
+// codex 复核 #1：client_metadata 存在但没有 session_id（空对象、或只有 installation）时，
+// 普通路径会退回用 prompt_cache_key 当会话默认值，透传路径却走了另一个分支没退回，
+// 最终 session 身份与缓存键不同。两条路径必须共用同一套缺字段判定。
+func TestCodexFingerprintConvergence_CodexClientMetadataWithoutSession(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		meta map[string]any
+	}{
+		{"空 client_metadata", map[string]any{}},
+		{"只有 installation", map[string]any{"x-codex-installation-id": convTestInstallation}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := convSessionModeAccount(t)
+			body, err := json.Marshal(map[string]any{
+				"model": "gpt-5.5", "stream": true, "prompt_cache_key": convTestSession,
+				"client_metadata": tc.meta,
+				"input":           []any{map[string]any{"type": "message", "role": "user", "content": "hi"}},
+			})
+			require.NoError(t, err)
+
+			h, scoped := convRunPassthrough(t, account, body, true)
+			t.Logf("透传 session-id=%s pck=%s", h.Get("session-id"), gjson.GetBytes(scoped, "prompt_cache_key").String())
+			require.Equal(t, h.Get("session-id"), gjson.GetBytes(scoped, "prompt_cache_key").String(),
+				"透传路径 session-id 必须与 body prompt_cache_key 同值")
+
+			// 普通路径同样的判定
+			var decoded map[string]any
+			require.NoError(t, json.Unmarshal(body, &decoded))
+			applyCodexAccountIdentityClientMetadataMap(decoded, account, 77)
+			c := newConvTestContext(t, body)
+			for _, name := range []string{"session-id", "thread-id", "x-client-request-id"} {
+				c.Request.Header.Del(name)
+			}
+			fp := resolveCodexFingerprintIDsFromRequest(account, c.Request.Header)
+			require.NotNil(t, fp)
+			applyCodexFingerprintClientMetadata(decoded, fp)
+			mapKey, _ := decoded["prompt_cache_key"].(string)
+			require.Equal(t, mapKey, gjson.GetBytes(scoped, "prompt_cache_key").String(),
+				"普通路径与透传路径的 prompt_cache_key 必须一致")
+		})
+	}
+}
+
+// codex 复核 #2：把"体内没有 session_id"直接当成"prompt_cache_key 就是默认会话键"，
+// 会连显式覆盖值和复合键一起抹成账号会话常量。复合键的形态是 codex 自己的子代理分支
+// （client.rs:512），必须保住；入站头证明了会话身份、而缓存键与之不同时也不该动它。
+func TestCodexFingerprintConvergence_CodexKeepsExplicitAndCompositeCacheKey(t *testing.T) {
+	t.Run("入站头证明了会话身份时保留显式缓存键", func(t *testing.T) {
+		account := convSessionModeAccount(t)
+		body, err := json.Marshal(map[string]any{
+			"model": "gpt-5.5", "stream": true, "prompt_cache_key": "explicit-cache-key",
+			"input": []any{map[string]any{"type": "message", "role": "user", "content": "hi"}},
+		})
+		require.NoError(t, err)
+		_, scoped := convRunPassthrough(t, account, body, false) // 入站保留 session-id
+		got := gjson.GetBytes(scoped, "prompt_cache_key").String()
+		t.Logf("pck=%s", got)
+		require.Equal(t, scopeCodexAccountIdentityValue(account, 77, "prompt-cache", "explicit-cache-key"), got,
+			"显式缓存键只应被命名空间化，不该被改成账号会话常量")
+	})
+
+	t.Run("复合键保形", func(t *testing.T) {
+		account := convSessionModeAccount(t)
+		composite := "guardian:" + convTestParentThread
+		body, err := json.Marshal(map[string]any{
+			"model": "gpt-5.5", "stream": true, "prompt_cache_key": composite,
+			"input": []any{map[string]any{"type": "message", "role": "user", "content": "hi"}},
+		})
+		require.NoError(t, err)
+		_, scoped := convRunPassthrough(t, account, body, true)
+		got := gjson.GetBytes(scoped, "prompt_cache_key").String()
+		t.Logf("pck=%s", got)
+		prefix, rest, ok := strings.Cut(got, ":")
+		require.True(t, ok, "复合 prompt_cache_key 应保持 <source>:<uuid> 形态，实际 %q", got)
+		require.Equal(t, "guardian", prefix)
+		requireV7SameTimestamp(t, convTestParentThread, rest, "复合键的父线程")
+	})
+}
