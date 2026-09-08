@@ -278,3 +278,72 @@ func TestCodexFingerprintConvergence_DeriveKeepsVersionAndTimestamp(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, uuid.Version(4), parsed.Version(), "非 UUID 原始值仍走 v4 哈希")
 }
+
+// device 模式与收敛开关同时开启：installation 收敛为账号常量（含头部/嵌入 turn-metadata），
+// 其余恒等式与仅开收敛时完全相同。按 Forward/透传的真实分段顺序驱动。
+func TestCodexFingerprintConvergence_WithDeviceMode(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := convTestAccount(true)
+	account.Extra[codexFingerprintModeExtraKey] = string(codexFingerprintDevice)
+	account.Extra[codexFingerprintSeedExtraKey] = "0d3c4d0e-5a7b-4d6e-8f90-1a2b3c4d5e6f"
+	wantInstall := resolveConvergedInstallationID(account, "0d3c4d0e-5a7b-4d6e-8f90-1a2b3c4d5e6f")
+	require.NotEmpty(t, wantInstall)
+	rawBody := convTestBody(t)
+
+	requireDevice := func(label string, h http.Header, body []byte) {
+		require.Equal(t, wantInstall, h.Get("x-codex-installation-id"), label+" installation 应为账号常量")
+		require.Equal(t, wantInstall, gjson.Parse(h.Get("x-codex-turn-metadata")).Get("installation_id").String(), label+" 头部 turn-metadata.installation_id")
+		if len(body) > 0 {
+			cm := gjson.ParseBytes(body).Get("client_metadata")
+			require.Equal(t, wantInstall, cm.Get("x-codex-installation-id").String(), label+" client_metadata.x-codex-installation-id")
+			require.Equal(t, wantInstall, gjson.Parse(cm.Get("x-codex-turn-metadata").String()).Get("installation_id").String(), label+" 嵌入 turn-metadata.installation_id")
+		}
+	}
+
+	// HTTP 非透传：identity → device 分段 → buildUpstreamRequest。
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(rawBody, &decoded))
+	require.True(t, applyCodexAccountIdentityClientMetadataMap(decoded, account, 77))
+	c := newConvTestContext(t, rawBody)
+	fp := resolveCodexFingerprintIDsFromRequest(account, c.Request.Header)
+	require.NotNil(t, fp)
+	require.True(t, applyCodexFingerprintClientMetadata(decoded, fp))
+	stageCodexFingerprintIDs(c, fp)
+	scopedBody, err := json.Marshal(decoded)
+	require.NoError(t, err)
+	httpReq, err := svc.buildUpstreamRequest(context.Background(), c, account, scopedBody, "tok", true, convTestSession, true)
+	require.NoError(t, err)
+	requireConvergenceInvariants(t, convOutbound{"HTTP+device", httpReq.Header, scopedBody})
+	requireDevice("HTTP+device", httpReq.Header, scopedBody)
+
+	// 透传：raw 字节上同样顺序。
+	scopedRaw, changed, err := applyCodexAccountIdentityClientMetadataRaw(rawBody, account, 77)
+	require.NoError(t, err)
+	require.True(t, changed)
+	c = newConvTestContext(t, rawBody)
+	fp = resolveCodexFingerprintIDsFromRequest(account, c.Request.Header)
+	require.NotNil(t, fp)
+	fpRaw, fpChanged, err := applyCodexFingerprintClientMetadataRaw(scopedRaw, fp)
+	require.NoError(t, err)
+	require.True(t, fpChanged)
+	stageCodexFingerprintIDs(c, fp)
+	ptReq, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), c, account, fpRaw, "tok")
+	require.NoError(t, err)
+	requireConvergenceInvariants(t, convOutbound{"透传+device", ptReq.Header, fpRaw})
+	requireDevice("透传+device", ptReq.Header, fpRaw)
+
+	// WS 握手。
+	c = newConvTestContext(t, rawBody)
+	stageCodexFingerprintIDs(c, resolveCodexFingerprintIDsFromRequest(account, c.Request.Header))
+	wsHeaders, _, err := svc.buildOpenAIWSHeaders(context.Background(), c, account, "tok",
+		OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2},
+		true, "", convTestTurnMetadata(), convTestSession, "", "")
+	require.NoError(t, err)
+	requireConvergenceInvariants(t, convOutbound{"WS+device", wsHeaders, nil})
+	requireDevice("WS+device", wsHeaders, nil)
+
+	for _, name := range []string{"session-id", "thread-id", "x-client-request-id", "x-codex-window-id", "x-codex-installation-id"} {
+		require.Equal(t, httpReq.Header.Get(name), ptReq.Header.Get(name), "HTTP 与透传 %s 应一致", name)
+		require.Equal(t, httpReq.Header.Get(name), wsHeaders.Get(name), "HTTP 与 WS %s 应一致", name)
+	}
+}
