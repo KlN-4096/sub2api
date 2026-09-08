@@ -96,8 +96,9 @@ func scopeCodexAccountIdentityValue(account *Account, apiKeyID int64, kind, raw 
 	if raw == "" || namespace == "" {
 		return raw
 	}
-	// klno 实验性指纹收敛：window 类 "<thread>:<n>" 形态按 thread 派生并保留序号
-	if derived, ok := deriveCodexConvergenceWindowValue(account, apiKeyID, kind, raw); ok {
+	// klno 实验性指纹收敛：复合形态（window "<thread>:<n>"、prompt-cache "<source>:<thread>"）
+	// 只派生其中的 UUID 部分并保留整体形态
+	if derived, ok := deriveCodexConvergenceCompositeValue(account, apiKeyID, kind, raw); ok {
 		return derived
 	}
 	seed := fmt.Sprintf(

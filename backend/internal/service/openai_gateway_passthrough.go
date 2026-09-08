@@ -187,6 +187,8 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		if accountScoped {
 			body = accountScopedBody
 		}
+		// klno 指纹收敛：暂存体内已派生的会话身份，供出站头在入站没有连字符会话头时重建。
+		stageCodexConvergenceBodyIdentityRaw(c, codexAccountIdentitySource(c, account), body)
 
 		stageCodexFingerprintIDs(c, nil)
 		// 指纹收敛：与非透传路径同门控（仅 OAuth、legacy compact 形态跳过）。

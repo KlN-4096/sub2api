@@ -393,3 +393,89 @@ func TestCodexFingerprintConvergence_KeepsSessionCorrelationWithoutInboundHeader
 		require.True(t, hasCorrelation(ptReq.Header), "透传路径 开关=%v 同样要求", enabled)
 	}
 }
+
+// 入站被中继剥掉连字符会话头（现网 31.108 apikey 中继形态：session-id / thread-id /
+// x-codex-parent-thread-id 全被剥离，体内 client_metadata 完整保留）时，出站头必须从体内
+// 已派生的同一份值重建，结果与客户端直连时逐字节相同。
+func TestCodexFingerprintConvergence_ReconstructsSessionHeadersFromBody(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := convTestAccount(true)
+	rawBody := convTestBody(t)
+	stripped := []string{"session-id", "thread-id", "x-codex-parent-thread-id", "x-client-request-id"}
+
+	newCtx := func() *gin.Context {
+		c := newConvTestContext(t, rawBody)
+		for _, name := range stripped {
+			c.Request.Header.Del(name)
+		}
+		return c
+	}
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(rawBody, &decoded))
+	require.True(t, applyCodexAccountIdentityClientMetadataMap(decoded, account, 77))
+	scopedBody, err := json.Marshal(decoded)
+	require.NoError(t, err)
+	c := newCtx()
+	stageCodexConvergenceBodyIdentityMap(c, account, decoded)
+	httpReq, err := svc.buildUpstreamRequest(context.Background(), c, account, scopedBody, "tok", true, convTestSession, true)
+	require.NoError(t, err)
+	requireConvergenceInvariants(t, convOutbound{"HTTP 中继剥头", httpReq.Header, scopedBody})
+
+	scopedRaw, changed, err := applyCodexAccountIdentityClientMetadataRaw(rawBody, account, 77)
+	require.NoError(t, err)
+	require.True(t, changed)
+	c = newCtx()
+	stageCodexConvergenceBodyIdentityRaw(c, account, scopedRaw)
+	ptReq, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), c, account, scopedRaw, "tok")
+	require.NoError(t, err)
+	requireConvergenceInvariants(t, convOutbound{"透传 中继剥头", ptReq.Header, scopedRaw})
+
+	// 与客户端直连（入站带头）时逐字节一致：重建值和派生值必须同源。
+	directReq, err := svc.buildUpstreamRequest(context.Background(), newConvTestContext(t, rawBody), account, scopedBody, "tok", true, convTestSession, true)
+	require.NoError(t, err)
+	for _, name := range append([]string{}, stripped...) {
+		require.Equal(t, directReq.Header.Get(name), httpReq.Header.Get(name), "重建的 %s 应与直连一致", name)
+		require.Equal(t, directReq.Header.Get(name), ptReq.Header.Get(name), "透传重建的 %s 应与直连一致", name)
+	}
+}
+
+// prompt_cache_key 与会话头同源：体内没有 client_metadata、只有 prompt_cache_key 时，
+// 上游按 kind="prompt-cache" 派生 body，而收敛头曾按 kind="session" 派生，两者不等——
+// 真 Codex 客户端里 session-id == prompt_cache_key 恒成立。
+func TestCodexFingerprintConvergence_PromptCacheKeySharesSessionSource(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := convTestAccount(true)
+
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-5.5", "stream": true, "prompt_cache_key": convTestSession,
+		"input": []any{map[string]any{"type": "message", "role": "user", "content": "hi"}},
+	})
+	require.NoError(t, err)
+
+	scopedRaw, changed, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77)
+	require.NoError(t, err)
+	require.True(t, changed)
+	scopedKey := gjson.GetBytes(scopedRaw, "prompt_cache_key").String()
+	require.NotEmpty(t, scopedKey)
+
+	c := newConvTestContext(t, body)
+	for _, name := range []string{"session-id", "thread-id", "x-client-request-id"} {
+		c.Request.Header.Del(name)
+	}
+	stageCodexConvergenceBodyIdentityRaw(c, account, scopedRaw)
+	req, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), c, account, scopedRaw, "tok")
+	require.NoError(t, err)
+	require.Equal(t, scopedKey, req.Header.Get("session-id"), "session-id 必须与 body prompt_cache_key 同值")
+
+	// 子代理形态 "<source>:<parent_thread_id>"（core prompt_cache_key()）：派生后保持同一形态，
+	// 不能被压成一个裸 UUID——真客户端不存在裸 UUID 的这一分支。
+	composite := "internal_guardian:" + convTestParentThread
+	derived := scopeCodexAccountIdentityValue(account, 77, "prompt-cache", composite)
+	prefix, rest, ok := strings.Cut(derived, ":")
+	require.True(t, ok, "复合 prompt_cache_key 派生后应保持 <source>:<uuid> 形态，实际 %q", derived)
+	require.Equal(t, "internal_guardian", prefix)
+	requireV7SameTimestamp(t, convTestParentThread, rest, "复合 prompt_cache_key 的 parent_thread_id")
+	require.Equal(t, scopeCodexAccountIdentityValue(account, 77, "thread", convTestParentThread), rest,
+		"复合 prompt_cache_key 的 thread 部分应与 thread 类同值")
+}
