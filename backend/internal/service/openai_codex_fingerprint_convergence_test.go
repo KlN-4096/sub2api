@@ -206,6 +206,40 @@ func TestCodexFingerprintConvergence_UnifiedAcrossCarriers(t *testing.T) {
 	}
 }
 
+// WS 握手头与帧内 client_metadata 是两次独立处理（握手一次，之后每个 response.create
+// 帧一次），必须落到同一身份：真实客户端一条连接内两者同源自一份 CodexResponsesMetadata。
+func TestCodexFingerprintConvergence_WSFramePayloadMatchesHandshakeHeaders(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := convTestAccount(true)
+	rawBody := convTestBody(t)
+	c := newConvTestContext(t, rawBody)
+
+	// 生产顺序：先建连（握手头），再发帧。
+	wsHeaders, _, err := svc.buildOpenAIWSHeaders(context.Background(), c, account, "tok",
+		OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2},
+		true, "", convTestTurnMetadata(), convTestSession, "", "")
+	require.NoError(t, err)
+
+	payload, err := applyCodexIdentityToWSPayload(c, account, rawBody)
+	require.NoError(t, err)
+	cm := gjson.ParseBytes(payload).Get("client_metadata")
+	require.True(t, cm.IsObject(), "帧内应有 client_metadata")
+	// 两边同时为空也会让下面的相等断言通过，先钉住非空。
+	require.NotEmpty(t, wsHeaders.Get("session-id"))
+	require.NotEmpty(t, wsHeaders.Get("x-codex-installation-id"))
+
+	require.Equal(t, wsHeaders.Get("session-id"), cm.Get("session_id").String(),
+		"握手头 session-id 与帧内 client_metadata.session_id 必须同源")
+	require.Equal(t, wsHeaders.Get("thread-id"), cm.Get("thread_id").String(),
+		"握手头 thread-id 与帧内 client_metadata.thread_id 必须同源")
+	require.Equal(t, wsHeaders.Get("x-codex-window-id"), cm.Get("x-codex-window-id").String(),
+		"握手头与帧内 window-id 必须同源")
+	require.Equal(t, wsHeaders.Get("x-codex-installation-id"), cm.Get("x-codex-installation-id").String(),
+		"握手头与帧内 installation 必须同源")
+	require.Equal(t, wsHeaders.Get("session-id"), gjson.ParseBytes(payload).Get("prompt_cache_key").String(),
+		"帧内 prompt_cache_key 必须等于握手头 session-id")
+}
+
 // 开关关闭：出站与上游 v0.2.2 完全一致（HTTP 不带三个头、下划线别名走旧隔离哈希、
 // x-client-request-id 独立派生、root_turn_id 原样、派生一律 v4）。
 func TestCodexFingerprintConvergence_OffMatchesUpstream(t *testing.T) {
