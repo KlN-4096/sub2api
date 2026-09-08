@@ -278,6 +278,9 @@ type codexFingerprintIDs struct {
 	// 入站 session-id 头的原始值（可能为空：apikey 中继会剥掉它）。用作判定
 	// prompt_cache_key 是不是显式覆盖值的独立旁证。
 	clientSessionID string
+	// 上面那个值命名空间化之后的副本，与请求体里的 prompt_cache_key 处在同一派生阶段，
+	// 判定时只能拿这个去比。
+	scopedClientSessionID string
 }
 
 // resolveCodexFingerprintIDs 按收敛模式计算出站 ID 集合。
@@ -345,7 +348,8 @@ func extractClientSessionID(h http.Header) string {
 // resolveCodexFingerprintIDsFromRequest 从客户端原始请求头中提取 session-id，
 // 结合账号配置一次性解析收敛 ID 集合。调用方应将返回的 ids 同时传给
 // applyCodexFingerprintHeaders 和 applyCodexFingerprintClientMetadata。
-func resolveCodexFingerprintIDsFromRequest(account *Account, clientHeaders http.Header) *codexFingerprintIDs {
+// clientHeaders 为 nil 时从 c 取；账号探测那种没有 gin context 的调用方直接传头。
+func resolveCodexFingerprintIDsFromRequest(c *gin.Context, account *Account, clientHeaders http.Header) *codexFingerprintIDs {
 	if account == nil {
 		return nil
 	}
@@ -353,11 +357,21 @@ func resolveCodexFingerprintIDsFromRequest(account *Account, clientHeaders http.
 	if mode == codexFingerprintOff {
 		return nil
 	}
+	if clientHeaders == nil && c != nil && c.Request != nil {
+		clientHeaders = c.Request.Header
+	}
 	clientSessionID := ""
 	if clientHeaders != nil {
 		clientSessionID = extractClientSessionID(clientHeaders)
 	}
-	return resolveCodexFingerprintIDs(account, clientSessionID, mode)
+	ids := resolveCodexFingerprintIDs(account, clientSessionID, mode)
+	if ids != nil && ids.convergence && clientSessionID != "" && c != nil {
+		// 入站头是原始值，而判定时拿到的 prompt_cache_key 已经被命名空间化过。这里先派生
+		// 一份同阶段的副本，否则 H(S) 与 S 永远不等，默认缓存键会被误判成显式覆盖值。
+		ids.scopedClientSessionID = scopeCodexAccountIdentityValue(
+			codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c), "session", clientSessionID)
+	}
+	return ids
 }
 
 // applyCodexFingerprintHeaders 按预计算的收敛 ID 改写出站 HTTP 头中的设备指纹。
@@ -493,9 +507,26 @@ func captureCodexFingerprintOriginalBodySessionID(ids *codexFingerprintIDs, clie
 		if sessionID, ok := metadata["session_id"].(string); ok {
 			ids.originalBodySessionID = strings.TrimSpace(sessionID)
 		}
+		if ids.originalBodySessionID == "" {
+			// 缺 session_id 时退到嵌入的 turn-metadata，理由见 codexBodySessionIDEvidence
+			embedded, _ := metadata[openAIWSTurnMetadataHeader].(string)
+			ids.originalBodySessionID = strings.TrimSpace(gjson.Parse(embedded).Get("session_id").String())
+		}
 	case map[string]string:
 		ids.originalBodySessionID = strings.TrimSpace(metadata["session_id"])
+		if ids.originalBodySessionID == "" {
+			ids.originalBodySessionID = strings.TrimSpace(gjson.Parse(metadata[openAIWSTurnMetadataHeader]).Get("session_id").String())
+		}
 	}
+}
+
+// codexBodySessionIDEvidence 从一份 client_metadata 里找会话身份：先 session_id，
+// 缺了再退到嵌入的 turn-metadata。两者在本阶段都已被命名空间化，与 prompt_cache_key 同阶段。
+func codexBodySessionIDEvidence(clientMetadata gjson.Result) gjson.Result {
+	if session := clientMetadata.Get("session_id"); session.Type == gjson.String && strings.TrimSpace(session.String()) != "" {
+		return session
+	}
+	return gjson.Parse(clientMetadata.Get(openAIWSTurnMetadataHeader).String()).Get("session_id")
 }
 
 func captureCodexFingerprintOriginalBodySessionIDRaw(ids *codexFingerprintIDs, value gjson.Result) {
@@ -511,10 +542,12 @@ func captureCodexFingerprintOriginalBodySessionIDRaw(ids *codexFingerprintIDs, v
 // shouldRewriteCodexFingerprintPromptCacheKey 判定 prompt_cache_key 是不是"会话默认键"，
 // 只有是的时候才允许 session/full 模式把它改写成账号会话常量。取证分三级，缺证据就不动：
 //
-//	体内有 client_metadata.session_id  -> 与之相等才算（上游原有规则，收敛开关无关）
-//	体内没有、入站有 session-id 头      -> 与之相等才算；不等说明是显式覆盖值，保留
-//	两者都没有（中继把头剥了）          -> 没有旁证可查，按 codex 默认语义当会话键
-//	                                     （core/src/client.rs:515 默认返回 session_id）
+//	体内有会话身份（client_metadata.session_id，缺了退到嵌入 turn-metadata）
+//	                                   -> 与之相等才算（上游原有规则，收敛开关无关）
+//	体内没有、入站有 session-id 头      -> 与其"同阶段派生副本"相等才算；不等说明是显式
+//	                                     覆盖值，保留
+//	两者都没有（中继把头剥了）          -> 请求里除它之外没有任何会话身份，按 codex 默认
+//	                                     语义当会话键（core/src/client.rs:515 返回 session_id）
 //
 // 复合形态一律排除：那是 codex 子代理分支自己的键（client.rs:512 "{source}:{parent_thread_id}"、
 // guardian/review_session.rs:304），本就不等于 session_id，改写会抹掉父线程关系。
@@ -535,7 +568,7 @@ func shouldRewriteCodexFingerprintPromptCacheKey(ids *codexFingerprintIDs, promp
 		return false
 	}
 	if ids.clientSessionID != "" {
-		return promptCacheKey == ids.clientSessionID
+		return promptCacheKey == ids.scopedClientSessionID
 	}
 	return true
 }
@@ -576,7 +609,7 @@ func applyCodexFingerprintClientMetadataRaw(body []byte, ids *codexFingerprintID
 
 	existing := map[string]any{}
 	if cm := gjson.GetBytes(body, "client_metadata"); cm.IsObject() {
-		captureCodexFingerprintOriginalBodySessionIDRaw(ids, gjson.GetBytes(body, "client_metadata.session_id"))
+		captureCodexFingerprintOriginalBodySessionIDRaw(ids, codexBodySessionIDEvidence(cm))
 		if err := json.Unmarshal([]byte(cm.Raw), &existing); err != nil {
 			return body, false, fmt.Errorf("decode client_metadata for fingerprint: %w", err)
 		}

@@ -183,6 +183,8 @@ func stageCodexConvergenceBodyIdentityMap(c *gin.Context, account *Account, body
 		value, _ := clientMetadata[pair[0]].(string)
 		setCodexConvergenceStagedValue(staged, pair[1], value)
 	}
+	embedded, _ := clientMetadata[openAIWSTurnMetadataHeader].(string)
+	fillCodexConvergenceIdentityFrom(staged, gjson.Parse(embedded))
 	promptCacheKey, _ := body["prompt_cache_key"].(string)
 	stageCodexConvergenceBodyIdentity(c, account, staged, promptCacheKey)
 }
@@ -195,10 +197,26 @@ func stageCodexConvergenceBodyIdentityRaw(c *gin.Context, account *Account, body
 	}
 	clientMetadata := gjson.GetBytes(body, "client_metadata")
 	staged := map[string]string{}
-	for _, pair := range codexConvergenceBodyToHeader {
-		setCodexConvergenceStagedValue(staged, pair[1], clientMetadata.Get(pair[0]).String())
-	}
+	fillCodexConvergenceIdentityFrom(staged, clientMetadata)
+	fillCodexConvergenceIdentityFrom(staged, gjson.Parse(clientMetadata.Get(openAIWSTurnMetadataHeader).String()))
 	stageCodexConvergenceBodyIdentity(c, account, staged, gjson.GetBytes(body, "prompt_cache_key").String())
+}
+
+// fillCodexConvergenceIdentityFrom 从一份身份元数据（client_metadata 或其中嵌入的
+// turn-metadata）补齐还没取到的字段，已有值不覆盖。两者在本阶段都已被
+// applyCodexAccountIdentity* 命名空间化，同源同值。
+func fillCodexConvergenceIdentityFrom(staged map[string]string, metadata gjson.Result) {
+	if !metadata.IsObject() {
+		return
+	}
+	for _, pair := range codexConvergenceBodyToHeader {
+		if staged[pair[1]] == "" {
+			setCodexConvergenceStagedValue(staged, pair[1], metadata.Get(pair[0]).String())
+		}
+	}
+	if staged["x-codex-parent-thread-id"] == "" {
+		setCodexConvergenceStagedValue(staged, "x-codex-parent-thread-id", metadata.Get("parent_thread_id").String())
+	}
 }
 
 func setCodexConvergenceStagedValue(staged map[string]string, name, value string) {
@@ -208,10 +226,10 @@ func setCodexConvergenceStagedValue(staged map[string]string, name, value string
 }
 
 func stageCodexConvergenceBodyIdentity(c *gin.Context, account *Account, staged map[string]string, promptCacheKey string) {
-	// 体内没有 client_metadata 但有 prompt_cache_key 时，它就是会话键：真客户端的
-	// prompt_cache_key 默认返回 session_id（core/src/client.rs:515），二者恒等。出站头取同
-	// 一份值，避免头按 kind="session"、请求体按 kind="prompt-cache" 各自派生出两个不同 UUID。
-	// 复合形态（子代理分支）除外——那时它本就不等于 session_id。
+	// client_metadata 和其中的 turn-metadata 都拿不到会话身份、只剩 prompt_cache_key 时，
+	// 才把它当会话键：真客户端的 prompt_cache_key 默认返回 session_id（core/src/client.rs:515）。
+	// 必须排在 turn-metadata 之后——turn-metadata 里有 session 时那才是会话身份，拿自定义
+	// 缓存键去填会话头会和它打架。复合形态（子代理分支）除外，它本就不等于 session_id。
 	if staged["session-id"] == "" && !codexConvergencePromptCacheKeyPattern.MatchString(strings.TrimSpace(promptCacheKey)) {
 		setCodexConvergenceStagedValue(staged, "session-id", promptCacheKey)
 	}
@@ -268,6 +286,27 @@ func codexConvergenceTurnMetadataIdentity(headers http.Header) map[string]string
 		setCodexConvergenceStagedValue(values, "x-codex-parent-thread-id", metadata.Get("parent_thread_id").String())
 	}
 	return values
+}
+
+// applyCodexFingerprintToWSPayload 把 HTTP 路径那套指纹收敛搬到独立 WS 入口：解析本 attempt
+// 的收敛 IDs、按模式改写体内 client_metadata、再暂存给握手头构造器。少了这一步，device 模式
+// 下 HTTP 用账号固定 installation、直连 WS 却还在用客户端安装 ID 的派生值，两条路径对不上。
+// 与 forward / passthrough 一样无条件覆写暂存（含 nil），避免 failover 残留上一账号的 IDs。
+func applyCodexFingerprintToWSPayload(c *gin.Context, account *Account, payload []byte) ([]byte, error) {
+	stageCodexFingerprintIDs(c, nil)
+	ids := resolveCodexFingerprintIDsFromRequest(c, account, nil)
+	next := payload
+	if ids != nil {
+		rewritten, changed, err := applyCodexFingerprintClientMetadataRaw(payload, ids)
+		if err != nil {
+			return payload, err
+		}
+		if changed {
+			next = rewritten
+		}
+	}
+	stageCodexFingerprintIDs(c, ids)
+	return next, nil
 }
 
 // applyCodexFingerprintConvergenceHeaders 在 applyStagedCodexFingerprintHeaders 之后、终态身份收口
