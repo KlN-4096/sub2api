@@ -86,6 +86,18 @@ func applyCodexConvergenceIdentityFields(values map[string]any, account *Account
 	return changed
 }
 
+// codexConvergenceSeedKind 由 scopeCodexAccountIdentityValue 调用：开关开启时 session 类
+// 并入 thread 类。根会话的 session_id 就是根线程的 ID（core/src/session/session.rs:791
+// session_id = SessionId::from(thread_id)），两类各自派生会让相等的原始值变成两个不同的
+// UUID——上游看到的每个请求都成了"子代理线程"形态，真客户端不存在这种形态。原始值本就
+// 不同（子代理：session_id 取根线程 ID）时派生结果仍然不同，关系两侧都保住。
+func codexConvergenceSeedKind(account *Account, kind string) string {
+	if kind == "session" && codexFingerprintConvergenceEnabled(account) {
+		return "thread"
+	}
+	return kind
+}
+
 const codexConvergenceUUIDPattern = `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`
 
 // codex 的 window_id 形态："<thread uuid>:<window_number>"。

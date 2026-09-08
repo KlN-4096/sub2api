@@ -106,7 +106,9 @@ func scopeCodexAccountIdentityValue(account *Account, apiKeyID int64, kind, raw 
 		codexAccountIdentityNamespaceVersion,
 		apiKeyID,
 		namespace,
-		kind,
+		// klno 实验性指纹收敛：session 类并入 thread 类，保住 codex 的
+		// session_id == 根线程 ID 关系
+		codexConvergenceSeedKind(account, kind),
 		raw,
 	)
 	// klno 实验性指纹收敛：原始值为 UUIDv7 时保持 v7 形态（见 openai_codex_fingerprint_convergence.go）
