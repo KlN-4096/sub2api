@@ -327,7 +327,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		if accountScoped {
 			normalized = accountScopedPayload
 		}
-		// klno 指纹收敛：暂存体内已派生的会话身份，供握手头在入站没有连字符会话头时重建。
+		// klno 指纹收敛：与 HTTP 路径同一套分段——先按模式改写体内 client_metadata 并暂存
+		// IDs（漏了这步 device 模式在直连 WS 上不生效），再暂存体内会话身份供握手头重建。
+		fingerprintPayload, fingerprintErr := applyCodexFingerprintToWSPayload(c, account, normalized)
+		if fingerprintErr != nil {
+			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket fingerprint metadata", fingerprintErr)
+		}
+		normalized = fingerprintPayload
 		stageCodexConvergenceBodyIdentityRaw(c, codexAccountIdentitySource(c, account), normalized)
 		if responsesLite {
 			litePayload, _, liteErr := normalizeOpenAIResponsesLitePayloadForAccount(normalized, account)

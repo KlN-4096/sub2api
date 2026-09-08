@@ -311,7 +311,7 @@ func TestCodexFingerprintConvergence_WithDeviceMode(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rawBody, &decoded))
 	require.True(t, applyCodexAccountIdentityClientMetadataMap(decoded, account, 77))
 	c := newConvTestContext(t, rawBody)
-	fp := resolveCodexFingerprintIDsFromRequest(account, c.Request.Header)
+	fp := resolveCodexFingerprintIDsFromRequest(c, account, nil)
 	require.NotNil(t, fp)
 	require.True(t, applyCodexFingerprintClientMetadata(decoded, fp))
 	stageCodexFingerprintIDs(c, fp)
@@ -327,7 +327,7 @@ func TestCodexFingerprintConvergence_WithDeviceMode(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, changed)
 	c = newConvTestContext(t, rawBody)
-	fp = resolveCodexFingerprintIDsFromRequest(account, c.Request.Header)
+	fp = resolveCodexFingerprintIDsFromRequest(c, account, nil)
 	require.NotNil(t, fp)
 	fpRaw, fpChanged, err := applyCodexFingerprintClientMetadataRaw(scopedRaw, fp)
 	require.NoError(t, err)
@@ -340,7 +340,7 @@ func TestCodexFingerprintConvergence_WithDeviceMode(t *testing.T) {
 
 	// WS 握手。
 	c = newConvTestContext(t, rawBody)
-	stageCodexFingerprintIDs(c, resolveCodexFingerprintIDsFromRequest(account, c.Request.Header))
+	stageCodexFingerprintIDs(c, resolveCodexFingerprintIDsFromRequest(c, account, nil))
 	wsHeaders, _, err := svc.buildOpenAIWSHeaders(context.Background(), c, account, "tok",
 		OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2},
 		true, "", convTestTurnMetadata(), convTestSession, "", "")
@@ -554,7 +554,7 @@ func TestCodexFingerprintConvergence_AstraSessionModeSyncsPromptCacheKey(t *test
 	}
 	scopedRaw, _, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77)
 	require.NoError(t, err)
-	fp := resolveCodexFingerprintIDsFromRequest(account, c.Request.Header)
+	fp := resolveCodexFingerprintIDsFromRequest(c, account, nil)
 	require.NotNil(t, fp)
 	fpRaw, _, err := applyCodexFingerprintClientMetadataRaw(scopedRaw, fp)
 	require.NoError(t, err)
@@ -616,7 +616,7 @@ func convRunPassthrough(t *testing.T, account *Account, body []byte, stripInboun
 	scoped, _, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77)
 	require.NoError(t, err)
 	stageCodexConvergenceBodyIdentityRaw(c, account, scoped)
-	fp := resolveCodexFingerprintIDsFromRequest(account, c.Request.Header)
+	fp := resolveCodexFingerprintIDsFromRequest(c, account, nil)
 	if fp != nil {
 		next, _, fpErr := applyCodexFingerprintClientMetadataRaw(scoped, fp)
 		require.NoError(t, fpErr)
@@ -661,7 +661,7 @@ func TestCodexFingerprintConvergence_CodexClientMetadataWithoutSession(t *testin
 			for _, name := range []string{"session-id", "thread-id", "x-client-request-id"} {
 				c.Request.Header.Del(name)
 			}
-			fp := resolveCodexFingerprintIDsFromRequest(account, c.Request.Header)
+			fp := resolveCodexFingerprintIDsFromRequest(c, account, nil)
 			require.NotNil(t, fp)
 			applyCodexFingerprintClientMetadata(decoded, fp)
 			mapKey, _ := decoded["prompt_cache_key"].(string)
@@ -705,4 +705,86 @@ func TestCodexFingerprintConvergence_CodexKeepsExplicitAndCompositeCacheKey(t *t
 		require.Equal(t, "guardian", prefix)
 		requireV7SameTimestamp(t, convTestParentThread, rest, "复合键的父线程")
 	})
+}
+
+// codex 复核三 #1：入站带默认形态的 session-id（pck == 该 session），体内没有 client_metadata。
+// 判定拿"已派生的缓存键 H(S)"去和"原始入站头 S"比，必然不等，默认键被误判成显式覆盖：
+// session/full 下头收敛成账号常量、缓存键却留在另一套身份里。
+func TestCodexFingerprintConvergence_R3DefaultCacheKeyWithInboundSessionHeader(t *testing.T) {
+	account := convSessionModeAccount(t)
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-5.5", "stream": true, "prompt_cache_key": convTestSession,
+		"input": []any{map[string]any{"type": "message", "role": "user", "content": "hi"}},
+	})
+	require.NoError(t, err)
+	h, scoped := convRunPassthrough(t, account, body, false) // 入站保留 session-id == pck 原值
+	t.Logf("session-id=%s pck=%s", h.Get("session-id"), gjson.GetBytes(scoped, "prompt_cache_key").String())
+	require.Equal(t, h.Get("session-id"), gjson.GetBytes(scoped, "prompt_cache_key").String(),
+		"默认缓存键应被识别出来，出站 session-id 与 body prompt_cache_key 必须同值")
+}
+
+// codex 复核三 #2：device 模式下，体内没有 client_metadata.session_id 但 turn-metadata 里有，
+// 且 prompt_cache_key 是自定义值。会话头不该拿自定义缓存键去填，那样会和 turn-metadata 打架。
+func TestCodexFingerprintConvergence_R3TurnMetadataBeatsCustomCacheKey(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := convTestAccount(true)
+	account.Extra[codexFingerprintModeExtraKey] = string(codexFingerprintDevice)
+	account.Extra[codexFingerprintSeedExtraKey] = "0d3c4d0e-5a7b-4d6e-8f90-1a2b3c4d5e6f"
+
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-5.5", "stream": true, "prompt_cache_key": "explicit-cache-key",
+		"client_metadata": map[string]any{
+			"x-codex-installation-id": convTestInstallation,
+			"x-codex-turn-metadata":   convTestTurnMetadata(),
+		},
+		"input": []any{map[string]any{"type": "message", "role": "user", "content": "hi"}},
+	})
+	require.NoError(t, err)
+
+	c := newConvTestContext(t, body)
+	for _, name := range []string{"session-id", "thread-id", "x-client-request-id", "x-codex-parent-thread-id", "x-codex-turn-metadata"} {
+		c.Request.Header.Del(name)
+	}
+	scoped, _, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77)
+	require.NoError(t, err)
+	stageCodexConvergenceBodyIdentityRaw(c, account, scoped)
+	req, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), c, account, scoped, "tok")
+	require.NoError(t, err)
+
+	embedded := gjson.Parse(gjson.GetBytes(scoped, "client_metadata.x-codex-turn-metadata").String())
+	wantSession := embedded.Get("session_id").String()
+	require.NotEmpty(t, wantSession)
+	t.Logf("session-id=%s turn-metadata.session_id=%s pck=%s",
+		req.Header.Get("session-id"), wantSession, gjson.GetBytes(scoped, "prompt_cache_key").String())
+	require.Equal(t, wantSession, req.Header.Get("session-id"),
+		"会话头应取 turn-metadata 里的 session，而不是自定义缓存键")
+	require.Equal(t, embedded.Get("thread_id").String(), req.Header.Get("thread-id"),
+		"thread 头同样应取 turn-metadata")
+}
+
+// codex 复核三 #3：独立 WS 入口没有解析/暂存指纹 IDs，device 模式下 HTTP 用账号固定
+// installation、直连 WS 却还在用客户端安装 ID 的派生值。这里驱动真实入口函数，
+// 不手工 stageCodexFingerprintIDs，否则正好把漏接掩盖掉。
+func TestCodexFingerprintConvergence_R3WSAppliesDeviceMode(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := convTestAccount(true)
+	account.Extra[codexFingerprintModeExtraKey] = string(codexFingerprintDevice)
+	account.Extra[codexFingerprintSeedExtraKey] = "0d3c4d0e-5a7b-4d6e-8f90-1a2b3c4d5e6f"
+	wantInstall := resolveConvergedInstallationID(account, "0d3c4d0e-5a7b-4d6e-8f90-1a2b3c4d5e6f")
+	require.NotEmpty(t, wantInstall)
+
+	rawBody := convTestBody(t)
+	c := newConvTestContext(t, rawBody)
+	scoped, _, err := applyCodexAccountIdentityClientMetadataRaw(rawBody, account, 77)
+	require.NoError(t, err)
+	// 独立 WS 入口目前只做到这一步（见 openai_ws_forwarder_ingress.go / v2 adapter）
+	applyCodexFingerprintToWSPayload(c, account, scoped)
+
+	wsHeaders, _, err := svc.buildOpenAIWSHeaders(context.Background(), c, account, "tok",
+		OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2},
+		true, "", convTestTurnMetadata(), convTestSession, "", "")
+	require.NoError(t, err)
+	t.Logf("ws installation=%s want=%s", wsHeaders.Get("x-codex-installation-id"), wantInstall)
+	require.Equal(t, wantInstall, wsHeaders.Get("x-codex-installation-id"),
+		"独立 WS 入口也必须应用 device 模式的账号固定 installation")
 }

@@ -187,20 +187,13 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		if accountScoped {
 			body = accountScopedBody
 		}
-		// klno 指纹收敛：暂存体内已派生的会话身份，供出站头在入站没有连字符会话头时重建。
-		stageCodexConvergenceBodyIdentityRaw(c, codexAccountIdentitySource(c, account), body)
-
 		stageCodexFingerprintIDs(c, nil)
 		// 指纹收敛：与非透传路径同门控（仅 OAuth、legacy compact 形态跳过）。
 		// 一次性解析收敛 ID：请求体 client_metadata 在此改写（raw 字节外科
 		// 手术，透传热路径禁全量 Unmarshal），出站头改写由请求构造器读取
 		// context 中的同一份 IDs 完成（turn_id 等随机字段两侧必须一致）。
 		if !isOpenAIResponsesCompactPath(c) {
-			var clientHeaders http.Header
-			if c != nil && c.Request != nil {
-				clientHeaders = c.Request.Header
-			}
-			fpIDs := resolveCodexFingerprintIDsFromRequest(account, clientHeaders)
+			fpIDs := resolveCodexFingerprintIDsFromRequest(c, account, nil)
 			if fpIDs != nil {
 				fpBody, fpChanged, fpErr := applyCodexFingerprintClientMetadataRaw(body, fpIDs)
 				if fpErr != nil {
@@ -212,6 +205,10 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			}
 			stageCodexFingerprintIDs(c, fpIDs)
 		}
+		// klno 指纹收敛：暂存体内已派生的会话身份，供出站头在入站没有连字符会话头时重建。
+		// 必须排在指纹改写之后——session/full 模式会重写体内 session_id，暂存早于它就会
+		// 存下一份过期的值。
+		stageCodexConvergenceBodyIdentityRaw(c, codexAccountIdentitySource(c, account), body)
 	}
 	if account != nil && account.IsOpenAI() {
 		responsesLite := isOpenAIResponsesLiteHeader(c.GetHeader(responsesLiteHeader)) || isOpenAIResponsesLiteWebSocketPayload(body)

@@ -443,7 +443,7 @@ func TestOpenAIGatewayService_BuildOpenAIWSHeadersDeviceModePreservesNamespacedC
 	c.Request.Header.Set("x-client-request-id", "client-request")
 
 	account := newTestOAuthAccount(1300, map[string]any{codexFingerprintModeExtraKey: "device"})
-	ids := resolveCodexFingerprintIDsFromRequest(account, c.Request.Header)
+	ids := resolveCodexFingerprintIDsFromRequest(c, account, nil)
 	require.NotNil(t, ids)
 	stageCodexFingerprintIDs(c, ids)
 
