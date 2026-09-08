@@ -8,7 +8,8 @@ package service
 //     （codex-api/src/requests/headers.rs build_session_headers）、x-codex-parent-thread-id、
 //     x-openai-subagent（core/src/responses_metadata.rs、core/src/client.rs:793）。WS 路径本就转发。
 //  2. x-client-request-id 恒等于 thread-id（codex-api/src/endpoint/responses.rs:120、core/src/client.rs:1245）。
-//  3. 不发真客户端不存在的 session_id / conversation_id 下划线别名。
+//  3. 补出 session-id 后，不再发真客户端不存在的 session_id / conversation_id 下划线别名；
+//     补不出（入站无会话头）时保留上游别名，否则请求会零会话身份出站。
 //  4. root_turn_id / parent_turn_id 与 turn_id 同类派生；parent_thread_id / forked_from_thread_id 与
 //     thread 同类；context_window_id 单独一类（core/src/session/mod.rs current_window：它是
 //     AutoCompactWindowIds.window_id，v7）；x-codex-window-id / window_id 真实形态是
@@ -160,7 +161,12 @@ func applyCodexFingerprintConvergenceHeaders(c *gin.Context, account *Account, h
 	if threadID := strings.TrimSpace(headers.Get("thread-id")); threadID != "" {
 		headers.Set("x-client-request-id", threadID)
 	}
-	// 3) 真客户端没有的下划线别名
-	headers.Del("session_id")
-	headers.Del("conversation_id")
+	// 3) 真客户端没有的下划线别名。仅在确实补出了 session-id 时才删：入站没带会话头的
+	// 客户端（现网 Codex Desktop 一条都不带）补不出连字符头，此时删别名会让请求出站
+	// 零会话身份——真 Codex 客户端不存在这种形态，且上游据此做缓存亲和，删掉会打散
+	// 路由（现网 pro1 HTTP 命中率 96% → 22%）。
+	if strings.TrimSpace(headers.Get("session-id")) != "" {
+		headers.Del("session_id")
+		headers.Del("conversation_id")
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -21,7 +22,7 @@ import (
 //	client_metadata.root_turn_id == client_metadata.turn_id
 //	头 x-codex-window-id == client_metadata.x-codex-window-id == turn-metadata.window_id == "<派生 thread-id>:<n>"
 //	turn-metadata.context_window_id 单独派生、保持 v7
-//	不发 session_id / conversation_id；v7 原始值派生后仍为 v7 且时间戳前缀不变；v4 原始值仍为 v4
+//	发出 session-id 时不再发 session_id / conversation_id 别名；v7 原始值派生后仍为 v7 且时间戳前缀不变；v4 原始值仍为 v4
 //
 // 开关关闭时行为与上游完全一致。
 const (
@@ -345,5 +346,50 @@ func TestCodexFingerprintConvergence_WithDeviceMode(t *testing.T) {
 	for _, name := range []string{"session-id", "thread-id", "x-client-request-id", "x-codex-window-id", "x-codex-installation-id"} {
 		require.Equal(t, httpReq.Header.Get(name), ptReq.Header.Get(name), "HTTP 与透传 %s 应一致", name)
 		require.Equal(t, httpReq.Header.Get(name), wsHeaders.Get(name), "HTTP 与 WS %s 应一致", name)
+	}
+}
+
+// 回归：入站不带 session-id / thread-id 的客户端（现网 Codex Desktop 形态）开启收敛后，
+// 出站必须仍带会话关联头。曾经无条件删除下划线别名，导致这类请求出站零会话身份，
+// 上游缓存路由打散（pro1 HTTP 命中率 96% → 22%）。
+func TestCodexFingerprintConvergence_KeepsSessionCorrelationWithoutInboundHeaders(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	rawBody := convTestBody(t)
+
+	newCtx := func() *gin.Context {
+		c := newConvTestContext(t, rawBody)
+		for _, name := range []string{"session-id", "thread-id", "x-codex-parent-thread-id"} {
+			c.Request.Header.Del(name)
+		}
+		return c
+	}
+	hasCorrelation := func(h http.Header) bool {
+		for _, name := range []string{"session-id", "session_id", "conversation_id"} {
+			if strings.TrimSpace(h.Get(name)) != "" {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, enabled := range []bool{false, true} {
+		account := convTestAccount(enabled)
+		var decoded map[string]any
+		require.NoError(t, json.Unmarshal(rawBody, &decoded))
+		applyCodexAccountIdentityClientMetadataMap(decoded, account, 77)
+		scopedBody, err := json.Marshal(decoded)
+		require.NoError(t, err)
+
+		httpReq, err := svc.buildUpstreamRequest(context.Background(), newCtx(), account, scopedBody, "tok", true, convTestSession, true)
+		require.NoError(t, err)
+		require.True(t, hasCorrelation(httpReq.Header),
+			"开关=%v：入站无会话头时出站仍须携带会话关联头，实际 session-id=%q session_id=%q conversation_id=%q",
+			enabled, httpReq.Header.Get("session-id"), httpReq.Header.Get("session_id"), httpReq.Header.Get("conversation_id"))
+
+		scopedRaw, _, err := applyCodexAccountIdentityClientMetadataRaw(rawBody, account, 77)
+		require.NoError(t, err)
+		ptReq, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), newCtx(), account, scopedRaw, "tok")
+		require.NoError(t, err)
+		require.True(t, hasCorrelation(ptReq.Header), "透传路径 开关=%v 同样要求", enabled)
 	}
 }
