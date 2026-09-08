@@ -18,6 +18,7 @@ import (
 // 对照 openai/codex codex-rs（commit 16ff14c）的出站身份恒等式，开关开启时三条路径必须同时满足：
 //
 //	头 session-id == body prompt_cache_key == client_metadata.session_id
+//	根会话 session-id == thread-id（子代理二者不等，各自独立派生）
 //	头 thread-id  == 头 x-client-request-id == client_metadata.thread_id
 //	client_metadata.root_turn_id == client_metadata.turn_id
 //	头 x-codex-window-id == client_metadata.x-codex-window-id == turn-metadata.window_id == "<派生 thread-id>:<n>"
@@ -118,6 +119,10 @@ func requireConvergenceInvariants(t *testing.T, o convOutbound) {
 	requireV7SameTimestamp(t, convTestSession, sid, o.label+" session-id")
 	requireV7SameTimestamp(t, convTestThread, tid, o.label+" thread-id")
 	require.Equal(t, tid, h.Get("x-client-request-id"), o.label+" x-client-request-id 必须等于 thread-id")
+	// 根会话的 session_id 就是根线程的 ID（core/src/session/session.rs:791
+	// session_id = SessionId::from(thread_id)）。夹具是根会话形态，派生后必须仍相等，
+	// 否则每个请求在上游看来都是子代理线程，真客户端不存在这种形态。
+	require.Equal(t, sid, tid, o.label+" 根会话 session-id 必须等于 thread-id")
 	require.Empty(t, h.Get("session_id"), o.label+" 不应发 session_id")
 	require.Empty(t, h.Get("conversation_id"), o.label+" 不应发 conversation_id")
 	requireV7SameTimestamp(t, convTestParentThread, h.Get("x-codex-parent-thread-id"), o.label+" x-codex-parent-thread-id")
@@ -478,4 +483,25 @@ func TestCodexFingerprintConvergence_PromptCacheKeySharesSessionSource(t *testin
 	requireV7SameTimestamp(t, convTestParentThread, rest, "复合 prompt_cache_key 的 parent_thread_id")
 	require.Equal(t, scopeCodexAccountIdentityValue(account, 77, "thread", convTestParentThread), rest,
 		"复合 prompt_cache_key 的 thread 部分应与 thread 类同值")
+}
+
+// 根会话 session_id 与 thread_id 是同一个 UUID（core/src/session/session.rs:791
+// session_id = SessionId::from(thread_id)），子代理才不等（session_id 取根线程 ID）。
+// 命名空间化必须保留这层关系，否则出站永远是"子代理线程"形态。
+func TestCodexFingerprintConvergence_RootSessionKeepsThreadIdentity(t *testing.T) {
+	on, off := convTestAccount(true), convTestAccount(false)
+	subThread := "01a07c99-2222-7bbb-8ccc-dddddddddddd"
+
+	require.Equal(t,
+		scopeCodexAccountIdentityValue(on, 77, "thread", convTestSession),
+		scopeCodexAccountIdentityValue(on, 77, "session", convTestSession),
+		"根会话：同一个原始 UUID 按 session / thread 派生必须得到同值")
+	require.NotEqual(t,
+		scopeCodexAccountIdentityValue(on, 77, "session", convTestSession),
+		scopeCodexAccountIdentityValue(on, 77, "thread", subThread),
+		"子代理：session_id 与自己的 thread_id 不同，派生后仍须不同")
+	require.NotEqual(t,
+		scopeCodexAccountIdentityValue(off, 77, "session", convTestSession),
+		scopeCodexAccountIdentityValue(off, 77, "thread", convTestSession),
+		"开关关闭时保持上游行为：session / thread 仍各自独立派生")
 }
