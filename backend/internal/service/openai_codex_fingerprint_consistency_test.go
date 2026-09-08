@@ -60,9 +60,10 @@ func TestCodexFingerprintConvergence_ConsistencyMatrix(t *testing.T) {
 								body["client_metadata"] = map[string]any{"x-codex-installation-id": convTestInstallation}
 							}
 							key := convTestSession
-							if keyKind == "override" {
+							switch keyKind {
+							case "override":
 								key = "explicit-cache-key"
-							} else if keyKind == "composite" {
+							case "composite":
 								key = "guardian:" + convTestParentThread
 							}
 							body["prompt_cache_key"] = key
