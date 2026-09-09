@@ -1827,18 +1827,25 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		return nil, err
 	}
 	upstreamCtx = withOpenAIImagesSelfBuiltRequest(upstreamCtx)
-	// 请求体是自建的（无 client_metadata），但出站头仍走 buildUpstreamRequest 的指纹改写。
-	// 必须先解析并暂存设备指纹 IDs：否则 applyStagedCodexFingerprintHeaders 取到 nil，
-	// 客户端透传进来的 x-codex-installation-id 只被账号 scope，同一账号的图片请求会带着
-	// 与推理面不同的另一套设备身份出站。
-	stageCodexFingerprintIDs(c, resolveCodexFingerprintIDsFromRequest(c, account, nil))
+	// 图片是自建 Responses body：先落设备载体，再允许线协议收口去掉独立安装头。
+	ids := resolveCodexFingerprintIDsFromRequest(c, account, nil)
+	stageCodexFingerprintIDs(c, ids)
+	if codexDeviceWireProfileEnabled(c, account) {
+		responsesBody, _, err = applyCodexFingerprintClientMetadataRaw(responsesBody, ids)
+		if err != nil {
+			return nil, fmt.Errorf("apply image device metadata: %w", err)
+		}
+		stageCodexConvergenceBodyIdentityRaw(c, codexAccountIdentitySource(c, account), responsesBody)
+	}
 	upstreamReq, err := s.buildUpstreamRequest(upstreamCtx, c, account, responsesBody, token, true, parsed.StickySessionSeed(), false)
 	if err != nil {
 		return nil, err
 	}
 	upstreamReq.Header.Set("Content-Type", "application/json")
 	upstreamReq.Header.Set("Accept", "text/event-stream")
-	upstreamReq.Header.Set("OpenAI-Beta", "responses=experimental")
+	if !codexDeviceWireProfileEnabled(c, account) {
+		upstreamReq.Header.Set("OpenAI-Beta", "responses=experimental")
+	}
 
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {

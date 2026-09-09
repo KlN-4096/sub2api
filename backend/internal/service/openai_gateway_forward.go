@@ -532,6 +532,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		var fpIDs *codexFingerprintIDs
 		if isCompactRequest {
 			fpIDs = resolveCodexFingerprintIDsFromRequest(c, account, nil)
+			if applyCodexCompactDefaultCacheKey(c, account, decoded) {
+				markDecodedModified()
+			}
 		} else {
 			fpIDs = resolveCodexFingerprintIDsWithBody(c, account, nil, decoded["client_metadata"])
 		}
@@ -1499,6 +1502,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	// 保证不被覆盖丢失）。
 	applyOpenAICodexBetaFeatures(c, account, req.Header)
 	setOpenAICodexRoutingHintFromBody(req.Header, account, body)
+	applyCodexDeviceWireProfile(c, account, req.Header, false)
 	logOpenAIRoutingDiagnosticsFromBody(ctx, account, "http", req.Header, body, "not_applicable")
 
 	return req, nil

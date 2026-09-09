@@ -270,7 +270,11 @@ func TestCodexFingerprintConvergence_WSEntriesKeepIdentityAcrossTurns(t *testing
 							if enabled {
 								wantInstallation = resolveConvergedInstallationID(account, seed)
 							}
-							require.Equal(t, wantInstallation, headers.Get("x-codex-installation-id"), "handshake")
+							if enabled && mode == "device" {
+								require.Empty(t, headers.Get("x-codex-installation-id"), "device identity belongs in the frame/turn-metadata")
+							} else {
+								require.Equal(t, wantInstallation, headers.Get("x-codex-installation-id"), "legacy handshake")
+							}
 							if enabled && mode == "session" {
 								require.Equal(t, resolveConvergedThreadID(seed, convTestSession), headers.Get("thread-id"), "body-only and direct clients must resolve the same per-session thread")
 							}

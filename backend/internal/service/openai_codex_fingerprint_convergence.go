@@ -32,6 +32,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const codexFingerprintConvergenceExtraKey = "codex_experimental_fingerprint_convergence"
@@ -51,6 +52,66 @@ func codexFingerprintConvergenceEnabled(account *Account) bool {
 		return v != 0
 	}
 	return false
+}
+
+// 本轮线协议投影只覆盖 device + 实验收敛双开，其他配置保持既有行为。
+func codexDeviceWireProfileEnabled(c *gin.Context, account *Account) bool {
+	return account != nil && account.GetCodexFingerprintMode() == codexFingerprintDevice &&
+		codexFingerprintConvergenceEnabled(codexAccountIdentitySource(c, account))
+}
+
+// compact 没有 client_metadata，但可确认的默认缓存键仍须和会话头同源。
+// 在普通入口的 body namespace 之前调用；透传入口已由原有 namespace 处理该键。
+func applyCodexCompactDefaultCacheKey(c *gin.Context, account *Account, body map[string]any) bool {
+	if c == nil || c.Request == nil || !codexDeviceWireProfileEnabled(c, account) {
+		return false
+	}
+	// 和出站会话头使用相同的旁证顺序；旧下划线别名不参与连字符头的重建。
+	session := c.GetHeader("session-id")
+	if strings.TrimSpace(session) == "" {
+		value := gjson.Parse(c.GetHeader(openAIWSTurnMetadataHeader)).Get("session_id")
+		if value.Type != gjson.String {
+			return false
+		}
+		session = value.Str
+	}
+	key, ok := body["prompt_cache_key"].(string)
+	if !ok || strings.TrimSpace(session) == "" || key != session ||
+		codexConvergencePromptCacheKeyPattern.MatchString(key) {
+		return false
+	}
+	scoped := scopeCodexAccountIdentityValue(codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c), "session", session)
+	if scoped == key {
+		return false
+	}
+	body["prompt_cache_key"] = scoped
+	return true
+}
+
+// 在所有身份/账号头改写之后调用。设备数据仍留在 body/turn-metadata 中；
+// compact 则必须保留独立安装头。未成功暂存 IDs 时不删除唯一设备载体，也不惰性重算。
+func applyCodexDeviceWireProfile(c *gin.Context, account *Account, headers http.Header, websocket bool) {
+	if headers == nil || !codexDeviceWireProfileEnabled(c, account) {
+		return
+	}
+	if !websocket {
+		stripOpenAILegacyResponsesBeta(headers)
+	}
+	if !websocket && isOpenAIResponsesCompactPath(c) {
+		headers.Del("x-client-request-id")
+	} else if ids := stagedCodexFingerprintIDs(c, account); ids != nil &&
+		ids.mode == codexFingerprintDevice && ids.installationID != "" {
+		headers.Del("x-codex-installation-id")
+	}
+	// 只裁剪兼容头的工具清单，不能修改 body 中的完整元数据。
+	raw := headers.Get(openAIWSTurnMetadataHeader)
+	metadata := gjson.Parse(raw)
+	if !metadata.IsObject() || !metadata.Get("tool_namespaces_info").Exists() || !gjson.Valid(raw) {
+		return
+	}
+	if next, err := sjson.Delete(raw, "tool_namespaces_info"); err == nil {
+		headers.Set(openAIWSTurnMetadataHeader, next)
+	}
 }
 
 // 上游字段表之外、真客户端 client_metadata / x-codex-turn-metadata 里同样携带的身份字段。
