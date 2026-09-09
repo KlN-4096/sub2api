@@ -156,7 +156,7 @@ func TestSyncOpenAIAlphaSearchBodySessionStrictIdentity(t *testing.T) {
 				wantID = tt.bodyID
 			}
 			wantBody := `{ "id": ` + wantID + `, "keep": [1, 2] }`
-			defer req.Body.Close()
+			defer func() { _ = req.Body.Close() }()
 			sent, err := io.ReadAll(req.Body)
 			require.NoError(t, err)
 			require.Equal(t, wantBody, string(sent), "only proven string identity may be rewritten")
@@ -164,7 +164,7 @@ func TestSyncOpenAIAlphaSearchBodySessionStrictIdentity(t *testing.T) {
 			require.NotNil(t, req.GetBody)
 			replay, err := req.GetBody()
 			require.NoError(t, err)
-			defer replay.Close()
+			defer func() { _ = replay.Close() }()
 			replayed, err := io.ReadAll(replay)
 			require.NoError(t, err)
 			require.Equal(t, sent, replayed, "retry body must match the original request")
