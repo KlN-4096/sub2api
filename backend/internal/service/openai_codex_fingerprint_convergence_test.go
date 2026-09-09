@@ -134,6 +134,10 @@ func requireConvergenceInvariants(t *testing.T, o convOutbound) {
 	windowID := h.Get("x-codex-window-id")
 	require.Equal(t, tid+":1", windowID, o.label+" x-codex-window-id 应为 <派生 thread-id>:<window_number>")
 	installation := h.Get("x-codex-installation-id")
+	if installation == "" {
+		installation = gjson.Get(h.Get(openAIWSTurnMetadataHeader), "installation_id").String()
+	}
+	require.NotEmpty(t, installation, o.label+" 设备身份必须保留在正确载体中")
 	if installation != "" {
 		parsed, err := uuid.Parse(installation)
 		require.NoError(t, err)
@@ -237,7 +241,9 @@ func TestCodexFingerprintConvergence_WSFramePayloadMatchesHandshakeHeaders(t *te
 	require.True(t, cm.IsObject(), "帧内应有 client_metadata")
 	// 两边同时为空也会让下面的相等断言通过，先钉住非空。
 	require.NotEmpty(t, wsHeaders.Get("session-id"))
-	require.NotEmpty(t, wsHeaders.Get("x-codex-installation-id"))
+	require.Empty(t, wsHeaders.Get("x-codex-installation-id"))
+	headerInstallation := gjson.Get(wsHeaders.Get(openAIWSTurnMetadataHeader), "installation_id").String()
+	require.NotEmpty(t, headerInstallation)
 
 	require.Equal(t, wsHeaders.Get("session-id"), cm.Get("session_id").String(),
 		"握手头 session-id 与帧内 client_metadata.session_id 必须同源")
@@ -245,12 +251,12 @@ func TestCodexFingerprintConvergence_WSFramePayloadMatchesHandshakeHeaders(t *te
 		"握手头 thread-id 与帧内 client_metadata.thread_id 必须同源")
 	require.Equal(t, wsHeaders.Get("x-codex-window-id"), cm.Get("x-codex-window-id").String(),
 		"握手头与帧内 window-id 必须同源")
-	require.Equal(t, wsHeaders.Get("x-codex-installation-id"), cm.Get("x-codex-installation-id").String(),
-		"握手头与帧内 installation 必须同源")
+	require.Equal(t, headerInstallation, cm.Get("x-codex-installation-id").String(),
+		"握手 turn-metadata 与帧内 installation 必须同源")
 	require.Equal(t, wsHeaders.Get("session-id"), gjson.ParseBytes(payload).Get("prompt_cache_key").String(),
 		"帧内 prompt_cache_key 必须等于握手头 session-id")
-	require.Equal(t, wantInstall, wsHeaders.Get("x-codex-installation-id"),
-		"双开时握手头必须落到 device 模式的账号固定 installation")
+	require.Equal(t, wantInstall, headerInstallation,
+		"双开时握手 turn-metadata 必须落到 device 模式的账号固定 installation")
 }
 
 // codex 复核四 #2：x-openai-memgen-request 与 x-responsesapi-include-timing-metrics
@@ -371,7 +377,7 @@ func TestCodexFingerprintConvergence_WithDeviceMode(t *testing.T) {
 	rawBody := convTestBody(t)
 
 	requireDevice := func(label string, h http.Header, body []byte) {
-		require.Equal(t, wantInstall, h.Get("x-codex-installation-id"), label+" installation 应为账号常量")
+		require.Empty(t, h.Get("x-codex-installation-id"), label+" 不应重复发送独立安装头")
 		require.Equal(t, wantInstall, gjson.Parse(h.Get("x-codex-turn-metadata")).Get("installation_id").String(), label+" 头部 turn-metadata.installation_id")
 		if len(body) > 0 {
 			cm := gjson.ParseBytes(body).Get("client_metadata")
@@ -849,16 +855,17 @@ func TestCodexFingerprintConvergence_R3WSAppliesDeviceMode(t *testing.T) {
 
 	rawBody := convTestBody(t)
 	c := newConvTestContext(t, rawBody)
-	_, err := applyCodexIdentityToWSPayload(c, account, rawBody)
+	payload, err := applyCodexIdentityToWSPayload(c, account, rawBody)
 	require.NoError(t, err)
 
 	wsHeaders, _, err := svc.buildOpenAIWSHeaders(context.Background(), c, account, "tok",
 		OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2},
 		true, "", convTestTurnMetadata(), convTestSession, "", "")
 	require.NoError(t, err)
-	t.Logf("ws installation=%s want=%s", wsHeaders.Get("x-codex-installation-id"), wantInstall)
-	require.Equal(t, wantInstall, wsHeaders.Get("x-codex-installation-id"),
-		"独立 WS 入口也必须应用 device 模式的账号固定 installation")
+	require.Empty(t, wsHeaders.Get("x-codex-installation-id"))
+	require.Equal(t, wantInstall, gjson.Get(wsHeaders.Get(openAIWSTurnMetadataHeader), "installation_id").String())
+	require.Equal(t, wantInstall, gjson.GetBytes(payload, "client_metadata.x-codex-installation-id").String(),
+		"独立 WS 入口必须在帧内保留账号固定 installation")
 }
 
 // 图片接口自建 Responses 请求体，走的是独立入口。回归：该入口曾漏接指纹 ID 暂存，
@@ -911,10 +918,12 @@ func TestCodexFingerprint_ImagesOAuthMatchesResponsesDeviceIdentity(t *testing.T
 		&OpenAIImagesRequest{Endpoint: "generations", Model: "gpt-image-2", Prompt: "a cat"}, "")
 	require.NotNil(t, imgUp.lastReq, "图片入口必须真正发出上游请求")
 
-	install := imgUp.lastReq.Header.Get("x-codex-installation-id")
+	install := gjson.GetBytes(imgUp.lastBody, "client_metadata.x-codex-installation-id").String()
 	require.NotEmpty(t, install)
 	require.NotEqual(t, "client-install-A", install, "device 模式下不得沿用客户端自带的安装标识")
-	require.Equal(t, respUp.lastReq.Header.Get("x-codex-installation-id"), install,
+	require.Empty(t, imgUp.lastReq.Header.Get("x-codex-installation-id"))
+	require.Empty(t, respUp.lastReq.Header.Get("x-codex-installation-id"))
+	require.Equal(t, gjson.GetBytes(respUp.lastBody, "client_metadata.x-codex-installation-id").String(), install,
 		"图片入口与推理入口必须收敛到同一台设备")
 }
 
@@ -1059,10 +1068,9 @@ func TestCodexFingerprint_PassthroughCompactMatchesResponsesDeviceIdentity(t *te
 	require.NotNil(t, compactUp.lastReq, "透传 compact 入口必须真正发出上游请求")
 
 	install := compactUp.lastReq.Header.Get("x-codex-installation-id")
-	t.Logf("passthrough compact install=%s responses install=%s",
-		install, respUp.lastReq.Header.Get("x-codex-installation-id"))
 	require.NotEmpty(t, install)
 	require.NotEqual(t, "client-install-A", install, "device 模式下不得沿用客户端自带的安装标识")
-	require.Equal(t, respUp.lastReq.Header.Get("x-codex-installation-id"), install,
+	require.Empty(t, respUp.lastReq.Header.Get("x-codex-installation-id"))
+	require.Equal(t, gjson.GetBytes(respUp.lastBody, "client_metadata.x-codex-installation-id").String(), install,
 		"透传 compact 与透传推理必须收敛到同一台设备")
 }

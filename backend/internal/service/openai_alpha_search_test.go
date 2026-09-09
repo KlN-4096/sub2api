@@ -112,6 +112,66 @@ func TestForwardAlphaSearchOAuthPreservesWire(t *testing.T) {
 	require.JSONEq(t, string(wantBody), string(upstream.lastBody))
 }
 
+func TestSyncOpenAIAlphaSearchBodySessionStrictIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tests := []struct {
+		name     string
+		bodyID   string
+		inbound  string
+		outbound string
+		wantID   string
+	}{
+		{"matching_strings", `"session"`, `"session"`, `"scoped"`, `"scoped"`},
+		{"numeric_body", `123`, `"123"`, `"scoped"`, ``},
+		{"boolean_body", `true`, `"true"`, `"scoped"`, ``},
+		{"object_body", `{"key":"value"}`, `"{\"key\":\"value\"}"`, `"scoped"`, ``},
+		{"numeric_inbound", `"123"`, `123`, `"scoped"`, ``},
+		{"boolean_inbound", `"true"`, `true`, `"scoped"`, ``},
+		{"numeric_outbound", `"session"`, `"session"`, `123`, ``},
+		{"boolean_outbound", `"session"`, `"session"`, `true`, ``},
+		{"null_inbound", `"session"`, `null`, `"scoped"`, ``},
+		{"empty_body", `""`, `""`, `"scoped"`, ``},
+		{"blank_outbound", `"session"`, `"session"`, `"  "`, ``},
+		{"body_whitespace_differs", `" session "`, `"session"`, `"scoped"`, ``},
+		{"inbound_whitespace_differs", `"session"`, `" session "`, `"scoped"`, ``},
+		{"matching_padded_strings", `" session "`, `" session "`, `"scoped"`, `"scoped"`},
+		{"preserve_outbound_string", `"session"`, `"session"`, `" scoped "`, `" scoped "`},
+		{"custom_id", `"custom"`, `"session"`, `"scoped"`, ``},
+		{"already_aligned", `"session"`, `"session"`, `"session"`, ``},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{ "id": ` + tt.bodyID + `, "keep": [1, 2] }`)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/alpha/search", bytes.NewReader(body))
+			c.Request.Header.Set("X-Codex-Turn-Metadata", `{"session_id":`+tt.inbound+`}`)
+			req, err := http.NewRequest(http.MethodPost, "https://upstream.invalid/alpha/search", bytes.NewReader(body))
+			require.NoError(t, err)
+			req.Header.Set("X-Codex-Turn-Metadata", `{"session_id":`+tt.outbound+`}`)
+
+			syncOpenAIAlphaSearchBodySession(c, req, body)
+
+			wantID := tt.wantID
+			if wantID == "" {
+				wantID = tt.bodyID
+			}
+			wantBody := `{ "id": ` + wantID + `, "keep": [1, 2] }`
+			defer req.Body.Close()
+			sent, err := io.ReadAll(req.Body)
+			require.NoError(t, err)
+			require.Equal(t, wantBody, string(sent), "only proven string identity may be rewritten")
+			require.Equal(t, int64(len(sent)), req.ContentLength)
+			require.NotNil(t, req.GetBody)
+			replay, err := req.GetBody()
+			require.NoError(t, err)
+			defer replay.Close()
+			replayed, err := io.ReadAll(replay)
+			require.NoError(t, err)
+			require.Equal(t, sent, replayed, "retry body must match the original request")
+		})
+	}
+}
+
 func TestForwardAlphaSearchPATUsesResponsesWebSearchFallback(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	body := []byte(`{

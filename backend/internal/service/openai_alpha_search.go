@@ -436,6 +436,7 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchRequest(ctx context.Context
 
 	account.ApplyHeaderOverrides(req.Header)
 	stripOpenAIAlphaSearchResponsesHeaders(req.Header)
+	applyCodexDeviceWireProfile(c, account, req.Header, false)
 	syncOpenAIAlphaSearchBodySession(c, req, body)
 	return req, nil
 }
@@ -446,25 +447,25 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchRequest(ctx context.Context
 // handle_call 与 search_request_headers）。而账号隔离与指纹收敛只改写了头里的
 // turn-metadata，body.id 会停在客户端原值上，使同一个请求带着两套会话身份出站。
 //
-// 仅在入站 body.id 与入站 turn-metadata.session_id 相等（可证同源）时派生：
-// SearchRequest.id 允许是任意自定义值，不能盲改。
+// 仅在入站 body.id 与入站 turn-metadata.session_id 都是字符串且原值相等时派生：
+// SearchRequest.id 允许是任意自定义值，类型转换或去除空白都不能作为同源证据。
 func syncOpenAIAlphaSearchBodySession(c *gin.Context, req *http.Request, body []byte) {
 	if req == nil {
 		return
 	}
-	bodyID := strings.TrimSpace(gjson.GetBytes(body, "id").String())
-	if bodyID == "" {
+	bodyID := gjson.GetBytes(body, "id")
+	if bodyID.Type != gjson.String || strings.TrimSpace(bodyID.Str) == "" {
 		return
 	}
-	inbound := strings.TrimSpace(gjson.Parse(openAIAlphaSearchInboundHeader(c, "X-Codex-Turn-Metadata")).Get("session_id").String())
-	if inbound != bodyID {
+	inbound := gjson.Parse(openAIAlphaSearchInboundHeader(c, "X-Codex-Turn-Metadata")).Get("session_id")
+	if inbound.Type != gjson.String || inbound.Str != bodyID.Str {
 		return
 	}
-	outbound := strings.TrimSpace(gjson.Parse(req.Header.Get("X-Codex-Turn-Metadata")).Get("session_id").String())
-	if outbound == "" || outbound == bodyID {
+	outbound := gjson.Parse(req.Header.Get("X-Codex-Turn-Metadata")).Get("session_id")
+	if outbound.Type != gjson.String || strings.TrimSpace(outbound.Str) == "" || outbound.Str == bodyID.Str {
 		return
 	}
-	next, err := sjson.SetBytes(body, "id", outbound)
+	next, err := sjson.SetBytes(body, "id", outbound.Str)
 	if err != nil {
 		return
 	}
