@@ -60,32 +60,83 @@ func codexDeviceWireProfileEnabled(c *gin.Context, account *Account) bool {
 		codexFingerprintConvergenceEnabled(codexAccountIdentitySource(c, account))
 }
 
-// compact 没有 client_metadata，但可确认的默认缓存键仍须和会话头同源。
-// 在普通入口的 body namespace 之前调用；透传入口已由原有 namespace 处理该键。
-func applyCodexCompactDefaultCacheKey(c *gin.Context, account *Account, body map[string]any) bool {
-	if c == nil || c.Request == nil || !codexDeviceWireProfileEnabled(c, account) {
+// applyCodexCompactPromptCacheKey 收口 compact 请求体的 prompt_cache_key。
+//
+// 真实客户端的 compact 请求体带该字段（codex-rs codex-api/src/common.rs 的
+// CompactionInput.prompt_cache_key，仅缺省时省略），而 handler 的 compact 白名单
+// 历史上把它和 store / stream 一起丢了——后两者确实不在该结构里，它不是。白名单
+// 已放行，但 handler 执行时还没选出账号（failover 还会换账号），所以保留与否、
+// 如何隔离都只能在这里按账号决定：
+//
+//	投影未开：删掉，字节级维持既有出站形态。
+//	投影已开：保留并做账号隔离。compact 整段跳过了
+//	         applyCodexAccountIdentityClientMetadataMap（那是给 client_metadata 的，
+//	         compact 没有），键原样出站会让不同用户的相同缓存键在同一 OAuth 账号下
+//	         互撞、读到别人的前缀缓存。
+//
+// 命名空间与体内 client_metadata 的规则一致：能证明是会话默认键（等于入站
+// session-id 或 turn-metadata.session_id）时按 session 派生，与出站会话头同源；
+// 否则按 prompt-cache 派生，不改变自定义键的语义。
+//
+// 返回是否改动过 body。
+func applyCodexCompactPromptCacheKey(c *gin.Context, account *Account, body map[string]any) bool {
+	if body == nil {
 		return false
-	}
-	// 和出站会话头使用相同的旁证顺序；旧下划线别名不参与连字符头的重建。
-	session := c.GetHeader("session-id")
-	if strings.TrimSpace(session) == "" {
-		value := gjson.Parse(c.GetHeader(openAIWSTurnMetadataHeader)).Get("session_id")
-		if value.Type != gjson.String {
-			return false
-		}
-		session = value.Str
 	}
 	key, ok := body["prompt_cache_key"].(string)
-	if !ok || strings.TrimSpace(session) == "" || key != session ||
-		codexConvergencePromptCacheKeyPattern.MatchString(key) {
+	if !ok || strings.TrimSpace(key) == "" {
+		// 非字符串的异常取值同样不该透给上游：投影未开时统一删除。
+		if _, exists := body["prompt_cache_key"]; exists && !codexDeviceWireProfileEnabled(c, account) {
+			delete(body, "prompt_cache_key")
+			return true
+		}
 		return false
 	}
-	scoped := scopeCodexAccountIdentityValue(codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c), "session", session)
+	if !codexDeviceWireProfileEnabled(c, account) {
+		delete(body, "prompt_cache_key")
+		return true
+	}
+	kind := "prompt-cache"
+	// 和出站会话头使用相同的旁证顺序；旧下划线别名不参与连字符头的重建。
+	if session := compactPromptCacheSessionEvidence(c); session != "" && session == key &&
+		!codexConvergencePromptCacheKeyPattern.MatchString(key) {
+		kind = "session"
+	}
+	scoped := scopeCodexAccountIdentityValue(codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c), kind, key)
 	if scoped == key {
 		return false
 	}
 	body["prompt_cache_key"] = scoped
 	return true
+}
+
+// stripCodexCompactPromptCacheKeyWhenProfileOff 是透传热路径的字节版：投影未开时
+// 删除 compact 请求体的 prompt_cache_key，维持既有出站形态。开启时不动，由随后的
+// applyCodexAccountIdentityClientMetadataRaw 做账号隔离。
+func stripCodexCompactPromptCacheKeyWhenProfileOff(c *gin.Context, account *Account, body []byte) ([]byte, bool) {
+	if codexDeviceWireProfileEnabled(c, account) || !gjson.GetBytes(body, "prompt_cache_key").Exists() {
+		return body, false
+	}
+	next, err := sjson.DeleteBytes(body, "prompt_cache_key")
+	if err != nil {
+		return body, false
+	}
+	return next, true
+}
+
+// compactPromptCacheSessionEvidence 取 compact 请求可用的会话旁证，顺序与出站会话头一致。
+func compactPromptCacheSessionEvidence(c *gin.Context) string {
+	if c == nil || c.Request == nil {
+		return ""
+	}
+	if session := strings.TrimSpace(c.GetHeader("session-id")); session != "" {
+		return c.GetHeader("session-id")
+	}
+	value := gjson.Parse(c.GetHeader(openAIWSTurnMetadataHeader)).Get("session_id")
+	if value.Type != gjson.String || strings.TrimSpace(value.Str) == "" {
+		return ""
+	}
+	return value.Str
 }
 
 // 在所有身份/账号头改写之后调用。设备数据仍留在 body/turn-metadata 中；

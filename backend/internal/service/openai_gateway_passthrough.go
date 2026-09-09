@@ -191,6 +191,14 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		} else {
 			fpIDs = resolveCodexFingerprintIDsWithBody(c, account, nil, gjson.GetBytes(body, "client_metadata"))
 		}
+		// handler 的 compact 白名单已放行 prompt_cache_key（真实 CompactionInput 带它）。
+		// 投影未开的账号维持既有出站形态：删掉。开启时交给紧随其后的 namespace 处理，
+		// 与非透传的 applyCodexCompactPromptCacheKey 同语义。
+		if isOpenAIResponsesCompactPath(c) {
+			if stripped, changed := stripCodexCompactPromptCacheKeyWhenProfileOff(c, account, body); changed {
+				body = stripped
+			}
+		}
 		accountScopedBody, accountScoped, scopeErr := applyCodexAccountIdentityClientMetadataRaw(body, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 		if scopeErr != nil {
 			return nil, scopeErr

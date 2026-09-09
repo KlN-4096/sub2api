@@ -3039,9 +3039,11 @@ func TestNormalizeOpenAICompactRequestBodyPreservesCurrentCodexPayloadFields(t *
 	require.Equal(t, "high", gjson.GetBytes(normalized, "reasoning.effort").String())
 	require.Equal(t, "low", gjson.GetBytes(normalized, "text.verbosity").String())
 	require.Equal(t, "resp_123", gjson.GetBytes(normalized, "previous_response_id").String())
+	// store / stream 确实不在真实 CompactionInput 里，继续裁剪；
+	// prompt_cache_key 在，handler 层放行，由 service 按账号收口。
 	require.False(t, gjson.GetBytes(normalized, "store").Exists())
 	require.False(t, gjson.GetBytes(normalized, "stream").Exists())
-	require.False(t, gjson.GetBytes(normalized, "prompt_cache_key").Exists())
+	require.Equal(t, "cache_123", gjson.GetBytes(normalized, "prompt_cache_key").String())
 }
 
 func TestNormalizeOpenAICompactRequestBodyDropsParallelToolCallsWithoutUsableTools(t *testing.T) {

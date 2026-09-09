@@ -397,7 +397,13 @@ func normalizeOpenAICompactRequestBody(body []byte) ([]byte, bool, error) {
 	}
 	normalized := []byte(`{}`)
 	// Keep the current Codex /compact schema while still dropping request-scoped
-	// fields such as prompt_cache_key, store, and stream.
+	// fields such as store and stream.
+	//
+	// prompt_cache_key 放行：真实客户端的 compact 请求体带该字段（codex-rs
+	// codex-api/src/common.rs 的 CompactionInput.prompt_cache_key，仅在缺省时
+	// 省略），而 store / stream 确实不在该结构里。本函数在 handler 里执行，
+	// 那时还没选出账号（failover 还会换账号），所以只放行不裁剪；是否保留、
+	// 如何做账号隔离由 service 层按账号收口（applyCodexCompactPromptCacheKey）。
 	for _, field := range []string{
 		"model",
 		"input",
@@ -408,6 +414,7 @@ func normalizeOpenAICompactRequestBody(body []byte) ([]byte, bool, error) {
 		"service_tier",
 		"text",
 		"previous_response_id",
+		"prompt_cache_key",
 	} {
 		value := gjson.GetBytes(body, field)
 		if !value.Exists() {

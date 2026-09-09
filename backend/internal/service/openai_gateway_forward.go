@@ -532,7 +532,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		var fpIDs *codexFingerprintIDs
 		if isCompactRequest {
 			fpIDs = resolveCodexFingerprintIDsFromRequest(c, account, nil)
-			if applyCodexCompactDefaultCacheKey(c, account, decoded) {
+			if applyCodexCompactPromptCacheKey(c, account, decoded) {
 				markDecodedModified()
 			}
 		} else {

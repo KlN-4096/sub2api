@@ -143,17 +143,47 @@ func TestCodexDeviceWireProfileCompact(t *testing.T) {
 				require.False(t, gjson.GetBytes(up.lastBody, "client_metadata").Exists())
 				require.Equal(t, resolveConvergedInstallationID(account, testCodexFingerprintSeed),
 					up.lastReq.Header.Get("x-codex-installation-id"))
-				wantCache := cacheKey
+				// 会话默认键按 session 命名空间派生，与出站会话头同源；自定义/复合键
+				// 按 prompt-cache 派生。两条入口必须给出同一个值——非透传 compact 整段
+				// 跳过了 client_metadata 的 namespace，若自定义键原样出站，不同用户的
+				// 相同缓存键会在同一 OAuth 账号下互撞、读到别人的前缀缓存。
+				wantCache := scopeCodexAccountIdentityValue(account, 77, "prompt-cache", cacheKey)
 				if cacheKey == convTestSession {
 					wantCache = up.lastReq.Header.Get("session-id")
 					require.NotEmpty(t, wantCache)
-				} else if passthrough {
-					// Preserve the passthrough path's existing namespace for explicit keys.
-					wantCache = scopeCodexAccountIdentityValue(account, 77, "prompt-cache", cacheKey)
 				}
 				require.Equal(t, wantCache, gjson.GetBytes(up.lastBody, "prompt_cache_key").String())
 				require.Empty(t, up.lastReq.Header.Get("x-client-request-id"))
 				require.NotEmpty(t, up.lastReq.Header.Get("version"))
+			})
+		}
+	}
+}
+
+// handler 的 compact 白名单放行 prompt_cache_key 后，投影未开的账号（现网 pro2/pro3）
+// 出站必须字节级维持原样——这条键在这些账号上没有任何 namespace 兜底，留着就会让
+// 不同用户的相同缓存键在同一 OAuth 账号下互撞。
+func TestCodexDeviceWireProfileCompactDropsCacheKeyWhenProfileOff(t *testing.T) {
+	for _, passthrough := range []bool{false, true} {
+		for _, cacheKey := range []string{convTestSession, "custom-cache"} {
+			name := "map/"
+			if passthrough {
+				name = "raw/"
+			}
+			t.Run(name+cacheKey, func(t *testing.T) {
+				account := wireProfileTestAccount(false)
+				account.Extra["openai_passthrough"] = passthrough
+				body, err := sjson.DeleteBytes(wireProfileTestBody(t), "client_metadata")
+				require.NoError(t, err)
+				body, err = sjson.SetBytes(body, "prompt_cache_key", cacheKey)
+				require.NoError(t, err)
+				c := newConvTestContext(t, body)
+				c.Request.URL.Path = "/v1/responses/compact"
+				svc, up := wireProfileTestService()
+				_, _ = svc.Forward(context.Background(), c, account, body)
+				require.NotNil(t, up.lastReq)
+				require.False(t, gjson.GetBytes(up.lastBody, "prompt_cache_key").Exists(),
+					"投影未开时 compact 不得带出 prompt_cache_key")
 			})
 		}
 	}
@@ -193,7 +223,9 @@ func TestCodexDeviceWireProfileCompactEvidence(t *testing.T) {
 			svc, up := wireProfileTestService()
 			_, _ = svc.Forward(context.Background(), c, account, body)
 			require.NotNil(t, up.lastReq)
-			want := tt.cacheKey
+			// 旁证不成立时不按 session 派生，但仍要做账号隔离（prompt-cache 命名空间）——
+			// 原样出站会让不同用户的相同缓存键在同一 OAuth 账号下互撞。
+			want := scopeCodexAccountIdentityValue(account, 77, "prompt-cache", tt.cacheKey)
 			if tt.wantScoped {
 				want = up.lastReq.Header.Get("session-id")
 				require.NotEmpty(t, want)

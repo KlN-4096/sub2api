@@ -2284,7 +2284,9 @@ func TestOpenAIGatewayService_CodexFingerprintCompactDoesNotRewriteBodyCacheKeyO
 	seed, ok := codexFingerprintSeed(account.Extra)
 	require.True(t, ok)
 	require.NotEqual(t, resolveConvergedSessionID(seed), gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
-	require.Equal(t, "body-session", gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
+	// 线协议投影未开（本例是 session 模式、未开实验收敛）：compact 的 prompt_cache_key
+	// 维持既有出站形态被删除——handler 以前就是这么做的，现在改由 service 按账号收口。
+	require.False(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").Exists())
 	require.Equal(t, "body-session", gjson.GetBytes(upstream.lastBody, "client_metadata.session_id").String())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "client_metadata.x-codex-installation-id").Exists())
 	// 头侧与体侧相反：真实 compact 照发 x-codex-window-id（codex-rs
