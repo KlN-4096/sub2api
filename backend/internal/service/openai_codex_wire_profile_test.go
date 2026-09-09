@@ -261,7 +261,7 @@ func TestCodexDeviceWireProfileAlphaMetadata(t *testing.T) {
 	svc, _ := wireProfileTestService()
 	req, err := svc.buildOpenAIAlphaSearchRequest(context.Background(), c, wireProfileTestAccount(true), body, "offline-token")
 	require.NoError(t, err)
-	defer req.Body.Close()
+	defer func() { _ = req.Body.Close() }()
 	sent, err := io.ReadAll(req.Body)
 	require.NoError(t, err)
 	meta := gjson.Parse(req.Header.Get(openAIWSTurnMetadataHeader))
