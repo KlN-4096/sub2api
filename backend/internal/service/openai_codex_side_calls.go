@@ -137,6 +137,11 @@ func (s *OpenAIGatewayService) scheduleCodexSettingsUser(c *gin.Context, account
 	if threadID == "" {
 		return
 	}
+	proxyURL, err := resolveConfiguredProxyURL(context.Background(), nil, account.ProxyID, account.Proxy)
+	if err != nil {
+		slog.Debug("codex_side_call_proxy_failed", "account_id", account.ID, "error", err)
+		return
+	}
 	// 去重窗口的基数由客户端决定：thread-id 每请求换一个的客户端会让条目无上限增长，
 	// 同时把账号面请求量翻倍——正是这个功能要消除的异常形态。到顶就停发，宁可少一条
 	// 装饰性 GET，也不让客户端拿它撑内存。
@@ -152,7 +157,7 @@ func (s *OpenAIGatewayService) scheduleCodexSettingsUser(c *gin.Context, account
 	// 对象，安全性只靠"插件路由现在恰好不读那些字段"这一个偶然事实。
 	snapshot := *account
 	snapshot.Credentials = maps.Clone(account.Credentials)
-	s.dispatchCodexSideCall(chatGPTSettingsUserURL, headers, codexWireTimezoneProxyURL(account), &snapshot, key)
+	s.dispatchCodexSideCall(chatGPTSettingsUserURL, headers, proxyURL, &snapshot, key)
 }
 
 // dispatchCodexSideCall 异步发一次 GET 并丢弃响应体，不阻塞推理请求。

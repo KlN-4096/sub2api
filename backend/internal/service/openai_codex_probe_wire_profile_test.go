@@ -276,7 +276,8 @@ func TestScheduledTestRunnerCredentialsOnlyRecoveryKeepsRateLimitWindows(t *test
 	resultRepo := &scheduledTestProbeResultRepo{}
 	rateLimitSvc := NewRateLimitService(repo, nil, &config.Config{}, nil, &tempUnschedCacheRecorder{})
 	runner := NewScheduledTestRunnerService(planRepo, NewScheduledTestService(planRepo, resultRepo), accountTestSvc, rateLimitSvc, &config.Config{})
-	plan := &ScheduledTestPlan{ID: 31, AccountID: account.ID, ModelID: "gpt-5.5", CronExpression: "*/5 * * * *", Enabled: true, MaxResults: 10, AutoRecover: true}
+	due := time.Now().Add(-time.Minute)
+	plan := &ScheduledTestPlan{ID: 31, AccountID: account.ID, ModelID: "gpt-5.5", CronExpression: "*/5 * * * *", Enabled: true, NextRunAt: &due, MaxResults: 10, AutoRecover: true}
 
 	runner.runOnePlan(context.Background(), plan)
 
@@ -309,9 +310,13 @@ type scheduledTestProbePlanRepo struct {
 	updatedAfterRun []int64
 }
 
-func (r *scheduledTestProbePlanRepo) UpdateAfterRun(_ context.Context, id int64, _, _ time.Time) error {
+func (r *scheduledTestProbePlanRepo) MarkRunFinished(_ context.Context, id int64, _ time.Time) error {
 	r.updatedAfterRun = append(r.updatedAfterRun, id)
 	return nil
+}
+
+func (r *scheduledTestProbePlanRepo) TryClaimDue(context.Context, *ScheduledTestPlan, time.Time, time.Time) (ScheduledTestPlanLease, bool, error) {
+	return &scheduledClaimTestRepo{}, true, nil
 }
 
 type scheduledTestProbeResultRepo struct {

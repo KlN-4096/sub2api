@@ -85,6 +85,20 @@ type openAIWSAcquireRequest struct {
 }
 
 type openAIWSHandshakeCompatibilityKey struct {
+	wsURL               string
+	proxyURL            string
+	userAgent           string
+	originator          string
+	version             string
+	openAIBeta          string
+	acceptLanguage      string
+	chatGPTAccountID    string
+	fedRAMP             string
+	credentialIdentity  string
+	agentRuntimeID      string
+	fingerprintMode     codexFingerprintMode
+	fingerprintSeed     string
+	deviceID            string
 	betaFeatures        string
 	codexInstallationID string
 	sessionIDHyphen     string
@@ -1186,10 +1200,13 @@ func (p *openAIWSConnPool) acquire(ctx context.Context, req openAIWSAcquireReque
 	if queueWait == nil {
 		queueWait = &openAIWSAcquireQueueWait{}
 	}
+	if err := requireOpenAIProxyBinding(req.Account, req.ProxyURL); err != nil {
+		return nil, err
+	}
 
 retryAcquire:
 	accountID := req.Account.ID
-	compatibility := normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
+	compatibility := normalizeOpenAIWSHandshakeCompatibility(req)
 	routingAffinity := normalizeOpenAIWSRoutingAffinity(req.Headers)
 	effectiveMaxConns := p.effectiveMaxConnsByAccount(req.Account)
 	if effectiveMaxConns <= 0 {
@@ -2196,7 +2213,8 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 	accountID := req.Account.ID
 	evict := func() { p.evictConn(accountID, id) }
 	pooledConn.onPeerClosed.Store(&evict)
-	pooledConn.handshakeCompatibility = normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
+	req.Headers = headers
+	pooledConn.handshakeCompatibility = normalizeOpenAIWSHandshakeCompatibility(req)
 	pooledConn.routingAffinity = normalizeOpenAIWSRoutingAffinity(req.Headers)
 	return pooledConn, nil
 }
@@ -2359,6 +2377,7 @@ func (p *openAIWSConnPool) dialTimeout() time.Duration {
 
 func cloneOpenAIWSAcquireRequest(req openAIWSAcquireRequest) openAIWSAcquireRequest {
 	copied := req
+	copied.Account = snapshotOpenAIOutboundAccount(req.Account)
 	copied.Headers = cloneHeader(req.Headers)
 	copied.WSURL = stringsTrim(req.WSURL)
 	copied.ProxyURL = stringsTrim(req.ProxyURL)
@@ -2375,9 +2394,7 @@ func cloneOpenAIWSAcquireRequestPtr(req *openAIWSAcquireRequest) *openAIWSAcquir
 }
 
 func sameOpenAIWSPrewarmTarget(a, b openAIWSAcquireRequest) bool {
-	return stringsTrim(a.WSURL) == stringsTrim(b.WSURL) &&
-		stringsTrim(a.ProxyURL) == stringsTrim(b.ProxyURL) &&
-		normalizeOpenAIWSHandshakeCompatibility(a.Account, a.Headers) == normalizeOpenAIWSHandshakeCompatibility(b.Account, b.Headers)
+	return normalizeOpenAIWSHandshakeCompatibility(a) == normalizeOpenAIWSHandshakeCompatibility(b)
 }
 
 func normalizeOpenAIWSBetaFeatures(headers http.Header) string {
@@ -2405,14 +2422,33 @@ func normalizeOpenAIWSBetaFeatures(headers http.Header) string {
 	return strings.Join(normalized, ",")
 }
 
-func normalizeOpenAIWSHandshakeCompatibility(account *Account, headers http.Header) openAIWSHandshakeCompatibilityKey {
+func normalizeOpenAIWSHandshakeCompatibility(req openAIWSAcquireRequest) openAIWSHandshakeCompatibilityKey {
+	account, headers := req.Account, req.Headers
 	key := openAIWSHandshakeCompatibilityKey{
-		betaFeatures: normalizeOpenAIWSBetaFeatures(headers),
+		wsURL:              stringsTrim(req.WSURL),
+		proxyURL:           stringsTrim(req.ProxyURL),
+		userAgent:          normalizeOpenAIWSStableIdentityHeader(headers, "user-agent"),
+		originator:         normalizeOpenAIWSStableIdentityHeader(headers, "originator"),
+		version:            normalizeOpenAIWSStableIdentityHeader(headers, "version"),
+		openAIBeta:         normalizeOpenAIWSStableIdentityHeader(headers, "openai-beta"),
+		acceptLanguage:     normalizeOpenAIWSStableIdentityHeader(headers, "accept-language"),
+		chatGPTAccountID:   normalizeOpenAIWSStableIdentityHeader(headers, "chatgpt-account-id"),
+		fedRAMP:            normalizeOpenAIWSStableIdentityHeader(headers, "x-openai-fedramp"),
+		credentialIdentity: codexAccountIdentityNamespace(account),
+		betaFeatures:       normalizeOpenAIWSBetaFeatures(headers),
+	}
+	// Bearer tokens, per-dial assertions, turn metadata and routing hints are
+	// intentionally excluded: refreshing those does not change stable identity.
+	if account != nil {
+		key.agentRuntimeID = account.GetCredential("agent_runtime_id")
+		key.deviceID = account.GetOpenAIDeviceID()
 	}
 	mode := activeCodexFingerprintMode(account)
+	key.fingerprintMode = mode
 	if mode == codexFingerprintOff {
 		return key
 	}
+	key.fingerprintSeed, _ = codexFingerprintSeed(account.Extra)
 	key.codexInstallationID = normalizeOpenAIWSStableIdentityHeader(headers, "x-codex-installation-id")
 	if mode == codexFingerprintDevice {
 		return key

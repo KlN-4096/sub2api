@@ -263,6 +263,12 @@ func shouldResolveCodexWireTimezone(account, credAccount *Account, now time.Time
 	if strings.TrimSpace(account.GetExtraString(codexWireTimezoneResolvedExtraKey)) == "" {
 		return true
 	}
+	if _, ok := account.Extra[codexWireLocationCountryExtraKey]; !ok {
+		// 本功能上线前解析过的账号只有时区、没有地理三项，TTL 未到时最长 24 小时不会
+		// 重解析——这段时间 user_location 走的是删除分支。判"键从未写过"而不是"值为空"：
+		// 写过但为空（上游没返回城市）的账号不会因此无限重解析。
+		return true
+	}
 	if account.GetExtraString(codexWireTimezoneResolvedProxyExtraKey) != codexWireTimezoneProxyTag(account) {
 		return true // 换了出口，立刻重解析
 	}
@@ -274,15 +280,22 @@ func shouldResolveCodexWireTimezone(account, credAccount *Account, now time.Time
 }
 
 // codexWireTimezoneExtraUpdates 组装写回 extra 的字段；时区名非法时返回 nil（保留旧值）。
-func codexWireTimezoneExtraUpdates(proxyTag, exitIP, timezone string, now time.Time) map[string]any {
-	timezone = strings.TrimSpace(timezone)
+//
+// 地理三项无条件写，包括查不到时的空串：它们和时区、proxy tag 必须是同一次查询的快照。
+// 只在非空时才写会把上一次出口的城市留在 extra 里，配上这次的新时区，恰好凑出
+// codexWireLocation 认为"齐全"的一组错配值。
+func codexWireTimezoneExtraUpdates(proxyTag string, exit codexWireExit, now time.Time) map[string]any {
+	timezone := strings.TrimSpace(exit.timezone)
 	if _, err := codexWireTimezoneLocation(timezone); err != nil {
 		return nil
 	}
 	return map[string]any{
 		codexWireTimezoneResolvedExtraKey:      timezone,
 		codexWireTimezoneResolvedAtExtraKey:    now.UTC().Format(time.RFC3339),
-		codexWireTimezoneResolvedIPExtraKey:    strings.TrimSpace(exitIP),
+		codexWireTimezoneResolvedIPExtraKey:    strings.TrimSpace(exit.ip),
 		codexWireTimezoneResolvedProxyExtraKey: proxyTag,
+		codexWireLocationCityExtraKey:          strings.TrimSpace(exit.city),
+		codexWireLocationRegionExtraKey:        strings.TrimSpace(exit.region),
+		codexWireLocationCountryExtraKey:       strings.TrimSpace(exit.country),
 	}
 }

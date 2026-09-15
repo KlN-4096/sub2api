@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -10,7 +11,12 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
-const scheduledTestDefaultMaxWorkers = 10
+const (
+	scheduledTestDefaultMaxWorkers = 10
+	scheduledTestTickDelay         = 10 * time.Second
+	scheduledTestRunTimeout        = 5 * time.Minute
+	scheduledTestFinishTimeout     = 2 * time.Second
+)
 
 // ScheduledTestRunnerService periodically scans due test plans and executes them.
 type ScheduledTestRunnerService struct {
@@ -23,6 +29,7 @@ type ScheduledTestRunnerService struct {
 	cron      *cron.Cron
 	startOnce sync.Once
 	stopOnce  sync.Once
+	running   atomic.Bool
 }
 
 // NewScheduledTestRunnerService creates a new runner.
@@ -85,10 +92,14 @@ func (s *ScheduledTestRunnerService) Stop() {
 }
 
 func (s *ScheduledTestRunnerService) runScheduled() {
+	if !s.running.CompareAndSwap(false, true) {
+		return
+	}
+	defer s.running.Store(false)
 	// Delay 10s so execution lands at ~:10 of each minute instead of :00.
-	time.Sleep(10 * time.Second)
+	time.Sleep(scheduledTestTickDelay)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), scheduledTestRunTimeout)
 	defer cancel()
 
 	now := time.Now()
@@ -107,7 +118,12 @@ func (s *ScheduledTestRunnerService) runScheduled() {
 	var wg sync.WaitGroup
 
 	for _, plan := range plans {
-		sem <- struct{}{}
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return
+		case sem <- struct{}{}:
+		}
 		wg.Add(1)
 		go func(p *ScheduledTestPlan) {
 			defer wg.Done()
@@ -120,12 +136,43 @@ func (s *ScheduledTestRunnerService) runScheduled() {
 }
 
 func (s *ScheduledTestRunnerService) runOnePlan(ctx context.Context, plan *ScheduledTestPlan) {
+	now := time.Now()
+	if plan == nil || !plan.Enabled || plan.NextRunAt == nil || plan.NextRunAt.After(now) || ctx.Err() != nil {
+		return
+	}
+	nextRun, err := computeNextRun(plan.CronExpression, now)
+	if err != nil || !nextRun.After(now) {
+		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d invalid next run: %v", plan.ID, err)
+		return
+	}
+	lease, claimed, err := s.planRepo.TryClaimDue(ctx, plan, now, nextRun)
+	if err != nil {
+		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d claim error: %v", plan.ID, err)
+		return
+	}
+	if !claimed {
+		return
+	}
+	defer func() {
+		if err := lease.Release(); err != nil {
+			logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d release error: %v", plan.ID, err)
+		}
+	}()
+	if ctx.Err() != nil {
+		return
+	}
 	result, err := s.accountTestSvc.RunTestBackground(ctx, plan.AccountID, plan.ModelID)
 	if err != nil {
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d RunTestBackground error: %v", plan.ID, err)
 		return
 	}
-
+	defer func() {
+		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledTestFinishTimeout)
+		defer cancel()
+		if err := s.planRepo.MarkRunFinished(finishCtx, plan.ID, time.Now()); err != nil {
+			logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d finish error: %v", plan.ID, err)
+		}
+	}()
 	if err := s.scheduledSvc.SaveResult(ctx, plan.ID, plan.MaxResults, result); err != nil {
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d SaveResult error: %v", plan.ID, err)
 	}
@@ -136,15 +183,6 @@ func (s *ScheduledTestRunnerService) runOnePlan(ctx context.Context, plan *Sched
 		s.tryRecoverAccount(ctx, plan.AccountID, plan.ID, result.CredentialsOnly)
 	}
 
-	nextRun, err := computeNextRun(plan.CronExpression, time.Now())
-	if err != nil {
-		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d computeNextRun error: %v", plan.ID, err)
-		return
-	}
-
-	if err := s.planRepo.UpdateAfterRun(ctx, plan.ID, time.Now(), nextRun); err != nil {
-		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d UpdateAfterRun error: %v", plan.ID, err)
-	}
 }
 
 // tryRecoverAccount attempts to recover an account from recoverable runtime state.

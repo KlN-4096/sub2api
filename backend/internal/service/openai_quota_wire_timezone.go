@@ -2,12 +2,14 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/imroc/req/v3"
 	gocache "github.com/patrickmn/go-cache"
 )
 
@@ -16,12 +18,25 @@ import (
 // 返回的 ip 即该账号出站时上游看到的地址，其归属时区就是要写进 environment_context 的值。
 // 任何失败都只记日志并保留旧值：额度查询的结果不受影响，改写侧没有值时也只是不改写。
 const (
-	codexWireTimezoneLookupURL     = "https://ipinfo.io/json"
 	codexWireTimezoneLookupTimeout = 10 * time.Second
 	// codexWireTimezoneRefreshTimeout 整段后台工作的上限。脱离请求 ctx 之后 DB / Redis 调用
 	// 就没有 deadline 了，卡住会让每次成功的额度查询泄一个 goroutine。
-	codexWireTimezoneRefreshTimeout = 30 * time.Second
+	// 名单有两条，最坏情况是两次查询各耗满 10 秒；余量必须够后面那次 UpdateExtra 写回，
+	// 否则解析成功的结果会因为 ctx 过期被丢掉，白跑两次经代理的外部查询。
+	codexWireTimezoneRefreshTimeout = 45 * time.Second
 )
+
+// codexWireTimezoneLookupURLs 按顺序尝试，第一条成功即止。
+//
+// ipinfo.io 只有 A 记录没有 AAAA，IPv6-only 出口根本连不到它：SOCKS 代理直接失败，
+// 该账号永远解析不出时区，于是静默退化成"不改写"——也就是把客户端本机时区原样发给
+// 上游，正是本功能要防的那件事。v6.ipinfo.io 是同厂的纯 IPv6 端点（只有 AAAA），
+// 响应结构与字段名完全一致，只在第一条失败后才可能成功，不引入新的第三方。
+// IPv4 出口仍然走第一条，行为不变。
+var codexWireTimezoneLookupURLs = []string{
+	"https://ipinfo.io/json",
+	"https://v6.ipinfo.io/json",
+}
 
 // codexWireTimezoneInFlight 按账号收口并发解析。额度查询有多个入口（管理端账号详情、
 // 定时用量刷新、自动重置流程），同一个未解析过的账号可能被同时点到：闸门读的是库里的
@@ -63,14 +78,19 @@ func (s *OpenAIQuotaService) refreshCodexWireTimezone(ctx context.Context, accou
 			return
 		}
 		// 量的必须是这条链路真正会用的出口：代理取值与转发侧同一个表达式。
-		exitIP, timezone, err := s.lookupCodexWireTimezone(ctx, codexWireTimezoneProxyURL(account))
+		proxyURL, err := resolveConfiguredProxyURL(ctx, s.proxyRepo, account.ProxyID, account.Proxy)
+		if err != nil {
+			slog.Warn("codex_wire_timezone_proxy_failed", "account_id", accountID, "error", err)
+			return
+		}
+		exit, err := s.lookupCodexWireTimezone(ctx, proxyURL)
 		if err != nil {
 			slog.Warn("codex_wire_timezone_lookup_failed", "account_id", accountID, "error", err)
 			return
 		}
-		updates := codexWireTimezoneExtraUpdates(codexWireTimezoneProxyTag(account), exitIP, timezone, now)
+		updates := codexWireTimezoneExtraUpdates(codexWireTimezoneProxyTag(account), exit, now)
 		if updates == nil {
-			slog.Warn("codex_wire_timezone_lookup_invalid", "account_id", accountID, "timezone", timezone)
+			slog.Warn("codex_wire_timezone_lookup_invalid", "account_id", accountID, "timezone", exit.timezone)
 			return
 		}
 		if err := s.accountRepo.UpdateExtra(ctx, accountID, updates); err != nil {
@@ -78,31 +98,77 @@ func (s *OpenAIQuotaService) refreshCodexWireTimezone(ctx context.Context, accou
 			return
 		}
 		slog.Info("codex_wire_timezone_resolved",
-			"account_id", accountID, "timezone", timezone, "exit_ip", exitIP)
+			"account_id", accountID, "timezone", exit.timezone, "exit_ip", exit.ip,
+			"city", exit.city, "region", exit.region, "country", exit.country)
 	}()
 }
 
-// lookupCodexWireTimezone 经账号代理查一次出口 IP 与其归属时区。
-func (s *OpenAIQuotaService) lookupCodexWireTimezone(ctx context.Context, proxyURL string) (string, string, error) {
+// codexWireExit 是一次出口解析的结果。地理三项供 web_search 的 user_location 对齐
+// （openai_codex_wire_user_location.go），和时区来自同一个响应，绝不会互相错配。
+type codexWireExit struct {
+	ip       string
+	timezone string
+	city     string
+	region   string
+	country  string
+}
+
+// lookupCodexWireTimezone 经账号代理查一次出口 IP、归属时区与大致地理位置。
+func (s *OpenAIQuotaService) lookupCodexWireTimezone(ctx context.Context, proxyURL string) (codexWireExit, error) {
 	client, err := s.privacyClientFactory(proxyURL)
 	if err != nil {
-		return "", "", err
+		return codexWireExit{}, err
 	}
+	var errs []error
+	for _, url := range codexWireTimezoneLookupURLs {
+		exit, err := lookupCodexWireTimezoneAt(ctx, client, url)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		return exit, nil
+	}
+	if len(errs) == 0 {
+		// 名单被改空：errors.Join 会返回 nil，调用方就把"什么都没查"当成查到了空时区。
+		return codexWireExit{}, errors.New("no exit timezone lookup endpoint configured")
+	}
+	return codexWireExit{}, errors.Join(errs...)
+}
+
+func lookupCodexWireTimezoneAt(ctx context.Context, client *req.Client, url string) (codexWireExit, error) {
 	lookupCtx, cancel := context.WithTimeout(ctx, codexWireTimezoneLookupTimeout)
 	defer cancel()
 	var payload struct {
 		IP       string `json:"ip"`
 		Timezone string `json:"timezone"`
+		City     string `json:"city"`
+		Region   string `json:"region"`
+		Country  string `json:"country"`
 	}
 	resp, err := client.R().
 		SetContext(lookupCtx).
 		SetSuccessResult(&payload).
-		Get(codexWireTimezoneLookupURL)
+		Get(url)
 	if err != nil {
-		return "", "", err
+		return codexWireExit{}, err
 	}
 	if !resp.IsSuccessState() {
-		return "", "", fmt.Errorf("exit timezone lookup returned %d", resp.StatusCode)
+		return codexWireExit{}, fmt.Errorf("exit timezone lookup returned %d", resp.StatusCode)
 	}
-	return strings.TrimSpace(payload.IP), strings.TrimSpace(payload.Timezone), nil
+	// 200 但没有时区，等同失败，否则会吃掉后面那条兜底。这条守卫救的是能解析成
+	// 功却无值的响应：`{}`、ipinfo 对私有地址返回的 bogon 体、以及任何缺 timezone
+	// 的 200 JSON——空体和 HTML 错误页在上面的反序列化就已经报错了。
+	// 只判时区：exit IP 仅写进 extra 供人工排查；地理三项缺失只是不改写 user_location，
+	// 不能让整条查询失败——时区才是这次查询的目的，为地理去打第二家反而放大暴露面。
+	timezone := strings.TrimSpace(payload.Timezone)
+	if timezone == "" {
+		return codexWireExit{}, fmt.Errorf("exit timezone lookup returned no timezone")
+	}
+	return codexWireExit{
+		ip:       strings.TrimSpace(payload.IP),
+		timezone: timezone,
+		city:     strings.TrimSpace(payload.City),
+		region:   strings.TrimSpace(payload.Region),
+		country:  strings.TrimSpace(payload.Country),
+	}, nil
 }
