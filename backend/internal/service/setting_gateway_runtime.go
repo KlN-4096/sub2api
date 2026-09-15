@@ -314,7 +314,15 @@ func (s *SettingService) GetOpenAICodexUserAgent(ctx context.Context) string {
 // 优先级：管理员在面板覆写的版本 → 自动同步到的官方最新稳定版 → 内置常量。
 // 上游在容量紧张时按客户端身份分优先级降载，陈旧版本会被优先丢弃，故该值需保持跟随官方发布；
 // 自动同步让运维不必为了跟版本而发新版本。
+//
+// Desktop 模式（openai_codex_client_type=desktop）下走 Desktop 分支：返回值是 UA 首段
+// 与 version 头同源的内嵌 CLI 快照版本（0.x-alpha 形态）——面板「Codex 客户端版本号」
+// 位置 1（`v1|v2` 的 v1）→ 兜底常量；UA 尾部标识组的 App 版本由
+// GetOpenAICodexDesktopAppVersion 单独供给（位置 2 / appcast 同步值）。
 func (s *SettingService) GetOpenAICodexClientVersion(ctx context.Context) string {
+	if IsCodexDesktopClient() {
+		return s.GetOpenAICodexDesktopClientVersion(ctx)
+	}
 	fallback := codexCLIVersion
 	if s == nil || s.settingRepo == nil {
 		return fallback
@@ -384,12 +392,28 @@ func (s *SettingService) InvalidateOpenAICodexClientVersionCache() {
 // 唯一能改 UA 后缀的地方，但它填写于某个历史版本，逐字沿用会把出站身份永久钉死在陈旧
 // 版本上并绕过自动同步——而陈旧身份正是上游优先降载的那一侧。
 // 需要固定版本请填「Codex 客户端版本号」并关闭自动同步。
+//
+// Desktop 模式：返回值是双版本 UA（`Codex Desktop/{cli} (…; …) unknown (Codex Desktop; {app})`），
+// 首段 CLI 版本由 GetOpenAICodexClientVersion 供给，尾组 App 版本由
+// GetOpenAICodexDesktopAppVersion 供给（面板位置 2 或 appcast 同步值）。
 func (s *SettingService) GetOpenAICodexCanonicalUserAgent(ctx context.Context) string {
 	if s == nil {
 		return codexCLIUserAgent
 	}
 	version := s.GetOpenAICodexClientVersion(ctx)
 	ua := strings.TrimSpace(s.GetOpenAICodexUserAgent(ctx))
+	if IsCodexDesktopClient() {
+		// 面板 UA 为空，或恰为 CLI 默认形态（getter 对空值返回的兜底，并非真正自定义）
+		// 时都视为「未设置」：CLI 形态没有 Desktop 官方尾组，若当作已自定义重建失败，
+		// 出站会被钉死在单版本错配身份上。
+		if ua == "" || ua == DefaultOpenAICodexUserAgent {
+			return buildCodexDesktopUserAgent(version, s.GetOpenAICodexDesktopAppVersion(ctx))
+		}
+		if rebuilt := openai.SetCodexDesktopUserAgentVersions(ua, version, s.GetOpenAICodexDesktopAppVersion(ctx)); rebuilt != "" {
+			return rebuilt
+		}
+		return ua
+	}
 	if ua == "" {
 		return buildCodexCLIUserAgent(version)
 	}

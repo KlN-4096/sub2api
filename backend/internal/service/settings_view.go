@@ -250,6 +250,9 @@ type SystemSettings struct {
 	OpenAICodexClientVersion               string // 出站声明的 Codex 客户端版本号（管理员覆写）；空值跟随自动同步值
 	OpenAICodexClientVersionSynced         string // 自动同步到的官方最新稳定版版本号（只读展示）
 	OpenAICodexVersionAutoSyncEnabled      bool   // 是否启用 Codex 客户端版本号自动同步（默认 true）
+	OpenAICodexClientType                  string // Codex 出站统一客户端身份（cli|desktop，管理员面板可选、入库保存）
+	OpenAICodexDesktopClientVersionSynced  string // Desktop 模式下 appcast 自动同步的 App 版本号（只读展示，仅 desktop 模式非空）
+	OpenAICodexDesktopCLIVersionSynced     string // Desktop 模式下 GitHub alpha prerelease 同步的内嵌 CLI 版本号（只读展示，仅 desktop 模式非空）
 	MinCodexVersion                        string // codex_cli_only 最低 Codex 引擎版本；空=不检查
 	MaxCodexVersion                        string // codex_cli_only 最高 Codex 引擎版本；空=不检查
 	CodexCLIOnlyBlacklist                  string // codex_cli_only 全局黑名单 JSON（[]AllowedClientEntry，OR deny）

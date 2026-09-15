@@ -2148,6 +2148,83 @@ func TestOpenAIGatewayService_OAuthPassthrough_CodexTuiIdentityUnified(t *testin
 	require.Equal(t, codexCLIVersion, upstream.lastReq.Header.Get("version"))
 }
 
+// TestOpenAIGatewayService_OAuthPassthrough_CodexClientTypeSwitchesIdentity 端到端保证：
+// 真实发出出站请求（svc.Forward → httpUpstreamRecorder 捕获）后，User-Agent / originator /
+// version 三元组按客户端类型（openai_codex_client_type 设置）整体切换——
+//   - cli（默认）：codex-tui 单版本身份；
+//   - desktop：Codex Desktop 双版本身份（UA 首段 = version 头 = 内嵌 CLI 版本，
+//     尾部官方标识组 = App 版本，与真实抓包形态一致）。
+//
+// 客户端自报的第三方身份不应透传：强制统一出口下出站身份完全由客户端类型决定。
+func TestOpenAIGatewayService_OAuthPassthrough_CodexClientTypeSwitchesIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	// 身份快照/解析器是进程级全局状态：先重置，结束后恢复，避免污染其他用例。
+	resetCodexIdentityTestState := func() {
+		ResetCodexClientTypeOverride()
+		SetCodexCanonicalUserAgentResolver(nil)
+		SetCodexDesktopCLIHeaderVersionResolver(nil)
+	}
+	resetCodexIdentityTestState()
+	t.Cleanup(resetCodexIdentityTestState)
+
+	newUpstream := func() *httpUpstreamRecorder {
+		return &httpUpstreamRecorder{resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid"}},
+			Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+		}}
+	}
+	newContext := func() *gin.Context {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(nil))
+		c.Request.Header.Set("User-Agent", "some-client/1.0.0")
+		return c
+	}
+	account := &Account{
+		ID:             321,
+		Name:           "acc",
+		Platform:       PlatformOpenAI,
+		Type:           AccountTypeOAuth,
+		Concurrency:    1,
+		Credentials:    map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
+		Extra:          map[string]any{"openai_passthrough": true},
+		Status:         StatusActive,
+		Schedulable:    true,
+		RateMultiplier: f64p(1),
+	}
+	body := []byte(`{"model":"gpt-5.2","stream":false,"store":true,"input":[{"type":"text","text":"hi"}]}`)
+
+	// CLI（默认）：codex-tui 单版本身份，客户端自报 UA 不透传。
+	upstream := newUpstream()
+	svc := &OpenAIGatewayService{
+		cfg:          &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: false}},
+		httpUpstream: upstream,
+	}
+	_, err := svc.Forward(context.Background(), newContext(), account, body)
+	require.NoError(t, err)
+	require.NotNil(t, upstream.lastReq)
+	require.Equal(t, codexCLIUserAgent, upstream.lastReq.Header.Get("User-Agent"))
+	require.Equal(t, openai.CodexDefaultOriginator, upstream.lastReq.Header.Get("originator"))
+	require.Equal(t, codexCLIVersion, upstream.lastReq.Header.Get("version"))
+
+	// 切换 Desktop（模拟面板保存后缓存失效生效）：出站整体变为 Codex Desktop 双版本形态。
+	// upstream 的 mock resp 是一次性 reader，第二次 Forward 需全新的 recorder 与服务实例。
+	SetCodexClientType("desktop")
+	SetCodexCanonicalUserAgentResolver(func() string { return codexDesktopUserAgent })
+	desktopUpstream := newUpstream()
+	desktopSvc := &OpenAIGatewayService{
+		cfg:          &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: false}},
+		httpUpstream: desktopUpstream,
+	}
+	_, err = desktopSvc.Forward(context.Background(), newContext(), account, body)
+	require.NoError(t, err)
+	require.NotNil(t, desktopUpstream.lastReq)
+	require.Equal(t, codexDesktopUserAgent, desktopUpstream.lastReq.Header.Get("User-Agent"))
+	require.Equal(t, codexDesktopClientName, desktopUpstream.lastReq.Header.Get("originator"))
+	require.Equal(t, codexDesktopCLIVersion, desktopUpstream.lastReq.Header.Get("version"))
+}
+
 func TestOpenAIGatewayService_CodexFingerprintHTTPTransformedHeaderBodyParityAndDefaultCacheKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

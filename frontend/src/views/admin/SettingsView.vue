@@ -5688,6 +5688,51 @@
                 </p>
               </div>
 
+              <!-- Codex 客户端身份（管理员面板可选，入库保存、保存即生效） -->
+              <div>
+                <label
+                  class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                >
+                  {{ t("admin.settings.gatewayForwarding.openaiCodexClientType") }}
+                </label>
+                <div class="flex items-center gap-2">
+                  <span class="text-xs text-gray-500 dark:text-gray-400">
+                    {{ t("admin.settings.gatewayForwarding.openaiCodexClientTypeLabel") }}
+                  </span>
+                  <div
+                    class="inline-flex rounded-md border border-gray-200 bg-white/60 p-0.5 dark:border-dark-600 dark:bg-dark-700/60"
+                  >
+                    <button
+                      type="button"
+                      class="rounded px-2.5 py-1 text-xs font-medium"
+                      :class="
+                        !isCodexDesktopClient
+                          ? 'bg-gray-900 text-white shadow-sm dark:bg-white dark:text-gray-900'
+                          : 'text-gray-500 dark:text-gray-400'
+                      "
+                      @click="form.openai_codex_client_type = 'cli'"
+                    >
+                      {{ t("admin.settings.gatewayForwarding.openaiCodexClientTypeCli") }}
+                    </button>
+                    <button
+                      type="button"
+                      class="rounded px-2.5 py-1 text-xs font-medium"
+                      :class="
+                        isCodexDesktopClient
+                          ? 'bg-gray-900 text-white shadow-sm dark:bg-white dark:text-gray-900'
+                          : 'text-gray-500 dark:text-gray-400'
+                      "
+                      @click="form.openai_codex_client_type = 'desktop'"
+                    >
+                      {{ t("admin.settings.gatewayForwarding.openaiCodexClientTypeDesktop") }}
+                    </button>
+                  </div>
+                </div>
+                <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t("admin.settings.gatewayForwarding.openaiCodexClientTypeHint") }}
+                </p>
+              </div>
+
               <!-- OpenAI Codex UA -->
               <div>
                 <label
@@ -5704,9 +5749,13 @@
                   type="text"
                   class="input w-full font-mono text-sm"
                   :placeholder="
-                    t(
-                      'admin.settings.gatewayForwarding.openaiCodexUserAgentPlaceholder',
-                    )
+                    isCodexDesktopClient
+                      ? t(
+                          'admin.settings.gatewayForwarding.openaiCodexUserAgentDesktopPlaceholder',
+                        )
+                      : t(
+                          'admin.settings.gatewayForwarding.openaiCodexUserAgentPlaceholder',
+                        )
                   "
                 />
                 <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
@@ -5718,7 +5767,9 @@
                 </p>
               </div>
 
-              <!-- Codex 客户端版本号 -->
+              <!-- Codex 客户端版本号：CLI 模式单版本（跟随自动同步）；Desktop 模式双位置
+                   `v1|v2`（v1=内嵌 CLI 版本填 UA 首段 + version 头，v2=App 版本填 UA 尾部
+                   标识组，对齐真实抓包形态），见下方说明区块 -->
               <div>
                 <label
                   class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
@@ -5734,18 +5785,89 @@
                   type="text"
                   class="input w-full font-mono text-sm"
                   :placeholder="
-                    t(
-                      'admin.settings.gatewayForwarding.openaiCodexClientVersionPlaceholder',
-                    )
+                    isCodexDesktopClient
+                      ? t(
+                          'admin.settings.gatewayForwarding.openaiCodexClientVersionDesktopPlaceholder',
+                        )
+                      : t(
+                          'admin.settings.gatewayForwarding.openaiCodexClientVersionPlaceholder',
+                        )
                   "
                 />
-                <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                <!-- Desktop 模式不展示输入框提示：语义已由下方版本号说明双 TAB 覆盖 -->
+                <p
+                  v-if="!isCodexDesktopClient"
+                  class="mt-1.5 text-xs text-gray-500 dark:text-gray-400"
+                >
                   {{
                     t(
-                      "admin.settings.gatewayForwarding.openaiCodexClientVersionHint",
+                      'admin.settings.gatewayForwarding.openaiCodexClientVersionHint',
                     )
                   }}
                 </p>
+                <!-- 版本号说明：CLI / Desktop 双 TAB（默认选中 .env 当前生效的客户端类型），
+                     说明各自模式的版本号语义、双位置填充与自动替换规则 -->
+                <div
+                  class="mt-3 rounded-lg border border-indigo-100 bg-indigo-50/60 p-3 dark:border-indigo-900/40 dark:bg-indigo-950/30"
+                >
+                  <div class="flex items-center justify-between gap-2">
+                    <p class="text-xs font-medium text-indigo-700 dark:text-indigo-300">
+                      {{ t("admin.settings.gatewayForwarding.openaiCodexVersionGuideTitle") }}
+                    </p>
+                    <div
+                      class="inline-flex rounded-md border border-indigo-200 bg-white/60 p-0.5 dark:border-indigo-800 dark:bg-dark-700/60"
+                    >
+                      <button
+                        type="button"
+                        class="rounded px-2 py-0.5 text-xs font-medium"
+                        :class="
+                          !effectiveDualVersionTabDesktop
+                            ? 'bg-indigo-600 text-white shadow-sm dark:bg-indigo-500'
+                            : 'text-gray-500 dark:text-gray-400'
+                        "
+                        @click="dualVersionTabDesktop = false"
+                      >
+                        {{ t("admin.settings.gatewayForwarding.openaiCodexPreviewCli") }}
+                      </button>
+                      <button
+                        type="button"
+                        class="rounded px-2 py-0.5 text-xs font-medium"
+                        :class="
+                          effectiveDualVersionTabDesktop
+                            ? 'bg-indigo-600 text-white shadow-sm dark:bg-indigo-500'
+                            : 'text-gray-500 dark:text-gray-400'
+                        "
+                        @click="dualVersionTabDesktop = true"
+                      >
+                        {{ t("admin.settings.gatewayForwarding.openaiCodexPreviewDesktop") }}
+                      </button>
+                    </div>
+                  </div>
+                  <!-- CLI 模式：单版本格式 + 原因 -->
+                  <div v-if="!effectiveDualVersionTabDesktop" class="mt-1.5">
+                    <p class="font-mono text-xs text-gray-800 dark:text-gray-200">
+                      codex-tui/0.146.1 (Ubuntu 22.4.0; x86_64) WindowsTerminal (codex-tui; 0.146.1)
+                    </p>
+                    <p class="mt-1.5 font-mono text-xs text-gray-800 dark:text-gray-200">
+                      {{ t("admin.settings.gatewayForwarding.openaiCodexVersionGuideCliFormat") }}
+                    </p>
+                    <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                      {{ t("admin.settings.gatewayForwarding.openaiCodexVersionGuideCliReason") }}
+                    </p>
+                  </div>
+                  <!-- Desktop 模式：双版本格式 + 原因 -->
+                  <div v-else class="mt-1.5">
+                    <p class="font-mono text-xs text-gray-800 dark:text-gray-200">
+                      Codex Desktop/0.154.0-alpha.6.2 (Mac OS 26.5.2; arm64) unknown (Codex Desktop; 26.908.70816)
+                    </p>
+                    <p class="mt-1.5 font-mono text-xs text-gray-800 dark:text-gray-200">
+                      {{ t("admin.settings.gatewayForwarding.openaiCodexDesktopDualVersionFormat") }}
+                    </p>
+                    <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                      {{ t("admin.settings.gatewayForwarding.openaiCodexVersionGuideDesktopReason") }}
+                    </p>
+                  </div>
+                </div>
               </div>
 
               <!-- Codex 版本号自动同步 -->
@@ -5768,13 +5890,91 @@
                     }}
                   </p>
                   <p
-                    v-if="codexSyncedVersionLabel"
+                    v-if="codexAutoSyncLabel"
                     class="mt-0.5 text-xs text-gray-500 dark:text-gray-400"
                   >
-                    {{ codexSyncedVersionLabel }}
+                    {{ codexAutoSyncLabel }}
                   </p>
                 </div>
                 <Toggle v-model="form.openai_codex_version_auto_sync_enabled" />
+              </div>
+
+              <!-- 出站 UA 实时预览：纯前端按后端同款规则拼装（版本段重建、Desktop 双位置），
+                   仅预览不提交；可在 CLI/Desktop 间切换对比两种身份形态。
+                   样式与「版本号说明」区块统一（indigo 容器 + 同款 TAB）。 -->
+              <div
+                class="rounded-lg border border-indigo-100 bg-indigo-50/60 p-3 dark:border-indigo-900/40 dark:bg-indigo-950/30"
+              >
+                <div class="flex items-center justify-between gap-2">
+                  <p class="text-xs font-medium text-indigo-700 dark:text-indigo-300">
+                    {{ t("admin.settings.gatewayForwarding.openaiCodexPreviewTitle") }}
+                  </p>
+                  <div
+                    class="inline-flex rounded-md border border-indigo-200 bg-white/60 p-0.5 dark:border-indigo-800 dark:bg-dark-700/60"
+                  >
+                    <button
+                      type="button"
+                      class="rounded px-2 py-0.5 text-xs font-medium"
+                      :class="
+                        !effectivePreviewClientTypeDesktop
+                          ? 'bg-indigo-600 text-white shadow-sm dark:bg-indigo-500'
+                          : 'text-gray-500 dark:text-gray-400'
+                      "
+                      @click="previewClientTypeDesktop = false"
+                    >
+                      {{ t("admin.settings.gatewayForwarding.openaiCodexPreviewCli") }}
+                    </button>
+                    <button
+                      type="button"
+                      class="rounded px-2 py-0.5 text-xs font-medium"
+                      :class="
+                        effectivePreviewClientTypeDesktop
+                          ? 'bg-indigo-600 text-white shadow-sm dark:bg-indigo-500'
+                          : 'text-gray-500 dark:text-gray-400'
+                      "
+                      @click="previewClientTypeDesktop = true"
+                    >
+                      {{ t("admin.settings.gatewayForwarding.openaiCodexPreviewDesktop") }}
+                    </button>
+                  </div>
+                </div>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t("admin.settings.gatewayForwarding.openaiCodexPreviewHint") }}
+                </p>
+                <dl class="mt-2 space-y-1.5">
+                  <div>
+                    <dt class="text-xs text-gray-500 dark:text-gray-400">
+                      {{ t("admin.settings.gatewayForwarding.openaiCodexPreviewUAHeader") }}
+                    </dt>
+                    <dd class="break-all font-mono text-xs text-gray-800 dark:text-gray-200">
+                      {{ previewCodexUserAgent }}
+                    </dd>
+                  </div>
+                  <div class="flex flex-wrap gap-x-6 gap-y-1">
+                    <div>
+                      <dt class="text-xs text-gray-500 dark:text-gray-400">
+                        {{ t("admin.settings.gatewayForwarding.openaiCodexPreviewOriginatorHeader") }}
+                      </dt>
+                      <dd class="font-mono text-xs text-gray-800 dark:text-gray-200">
+                        {{ previewCodexOriginator }}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt class="text-xs text-gray-500 dark:text-gray-400">
+                        version
+                      </dt>
+                      <dd class="font-mono text-xs text-gray-800 dark:text-gray-200">
+                        {{ previewCodexVersionHeader }}
+                      </dd>
+                    </div>
+                  </div>
+                </dl>
+                <p
+                  v-if="isPreviewClientTypeActive"
+                  class="mt-1.5 text-xs text-emerald-600 dark:text-emerald-400"
+                >
+                  ✓ {{ t("admin.settings.gatewayForwarding.openaiCodexPreviewCurrentLabel") }}
+                </p>
               </div>
 
             </div>
@@ -9841,6 +10041,11 @@ const form = reactive<SettingsForm>({
   // 只读展示：自动同步任务写入的官方最新稳定版，不参与提交（提交载荷按字段显式构造）
   openai_codex_client_version_synced: "",
   openai_codex_version_auto_sync_enabled: true,
+  // Codex 出站客户端身份（cli|desktop），管理员面板可选、随表单保存
+  openai_codex_client_type: "cli",
+  openai_codex_desktop_client_version_synced: "",
+  // 只读展示：GitHub alpha prerelease 同步的内嵌 CLI 版本，不参与提交
+  openai_codex_desktop_cli_version_synced: "",
   // codex_cli_only 加固
   min_codex_version: "",
   max_codex_version: "",
@@ -10828,6 +11033,187 @@ const codexSyncedVersionLabel = computed(() => {
   });
 });
 
+// Codex 出站客户端身份（cli|desktop，管理员面板可选、随表单保存）。
+const isCodexDesktopClient = computed(
+  () => form.openai_codex_client_type === "desktop",
+);
+
+// Desktop 生效双版本展示（位置 1 = 内嵌 CLI 版本，位置 2 = App 版本）：
+// 取值链与后端一致（面板双位置 → 同步值 → 内置兜底），直接复用预览的解析结果。
+const desktopSyncedVersionLabel = computed(() => {
+  const [cli, app] = previewDesktopVersions.value;
+  if (!cli && !app) return "";
+  return t(
+    "admin.settings.gatewayForwarding.openaiCodexDesktopVersionSyncedValue",
+    { cliVersion: cli, appVersion: app },
+  );
+});
+
+// 自动同步行的补充标签：CLI 模式展示 GitHub Releases 同步值；Desktop 模式展示
+// 生效双版本（位置 1 内嵌 CLI 版本 + 位置 2 App 版本，App 版本即 appcast 同步源）。
+const codexAutoSyncLabel = computed(() =>
+  isCodexDesktopClient.value
+    ? desktopSyncedVersionLabel.value
+    : codexSyncedVersionLabel.value,
+);
+
+// 版本号说明区块的 TAB 状态：未手动切换前跟随 .env 生效的客户端类型
+//（null = 跟随，切换后固定为用户选择）。与出站 UA 预览的独立切换语义一致。
+const dualVersionTabDesktop = ref<boolean | null>(null);
+const effectiveDualVersionTabDesktop = computed(
+  () => dualVersionTabDesktop.value ?? isCodexDesktopClient.value,
+);
+
+// ===== 出站 UA 实时预览 =====
+// 与后端组装规则对齐的纯前端拼装，仅预览、不提交：
+//   - CLI：codex-tui/{version} (Ubuntu 22.4.0; x86_64) xterm-256color，version 头与 UA 版本段同源；
+//   - Desktop：Codex Desktop/{cli} (Mac OS 26.5.2; arm64) unknown (Codex Desktop; {app})，
+//     双版本身份：首段 + version 头 = 内嵌 CLI 快照（位置 1），尾组 = App 版本
+//     （位置 2 / appcast 同步值）——与真实客户端抓包样本一致。
+// 面板 UA 输入只贡献客户端名与 OS / 架构 / 终端指纹，版本段一律用生效版本重建（后端规则）。
+
+// 预览切换的客户端类型（独立于 .env 只读配置，仅影响预览展示）。
+// 未手动切换前跟随 .env 生效的客户端类型（null = 跟随），与版本号说明 TAB 同语义。
+const previewClientTypeDesktop = ref<boolean | null>(null);
+const effectivePreviewClientTypeDesktop = computed(
+  () => previewClientTypeDesktop.value ?? isCodexDesktopClient.value,
+);
+// 预览模式是否与当前生效的出站身份一致（用于「当前生效」标记）。
+const isPreviewClientTypeActive = computed(
+  () => effectivePreviewClientTypeDesktop.value === isCodexDesktopClient.value,
+);
+
+// 版本号合法性校验（与后端 codexClientVersionPattern 等价）：
+// 允许 0.146.0 / 26.908.70816 / 0.154.0-alpha.6.2 等官方形态。
+const CODEX_VERSION_RE = /^\d+(\.\d+){1,3}(-[0-9A-Za-z.]+)?$/;
+function normalizePreviewVersion(v: string): string {
+  const trimmed = v.trim();
+  return trimmed && CODEX_VERSION_RE.test(trimmed) ? trimmed : "";
+}
+
+// 解析 Desktop 双位置输入 `v1|v2`：与后端 parseCodexDesktopPanelVersions 同语义。
+// 返回 [cliVersion, appVersion]，空串表示该位置走回退链。
+function parseDesktopDualVersion(raw: string): [string, string] {
+  const trimmed = raw.trim();
+  if (!trimmed) return ["", ""];
+  const parts = trimmed.split("|");
+  if (parts.length !== 2) return ["", ""];
+  return [normalizePreviewVersion(parts[0]), normalizePreviewVersion(parts[1])];
+}
+
+// 后端 codexOfficialClientOriginators（request.go）+ `Codex ` 家族前缀的前端镜像：
+// UA 尾部官方客户端标识组 `(name; version)` 的版本才允许被重建，OS 组不受影响。
+const CODEX_OFFICIAL_TRAILER_NAMES = new Set([
+  "codex_cli_rs",
+  "codex-tui",
+  "codex_vscode",
+  "codex_vscode_copilot",
+  "codex_app",
+  "codex_chatgpt_desktop",
+  "codex_atlas",
+  "codex_exec",
+  "codex_sdk_ts",
+]);
+function isCodexOfficialTrailerName(name: string): boolean {
+  const v = name.trim().toLowerCase();
+  return v.length > 0 && (CODEX_OFFICIAL_TRAILER_NAMES.has(v) || v.startsWith("codex "));
+}
+
+// 与后端 rewriteCodexUATrailerVersion 同构：仅当最后一个括号组形如 `(name; version)`
+// 且 name 为官方客户端名时把版本重建为 version，否则原样返回（保护 OS 指纹组）。
+function rewritePreviewTrailerVersion(ua: string, version: string): string {
+  const open = ua.lastIndexOf("(");
+  if (open < 0) return ua;
+  const close = ua.indexOf(")", open + 1);
+  if (close < 0) return ua;
+  const inner = ua.slice(open + 1, close);
+  const semi = inner.indexOf(";");
+  if (semi < 0) return ua;
+  const name = inner.slice(0, semi).trim();
+  const oldVersion = inner.slice(semi + 1).trim();
+  if (!name || !oldVersion || !isCodexOfficialTrailerName(name)) return ua;
+  return ua.slice(0, open + 1) + name + "; " + version + ua.slice(close);
+}
+
+// Desktop 预览用的两个生效版本：CLI 版本（面板位置 1 → alpha 同步值 → 内置快照兜底）、
+// App 版本（面板位置 2 → appcast 同步值 → 内置兜底），与后端取值链一致。
+const previewDesktopVersions = computed<[string, string]>(() => {
+  const [panelCli, panelApp] = parseDesktopDualVersion(
+    form.openai_codex_client_version || "",
+  );
+  const synced = form.openai_codex_desktop_client_version_synced?.trim() || "";
+  const syncedCli =
+    form.openai_codex_desktop_cli_version_synced?.trim() || "";
+  const cli =
+    panelCli ||
+    (CODEX_VERSION_RE.test(syncedCli) ? syncedCli : "0.154.0-alpha.6.2");
+  const app =
+    panelApp ||
+    (CODEX_VERSION_RE.test(synced) ? synced : "26.908.70816");
+  return [cli, app];
+});
+
+// CLI 预览用的生效版本：面板覆写 → 自动同步值 → 内置常量（与后端取值链一致）。
+const previewCliVersion = computed<string>(() => {
+  const manual = normalizePreviewVersion(
+    form.openai_codex_client_version || "",
+  );
+  if (manual) return manual;
+  const synced = normalizePreviewVersion(
+    form.openai_codex_client_version_synced?.trim() || "",
+  );
+  return synced || "0.146.0";
+});
+
+// 预览的最终出站 UA：面板 UA 非空时重建其版本声明（与后端语义一致）——
+//   - CLI：首段与尾组是同一版本声明的两个出口（如 `codex-tui/0.146.1 … (codex-tui; 0.146.1)`），
+//     SetCodexUserAgentVersion 会一并重建，预览同样两处同版本，避免首段新、尾组旧的自相矛盾身份；
+//   - Desktop：首段重建内嵌 CLI 版本、尾组官方标识组单独重建 App 版本
+//     （SetCodexDesktopUserAgentVersions 双位置语义）；非官方尾组只保留指纹、不重建。
+// 非 `{client}/{version}` 形态不可重建，原样展示（后端空串回退语义）。
+const previewCodexUserAgent = computed<string>(() => {
+  const panelUA = form.openai_codex_user_agent?.trim() || "";
+  if (effectivePreviewClientTypeDesktop.value) {
+    const [cli, app] = previewDesktopVersions.value;
+    // 真实抓包形态：首段 CLI 版本，尾组 App 版本。
+    const defaultUA = `Codex Desktop/${cli} (Mac OS 26.5.2; arm64) unknown (Codex Desktop; ${app})`;
+    if (!panelUA) return defaultUA;
+    const slash = panelUA.indexOf("/");
+    if (slash <= 0) return panelUA;
+    const client = panelUA.slice(0, slash).trim();
+    if (!client) return panelUA;
+    const rest = panelUA.slice(slash + 1);
+    const space = rest.indexOf(" ");
+    const tail = space >= 0 ? rest.slice(space) : "";
+    return rewritePreviewTrailerVersion(client + "/" + cli + tail, app);
+  }
+  const version = previewCliVersion.value;
+  const defaultUA = `codex-tui/${version} (Ubuntu 22.4.0; x86_64) xterm-256color`;
+  if (!panelUA) return defaultUA;
+  const slash = panelUA.indexOf("/");
+  if (slash <= 0) return panelUA;
+  const client = panelUA.slice(0, slash).trim();
+  if (!client) return panelUA;
+  const rest = panelUA.slice(slash + 1);
+  const space = rest.indexOf(" ");
+  const tail = space >= 0 ? rest.slice(space) : "";
+  // 首段 + 尾组（官方标识组）按同一生效版本重建，与后端 SetCodexUserAgentVersion 一致。
+  return rewritePreviewTrailerVersion(client + "/" + version + tail, version);
+});
+
+// 预览的 originator：与 UA 首段配套（上游校验 originator 与 UA 首段一致）。
+const previewCodexOriginator = computed<string>(() =>
+  effectivePreviewClientTypeDesktop.value ? "Codex Desktop" : "codex-tui",
+);
+
+// 预览的 version 头：CLI/Desktop 都与 UA 首段版本同源
+//（Desktop 的首段即内嵌 CLI 版本，真实客户端双版本中进 version 头的是它）。
+const previewCodexVersionHeader = computed<string>(() =>
+  effectivePreviewClientTypeDesktop.value
+    ? previewDesktopVersions.value[0]
+    : previewCliVersion.value,
+);
+
 async function loadSettings() {
   loading.value = true;
   loadFailed.value = false;
@@ -11443,6 +11829,8 @@ async function saveSettings() {
         form.antigravity_user_agent_version?.trim() || "",
       openai_codex_user_agent:
         form.openai_codex_user_agent?.trim() || "",
+      openai_codex_client_type:
+        form.openai_codex_client_type === "desktop" ? "desktop" : "cli",
       openai_codex_client_version:
         form.openai_codex_client_version?.trim() || "",
       openai_codex_version_auto_sync_enabled:
