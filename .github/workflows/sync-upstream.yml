@@ -95,7 +95,7 @@ jobs:
         run: |
           set -euo pipefail
           go build ./...
-          go test ./internal/service -count=1 -run 'CodexFingerprintConvergence|CodexAccountIdentity|CodexFingerprint|OAuthPassthrough|BuildOpenAIWSHeaders|SetupTokenCompat|IngressSession' 2>&1 | grep -vE '"level":"(DEBUG|INFO|WARN)"' | tail -20
+          go test -tags=unit ./internal/service -count=1 -run 'CodexFingerprintConvergence|CodexAccountIdentity|CodexFingerprint|CodexDeviceWireProfile|OAuthPassthrough|BuildOpenAIWSHeaders|SetupTokenCompat|IngressSession|CPR|OAuthOnlyGroupPredicate' 2>&1 | grep -vE '"level":"(DEBUG|INFO|WARN)"' | tail -20
 
       - name: Check codex-rs identity sources for drift
         run: |

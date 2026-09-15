@@ -344,6 +344,32 @@ func groupSupportsOAuthOnlyFilter(platform string) bool {
 		platform == PlatformComposite
 }
 
+// filterOAuthOnlyGroupAccounts 按 require_oauth_only 过滤待绑定账号，保持入参顺序。
+// CreateGroup 与 UpdateGroup 共用：两处原本是逐字重复的副本，改谓词时漏掉一处就能
+// 让 PUT /admin/groups/:id 绕过限制。抽成一处后不可能再分叉。
+func (s *adminServiceImpl) filterOAuthOnlyGroupAccounts(ctx context.Context, group *Group, accountIDs []int64) ([]int64, error) {
+	if group == nil || !group.RequireOAuthOnly || !groupSupportsOAuthOnlyFilter(group.Platform) || len(accountIDs) == 0 {
+		return accountIDs, nil
+	}
+	accounts, err := s.accountRepo.GetByIDs(ctx, accountIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch accounts for oauth filter: %w", err)
+	}
+	allowed := make(map[int64]struct{}, len(accounts))
+	for _, acc := range accounts {
+		if accountAllowedInOAuthOnlyGroup(acc.Type) {
+			allowed[acc.ID] = struct{}{}
+		}
+	}
+	var filtered []int64
+	for _, aid := range accountIDs {
+		if _, ok := allowed[aid]; ok {
+			filtered = append(filtered, aid)
+		}
+	}
+	return filtered, nil
+}
+
 // accountAllowedInOAuthOnlyGroup 判定账号类型能否进入 require_oauth_only 分组。
 //
 // 这里刻意维持"黑名单"而非"只放行 OAuth 类"：upstream / bedrock / service_account
@@ -634,25 +660,9 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		return nil, err
 	}
 
-	// require_oauth_only: 过滤掉 apikey 类型账号
-	if group.RequireOAuthOnly && groupSupportsOAuthOnlyFilter(group.Platform) && len(accountIDsToCopy) > 0 {
-		accounts, err := s.accountRepo.GetByIDs(ctx, accountIDsToCopy)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch accounts for oauth filter: %w", err)
-		}
-		oauthIDs := make(map[int64]struct{}, len(accounts))
-		for _, acc := range accounts {
-			if accountAllowedInOAuthOnlyGroup(acc.Type) {
-				oauthIDs[acc.ID] = struct{}{}
-			}
-		}
-		var filtered []int64
-		for _, aid := range accountIDsToCopy {
-			if _, ok := oauthIDs[aid]; ok {
-				filtered = append(filtered, aid)
-			}
-		}
-		accountIDsToCopy = filtered
+	accountIDsToCopy, err = s.filterOAuthOnlyGroupAccounts(ctx, group, accountIDsToCopy)
+	if err != nil {
+		return nil, err
 	}
 
 	// 如果有需要复制的账号，绑定到新分组
@@ -1109,25 +1119,9 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 			return nil, fmt.Errorf("failed to clear existing account bindings: %w", err)
 		}
 
-		// require_oauth_only: 过滤掉 apikey 类型账号
-		if group.RequireOAuthOnly && groupSupportsOAuthOnlyFilter(group.Platform) && len(accountIDsToCopy) > 0 {
-			accounts, err := s.accountRepo.GetByIDs(ctx, accountIDsToCopy)
-			if err != nil {
-				return nil, fmt.Errorf("failed to fetch accounts for oauth filter: %w", err)
-			}
-			oauthIDs := make(map[int64]struct{}, len(accounts))
-			for _, acc := range accounts {
-				if accountAllowedInOAuthOnlyGroup(acc.Type) {
-					oauthIDs[acc.ID] = struct{}{}
-				}
-			}
-			var filtered []int64
-			for _, aid := range accountIDsToCopy {
-				if _, ok := oauthIDs[aid]; ok {
-					filtered = append(filtered, aid)
-				}
-			}
-			accountIDsToCopy = filtered
+		accountIDsToCopy, err = s.filterOAuthOnlyGroupAccounts(ctx, group, accountIDsToCopy)
+		if err != nil {
+			return nil, err
 		}
 
 		// 再绑定源分组的账号

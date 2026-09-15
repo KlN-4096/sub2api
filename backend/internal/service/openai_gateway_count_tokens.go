@@ -157,7 +157,9 @@ func shouldEstimateOpenAIInputTokensLocally(account *Account) bool {
 	// CPR 中继：它的路由表（openai/router.rs:21-27）只有 responses / alpha_search /
 	// images / models，**没有 input_tokens**。原来的 `Type != apikey → false` 本意是
 	// "OAuth 走官方端点"，对中继账号是错的——会把 CPR 的 client key 发给 api.openai.com。
-	if account.IsCPR() {
+	// 用 Type 而非 IsCPR()：IsCPR() 还要求 platform==openai，平台错配的脏数据
+	// 不该从这里漏回官方端点（下游 buildInputTokensUpstreamRequest 同样按 Type 分流）。
+	if account.Type == AccountTypeCPR {
 		return true
 	}
 	if account.Type != AccountTypeAPIKey {

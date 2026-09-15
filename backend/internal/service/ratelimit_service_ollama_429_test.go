@@ -395,11 +395,10 @@ func TestOllamaProbeCallback_StaleLongDoesNotOverrideNewShort(t *testing.T) {
 	require.Equal(t, 1, scheduler.count())
 
 	// An admin / newer policy re-arms the account to a fresh SHORT cooldown.
-	// 偏移量不能省：handle429 的即时冷却也是 now+5s，而 Windows 的 time.Now() 粒度
-	// 约 0.5-15ms，两次调用会返回同一时刻，于是这个"新的短冷却"与调度时捕获的
-	// expectedResetAt 逐纳秒相同。CAS 正确地判定"什么都没变"而放行，用例遂在
-	// Windows 上必红、在上游 CI 的 Linux 上必绿（纳秒粒度）。
-	newShort := time.Now().Add(5*time.Second + 7*time.Millisecond)
+	// 必须比 handle429 写下的那一刻严格晚：它的即时冷却也是 now+5s，而 Windows 的
+	// time.Now() 粒度约 0.5-15ms，两次调用会返回同一时刻，于是这个"新的短冷却"与
+	// 调度时捕获的 expectedResetAt 逐纳秒相同，CAS 正确地判定"什么都没变"而放行。
+	newShort := repo.currentReset(acct.ID).Add(time.Millisecond)
 	repo.mutate(acct.ID, func(a *Account) { a.RateLimitResetAt = ollama429TimePtr(newShort) })
 
 	// The old async result reports a long 7d reset; it must not override.

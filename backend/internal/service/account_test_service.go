@@ -791,7 +791,9 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 		// GetOpenAIAccessToken()，而该 getter 只按 platform 门控、不按 type——
 		// 改类型时凭据是 merge 不是 replace，残留的 access_token 会被真的发出去，
 		// 正是 cpr 类型存在的理由所要避免的事。
-		if account.Type == AccountTypeAPIKey || account.IsCPR() {
+		// 用 Type 而非 IsCPR()：IsCPR() 还要求 platform==openai，平台错配的脏数据
+		// 会从这里漏到 OAuth 那条（下游 testOpenAIImageAPIKey 的 cpr 分支同样按 Type）。
+		if account.Type == AccountTypeAPIKey || account.Type == AccountTypeCPR {
 			return s.testOpenAIImageAPIKey(c, ctx, account, testModelID, imagePrompt)
 		}
 		return s.testOpenAIImageOAuth(c, ctx, account, testModelID, imagePrompt)

@@ -117,17 +117,14 @@ func TestCodexDeviceWireProfileImages(t *testing.T) {
 				// gpt-image-2 命中 usesCodexDirectImages，上游 0.2.5 起走
 				// buildOpenAIImagesOAuthPayload，不再是 Responses 的
 				// instructions/input/tools，所以那三键的相对序断言不再适用。
-				//
-				// 已知偏离，故意不在这里断言字段序（实测出线序是
-				// [model client_metadata prompt]，gjson ForEach 保序）：
-				//   - "首键必须是 model" 是空断言：direct 的 payload 走
-				//     json.Marshal(map[string]any)，Go 按键名字典序输出，只传
-				//     model+prompt 时恰好是 model，带上 background 就变 background。
-				//   - "client_metadata 必须是末键" 在这条路径上不成立。
-				// 真 Codex 客户端不会这么发。修它要动上游的 payload 构造，还需要
-				// direct 端点真客户端字段序的证据——两者都没有，所以宁可留空缺口
-				// 也不放一条看起来在守、实际不守的断言。
-				require.Contains(t, topLevelKeys(t, up.lastBody), "client_metadata")
+				// 仍然成立的是 client_metadata 末键：它由
+				// applyCodexFingerprintClientMetadataRaw 追加，而 direct 端点不套
+				// Responses 字段表（见 TestCodexDeviceWireProfileDirectImagesNotTreatedAsResponses）。
+				// 不断言"首键是 model"：direct payload 是 map[string]any，
+				// json.Marshal 按键名字典序输出，model 排在首位只是巧合，
+				// 带上 background 就变 background。
+				keys := topLevelKeys(t, up.lastBody)
+				require.Equal(t, "client_metadata", keys[len(keys)-1], "字段序：%v", keys)
 			} else {
 				require.False(t, gjson.GetBytes(up.lastBody, "client_metadata").Exists())
 				require.Equal(t, wantInstall, up.lastReq.Header.Get("x-codex-installation-id"))
@@ -139,6 +136,34 @@ func TestCodexDeviceWireProfileImages(t *testing.T) {
 				"version 是 provider 头（model-provider-info/src/lib.rs:397），钉到规范身份")
 		})
 	}
+}
+
+// TestCodexDeviceWireProfileDirectImagesNotTreatedAsResponses 钉住 direct 图片端点
+// 不套 /responses 的线协议。buildUpstreamRequest 按它自己算出的 targetURL
+// (.../codex/responses) 做字段序与 zstd，而 openai_images_responses.go 要到它返回之后
+// 才把 URL 换成 /images/generations——于是发往 images 端点的体被套上了 Responses 的
+// 字段表并被压缩，正是 openai_codex_body_order.go:52 与
+// codexRequestBodyCompressionEnabled 注释里明令排除的两件事。
+func TestCodexDeviceWireProfileDirectImagesNotTreatedAsResponses(t *testing.T) {
+	account := wireProfileTestAccount(true)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(nil))
+	c.Request.Header.Set("originator", "codex-tui")
+	c.Request.Header.Set("User-Agent", codexCLIUserAgent)
+	svc, up := wireProfileTestService()
+	_, _ = svc.ForwardImages(context.Background(), c, account, nil,
+		&OpenAIImagesRequest{Endpoint: "generations", Model: "gpt-image-2", Prompt: "offline"}, "")
+	require.NotNil(t, up.lastReq)
+	require.Equal(t, "/backend-api/codex/images/generations", up.lastReq.URL.Path, "前提：这条用例必须走 direct 端点")
+
+	require.Empty(t, up.lastReq.Header.Get("Content-Encoding"),
+		"images 端点不压缩；真客户端只对 /responses 做 zstd")
+	require.Equal(t, up.lastBody, up.lastRawBody, "线上字节必须就是明文 JSON")
+
+	// Responses 的字段表把 client_metadata 钉在 model 之后；images 自建 payload
+	// 不该被它重排，client_metadata 由 applyCodexFingerprintClientMetadataRaw 追加在末尾。
+	keys := topLevelKeys(t, up.lastBody)
+	require.Equal(t, []string{"model", "prompt", "client_metadata"}, keys)
 }
 
 func TestCodexDeviceWireProfileCompact(t *testing.T) {

@@ -356,6 +356,28 @@ func isOpenAIImagesSelfBuiltRequest(ctx context.Context) bool {
 	return selfBuilt
 }
 
+// openAIImagesWireTargetContextKey 携带自建图片请求最终会发往的端点。
+// buildUpstreamRequest 按它自己算出的 .../responses 决定顶层字段序与 zstd 压缩，
+// 而真实 URL 要到它返回之后才被换成 /images/*（见本文件 forwardOpenAIImagesOAuth）。
+// 不把真端点传进去，direct 图片体就会被套上 Responses 字段表、并带着
+// Content-Encoding: zstd 发给一个不压缩的端点。
+type openAIImagesWireTargetContextKey struct{}
+
+func withOpenAIImagesWireTarget(ctx context.Context, target string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, openAIImagesWireTargetContextKey{}, target)
+}
+
+func openAIImagesWireTarget(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	target, _ := ctx.Value(openAIImagesWireTargetContextKey{}).(string)
+	return target
+}
+
 func buildOpenAIImagesResponsesRequest(parsed *OpenAIImagesRequest, toolModel string) ([]byte, error) {
 	if parsed == nil {
 		return nil, fmt.Errorf("parsed images request is required")
@@ -1834,6 +1856,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		return nil, err
 	}
 	upstreamCtx = withOpenAIImagesSelfBuiltRequest(upstreamCtx)
+	upstreamCtx = withOpenAIImagesWireTarget(upstreamCtx, targetURL)
 	// 图片是自建 Responses body：先落设备载体，再允许线协议收口去掉独立安装头。
 	ids := resolveCodexFingerprintIDsFromRequest(c, account, nil)
 	stageCodexFingerprintIDs(c, ids)
