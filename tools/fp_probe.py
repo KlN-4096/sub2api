@@ -20,8 +20,10 @@
 预演凭据从 SUB2API_REHEARSAL_API_KEY 读取，不写入仓库。
 """
 import base64
+import datetime
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -30,6 +32,10 @@ import time
 
 GW = "http://127.0.0.1:18080"
 KEY = os.environ.get("SUB2API_REHEARSAL_API_KEY", "")
+# --expect-timezone=<IANA|none>：必须显式声明。none 表示"该账号不该改写"，出站体要与探针
+# 发出的逐字相同；给 IANA 名则按该时区断言。刻意不设缺省：额度刷新会在后台把自动解析出的
+# 出口时区写进账号 extra（24 小时一次，无需人工），缺省成 none 的话配置没变的探针会某天突然变红。
+EXPECT_TZ = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--expect-timezone=")), "")
 CAP = "/opt/s2a-rehearsal/echo/capture.jsonl"
 UA = "codex-tui/0.153.4 (Mac OS 26.2.0; arm64) Apple_Terminal/466 (codex-tui; 0.153.4)"
 INSTALL = "7f582abd-05d2-4a59-b4e5-ec1b733b4edc"
@@ -161,6 +167,8 @@ CONTRACTS = {
     # 无 Responses 的设备/窗口/请求种类字段，body.id 与 session_id 同源；
     # metadata.codex_version / model 与出站 version 头 / body.model 同源。
     "search": {
+        # 独立搜索端点不压：真客户端只对 /responses 压（core/src/client.rs:1534-1541）。
+        "content_encoding": None,
         "required_headers": ["originator", "user-agent", "version", "x-codex-turn-metadata"],
         "forbidden_headers": ["session-id", "thread-id", "x-client-request-id",
                               "x-codex-window-id", "x-codex-installation-id",
@@ -225,10 +233,20 @@ def meta(s, window_number=WINDOW_NUMBER):
             "x-codex-turn-metadata": turn_meta(s, window_number)}
 
 
-def resp_body(s, stream=True):
+def resp_body(s, stream=True, env_context=False):
+    items = [{"type": "message", "role": "user", "content": "hi"}]
+    if env_context:
+        items.insert(0, {
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": ENV_CONTEXT}],
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["environments.environment_context"],
+                "create_time": PROBE_ENV_CREATED_AT,
+            },
+        })
     return {"model": "gpt-5.4", "stream": stream, "prompt_cache_key": s,
             "client_metadata": meta(s),
-            "input": [{"type": "message", "role": "user", "content": "hi"}]}
+            "input": items}
 
 
 def build_cases():
@@ -236,7 +254,7 @@ def build_cases():
     return [
         {"label": "A 直连 SSE", "path": "/v1/responses", "contract": "responses",
          "upstream": "/backend-api/codex/responses",
-         "body": resp_body(s1), "headers": codex_headers(s1)},
+         "body": resp_body(s1, env_context=True), "headers": codex_headers(s1)},
         {"label": "B 中继剥头 SSE", "path": "/v1/responses", "contract": "responses",
          "upstream": "/backend-api/codex/responses",
          "body": resp_body(s2), "headers": codex_headers(s2, relayed=True)},
@@ -323,6 +341,145 @@ def resolve(token, ctx):
     raise AssertionError("unknown token " + token)
 
 
+for _name, _spec in CONTRACTS.items():
+    assert "content_encoding" in _spec, \
+        "契约 %s 必须显式声明 content_encoding（\"zstd\" 或 None）" % _name
+
+
+# ── 账号面侧信道与 environment_context 时区 ─────────────────────────────────
+# 真客户端除推理外还打一条只读 GET：settings/user（git 归属策略按线程首见拉一次，
+# ext/git-attribution/src/policy.rs:52-102）。网关按同样节奏补发，它不是推理请求，
+# 不参与 check_rows 的位置配对。config/bundle 见下面：个人 plan 的真客户端不发，出现即判红。
+SIDE_CALL_PREFIX = "/backend-api/wham/"
+SIDE_CALL_SETTINGS = "/backend-api/wham/settings/user"
+# config/bundle 只有 business/edu/enterprise plan 的真客户端会打
+# （cloud-config/src/service.rs:50-58 + protocol/src/account.rs:67-80），个人 Plus/Pro 一条都没有；
+# 网关补发它等于凭空多一个特征，所以这里把它当"不该出现的账号面请求"判红。
+# backend-client 的 headers()（backend-client/src/client.rs:245-265）只发这些；
+# originator / version 来自推理面的 OpenAI Provider，backend-client 不走它。
+SIDE_CALL_REQUIRED = ["authorization", "user-agent", "chatgpt-account-id"]
+SIDE_CALL_FORBIDDEN = ["originator", "version", "session-id", "thread-id",
+                       "x-client-request-id", "x-codex-window-id", "x-codex-turn-metadata",
+                       "x-codex-installation-id", "openai-beta", "x-codex-inference-call-id"]
+
+# 固定的历史消息，日期必须按它的 create_time 换算，不能按检查器运行时的今天。
+PROBE_ENV_CREATED_AT = datetime.datetime(2026, 3, 1, 3, 30, tzinfo=datetime.timezone.utc).timestamp()
+
+
+def _probe_environment_source():
+    """选一个与目标日历日不同的固定偏移时区，让日期改写断言确实被触发。"""
+    source_tz, offset = "Etc/GMT+12", -12
+    source_date = datetime.datetime.fromtimestamp(
+        PROBE_ENV_CREATED_AT, datetime.timezone(datetime.timedelta(hours=offset))).strftime("%Y-%m-%d")
+    try:
+        from zoneinfo import ZoneInfo
+        if EXPECT_TZ and EXPECT_TZ != "none":
+            target_date = datetime.datetime.fromtimestamp(PROBE_ENV_CREATED_AT, ZoneInfo(EXPECT_TZ)).strftime("%Y-%m-%d")
+            if target_date == source_date:
+                source_tz, offset = "Etc/GMT-14", 14
+                source_date = datetime.datetime.fromtimestamp(
+                    PROBE_ENV_CREATED_AT, datetime.timezone(datetime.timedelta(hours=offset))).strftime("%Y-%m-%d")
+    except Exception:
+        pass  # 检查器会明确报告缺少 tz 数据库，不把回落值当作目标时区的证据。
+    return source_tz, source_date
+
+
+PROBE_ENV_TZ, PROBE_ENV_DATE = _probe_environment_source()
+ENV_CONTEXT = ("<environment_context>\n  <cwd>/home/probe</cwd>\n  <shell>bash</shell>\n"
+               "  <current_date>%s</current_date>\n  <timezone>%s</timezone>\n"
+               "</environment_context>" % (PROBE_ENV_DATE, PROBE_ENV_TZ))
+
+
+def check_side_calls(side_rows, inference_rows):
+    """HTTP/WS 的每个最终线程一条 settings/user；返回 problems 列表。"""
+    problems = []
+    threads = set()
+    for row in inference_rows:
+        if row.get("kind") == "ws_message":
+            body = row.get("body") or {}
+            if isinstance(body, dict) and body.get("type") == "response.create":
+                cm = body.get("client_metadata") or {}
+                tid = cm.get("thread_id") if isinstance(cm, dict) else None
+                if isinstance(tid, str) and tid:
+                    threads.add(tid)
+            continue
+        if row.get("kind") != "http" or row.get("path") != "/backend-api/codex/responses":
+            continue
+        tid = hdr(row, "thread-id")
+        if tid:
+            threads.add(tid)
+
+    counts = {}
+    for row in side_rows:
+        path = row.get("path")
+        counts[path] = counts.get(path, 0) + 1
+        if row.get("method") != "GET":
+            problems.append("侧信道 %s 必须是只读 GET，实际 %s" % (path, row.get("method")))
+        for name in SIDE_CALL_REQUIRED:
+            if not hdr(row, name):
+                problems.append("侧信道 %s 缺 %s" % (path, name))
+        for name in SIDE_CALL_FORBIDDEN:
+            if hdr(row, name):
+                problems.append("侧信道 %s 不该带推理面的 %s" % (path, name))
+
+    unknown = sorted(set(counts) - {SIDE_CALL_SETTINGS})
+    if unknown:
+        problems.append("出现未声明的账号面请求：%s" % unknown)
+    got_settings = counts.get(SIDE_CALL_SETTINGS, 0)
+    if got_settings != len(threads):
+        problems.append("settings/user 每线程一条，出站线程 %d 个 %s，实际 %d 条"
+                        % (len(threads), sorted(threads), got_settings))
+    return problems
+
+
+def env_tag(text, tag):
+    m = re.search("<%s>([^<]*)</%s>" % (tag, tag), text)
+    return m.group(1) if m else None
+
+
+def probe_date_in(tz, problems):
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.datetime.fromtimestamp(PROBE_ENV_CREATED_AT, ZoneInfo(tz)).strftime("%Y-%m-%d")
+    except Exception as exc:
+        problems.append("无法按时区 %s 换算消息创建日期：%s" % (tz, exc))
+        return None
+
+
+def check_environment_timezone(rows, expect_tz):
+    """expect_tz 为 None 表示账号没配时区：environment_context 必须原样透传；
+    配了就必须按该消息的固定 create_time 换算。两侧都是硬断言，不存在跳过。"""
+    problems = []
+    seen = 0
+    for row in rows:
+        # echo server 会把长字段省略（trim_body），environment_context 落在被省略的 input 里，
+        # 所以它在省略前单独摘了一列 env_context；自检里的构造样本仍走 body 文本这条路。
+        env = row.get("env_context")
+        if isinstance(env, dict) and env:
+            got_tz, got_date = env.get("timezone"), env.get("current_date")
+        else:
+            raw = row.get("body")
+            text = json.dumps(raw, ensure_ascii=False) if isinstance(raw, (dict, list)) else str(raw or "")
+            if "<timezone>" not in text and "<current_date>" not in text:
+                continue
+            got_tz, got_date = env_tag(text, "timezone"), env_tag(text, "current_date")
+        seen += 1
+        if expect_tz is None:
+            if got_tz != PROBE_ENV_TZ or got_date != PROBE_ENV_DATE:
+                problems.append("未配置账号级时区时 environment_context 必须原样透传，实际 %s / %s"
+                                % (got_tz, got_date))
+            continue
+        if got_tz != expect_tz:
+            problems.append("environment_context 时区应改写为 %s，实际 %s" % (expect_tz, got_tz))
+        want_date = probe_date_in(expect_tz, problems)
+        if want_date and got_date != want_date:
+            problems.append("environment_context 日期应按 %s 算出 %s，实际 %s"
+                            % (expect_tz, want_date, got_date))
+    if seen == 0:
+        problems.append("没有任何出站体带 environment_context，时区断言全部落空")
+    return problems
+
+
 def check_rows(rows, cases, cross_check=True):
     """rows 与 cases 一一对应；返回 problems 列表。
     cross_check=False 时不做跨路径设备一致性判断，留给调用方合并 WS 结果后统一判。"""
@@ -368,7 +525,7 @@ def check_rows(rows, cases, cross_check=True):
         for name in spec["forbidden_headers"]:
             if hdr(row, name) is not None:
                 problems.append("%s 不该发的头 %s=%r" % (label, name, hdr(row, name)))
-        want_encoding = spec.get("content_encoding")
+        want_encoding = spec["content_encoding"]
         got_encoding = (hdr(row, "content-encoding") or "").strip().lower()
         if want_encoding and got_encoding != want_encoding:
             problems.append("%s 请求体编码 %r != %r（真客户端默认 enable_request_compression）"
@@ -655,8 +812,117 @@ def selftest():
 
     failures += selftest_search()
     failures += selftest_ws()
+    failures += selftest_side_calls()
+    failures += selftest_env_timezone()
     print("\n自检结果：%s" % ("全部反例均被拦下" if failures == 0 else "%d 条未被拦下" % failures))
     return 1 if failures else 0
+
+
+def selftest_side_calls():
+    """侧信道契约的反例；返回未被拦下的条数。"""
+    def inf(tid):
+        return {"kind": "http", "method": "POST", "path": "/backend-api/codex/responses",
+                "headers": [["thread-id", tid]]}
+
+    def side(path, headers=None, method="GET"):
+        return {"kind": "http", "method": method, "path": path,
+                "headers": headers if headers is not None
+                else [["authorization", "Bearer x"], ["user-agent", UA],
+                      ["chatgpt-account-id", "acct"]]}
+
+    bundle = "/backend-api/wham/config/bundle"
+    inference = [inf("S1"), inf("S2"),
+                 {"kind": "ws_handshake", "path": "/backend-api/codex/responses",
+                  "headers": [["thread-id", "stale-handshake-thread"]]},
+                 {"kind": "ws_message", "body": {"type": "response.create",
+                                                "client_metadata": {"thread_id": "S1"}}},
+                 {"kind": "ws_message", "body": {"type": "response.create",
+                                                "client_metadata": {"thread_id": "S3"}}}]
+    good = [side(SIDE_CALL_SETTINGS) for _ in range(3)]
+    failures = 0
+    ok = check_side_calls(good, inference)
+    if ok:
+        print("[SELFTEST FAIL] 侧信道正样本被误报：%s" % ok)
+        failures += 1
+    else:
+        print("  [ok] 侧信道正样本：每线程一条 settings/user，没有别的账号面请求")
+
+    negatives = [
+        ("补发了 config/bundle（个人 plan 的真客户端不发）",
+         good + [side(bundle)], inference, "未声明的账号面请求"),
+        ("settings/user 每请求都发（线程去重失效）",
+         good + [side(SIDE_CALL_SETTINGS)], inference, "settings/user"),
+        ("settings/user 漏了一个线程",
+         [side(SIDE_CALL_SETTINGS)], inference, "settings/user"),
+        ("侧信道用了 POST",
+         [side(SIDE_CALL_SETTINGS, method="POST"), side(SIDE_CALL_SETTINGS)], inference, "只读 GET"),
+        ("侧信道缺 authorization",
+         [side(SIDE_CALL_SETTINGS, headers=[["user-agent", UA], ["chatgpt-account-id", "acct"]]),
+          side(SIDE_CALL_SETTINGS)], inference, "缺 authorization"),
+        ("侧信道缺 chatgpt-account-id",
+         [side(SIDE_CALL_SETTINGS, headers=[["authorization", "Bearer x"], ["user-agent", UA]]),
+          side(SIDE_CALL_SETTINGS)], inference, "缺 chatgpt-account-id"),
+        ("侧信道带上了 originator",
+         [side(SIDE_CALL_SETTINGS, headers=[["authorization", "Bearer x"], ["user-agent", UA],
+                                            ["chatgpt-account-id", "acct"], ["originator", "codex-tui"]]),
+          side(SIDE_CALL_SETTINGS)], inference, "originator"),
+        ("多打了一个没声明的账号面接口",
+         good + [side("/backend-api/wham/whoami")], inference, "未声明的账号面请求"),
+    ]
+    for name, side_rows, inf_rows, want in negatives:
+        problems = check_side_calls(side_rows, inf_rows)
+        if not any(want in p for p in problems):
+            print("[SELFTEST FAIL] 侧信道反例没被拦下：%s -> %s" % (name, problems))
+            failures += 1
+        else:
+            print("  [ok] 反例被拦下：%s" % name)
+    return failures
+
+
+def selftest_env_timezone():
+    """environment_context 时区改写的反例；返回未被拦下的条数。"""
+    def row(tz, date):
+        return {"kind": "http", "path": "/backend-api/codex/responses",
+                "body": {"input": [{"content": "<timezone>%s</timezone>"
+                                               "<current_date>%s</current_date>" % (tz, date)}]}}
+
+    failures = 0
+    # 与真实校验同一条取值路径。本机没有 IANA tz 数据库时 probe_date_in 会报错而不是静默放过，
+    # 那种情况下改为断言"缺库必须判红"，日期算式的正样本留给预演机（Debian 有 tzdata）。
+    expected_date = probe_date_in("Asia/Shanghai", [])
+
+    positives = [("未配时区：原样透传", [row(PROBE_ENV_TZ, PROBE_ENV_DATE)], None)]
+    negatives = [
+        ("配了时区但没改写", [row(PROBE_ENV_TZ, PROBE_ENV_DATE)], "Asia/Shanghai", "时区应改写"),
+        ("没配时区却被改写了", [row("Asia/Shanghai", "2026-01-01")], None, "原样透传"),
+        ("出站体里根本没有 environment_context", [{"kind": "http", "body": {"input": []}}], None,
+         "断言全部落空"),
+    ]
+    if expected_date:
+        positives.append(("配了时区：按固定历史时间换算", [row("Asia/Shanghai", expected_date)], "Asia/Shanghai"))
+        wrong_date = (datetime.date.fromisoformat(expected_date) + datetime.timedelta(days=1)).isoformat()
+        negatives.append(("改了时区但日期不对应创建时间", [row("Asia/Shanghai", wrong_date)],
+                          "Asia/Shanghai", "日期应按"))
+    else:
+        negatives.append(("本机缺 tz 数据库：必须判红而不是放过",
+                          [row("Asia/Shanghai", PROBE_ENV_DATE)], "Asia/Shanghai", "无法按时区"))
+        print("  [note] 本机没有 IANA tz 数据库，日期算式的正样本留给预演机")
+
+    for label, rows, expect in positives:
+        problems = check_environment_timezone(rows, expect)
+        if problems:
+            print("[SELFTEST FAIL] 时区正样本被误报：%s -> %s" % (label, problems))
+            failures += 1
+        else:
+            print("  [ok] 时区正样本：%s" % label)
+    for name, rows, expect, want in negatives:
+        problems = check_environment_timezone(rows, expect)
+        if not any(want in p for p in problems):
+            print("[SELFTEST FAIL] 时区反例没被拦下：%s -> %s" % (name, problems))
+            failures += 1
+        else:
+            print("  [ok] 反例被拦下：%s" % name)
+    return failures
 
 
 def selftest_search():
@@ -1026,7 +1292,7 @@ def ws_probe(session, problems):
                 cm["x-codex-ws-stream-request-start-ms"] = WS_OWN_STREAM_START
             payload = {"type": "response.create", "model": "gpt-5.4", "stream": True,
                        "prompt_cache_key": session, "client_metadata": cm,
-                       "input": [{"type": "message", "role": "user", "content": "hi %d" % turn}]}
+                       "input": resp_body(session, env_context=True)["input"]}
             sock.sendall(ws_frame(json.dumps(payload)))
             print("  sent: WS 第%d轮 response.create" % turn, flush=True)
             if not ws_drain(sock, 4):
@@ -1161,6 +1427,9 @@ def main():
     if not KEY or any(ch in KEY for ch in "\r\n"):
         print("需要通过 SUB2API_REHEARSAL_API_KEY 提供有效的预演凭据", file=sys.stderr)
         return 2
+    if not EXPECT_TZ:
+        print("需要 --expect-timezone=<IANA 名|none> 声明该账号出站应自报的时区", file=sys.stderr)
+        return 2
     cases = build_cases()
     start = sum(1 for _ in open(CAP))
     problems = []
@@ -1172,7 +1441,12 @@ def main():
     time.sleep(2)
 
     rows = [json.loads(l) for l in open(CAP)][start:]
-    http_rows = [r for r in rows if r.get("kind") == "http"]
+    def is_side_call(row):
+        return str(row.get("path", "")).startswith(SIDE_CALL_PREFIX)
+
+    all_http = [r for r in rows if r.get("kind") == "http"]
+    side_rows = [r for r in all_http if is_side_call(r)]
+    http_rows = [r for r in all_http if not is_side_call(r)]
     ws_rows = [r for r in rows if str(r.get("kind", "")).startswith("ws_")]
     print("\n== 捕获 %d 条 HTTP 出站 + %d 条 WS 事件 ==" % (len(http_rows), len(ws_rows)), flush=True)
     for r in http_rows:
@@ -1182,6 +1456,9 @@ def main():
 
     http_problems, devices = check_rows(http_rows, cases, cross_check=False)
     problems += http_problems
+    problems += check_side_calls(side_rows, http_rows + ws_rows)
+    problems += check_environment_timezone(http_rows, None if EXPECT_TZ == "none" else EXPECT_TZ)
+    problems += check_environment_timezone(ws_rows, None if EXPECT_TZ == "none" else EXPECT_TZ)
     for k, v in check_ws(ws_rows, problems).items():
         devices.setdefault(k, []).extend(v)
     problems += cross_device_problems(devices)
@@ -1195,7 +1472,7 @@ def main():
         for p in sorted(set(problems)):
             print("  [FAIL] " + p)
         return 1
-    print("  探针契约通过（%d HTTP 用例 + WS 两轮；第二轮窗口递增）" % len(cases))
+    print("  探针契约通过（%d HTTP 用例 + WS 两轮；第二轮窗口递增；侧信道 %d 条；时区期望 %s）" % (len(cases), len(side_rows), EXPECT_TZ))
     return 0
 
 

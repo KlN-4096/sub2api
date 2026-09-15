@@ -273,6 +273,38 @@ func TestRateLimitService_RecoverAccountState_CredentialsOnlyClearsErrorButKeeps
 	require.Equal(t, []int64{43}, cache.deletedIDs)
 }
 
+func TestRateLimitService_CredentialsOnlyKeepsGatewayCooldownAndRetryState(t *testing.T) {
+	account := &Account{ID: 44, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusError}
+	repo := &rateLimitClearRepoStub{getByIDAccount: account}
+	gateway := &OpenAIGatewayService{}
+	until := time.Now().Add(10 * time.Minute)
+	retryStarted := time.Now().Add(-30 * time.Second)
+	gateway.BlockAccountScheduling(account, until, "openai_403_temp")
+	gateway.openaiOAuth429RetryStartedAt.Store(account.ID, retryStarted)
+	svc := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	svc.SetAccountRuntimeBlocker(gateway)
+
+	result, err := svc.RecoverAccountAfterSuccessfulTest(context.Background(), account.ID, true)
+	require.NoError(t, err)
+	require.True(t, result.ClearedError)
+	require.False(t, result.ClearedRateLimit)
+	require.True(t, gateway.isOpenAIAccountRuntimeBlocked(account),
+		"这里只验探针不得主动清理；不改变请求调度器以持久化窗口为准的策略")
+	deadline, ok := gateway.openaiAccountRuntimeBlockUntil.Load(account.ID)
+	require.True(t, ok)
+	require.Equal(t, until, deadline)
+	started, ok := gateway.openaiOAuth429RetryStartedAt.Load(account.ID)
+	require.True(t, ok)
+	require.Equal(t, retryStarted, started)
+
+	// 真正跑通推理后的完整恢复仍须清掉内存状态，不能把禁清理扩大到旧路径。
+	_, err = svc.RecoverAccountAfterSuccessfulTest(context.Background(), account.ID, false)
+	require.NoError(t, err)
+	require.False(t, gateway.isOpenAIAccountRuntimeBlocked(account))
+	_, ok = gateway.openaiOAuth429RetryStartedAt.Load(account.ID)
+	require.False(t, ok)
+}
+
 func TestRateLimitService_RecoverAccountAfterSuccessfulTest_NoRecoverableStateIsNoop(t *testing.T) {
 	repo := &rateLimitClearRepoStub{
 		getByIDAccount: &Account{
