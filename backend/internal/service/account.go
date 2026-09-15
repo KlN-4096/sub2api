@@ -1363,6 +1363,14 @@ func (a *Account) GetOpenAIBaseURL() string {
 			}
 		}
 	}
+	// CPR 中继绝不回落官方端点：本函数有二十多个调用点，只要有一个漏了适配，
+	// 回落就等于把 CPR 的 client key 当成 OpenAI API key 明文发给 api.openai.com。
+	// 返回空串让调用方报错，比返回一个能连通的错误目标安全得多。
+	// 这里刻意用 Type 而非 IsCPR()：IsCPR() 还要求 platform==openai，若真出现
+	// 平台错配的 cpr 账号，只看 Type 才能保证它同样拿不到任何回落地址。
+	if a.Type == AccountTypeCPR {
+		return strings.TrimSpace(a.GetCredential(cprCredentialBaseURL))
+	}
 	if a.Type == AccountTypeAPIKey || a.Type == AccountTypeUpstream {
 		if baseURL := strings.TrimSpace(a.GetCredential("base_url")); baseURL != "" {
 			return baseURL
@@ -1898,7 +1906,8 @@ func (a *Account) SupportsOpenAIEndpointCapability(capability OpenAIEndpointCapa
 		// chatgpt.com/backend-api/codex/alpha/search，API key 走
 		// {base_url}/v1/alpha/search（见 openAIAlphaSearchURL），两类账号
 		// 都可承接独立搜索请求。上游不支持该端点时由转发层 failover 兜底。
-		if a.Type != AccountTypeOAuth && a.Type != AccountTypeAPIKey {
+		// CPR 中继走 {base_url}/v1/alpha/search，形状与 API key 一路相同。
+		if a.Type != AccountTypeOAuth && a.Type != AccountTypeAPIKey && a.Type != AccountTypeCPR {
 			return false
 		}
 	case OpenAIEndpointCapabilityEmbeddings:
@@ -2044,7 +2053,10 @@ func (a *Account) SupportsOpenAIImageCapability(capability OpenAIImagesCapabilit
 	case OpenAIImagesCapabilityAPIKey:
 		return a.Type == AccountTypeAPIKey
 	case OpenAIImagesCapabilityBasic, OpenAIImagesCapabilityNative:
-		return a.Type == AccountTypeOAuth || a.Type == AccountTypeSetupToken || a.Type == AccountTypeAPIKey
+		// cpr 走 {base_url}/v1/images/*（CPR openai/router.rs 的 images 路由），
+		// 形状与 API key 一路完全相同。
+		return a.Type == AccountTypeOAuth || a.Type == AccountTypeSetupToken ||
+			a.Type == AccountTypeAPIKey || a.Type == AccountTypeCPR
 	default:
 		return true
 	}
@@ -2121,6 +2133,11 @@ func (a *Account) IsOpenAIPassthroughEnabled() bool {
 	if a == nil || !a.IsOpenAI() || a.Extra == nil {
 		return false
 	}
+	// CPR 中继本身就是透传层，sub2api 再套一层没有意义；而且这个开关在前端
+	// 对 cpr 账号可见可点、编辑页却不显示，开了就关不掉。直接在这里关死。
+	if a.IsCPR() {
+		return false
+	}
 	if enabled, ok := a.Extra["openai_passthrough"].(bool); ok {
 		return enabled
 	}
@@ -2145,6 +2162,11 @@ func (a *Account) IsOpenAIPassthroughEnabled() bool {
 // 2. 分类型字段缺失时，回退兼容字段
 func (a *Account) IsOpenAIResponsesWebSocketV2Enabled() bool {
 	if a == nil || !a.IsOpenAI() || a.Extra == nil {
+		return false
+	}
+	// cpr 走 CPR 网关的 HTTP /v1/responses，没有 WS 上行；与透传开关同样关死，
+	// 否则恢复备份或手改 extra 命中下面的历史键就会造出一个每请求必报错的废号。
+	if a.IsCPR() {
 		return false
 	}
 	if a.IsOpenAIOAuthLike() {

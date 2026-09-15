@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -609,7 +610,9 @@ func (s *OpenAIGatewayService) ForwardImages(
 		return nil, fmt.Errorf("parsed images request is required")
 	}
 	switch account.Type {
-	case AccountTypeAPIKey:
+	// cpr 与 apikey 同一条：Bearer + {base_url}/v1/images/*。差别只在 buildOpenAIImagesRequest
+	// 里——cpr 的 base_url 为空时直接报错，绝不回落 api.openai.com。
+	case AccountTypeAPIKey, AccountTypeCPR:
 		return s.forwardOpenAIImagesAPIKey(ctx, c, account, body, parsed, channelMappedModel)
 	case AccountTypeOAuth, AccountTypeSetupToken:
 		return s.forwardOpenAIImagesOAuth(ctx, c, account, parsed, channelMappedModel)
@@ -826,6 +829,9 @@ func (s *OpenAIGatewayService) buildOpenAIImagesRequest(
 		targetURL = openAIImagesEditsURL
 	}
 	baseURL := account.GetOpenAIBaseURL()
+	if baseURL == "" && account.IsCPR() {
+		return nil, errors.New("cpr account requires credentials.base_url")
+	}
 	if baseURL != "" {
 		validatedURL, err := s.validateUpstreamBaseURL(baseURL)
 		if err != nil {

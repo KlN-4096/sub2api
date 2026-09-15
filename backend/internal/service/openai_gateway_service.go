@@ -1283,6 +1283,14 @@ func (s *OpenAIGatewayService) GetAccessToken(ctx context.Context, account *Acco
 			return "", "", errors.New("api_key not found in credentials")
 		}
 		return apiKey, "apikey", nil
+	case AccountTypeCPR:
+		// CPR 中继：凭据就是 CPR 的 client key，直接作为 Bearer 发给 CPR。
+		// 上游的真实 OAuth token 由 CPR 自己持有，sub2api 从不接触。
+		clientKey := account.GetCPRClientKey()
+		if clientKey == "" {
+			return "", "", errors.New("api_key not found in credentials")
+		}
+		return clientKey, "apikey", nil
 	default:
 		return "", "", fmt.Errorf("unsupported account type: %s", account.Type)
 	}

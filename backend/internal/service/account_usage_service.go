@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
@@ -296,6 +297,7 @@ type AccountUsageService struct {
 	grokQuotaFetcher        *GrokQuotaFetcher
 	grokQuotaService        *GrokQuotaService
 	openAIQuotaService      *OpenAIQuotaService
+	cprQuotaService         *CPRQuotaService
 	cache                   *UsageCache
 	identityCache           IdentityCache
 	tlsFPProfileService     *TLSFingerprintProfileService
@@ -314,6 +316,7 @@ func NewAccountUsageService(
 	cache *UsageCache,
 	identityCache IdentityCache,
 	tlsFPProfileService *TLSFingerprintProfileService,
+	cfg *config.Config,
 ) *AccountUsageService {
 	return &AccountUsageService{
 		accountRepo:             accountRepo,
@@ -324,9 +327,11 @@ func NewAccountUsageService(
 		grokQuotaFetcher:        grokQuotaFetcher,
 		grokQuotaService:        grokQuotaService,
 		openAIQuotaService:      openAIQuotaService,
-		cache:                   cache,
-		identityCache:           identityCache,
-		tlsFPProfileService:     tlsFPProfileService,
+		// CPR 适配器需要 cfg 才能对 admin_base_url 套同一套 URL 白名单策略。
+		cprQuotaService:     NewCPRQuotaService(cfg),
+		cache:               cache,
+		identityCache:       identityCache,
+		tlsFPProfileService: tlsFPProfileService,
 	}
 }
 
@@ -358,6 +363,15 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 		// Usage can come from a stored snapshot even when a probe fails. Neither
 		// that nor a working access token proves a rejected refresh token recovered.
 		return s.getOpenAIUsage(ctx, account, forceProbe)
+	}
+	// CPR 中继与 OAuth 共用 getOpenAIUsage：展示口径（codex_5h_* / codex_7d_*）相同，
+	// 数据源是 CPR 的 admin API。CPR 没有 refresh token，查到用量即可清可恢复错误。
+	if account.Platform == PlatformOpenAI && account.IsCPR() {
+		usage, err := s.getOpenAIUsage(ctx, account, forceProbe)
+		if err == nil {
+			s.tryClearRecoverableAccountError(ctx, account)
+		}
+		return usage, err
 	}
 
 	if account.Platform == PlatformGemini {
@@ -734,6 +748,10 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 					}
 				}
 			}
+		} else if account.IsCPR() {
+			// CPR 中继账号的额度只能从 CPR 的 admin API 拿：它会故意剥掉响应里的
+			// x-codex-primary-* 配额头，转发链上一个字节都读不到。
+			s.refreshCPRCodexSnapshot(ctx, account, usage, now)
 		} else if s.openAIQuotaService != nil {
 			// 普通 OAuth 账号同样从 /wham/usage 取额度——真实 Codex 客户端就是从这个
 			// 接口读的。此前这里向 /responses 发一条合成的 "hi" 推理请求、只为蹭响应头
@@ -793,7 +811,9 @@ func shouldRefreshOpenAICodexSnapshot(account *Account, usage *UsageInfo, now ti
 }
 
 func isOpenAICodexSnapshotStale(account *Account, now time.Time) bool {
-	if account == nil || !account.IsOpenAIOAuth() {
+	// CPR 中继账号共用同一套 codex_usage_updated_at 时效判定：它的额度同样是
+	// 拉回来的快照，只是数据源换成了 CPR 的 admin API。
+	if account == nil || (!account.IsOpenAIOAuth() && !account.IsCPR()) {
 		return false
 	}
 	// 普通与影子 OAuth 账号均通过 /wham/usage 刷新，与推理是否启用 WSv2 无关。

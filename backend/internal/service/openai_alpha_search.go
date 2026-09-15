@@ -595,7 +595,9 @@ func (s *OpenAIGatewayService) ensureOpenAIAlphaSearchAuthMetadata(ctx context.C
 // 不是把 404 透传给客户端，否则混合分组里 OAuth 账号明明可以承接搜索，
 // 请求却可能死在先被选中的 API key 账号上。
 func isOpenAIAlphaSearchEndpointUnsupported(account *Account, statusCode int) bool {
-	if account == nil || account.Type != AccountTypeAPIKey {
+	// cpr 与 apikey 走同一个 {base}/v1/alpha/search 形状，上游没实现该端点时
+	// 同样应该换号而不是把 404/405 直接甩给客户端。
+	if account == nil || (account.Type != AccountTypeAPIKey && account.Type != AccountTypeCPR) {
 		return false
 	}
 	return statusCode == http.StatusNotFound || statusCode == http.StatusMethodNotAllowed
@@ -738,6 +740,18 @@ func (s *OpenAIGatewayService) openAIAlphaSearchURL(account *Account) (string, e
 		baseURL := account.GetOpenAIBaseURL()
 		if baseURL == "" {
 			return openAIPlatformAlphaSearchURL, nil
+		}
+		validatedURL, err := s.validateUpstreamBaseURL(baseURL)
+		if err != nil {
+			return "", err
+		}
+		return buildOpenAIEndpointURL(validatedURL, "/v1/alpha/search"), nil
+	case AccountTypeCPR:
+		// CPR 的路径带 /v1 前缀（POST /v1/alpha/search）。同样不设默认值：
+		// 回落到官方端点会把 client key 发给 OpenAI。
+		baseURL := account.GetCPRGatewayBaseURL()
+		if baseURL == "" {
+			return "", fmt.Errorf("cpr account requires credentials.base_url")
 		}
 		validatedURL, err := s.validateUpstreamBaseURL(baseURL)
 		if err != nil {

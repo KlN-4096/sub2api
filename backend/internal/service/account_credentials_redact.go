@@ -7,6 +7,9 @@ var SensitiveCredentialKeys = []string{
 	"access_token", "refresh_token", "id_token", "agent_private_key",
 	// API Key 类
 	"api_key", "session_key", "cookie",
+	// CPR 中继：admin_api_key 是 CPR 网关的全控凭据（可增删账号、读全部上游 token），
+	// 权限远高于 client key，绝不能回显或落审计。
+	"admin_api_key",
 	// Grok Web SSO / password (must never persist or echo after Build OAuth)
 	"password", "sso_token", "sso", "sso-rw", "clearTextPassword",
 	// 云服务凭据

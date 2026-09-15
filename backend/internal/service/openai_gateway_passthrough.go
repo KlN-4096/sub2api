@@ -615,6 +615,20 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 			}
 			targetURL = buildOpenAIResponsesURLForPlatform(account.Platform, validatedURL)
 		}
+	case AccountTypeCPR:
+		baseURL := account.GetCPRGatewayBaseURL()
+		if baseURL == "" {
+			return nil, errors.New("cpr account requires credentials.base_url")
+		}
+		validatedURL, err := s.validateUpstreamBaseURL(baseURL)
+		if err != nil {
+			return nil, err
+		}
+		targetURL = buildOpenAIResponsesURL(validatedURL)
+	default:
+		// 不再静默沿用 openaiPlatformAPIURL：新增账号类型忘了适配时，
+		// 后果是把该类型的凭据发给 api.openai.com。宁可显式报错。
+		return nil, fmt.Errorf("unsupported account type for openai passthrough: %s", account.Type)
 	}
 	targetURL = appendOpenAIResponsesRequestPathSuffix(targetURL, openAIResponsesRequestPathSuffix(c))
 

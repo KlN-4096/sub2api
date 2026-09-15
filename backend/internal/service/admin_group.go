@@ -344,6 +344,15 @@ func groupSupportsOAuthOnlyFilter(platform string) bool {
 		platform == PlatformComposite
 }
 
+// accountAllowedInOAuthOnlyGroup 判定账号类型能否进入 require_oauth_only 分组。
+//
+// 这里刻意维持"黑名单"而非"只放行 OAuth 类"：upstream / bedrock / service_account
+// 历史上一直能进，改成白名单会动到 cpr 之外的既有渠道。cpr 与 apikey 同属
+// 「不是 OAuth 账号」，必须挡住。
+func accountAllowedInOAuthOnlyGroup(accountType string) bool {
+	return accountType != AccountTypeAPIKey && accountType != AccountTypeCPR
+}
+
 func groupSupportsOpenAIFast(platform string) bool {
 	return platform == PlatformOpenAI || platform == PlatformComposite
 }
@@ -633,7 +642,7 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		}
 		oauthIDs := make(map[int64]struct{}, len(accounts))
 		for _, acc := range accounts {
-			if acc.Type != AccountTypeAPIKey {
+			if accountAllowedInOAuthOnlyGroup(acc.Type) {
 				oauthIDs[acc.ID] = struct{}{}
 			}
 		}

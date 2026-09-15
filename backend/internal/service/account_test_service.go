@@ -865,6 +865,22 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 			return s.testOpenAIChatCompletionsConnection(c, account, testModelID, prompt, normalizedBaseURL, authToken)
 		}
 		apiURL = buildOpenAIResponsesURLForPlatform(credentialAccount.Platform, normalizedBaseURL)
+	} else if credentialAccount.IsCPR() {
+		// cpr 形状与 apikey 一致（Bearer + 自定义 base_url），差别只是绝不回落官方端点：
+		// base_url 为空直接报错，而不是把 CPR 的 client key 发给 api.openai.com。
+		authToken = credentialAccount.GetCPRClientKey()
+		if authToken == "" {
+			return s.sendErrorAndEnd(c, "No CPR client key available")
+		}
+		baseURL := credentialAccount.GetCPRGatewayBaseURL()
+		if baseURL == "" {
+			return s.sendErrorAndEnd(c, "cpr account requires credentials.base_url")
+		}
+		normalizedBaseURL, err := s.validateUpstreamBaseURL(baseURL)
+		if err != nil {
+			return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid base URL: %s", err.Error()))
+		}
+		apiURL = buildOpenAIResponsesURL(normalizedBaseURL)
 	} else {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Unsupported account type: %s", account.Type))
 	}

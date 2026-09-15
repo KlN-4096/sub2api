@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -151,6 +152,12 @@ func prepareNativeOpenAIInputTokensCountRequest(body []byte, account *Account) (
 
 func shouldEstimateOpenAIInputTokensLocally(account *Account) bool {
 	if account == nil || account.IsGrok() || account.IsCNProvider() || account.Type == AccountTypeUpstream {
+		return true
+	}
+	// CPR 中继：它的路由表（openai/router.rs:21-27）只有 responses / alpha_search /
+	// images / models，**没有 input_tokens**。原来的 `Type != apikey → false` 本意是
+	// "OAuth 走官方端点"，对中继账号是错的——会把 CPR 的 client key 发给 api.openai.com。
+	if account.IsCPR() {
 		return true
 	}
 	if account.Type != AccountTypeAPIKey {
@@ -434,7 +441,8 @@ func (s *OpenAIGatewayService) buildInputTokensUpstreamRequest(
 	token string,
 ) (*http.Request, error) {
 	targetURL := openaiPlatformAPIInputTokensURL
-	if account.Type == AccountTypeAPIKey {
+	switch account.Type {
+	case AccountTypeAPIKey:
 		if baseURL := account.GetOpenAIBaseURL(); strings.TrimSpace(baseURL) != "" {
 			validatedURL, err := s.validateUpstreamBaseURL(baseURL)
 			if err != nil {
@@ -442,6 +450,18 @@ func (s *OpenAIGatewayService) buildInputTokensUpstreamRequest(
 			}
 			targetURL = buildOpenAIResponsesInputTokensURL(validatedURL)
 		}
+	case AccountTypeCPR:
+		// CPR 中继绝不能回落到官方端点：client key 只对 CPR 网关有效，发给 OpenAI 就是凭据外泄。
+		// 注意不能加无差别 default——oauth / setup-token 合法使用官方 input_tokens 端点。
+		baseURL := account.GetCPRGatewayBaseURL()
+		if baseURL == "" {
+			return nil, errors.New("cpr account requires credentials.base_url")
+		}
+		validatedURL, err := s.validateUpstreamBaseURL(baseURL)
+		if err != nil {
+			return nil, err
+		}
+		targetURL = buildOpenAIResponsesInputTokensURL(validatedURL)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))

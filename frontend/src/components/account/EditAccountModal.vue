@@ -892,6 +892,35 @@
         </div>
       </div>
 
+      <!-- CPR 中继（密钥留空表示不修改） -->
+      <div v-if="account.type === 'cpr'" class="space-y-4">
+        <div>
+          <label class="input-label">{{ t('admin.accounts.cpr.baseUrl') }}</label>
+          <input v-model="editCprBaseUrl" type="text" class="input" placeholder="http://127.0.0.1:18081" />
+          <p class="input-hint">{{ t('admin.accounts.cpr.baseUrlHint') }}</p>
+        </div>
+        <div>
+          <label class="input-label">{{ t('admin.accounts.cpr.accountId') }}</label>
+          <input v-model="editCprAccountId" type="text" class="input font-mono" placeholder="acct_..." />
+          <p class="input-hint">{{ t('admin.accounts.cpr.accountIdHint') }}</p>
+        </div>
+        <div>
+          <label class="input-label">{{ t('admin.accounts.cpr.clientKey') }}</label>
+          <input v-model="editCprClientKey" type="password" autocomplete="off" class="input font-mono" placeholder="sk_..." />
+          <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }}</p>
+        </div>
+        <div>
+          <label class="input-label">{{ t('admin.accounts.cpr.adminApiKey') }}</label>
+          <input v-model="editCprAdminApiKey" type="password" autocomplete="off" class="input font-mono" placeholder="admin-..." />
+          <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }}</p>
+        </div>
+        <div>
+          <label class="input-label">{{ t('admin.accounts.cpr.adminBaseUrl') }}</label>
+          <input v-model="editCprAdminBaseUrl" type="text" class="input" :placeholder="editCprBaseUrl || 'http://127.0.0.1:18081'" />
+          <p class="input-hint">{{ t('admin.accounts.cpr.adminBaseUrlHint') }}</p>
+        </div>
+      </div>
+
       <!-- Vertex Service Account -->
       <div v-if="(account.platform === 'gemini' || account.platform === 'anthropic') && account.type === 'service_account'" class="space-y-4">
         <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -3391,6 +3420,12 @@ interface TempUnschedRuleForm {
 const submitting = ref(false)
 const editBaseUrl = ref('https://api.anthropic.com')
 const editApiKey = ref('')
+// CPR 中继：两把密钥留空表示保持不变，不回显明文。
+const editCprBaseUrl = ref('')
+const editCprAccountId = ref('')
+const editCprClientKey = ref('')
+const editCprAdminApiKey = ref('')
+const editCprAdminBaseUrl = ref('')
 
 // ── 国产供应商（Kimi / Zhipu / DeepSeek）account_mode / api_protocol 编辑 ──
 // account_mode 决定额度/余额监控路径，api_protocol 决定转发端点与格式；
@@ -4548,6 +4583,14 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   } else if (newAccount.type === 'upstream' && newAccount.credentials) {
     const credentials = newAccount.credentials as Record<string, unknown>
     editBaseUrl.value = (credentials.base_url as string) || ''
+  } else if (newAccount.type === 'cpr' && newAccount.credentials) {
+    const credentials = newAccount.credentials as Record<string, unknown>
+    editCprBaseUrl.value = (credentials.base_url as string) || ''
+    editCprAccountId.value = (credentials.cpr_account_id as string) || ''
+    editCprAdminBaseUrl.value = (credentials.admin_base_url as string) || ''
+    // 两把密钥不回显。
+    editCprClientKey.value = ''
+    editCprAdminApiKey.value = ''
   } else if ((newAccount.platform === 'gemini' || newAccount.platform === 'anthropic') && newAccount.type === 'service_account' && newAccount.credentials) {
     const credentials = newAccount.credentials as Record<string, unknown>
     editVertexProjectId.value = (credentials.project_id as string) || ''
@@ -5328,6 +5371,31 @@ const handleSubmit = async () => {
 
       // Add intercept warmup requests setting
       applyInterceptWarmup(newCredentials, interceptWarmupRequests.value, 'edit')
+      applyAccountSchedulingThresholdOverridePatch(newCredentials, currentCredentials)
+      if (!applyTempUnschedConfig(newCredentials)) {
+        return
+      }
+
+      updatePayload.credentials = newCredentials
+    } else if (props.account.type === 'cpr') {
+      const currentCredentials = (props.account.credentials as Record<string, unknown>) || {}
+      const newCredentials: Record<string, unknown> = { ...currentCredentials }
+
+      newCredentials.base_url = editCprBaseUrl.value.trim().replace(/\/+$/, '')
+      newCredentials.cpr_account_id = editCprAccountId.value.trim()
+      if (editCprAdminBaseUrl.value.trim()) {
+        newCredentials.admin_base_url = editCprAdminBaseUrl.value.trim().replace(/\/+$/, '')
+      } else {
+        delete newCredentials.admin_base_url
+      }
+      // 留空 = 保持原值，避免清空后无法恢复。
+      if (editCprClientKey.value.trim()) {
+        newCredentials.api_key = editCprClientKey.value.trim()
+      }
+      if (editCprAdminApiKey.value.trim()) {
+        newCredentials.admin_api_key = editCprAdminApiKey.value.trim()
+      }
+
       applyAccountSchedulingThresholdOverridePatch(newCredentials, currentCredentials)
       if (!applyTempUnschedConfig(newCredentials)) {
         return
