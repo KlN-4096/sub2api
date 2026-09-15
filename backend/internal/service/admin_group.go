@@ -1117,7 +1117,7 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 			}
 			oauthIDs := make(map[int64]struct{}, len(accounts))
 			for _, acc := range accounts {
-				if acc.Type != AccountTypeAPIKey {
+				if accountAllowedInOAuthOnlyGroup(acc.Type) {
 					oauthIDs[acc.ID] = struct{}{}
 				}
 			}

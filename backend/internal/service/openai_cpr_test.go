@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -643,4 +644,52 @@ func TestCPRUpstreamModelSync(t *testing.T) {
 	_, err = buildOpenAIAPIKeyModelsRequest(context.Background(),
 		&Account{Platform: PlatformOpenAI, Type: AccountTypeUpstream}, validate)
 	require.Error(t, err)
+}
+
+// --- 第三轮评审补测 ---
+
+// TestCPRPlatformMismatchStillNeverFallsBackToOfficial：守卫必须用 Type 而非
+// IsCPR()。IsCPR() 还要求 platform==openai，而 GetOpenAIBaseURL 对平台错配的
+// cpr 账号返回空串——此时 IsCPR() 为 false，守卫不触发，targetURL 停在
+// api.openai.com，而 GetAccessToken 会把 client key 发过去。
+func TestCPRPlatformMismatchStillNeverFallsBackToOfficial(t *testing.T) {
+	svc := cprTestService()
+	mismatched := newCPRTestAccount()
+	mismatched.Platform = PlatformAnthropic // 写入侧被 validateCPRAccountShape 拦住，这里模拟脏数据
+	delete(mismatched.Credentials, "base_url")
+
+	require.False(t, mismatched.IsCPR(), "前置：平台错配时 IsCPR() 为假")
+	require.Empty(t, mismatched.GetOpenAIBaseURL(), "前置：拿不到任何回落地址")
+
+	_, err := svc.buildOpenAIImagesRequest(context.Background(), newConvTestContext(t, []byte(`{}`)),
+		mismatched, []byte(`{}`), "application/json", cprTestClientKey, openAIImagesGenerationsEndpoint)
+	require.Error(t, err, "images 不得回落 api.openai.com")
+
+	_, err = svc.openAIChatCompletionsTargetURL(mismatched)
+	require.Error(t, err, "chat/completions 不得回落 api.openai.com")
+}
+
+// TestCPRImageTestConnectionNeverTargetsChatGPT：图片「测试连接」的分派此前只认
+// apikey，cpr 落到 OAuth 那条——它会设 req.Host = "chatgpt.com" 并发
+// GetOpenAIAccessToken()（该 getter 只按 platform 门控、不按 type）。
+func TestCPRImageTestConnectionNeverTargetsChatGPT(t *testing.T) {
+	account := newCPRTestAccount()
+	// 模拟改类型后残留的 OAuth 凭据：credentials 是 merge 不是 replace。
+	account.Credentials["access_token"] = "leftover-oauth-token"
+
+	require.True(t, account.Type == AccountTypeAPIKey || account.IsCPR(),
+		"cpr 必须命中 apikey 那条分派，否则会直连 chatgpt.com")
+	require.NotEmpty(t, account.GetCPRClientKey(), "apikey 那条对 cpr 用 client key")
+}
+
+// TestCPRBlockedFromOAuthOnlyGroupBothSites：require_oauth_only 的活判定有两处
+// （CreateGroup 与 UpdateGroup），第一轮只改了一处，PUT /admin/groups/:id 能绕过。
+func TestCPRBlockedFromOAuthOnlyGroupBothSites(t *testing.T) {
+	src, err := os.ReadFile("admin_group.go")
+	require.NoError(t, err)
+	body := string(src)
+	require.Equal(t, 2, strings.Count(body, "accountAllowedInOAuthOnlyGroup(acc.Type)"),
+		"CreateGroup 与 UpdateGroup 两处都必须走同一谓词")
+	require.NotContains(t, body, "if acc.Type != AccountTypeAPIKey {",
+		"不得残留只挡 apikey 的旧谓词")
 }

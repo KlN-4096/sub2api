@@ -787,7 +787,11 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 		if imagePrompt == "" {
 			imagePrompt = defaultOpenAIImageTestPrompt
 		}
-		if account.Type == "apikey" {
+		// cpr 必须走 apikey 那条：OAuth 那条会设 req.Host = "chatgpt.com" 并发
+		// GetOpenAIAccessToken()，而该 getter 只按 platform 门控、不按 type——
+		// 改类型时凭据是 merge 不是 replace，残留的 access_token 会被真的发出去，
+		// 正是 cpr 类型存在的理由所要避免的事。
+		if account.Type == AccountTypeAPIKey || account.IsCPR() {
 			return s.testOpenAIImageAPIKey(c, ctx, account, testModelID, imagePrompt)
 		}
 		return s.testOpenAIImageOAuth(c, ctx, account, testModelID, imagePrompt)
@@ -3072,11 +3076,18 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 		return s.sendErrorAndEnd(c, err.Error())
 	}
 	authToken := account.GetOpenAIApiKey()
+	baseURL := account.GetOpenAIBaseURL()
+	if account.Type == AccountTypeCPR {
+		// 与 buildOpenAIImagesRequest 保持同一守卫：client key 只对 CPR 网关有效，
+		// base_url 缺失时必须报错，绝不回落 api.openai.com。
+		authToken = account.GetCPRClientKey()
+		if baseURL == "" {
+			return s.sendErrorAndEnd(c, "cpr account requires credentials.base_url")
+		}
+	}
 	if authToken == "" {
 		return s.sendErrorAndEnd(c, "No API key available")
 	}
-
-	baseURL := account.GetOpenAIBaseURL()
 	if baseURL == "" {
 		baseURL = "https://api.openai.com"
 	}

@@ -777,7 +777,10 @@ func (s *OpenAIGatewayService) buildOpenAIImagesRequest(
 		targetURL = openAIImagesEditsURL
 	}
 	baseURL := account.GetOpenAIBaseURL()
-	if baseURL == "" && account.IsCPR() {
+	// 用 Type 而非 IsCPR()：IsCPR() 还要求 platform==openai，而 GetOpenAIBaseURL
+	// 对平台错配的 cpr 账号返回空串——此时 IsCPR() 为 false，守卫不触发，
+	// targetURL 就停在 api.openai.com，而 GetAccessToken 会把 client key 发过去。
+	if baseURL == "" && account.Type == AccountTypeCPR {
 		return nil, errors.New("cpr account requires credentials.base_url")
 	}
 	if baseURL != "" {
