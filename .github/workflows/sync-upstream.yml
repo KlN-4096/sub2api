@@ -1,0 +1,150 @@
+name: Sync upstream into klno
+
+# 上游 Wei-Shaw/sub2api 发新版标签后，把 klno 分支 rebase 到新标签、跑定向测试、
+# 打 <上游标签>-klno.N 标签并触发 release.yml 出包；同时检查 codex-rs 身份相关源码是否变动。
+# 冲突、测试失败、codex-rs 漂移都只让 run 失败（GitHub 邮件通知），不推送任何东西；fork 未开 issues。
+# 所以漂移检查必须排在推分支/推标签/触发 release 之前——排在后面等于包已经发出去才报错。
+# 每次运行还会把默认分支 main 重建成 upstream/main + 本文件：GitHub 的定时 workflow 只从默认
+# 分支触发，main 只是 cron 的宿主，没人同步它就会一直落后（仓库首页那条 "N commits behind"）。
+
+on:
+  schedule:
+    - cron: '17 3 * * *' # UTC，每天一次
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: '指定上游标签（留空=最新 vX.Y.Z）'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  UPSTREAM_REPO: Wei-Shaw/sub2api
+  FORK_BRANCH: klno
+  CODEX_PINNED_COMMIT: e763730
+  CODEX_IDENTITY_PATHS: >-
+    codex-rs/codex-api/src/requests/headers.rs
+    codex-rs/codex-api/src/endpoint/responses.rs
+    codex-rs/core/src/responses_metadata.rs
+    codex-rs/core/src/client.rs
+    codex-rs/core/src/session/session.rs
+    codex-rs/core/src/state/auto_compact_window.rs
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.FORK_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve upstream tag
+        id: up
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --tags --force upstream
+          if [ -n "${{ inputs.upstream_tag }}" ]; then
+            latest="${{ inputs.upstream_tag }}"
+          else
+            latest=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          fi
+          base=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${FORK_BRANCH}" | sed -E 's/-klno\.[0-9]+$//')
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "upstream latest=$latest, klno base=$base"
+
+      - name: Rebase klno onto upstream tag
+        id: rebase
+        if: steps.up.outputs.latest != steps.up.outputs.base
+        run: |
+          set -euo pipefail
+          git config user.name "klno-sync-bot"
+          git config user.email "klno-sync-bot@users.noreply.github.com"
+          if git rebase --onto "${{ steps.up.outputs.latest }}" "${{ steps.up.outputs.base }}" "${FORK_BRANCH}"; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U > /tmp/conflicts.txt || true
+            git rebase --abort
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fail on conflict
+        if: steps.rebase.outputs.conflict == 'true'
+        run: |
+          echo "::error title=sync-upstream conflict::rebase klno (${{ steps.up.outputs.base }}) onto ${{ steps.up.outputs.latest }} 冲突，需要人工处理，冲突文件见本步骤日志"
+          cat /tmp/conflicts.txt
+          exit 1
+
+      - name: Setup Go
+        if: steps.up.outputs.latest != steps.up.outputs.base
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Build and targeted tests
+        if: steps.up.outputs.latest != steps.up.outputs.base
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          go build ./...
+          go test ./internal/service -count=1 -run 'CodexFingerprintConvergence|CodexAccountIdentity|CodexFingerprint|OAuthPassthrough|BuildOpenAIWSHeaders|SetupTokenCompat|IngressSession' 2>&1 | grep -vE '"level":"(DEBUG|INFO|WARN)"' | tail -20
+
+      - name: Check codex-rs identity sources for drift
+        run: |
+          set -euo pipefail
+          git clone -q --filter=blob:none https://github.com/openai/codex.git /tmp/codex
+          cd /tmp/codex
+          head=$(git rev-parse --short HEAD)
+          changed=$(git diff --stat "${CODEX_PINNED_COMMIT}" HEAD -- ${CODEX_IDENTITY_PATHS} | tail -1 || true)
+          if [ -n "$changed" ]; then
+            git diff --stat "${CODEX_PINNED_COMMIT}" HEAD -- ${CODEX_IDENTITY_PATHS}
+            echo "::error title=codex-rs identity drift::被跟踪的 codex-rs 身份文件相对 ${CODEX_PINNED_COMMIT} 有变动（当前 ${head}），请核对 openai_codex_fingerprint_convergence.go 的恒等式，确认后更新 CODEX_PINNED_COMMIT。"
+            exit 1
+          fi
+          echo "codex identity sources unchanged since ${CODEX_PINNED_COMMIT}"
+
+      - name: Push rebased branch and tag, trigger release
+        if: steps.up.outputs.latest != steps.up.outputs.base
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git push --force-with-lease origin "${FORK_BRANCH}"
+          n=1
+          while git ls-remote --exit-code --tags origin "refs/tags/${{ steps.up.outputs.latest }}-klno.${n}" >/dev/null 2>&1; do n=$((n+1)); done
+          tag="${{ steps.up.outputs.latest }}-klno.${n}"
+          git tag -a "$tag" -m "klno build on upstream ${{ steps.up.outputs.latest }}"
+          git push origin "$tag"
+          # GITHUB_TOKEN 推的 tag 不会触发 release.yml，改用 workflow_dispatch；必须显式 --repo，否则 gh 会从 upstream remote 解析成上游仓库（403）
+          gh workflow run release.yml --repo "${GITHUB_REPOSITORY}" --ref "$tag" -f tag="$tag"
+          echo "released $tag"
+
+      - name: Resync default branch onto upstream
+        run: |
+          set -euo pipefail
+          git fetch --force origin main
+          git fetch --force upstream main
+          behind=$(git rev-list --count origin/main..upstream/main)
+          if [ "$behind" -eq 0 ]; then
+            echo "default branch already level with upstream/main"
+            exit 0
+          fi
+          # main 只承担一个职责：给 cron 当宿主。重建成 upstream/main + klno 那份本文件，
+          # 不保留 release.yml 推来的 "chore: sync VERSION to *-klno.*"——那是 klno 的版本号，
+          # 留在镜像分支上只会每次跟上游的 VERSION 打架。
+          git config user.name "klno-sync-bot"
+          git config user.email "klno-sync-bot@users.noreply.github.com"
+          git checkout -B main upstream/main
+          git checkout "${FORK_BRANCH}" -- .github/workflows/sync-upstream.yml
+          git commit -q -m "ci: host sync-upstream workflow on the default branch" || true
+          test -f .github/workflows/sync-upstream.yml # 丢了这个文件 cron 就停了
+          git push --force-with-lease origin main
+          echo "default branch resynced onto upstream/main ($(git rev-parse --short upstream/main)), was $behind behind"
