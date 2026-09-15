@@ -37,15 +37,20 @@ type ScheduledTestResult struct {
 	CredentialsOnly bool `json:"-"`
 }
 
+type ScheduledTestPlanLease interface {
+	Release() error
+}
+
 // ScheduledTestPlanRepository defines the data access interface for test plans.
 type ScheduledTestPlanRepository interface {
 	Create(ctx context.Context, plan *ScheduledTestPlan) (*ScheduledTestPlan, error)
 	GetByID(ctx context.Context, id int64) (*ScheduledTestPlan, error)
 	ListByAccountID(ctx context.Context, accountID int64) ([]*ScheduledTestPlan, error)
 	ListDue(ctx context.Context, now time.Time) ([]*ScheduledTestPlan, error)
+	TryClaimDue(ctx context.Context, plan *ScheduledTestPlan, now, nextRunAt time.Time) (ScheduledTestPlanLease, bool, error)
 	Update(ctx context.Context, plan *ScheduledTestPlan) (*ScheduledTestPlan, error)
 	Delete(ctx context.Context, id int64) error
-	UpdateAfterRun(ctx context.Context, id int64, lastRunAt time.Time, nextRunAt time.Time) error
+	MarkRunFinished(ctx context.Context, id int64, lastRunAt time.Time) error
 }
 
 // ScheduledTestResultRepository defines the data access interface for test results.

@@ -158,6 +158,11 @@ func TestShouldResolveCodexWireTimezone(t *testing.T) {
 		a.Extra[codexWireTimezoneResolvedExtraKey] = "Europe/Berlin"
 		a.Extra[codexWireTimezoneResolvedAtExtraKey] = at
 		a.Extra[codexWireTimezoneResolvedProxyExtraKey] = proxyTag
+		// 地理三项与时区同一次写回。没有它们就是本功能上线前解析过的老账号，
+		// 会被下面那条迁移闸门判成"要重解析"。
+		a.Extra[codexWireLocationCityExtraKey] = "Berlin"
+		a.Extra[codexWireLocationRegionExtraKey] = "Berlin"
+		a.Extra[codexWireLocationCountryExtraKey] = "DE"
 		return a
 	}
 
@@ -205,6 +210,23 @@ func TestShouldResolveCodexWireTimezone(t *testing.T) {
 	t.Run("unparsable_timestamp", func(t *testing.T) {
 		require.True(t, shouldResolveCodexWireTimezone(resolved("yesterday", "none"), resolved("yesterday", "none"), now))
 	})
+	// 地理三项上线前解析过的老账号：不补这条闸门，TTL 未到时最长 24h 拿不到地理，
+	// 这段时间 user_location 走的是删除分支，线上多一次形态跃迁。
+	t.Run("missing_geo_keys_triggers_migration_refresh", func(t *testing.T) {
+		a := resolved(fresh, "none")
+		require.False(t, shouldResolveCodexWireTimezone(a, a, now), "前置：地理齐全时不重解析")
+
+		for _, key := range []string{
+			codexWireLocationCityExtraKey, codexWireLocationRegionExtraKey, codexWireLocationCountryExtraKey,
+		} {
+			delete(a.Extra, key)
+		}
+		require.True(t, shouldResolveCodexWireTimezone(a, a, now), "老账号要补一次解析")
+
+		// 写过但为空（上游没返回城市）不算老账号，否则会无限重解析。
+		a.Extra[codexWireLocationCountryExtraKey] = ""
+		require.False(t, shouldResolveCodexWireTimezone(a, a, now))
+	})
 }
 
 func TestCodexWireTimezoneExtraUpdates(t *testing.T) {
@@ -214,17 +236,34 @@ func TestCodexWireTimezoneExtraUpdates(t *testing.T) {
 	account.ProxyID = &id
 	account.Proxy = &Proxy{ID: id, Protocol: "socks5", Host: "10.0.0.9", Port: 1080}
 
-	updates := codexWireTimezoneExtraUpdates(codexWireTimezoneProxyTag(account), "24.120.102.167", "America/Los_Angeles", now)
+	exit := codexWireExit{
+		ip: "24.120.102.167", timezone: "America/Los_Angeles",
+		city: "Las Vegas", region: "Nevada", country: "US",
+	}
+	updates := codexWireTimezoneExtraUpdates(codexWireTimezoneProxyTag(account), exit, now)
 	require.Equal(t, map[string]any{
 		codexWireTimezoneResolvedExtraKey:      "America/Los_Angeles",
 		codexWireTimezoneResolvedAtExtraKey:    "2026-03-01T12:00:00Z",
 		codexWireTimezoneResolvedIPExtraKey:    "24.120.102.167",
 		codexWireTimezoneResolvedProxyExtraKey: codexWireTimezoneProxyTag(account),
+		codexWireLocationCityExtraKey:          "Las Vegas",
+		codexWireLocationRegionExtraKey:        "Nevada",
+		codexWireLocationCountryExtraKey:       "US",
 	}, updates)
 
-	require.Nil(t, codexWireTimezoneExtraUpdates(codexWireTimezoneProxyTag(account), "1.2.3.4", "Mars/Olympus", now),
+	// 地理三项无条件写：只在非空时写会把上一次出口的城市留在 extra 里，
+	// 配上这次的新时区恰好凑出一组 codexWireLocation 认为"齐全"的错配值。
+	noGeo := codexWireTimezoneExtraUpdates(codexWireTimezoneProxyTag(account),
+		codexWireExit{ip: "1.2.3.4", timezone: "America/Denver"}, now)
+	require.Equal(t, "", noGeo[codexWireLocationCityExtraKey])
+	require.Equal(t, "", noGeo[codexWireLocationRegionExtraKey])
+	require.Equal(t, "", noGeo[codexWireLocationCountryExtraKey])
+
+	require.Nil(t, codexWireTimezoneExtraUpdates(codexWireTimezoneProxyTag(account),
+		codexWireExit{ip: "1.2.3.4", timezone: "Mars/Olympus"}, now),
 		"上游返回的时区名非法时保留旧值")
-	require.Nil(t, codexWireTimezoneExtraUpdates(codexWireTimezoneProxyTag(account), "1.2.3.4", "", now))
+	require.Nil(t, codexWireTimezoneExtraUpdates(codexWireTimezoneProxyTag(account),
+		codexWireExit{ip: "1.2.3.4"}, now))
 }
 
 func TestCodexDeviceWireProfileWSFrameRewritesTimezone(t *testing.T) {

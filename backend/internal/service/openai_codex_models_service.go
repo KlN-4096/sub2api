@@ -1784,9 +1784,9 @@ func (s *OpenAIGatewayService) buildCodexModelsManifestRequest(ctx context.Conte
 	}
 	headers.Set("Version", headerVersion)
 
-	proxyURL := ""
-	if account.ProxyID != nil && account.Proxy != nil {
-		proxyURL = account.Proxy.URL()
+	proxyURL, err := resolveConfiguredProxyURL(ctx, nil, account.ProxyID, account.Proxy)
+	if err != nil {
+		return openAIModelsRequest{}, nil, err
 	}
 
 	request := openAIModelsRequest{

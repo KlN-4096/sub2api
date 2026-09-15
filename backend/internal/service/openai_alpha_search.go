@@ -64,6 +64,11 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Co
 	}
 	SetOpsUpstreamModel(c, upstreamModel)
 
+	// settings.user_location 带的是客户端本机城市，与已按出口改写的 environment_context
+	// 时区自相矛盾。放在 PAT 分支之前：下面那条兜底会把这个字段搬进 Responses 的
+	// tools[].user_location，改在源头一次就够（openai_codex_wire_user_location.go）。
+	body = rewriteCodexAlphaSearchUserLocation(c, account, body)
+
 	// Codex Personal Access Token（at-...）目前可访问 ChatGPT Codex
 	// /responses，但会被 standalone /alpha/search 的 access enforcement
 	// 拒绝为 no_matching_rule。对 PAT 账号使用等价的 hosted web_search

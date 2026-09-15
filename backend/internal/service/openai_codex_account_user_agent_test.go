@@ -41,6 +41,13 @@ type quotaUserAgentTestRepo struct {
 	account *Account
 }
 
+func quotaUserAgentCallForTest(account *Account, fedRAMP bool) *openAIQuotaCall {
+	return &openAIQuotaCall{
+		account: account, forwardedRow: account, accessToken: "token",
+		chatGPTAccountID: "acct", fedRAMP: fedRAMP,
+	}
+}
+
 func (r *quotaUserAgentTestRepo) GetByID(_ context.Context, _ int64) (*Account, error) {
 	return r.account, nil
 }
@@ -54,7 +61,7 @@ func TestCodexQuotaHeadersFollowAccountUserAgent(t *testing.T) {
 		account.Extra[codexAccountUserAgentExtraKey] = configured
 		svc := &OpenAIQuotaService{accountRepo: &quotaUserAgentTestRepo{account: account}}
 
-		headers, _, err := svc.buildCodexQuotaHeaders(context.Background(), account.ID, "token", "acct", false)
+		headers, _, err := svc.buildCodexQuotaHeaders(quotaUserAgentCallForTest(account, false))
 
 		require.NoError(t, err)
 		require.Equal(t, resolveCodexOutboundIdentity(configured).userAgent, headers["user-agent"],
@@ -72,7 +79,7 @@ func TestCodexQuotaHeadersFollowAccountUserAgent(t *testing.T) {
 		require.NotEmpty(t, account.GetOpenAIUserAgent(), "取值路径确实读得到遗留字段")
 		svc := &OpenAIQuotaService{accountRepo: &quotaUserAgentTestRepo{account: account}}
 
-		headers, _, err := svc.buildCodexQuotaHeaders(context.Background(), account.ID, "token", "acct", false)
+		headers, _, err := svc.buildCodexQuotaHeaders(quotaUserAgentCallForTest(account, false))
 
 		require.NoError(t, err)
 		require.Equal(t, CodexCanonicalUserAgent(), headers["user-agent"])
@@ -90,7 +97,7 @@ func TestCodexQuotaHeadersFollowAccountUserAgent(t *testing.T) {
 		shadow.Extra[codexAccountUserAgentExtraKey] = own
 		svc := &OpenAIQuotaService{accountRepo: &quotaUserAgentTestRepo{account: shadow}}
 
-		headers, _, err := svc.buildCodexQuotaHeaders(context.Background(), shadow.ID, "token", "acct", false)
+		headers, _, err := svc.buildCodexQuotaHeaders(quotaUserAgentCallForTest(shadow, false))
 
 		require.NoError(t, err)
 		require.Contains(t, headers["user-agent"], "Mac OS 26.2.0", "取被转发行自己的 UA")
@@ -103,12 +110,12 @@ func TestCodexQuotaHeadersFollowAccountUserAgent(t *testing.T) {
 		account.Extra[codexAccountUserAgentExtraKey] = "codex-tui/0.140.0 (TestOS 12345; arm64) Terminal\r\nX-Injected: 1"
 		require.Empty(t, account.GetOpenAIUserAgent(), "含控制字符的配置整体忽略")
 		svc := &OpenAIQuotaService{accountRepo: &quotaUserAgentTestRepo{account: account}}
-		headers, _, err := svc.buildCodexQuotaHeaders(context.Background(), account.ID, "token", "acct", false)
+		headers, _, err := svc.buildCodexQuotaHeaders(quotaUserAgentCallForTest(account, false))
 		require.NoError(t, err)
 		require.Equal(t, CodexCanonicalUserAgent(), headers["user-agent"], "额度面也必须忽略无效配置")
 		account.Credentials["user_agent"] = "legacy-credential-ua"
 		require.Equal(t, "legacy-credential-ua", account.GetOpenAIUserAgent())
-		headers, _, err = svc.buildCodexQuotaHeaders(context.Background(), account.ID, "token", "acct", false)
+		headers, _, err = svc.buildCodexQuotaHeaders(quotaUserAgentCallForTest(account, false))
 		require.NoError(t, err)
 		require.Equal(t, CodexCanonicalUserAgent(), headers["user-agent"], "无效新配置不能启用遗留 UA 跟随")
 	})
@@ -117,7 +124,7 @@ func TestCodexQuotaHeadersFollowAccountUserAgent(t *testing.T) {
 		account := wireProfileTestAccount(true)
 		svc := &OpenAIQuotaService{accountRepo: &quotaUserAgentTestRepo{account: account}}
 
-		headers, _, err := svc.buildCodexQuotaHeaders(context.Background(), account.ID, "token", "acct", true)
+		headers, _, err := svc.buildCodexQuotaHeaders(quotaUserAgentCallForTest(account, true))
 
 		require.NoError(t, err)
 		require.Equal(t, CodexCanonicalUserAgent(), headers["user-agent"])
