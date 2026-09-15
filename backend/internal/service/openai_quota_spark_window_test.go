@@ -557,6 +557,11 @@ func TestQueryUsageIncludesResetCreditExpirations_EndToEnd(t *testing.T) {
 			detailCalls++
 			capturedBeta = r.Header.Get("OpenAI-Beta")
 			require.Equal(t, "org-parent123", r.Header.Get("ChatGPT-Account-ID"))
+			// 额度面与推理面自报同一个客户端身份，且不带任何浏览器语义头。
+			require.Equal(t, CodexCanonicalUserAgent(), r.Header.Get("User-Agent"))
+			for _, browserOnly := range []string{"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "priority", "oai-language", "originator"} {
+				require.Empty(t, r.Header.Get(browserOnly), "不应发浏览器语义头 %s", browserOnly)
+			}
 			_, _ = w.Write([]byte(`{"credits":[{"id":"secret-credit-id","expires_at":"2026-07-03T04:05:06Z"},{"expiresAt":"2026-07-04T04:05:06Z"}]}`))
 		default:
 			http.NotFound(w, r)
@@ -571,7 +576,9 @@ func TestQueryUsageIncludesResetCreditExpirations_EndToEnd(t *testing.T) {
 	require.NotNil(t, usage.RateLimitResetCredits)
 	require.Equal(t, 2, usage.RateLimitResetCredits.AvailableCount)
 	require.Equal(t, 1, detailCalls)
-	require.Equal(t, openaiQuotaCodexBeta, capturedBeta)
+	// 真实 Codex 查额度不发 OpenAI-Beta：backend-client/src/client.rs 的 headers()
+	// 只有 User-Agent / Authorization / ChatGPT-Account-Id / X-OpenAI-Fedramp。
+	require.Empty(t, capturedBeta)
 	require.Equal(t, []OpenAIRateLimitResetCreditDetail{
 		{ExpiresAt: "2026-07-03T04:05:06Z"},
 		{ExpiresAt: "2026-07-04T04:05:06Z"},
