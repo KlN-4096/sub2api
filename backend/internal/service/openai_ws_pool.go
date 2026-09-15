@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	coderws "github.com/coder/websocket"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -208,6 +209,15 @@ func (l *openAIWSConnLease) WriteJSONWithContextTimeout(ctx context.Context, val
 		return err
 	}
 	return conn.writeJSONWithTimeout(ctx, value, timeout)
+}
+
+// WriteTextWithContextTimeout 写出已序列化好的 JSON 文本帧（字节原样，见 openAIWSRawTextWriter）。
+func (l *openAIWSConnLease) WriteTextWithContextTimeout(ctx context.Context, payload []byte, timeout time.Duration) error {
+	conn, err := l.activeConn()
+	if err != nil {
+		return err
+	}
+	return conn.writeTextWithTimeout(ctx, payload, timeout)
 }
 
 func (l *openAIWSConnLease) WriteJSONContext(ctx context.Context, value any) error {
@@ -598,6 +608,40 @@ func (c *openAIWSConn) writeJSON(value any, writeCtx context.Context) error {
 		writeCtx = context.Background()
 	}
 	if err := c.ws.WriteJSON(writeCtx, value); err != nil {
+		return err
+	}
+	c.touch()
+	return nil
+}
+
+// writeTextWithTimeout 原样写出文本帧（双开专用）。连接实现不支持原始写时显式失败：退回
+// WriteJSON 会让字节重新经 wsjson 的 json.Encoder（HTML 转义 + 尾部换行），那正是这条路径
+// 要消除的差异，静默降级等于悄悄回归。生产连接 coderOpenAIWSClientConn 有编译期断言。
+func (c *openAIWSConn) writeTextWithTimeout(parent context.Context, payload []byte, timeout time.Duration) error {
+	select {
+	case <-c.closedCh:
+		return errOpenAIWSConnClosed
+	default:
+	}
+	writeCtx := parent
+	if writeCtx == nil {
+		writeCtx = context.Background()
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		writeCtx, cancel = context.WithTimeout(writeCtx, timeout)
+		defer cancel()
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if c.ws == nil {
+		return errOpenAIWSConnClosed
+	}
+	raw, ok := c.ws.(openAIWSRawTextWriter)
+	if !ok {
+		return fmt.Errorf("websocket connection %T does not support raw text frames", c.ws)
+	}
+	if err := raw.WriteFrame(writeCtx, coderws.MessageText, payload); err != nil {
 		return err
 	}
 	c.touch()

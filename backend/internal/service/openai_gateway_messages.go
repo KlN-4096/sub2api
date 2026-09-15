@@ -257,6 +257,12 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		if codexResult.PromptCacheKey != "" {
 			promptCacheKey = codexResult.PromptCacheKey
 		}
+		// 双开：把桥伪装成一个真客户端会话——先在入站侧合成客户端原始身份（会话/线程 v7、每轮 turn v7、
+		// 窗口、turn-metadata、默认 prompt_cache_key，见 openai_compat_bridge_identity.go），再交给下面与
+		// /responses 完全相同的账号隔离 → 指纹收敛 → 线协议投影管线派生出站；桥自己不再单独写任何会话头。
+		// 非双开桥零改动（不注入）。入站头在本函数返回时还原，避免漏给 failover 的下一账号。
+		bridgeRestore, bridgeIdentity := s.injectOpenAICompatBridgeIdentity(c, account, reqBody, promptCacheKey)
+		defer bridgeRestore()
 		applyCodexAccountIdentityClientMetadataMap(reqBody, codexAccountIdentitySource(c, account), apiKeyID)
 		// 指纹收敛：与 /responses 走同一套解析与暂存。此前 Messages 桥没有这一步，
 		// 同一个账号在两个端点上会报出两套不同的设备身份（体内是按账号命名空间哈希
@@ -267,8 +273,14 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 			applyCodexFingerprintClientMetadata(reqBody, fpIDs)
 		}
 		stageCodexFingerprintIDs(c, fpIDs)
-		delete(reqBody, "prompt_cache_key")
-		if shouldAutoInjectPromptCacheKeyForCompat(upstreamModel) {
+		if !bridgeIdentity {
+			// 基线：桥体不带 prompt_cache_key。双开桥的 prompt_cache_key 是合成身份的一部分（默认 PCK =
+			// session_id），已随 client_metadata 一起被账号隔离派生，与出站头 session-id 同值，保留。
+			delete(reqBody, "prompt_cache_key")
+		}
+		// 双开不跨轮回注 x-codex-turn-state：真客户端的 turn_state 是每轮一个 OnceLock（core/src/client.rs:285-292、
+		// turn_state.rs:140/:152），只在同一轮的重试里复用，新的一轮从不带上一轮的 blob；非双开维持基线的跨轮粘连。
+		if shouldAutoInjectPromptCacheKeyForCompat(upstreamModel) && !codexDeviceWireProfileEnabled(c, account) {
 			compatTurnState = s.getOpenAICompatSessionTurnState(ctx, c, account, promptCacheKey)
 		}
 		// OAuth codex transform forces stream=true upstream, so always use

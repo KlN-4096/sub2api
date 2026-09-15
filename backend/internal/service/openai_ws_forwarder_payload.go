@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/gin-gonic/gin"
@@ -230,34 +232,100 @@ func (s *OpenAIGatewayService) buildOpenAIWSCreatePayload(reqBody map[string]any
 // setOpenAIWSTurnMetadata fills missing frame metadata from the request headers.
 // A frame's own metadata includes its current turn/window, unlike a reused handshake.
 func setOpenAIWSTurnMetadata(payload map[string]any, turnMetadata string) {
+	setOpenAIWSClientMetadataIfMissing(payload, openAIWSTurnMetadataHeader, turnMetadata)
+}
+
+// codexWSStreamRequestStartKey：真客户端在发送前给每个 response.create 帧（含 generate=false
+// 的预热帧）盖时间戳（core/src/client.rs:1884 → :2103-2112 stamp_ws_stream_request_start_ms），
+// 值是 unix 毫秒的十进制字符串（client_metadata 是 HashMap<String,String>，common.rs:361）。
+// 语义是无条件覆盖（HashMap::insert）且在重试循环内（:1746 loop），每次 attempt 重新盖，
+// 注释也写明"发送到 socket 之前才盖，以捕获真实传输时延"（:2099-2101）。
+const codexWSStreamRequestStartKey = "x-codex-ws-stream-request-start-ms"
+
+// applyCodexWSFrameWireProfile 是双开账号 response.create 帧的收口，三条 WS 路径
+// （ctx_pool ingress / v2 / passthrough）与 v2 预热帧都在各自的发送边界调用：
+//  1. 客户端自己持有的 turn-state 放进 client_metadata——真客户端的位置（core/src/client.rs:
+//     1792-1793，OnceLock 有值才带），握手上不带（client.rs:1241）。帧自带的不覆盖，没有值不补；
+//     网关自己铸出/存储的值不进帧（真客户端拿不到那些值，见调用方 clientTurnState 注释）。
+//  2. 发送前无条件盖 x-codex-ws-stream-request-start-ms，与真客户端每次 attempt 重盖一致；
+//     转发客户端原帧时也重盖：那个戳记的是客户端到网关那一跳，出站这一跳的时刻才是上游读到的。
+//  3. 顶层字段按 ResponseCreateWsRequest 声明序（codex-api/src/common.rs:334-363）。
+//
+// client_metadata 存在但不是对象时不往里塞键（sjson 会把标量整个换成对象）。
+func applyCodexWSFrameWireProfile(c *gin.Context, account *Account, payload []byte, turnState string) []byte {
+	if !codexDeviceWireProfileEnabled(c, account) {
+		return payload
+	}
+	if eventType := gjson.GetBytes(payload, "type").String(); eventType != "" && eventType != "response.create" {
+		return payload
+	}
+	if meta := gjson.GetBytes(payload, "client_metadata"); !meta.Exists() || meta.IsObject() {
+		if turnState = strings.TrimSpace(turnState); turnState != "" {
+			existing := gjson.GetBytes(payload, "client_metadata."+openAICodexTurnStateHeader)
+			if existing.Type != gjson.String || strings.TrimSpace(existing.Str) == "" {
+				payload = setCodexWSClientMetadataString(payload, openAICodexTurnStateHeader, turnState)
+			}
+		}
+		payload = setCodexWSClientMetadataString(payload, codexWSStreamRequestStartKey,
+			strconv.FormatInt(time.Now().UnixMilli(), 10))
+	}
+	payload = rewriteCodexEnvironmentTimezoneWithName(codexWireTimezoneName(account), payload)
+	return reorderCodexTopLevelFields(payload, codexWSCreateFieldOrder)
+}
+
+// setCodexWSClientMetadataString 写 client_metadata 的字符串键：值先用不转义 HTML 的编码器
+// 编好再 SetRaw——sjson 对含非 ASCII/引号/反斜杠的值会退回 encoding/json.Marshal（EscapeHTML
+// 默认开），而真客户端出线走 serde_json::to_string，不转义。
+func setCodexWSClientMetadataString(payload []byte, key, value string) []byte {
+	raw, err := marshalOpenAIUpstreamJSON(value)
+	if err != nil {
+		return payload
+	}
+	next, err := sjson.SetRawBytes(payload, "client_metadata."+key, raw)
+	if err != nil {
+		return payload
+	}
+	return next
+}
+
+// writeCodexWSFrame 是 ctx_pool ingress / v2 / 预热共用的帧写出：双开帧的字节原样上线
+// （不经 wsjson 的 json.Encoder，它会 HTML 转义并追加换行），其余账号维持既有 WriteJSON 编码。
+func writeCodexWSFrame(ctx context.Context, c *gin.Context, account *Account, lease *openAIWSConnLease, payload []byte, timeout time.Duration) error {
+	if codexDeviceWireProfileEnabled(c, account) {
+		return lease.WriteTextWithContextTimeout(ctx, payload, timeout)
+	}
+	return lease.WriteJSONWithContextTimeout(ctx, json.RawMessage(payload), timeout)
+}
+
+func setOpenAIWSClientMetadataIfMissing(payload map[string]any, key, value string) {
 	if len(payload) == 0 {
 		return
 	}
-	metadata := strings.TrimSpace(turnMetadata)
-	if metadata == "" {
+	value = strings.TrimSpace(value)
+	if value == "" {
 		return
 	}
 
 	switch existing := payload["client_metadata"].(type) {
 	case map[string]any:
-		if current, ok := existing[openAIWSTurnMetadataHeader].(string); ok && strings.TrimSpace(current) != "" {
+		if current, ok := existing[key].(string); ok && strings.TrimSpace(current) != "" {
 			return
 		}
-		existing[openAIWSTurnMetadataHeader] = metadata
+		existing[key] = value
 		payload["client_metadata"] = existing
 	case map[string]string:
-		if strings.TrimSpace(existing[openAIWSTurnMetadataHeader]) != "" {
+		if strings.TrimSpace(existing[key]) != "" {
 			return
 		}
 		next := make(map[string]any, len(existing)+1)
 		for k, v := range existing {
 			next[k] = v
 		}
-		next[openAIWSTurnMetadataHeader] = metadata
+		next[key] = value
 		payload["client_metadata"] = next
 	default:
 		payload["client_metadata"] = map[string]any{
-			openAIWSTurnMetadataHeader: metadata,
+			key: value,
 		}
 	}
 }

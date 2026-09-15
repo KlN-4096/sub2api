@@ -223,7 +223,7 @@ func TestRateLimitService_RecoverAccountAfterSuccessfulTest_ClearsErrorAndRateLi
 	svc := NewRateLimitService(repo, nil, &config.Config{}, nil, cache)
 	svc.SetAccountRuntimeBlocker(blocker)
 
-	result, err := svc.RecoverAccountAfterSuccessfulTest(context.Background(), 42)
+	result, err := svc.RecoverAccountAfterSuccessfulTest(context.Background(), 42, false)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.True(t, result.ClearedError)
@@ -239,6 +239,40 @@ func TestRateLimitService_RecoverAccountAfterSuccessfulTest_ClearsErrorAndRateLi
 	require.Equal(t, []int64{42}, blocker.clearedIDs)
 }
 
+// 凭据探针（双开账号的 GET /models）的成功只清 StatusError，运行时窗口按到期自然解除。
+func TestRateLimitService_RecoverAccountState_CredentialsOnlyClearsErrorButKeepsRuntimeWindows(t *testing.T) {
+	resetAt := time.Now().Add(time.Hour)
+	repo := &rateLimitClearRepoStub{
+		getByIDAccount: &Account{
+			ID:                     43,
+			Status:                 StatusError,
+			RateLimitedAt:          &resetAt,
+			RateLimitResetAt:       &resetAt,
+			TempUnschedulableUntil: &resetAt,
+		},
+	}
+	cache := &tempUnschedCacheRecorder{}
+	svc := NewRateLimitService(repo, nil, &config.Config{}, nil, cache)
+
+	result, err := svc.RecoverAccountState(context.Background(), 43, AccountRecoveryOptions{CredentialsOnly: true})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.ClearedError)
+	require.False(t, result.ClearedRateLimit, "凭据可用证明不了限流/临时下线已解除")
+	require.Equal(t, 1, repo.clearErrorCalls)
+	require.Equal(t, 0, repo.clearRateLimitCalls)
+	require.Equal(t, 0, repo.clearTempUnschedCalls)
+	require.Equal(t, 0, repo.clearModelRateLimitCalls)
+	require.Empty(t, cache.deletedIDs)
+
+	// 正控：同一账号按"跑通推理"的成功恢复，窗口确实会被清。
+	result, err = svc.RecoverAccountAfterSuccessfulTest(context.Background(), 43, false)
+	require.NoError(t, err)
+	require.True(t, result.ClearedRateLimit)
+	require.Equal(t, 1, repo.clearRateLimitCalls)
+	require.Equal(t, []int64{43}, cache.deletedIDs)
+}
+
 func TestRateLimitService_RecoverAccountAfterSuccessfulTest_NoRecoverableStateIsNoop(t *testing.T) {
 	repo := &rateLimitClearRepoStub{
 		getByIDAccount: &Account{
@@ -251,7 +285,7 @@ func TestRateLimitService_RecoverAccountAfterSuccessfulTest_NoRecoverableStateIs
 	cache := &tempUnschedCacheRecorder{}
 	svc := NewRateLimitService(repo, nil, &config.Config{}, nil, cache)
 
-	result, err := svc.RecoverAccountAfterSuccessfulTest(context.Background(), 7)
+	result, err := svc.RecoverAccountAfterSuccessfulTest(context.Background(), 7, false)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.False(t, result.ClearedError)
@@ -276,7 +310,7 @@ func TestRateLimitService_RecoverAccountAfterSuccessfulTest_ClearErrorFailed(t *
 	}
 	svc := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 
-	result, err := svc.RecoverAccountAfterSuccessfulTest(context.Background(), 9)
+	result, err := svc.RecoverAccountAfterSuccessfulTest(context.Background(), 9, false)
 	require.Error(t, err)
 	require.Nil(t, result)
 	require.Equal(t, 1, repo.getByIDCalls)

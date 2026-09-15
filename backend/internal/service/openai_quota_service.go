@@ -207,6 +207,9 @@ func (s *OpenAIQuotaService) QueryUsage(ctx context.Context, accountID int64) (*
 	}
 
 	payload.FetchedAt = time.Now().Unix()
+	// 顺带解析出口时区，供双开账号改写请求体 environment_context
+	// （openai_quota_wire_timezone.go 内部按 24 小时 / 换代理节流；失败只记日志）。
+	s.refreshCodexWireTimezone(ctx, accountID)
 	details := s.queryResetCreditDetails(callCtx, client, accessToken, chatGPTAccountID, fedRAMP, accountID)
 	if details != nil {
 		payload.autoResetCandidates = details.AutoResetCandidates
@@ -556,11 +559,28 @@ func (s *OpenAIQuotaService) buildCodexQuotaHeaders(ctx context.Context, account
 		}
 		return headers, "", nil
 	}
+	// UA 取被转发的这一行，必须在解析凭证账号之前取：推理面读的也是被转发的行
+	// （openai_gateway_forward.go codexIdentityOverrideUA），影子行自己配了 UA 时
+	// 用母账号的值就又把两面拆开了。
+	forwardedRow := account
 	if account.IsShadow() {
 		if resolved, resolveErr := resolveCredentialAccount(ctx, s.accountRepo, account); resolveErr == nil && resolved != nil {
 			account = resolved
 		} else if strings.TrimSpace(accessToken) == "" {
 			return nil, "", fmt.Errorf("agent identity shadow credentials are unavailable")
+		}
+	}
+	// 额度面与推理面自报同一个客户端。必须过 resolveCodexOutboundIdentity：推理面的 UA
+	// 版本段会被重建成生效版本，这里直接写账号原值的话，同一账号在 /responses 报生效版本、
+	// 在 /wham/usage 报管理员填的历史版本，两面反而对不上。
+	//
+	// 只认新键 extra.codex_user_agent，不认遗留的 credentials.user_agent：后者是改动前就
+	// 存在的字段，跟着它走会让一批没启用本功能的老账号在 /wham/usage 上换 UA——那是本轮
+	// 不该有的字节变化。关闭强制统一身份时也整体不接管：那条路径上推理面保留账号原值的
+	// 版本段，这里再去重建就是反方向的不一致。
+	if codexIdentityEnforcement.Load() {
+		if ua := forwardedRow.getCodexUserAgentOverride(); ua != "" {
+			headers["user-agent"] = resolveCodexOutboundIdentity(ua).userAgent
 		}
 	}
 	if !account.IsOpenAIAgentIdentity() {
