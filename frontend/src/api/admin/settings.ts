@@ -643,6 +643,8 @@ export interface SystemSettings {
   openai_codex_client_type?: string;
   /** 只读：Desktop 模式下 appcast 同步的 App 版本号（仅 desktop 模式非空） */
   openai_codex_desktop_client_version_synced?: string;
+  /** 只读：Desktop 模式下 GitHub alpha prerelease 同步的内嵌 CLI 版本号（仅 desktop 模式非空） */
+  openai_codex_desktop_cli_version_synced?: string;
   // codex_cli_only 加固
   min_codex_version: string;
   max_codex_version: string;

@@ -2160,7 +2160,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_CodexClientTypeSwitchesIdentity(t
 	gin.SetMode(gin.TestMode)
 	// 身份快照/解析器是进程级全局状态：先重置，结束后恢复，避免污染其他用例。
 	resetCodexIdentityTestState := func() {
-		SetCodexClientType("")
+		ResetCodexClientTypeOverride()
 		SetCodexCanonicalUserAgentResolver(nil)
 		SetCodexDesktopCLIHeaderVersionResolver(nil)
 	}

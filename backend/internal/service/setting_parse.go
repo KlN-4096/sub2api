@@ -888,8 +888,18 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	result.OpenAICodexClientVersionSynced = NormalizeCodexClientVersion(settings[SettingKeyOpenAICodexClientVersionSynced])
 	// Desktop 模式下补充展示 appcast 同步的 App 版本号（UA 尾部标识组，独立 key，
 	// 与 CLI synced 值不同源）；无同步值时回退编译期兜底，保证前端始终有可展示的生效版本。
+	// Desktop 同步值直接取自设置表（纯同步结果，不含面板覆写优先级——覆写只影响
+	// 出站身份组装，不改变「同步值」这一展示语义）；同步值缺失时回编译期兜底，
+	// 保证前端始终有可展示的生效版本。
 	if IsCodexDesktopClient() {
-		result.OpenAICodexDesktopClientVersionSynced = s.GetOpenAICodexDesktopAppVersion(context.Background())
+		result.OpenAICodexDesktopClientVersionSynced = NormalizeCodexClientVersion(settings[SettingKeyOpenAICodexDesktopClientVersionSynced])
+		if result.OpenAICodexDesktopClientVersionSynced == "" {
+			result.OpenAICodexDesktopClientVersionSynced = codexDesktopAppVersion
+		}
+		result.OpenAICodexDesktopCLIVersionSynced = NormalizeCodexClientVersion(settings[SettingKeyOpenAICodexDesktopCLIVersionSynced])
+		if result.OpenAICodexDesktopCLIVersionSynced == "" {
+			result.OpenAICodexDesktopCLIVersionSynced = codexDesktopCLIVersion
+		}
 	}
 	// 自动同步默认开启：缺失/空值一律视为开启，与 enable_client_dateline_normalization 同一惯例。
 	if v, ok := settings[SettingKeyOpenAICodexVersionAutoSyncEnabled]; ok && v != "" {

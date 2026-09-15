@@ -244,15 +244,10 @@ func (s *OpenAICodexVersionSyncService) runOnceDesktop(ctx context.Context) {
 		SettingKeyOpenAICodexDesktopClientVersionSynced: nextApp,
 		SettingKeyOpenAICodexDesktopCLIVersionSynced:    nextCLI,
 	}
+	// SetMultiple 是单条 upsert 语句：写入失败即整批未生效，无需（也不应）回写——
+	// 用先前读到的旧值回写会与存储层的最新状态竞争，反而引入覆盖风险。
 	if err := s.settingRepo.SetMultiple(ctx, updates); err != nil {
 		slog.Warn("openai_codex_desktop_version_sync_persist_failed", "error", err)
-		// 防御性回退：即使存储层部分生效，也把两个键都写回更新前的值。
-		if rollbackErr := s.settingRepo.SetMultiple(ctx, map[string]string{
-			SettingKeyOpenAICodexDesktopClientVersionSynced: currentApp,
-			SettingKeyOpenAICodexDesktopCLIVersionSynced:    currentCLI,
-		}); rollbackErr != nil {
-			slog.Error("openai_codex_desktop_version_sync_rollback_failed", "error", rollbackErr)
-		}
 		return
 	}
 	s.settingService.InvalidateOpenAICodexClientVersionCache()

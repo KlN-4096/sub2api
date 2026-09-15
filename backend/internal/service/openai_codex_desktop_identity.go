@@ -96,6 +96,13 @@ func SetCodexClientType(clientType string) {
 	codexClientTypeOverride.Store(NormalizeCodexClientType(clientType))
 }
 
+// ResetCodexClientTypeOverride 清除显式覆盖快照，恢复为「解析器（DB 值）→ 默认 cli」
+// 取值链。测试清理请用本函数而非 SetCodexClientType("")：后者会留下一个显式 CLI
+// 覆盖，遮蔽注入解析器，导致依赖解析器的用例失真。
+func ResetCodexClientTypeOverride() {
+	codexClientTypeOverride.Store("")
+}
+
 // CurrentCodexClientType 返回当前生效的 Codex 出站客户端身份类型
 // （CodexClientTypeCLI / Desktop）。取值优先级：测试覆盖 → 注入解析器
 // （settings 值，60s TTL 缓存）→ 默认 cli。

@@ -20,7 +20,7 @@ func TestNormalizeCodexClientType(t *testing.T) {
 }
 
 func TestSetCodexClientTypeSnapshot(t *testing.T) {
-	t.Cleanup(func() { SetCodexClientType("") })
+	t.Cleanup(ResetCodexClientTypeOverride)
 
 	SetCodexClientType("desktop")
 	require.Equal(t, CodexClientTypeDesktop, CurrentCodexClientType())
@@ -86,7 +86,7 @@ func TestSetCodexDesktopUserAgentVersions(t *testing.T) {
 
 func TestResolveCodexOutboundIdentityDesktopDualVersion(t *testing.T) {
 	t.Cleanup(func() {
-		SetCodexClientType("")
+		ResetCodexClientTypeOverride()
 		SetCodexCanonicalUserAgentResolver(nil)
 		SetCodexDesktopCLIHeaderVersionResolver(nil)
 	})
@@ -157,7 +157,7 @@ func TestParseCodexDesktopPanelVersions(t *testing.T) {
 }
 
 func TestResolveCodexDesktopPanelVersionsPair(t *testing.T) {
-	t.Cleanup(func() { SetCodexClientType("") })
+	t.Cleanup(ResetCodexClientTypeOverride)
 
 	// 无面板值：两版本都回编译期兜底。
 	repo := newCodexVersionSyncSettingRepoStub(nil)
@@ -221,7 +221,7 @@ func TestFirstSparkleShortVersion(t *testing.T) {
 }
 
 func TestOpenAICodexDesktopSyncWritesAppcastVersion(t *testing.T) {
-	t.Cleanup(func() { SetCodexClientType("") })
+	t.Cleanup(ResetCodexClientTypeOverride)
 	SetCodexClientType("desktop")
 
 	repo := newCodexVersionSyncSettingRepoStub(nil)
@@ -245,7 +245,7 @@ func TestOpenAICodexDesktopSyncWritesAppcastVersion(t *testing.T) {
 }
 
 func TestOpenAICodexDesktopSyncWritesCLIVersionFromAlphaPrerelease(t *testing.T) {
-	t.Cleanup(func() { SetCodexClientType("") })
+	t.Cleanup(ResetCodexClientTypeOverride)
 	SetCodexClientType("desktop")
 
 	repo := newCodexVersionSyncSettingRepoStub(nil)
@@ -267,7 +267,7 @@ func TestOpenAICodexDesktopSyncWritesCLIVersionFromAlphaPrerelease(t *testing.T)
 }
 
 func TestOpenAICodexDesktopSyncPairedRollbackOnPartialSource(t *testing.T) {
-	t.Cleanup(func() { SetCodexClientType("") })
+	t.Cleanup(ResetCodexClientTypeOverride)
 	SetCodexClientType("desktop")
 
 	// 预置上一轮成对同步结果。
@@ -289,7 +289,7 @@ func TestOpenAICodexDesktopSyncPairedRollbackOnPartialSource(t *testing.T) {
 }
 
 func TestOpenAICodexDesktopSyncOnlyMovesForward(t *testing.T) {
-	t.Cleanup(func() { SetCodexClientType("") })
+	t.Cleanup(ResetCodexClientTypeOverride)
 	SetCodexClientType("desktop")
 
 	repo := newCodexVersionSyncSettingRepoStub(map[string]string{
@@ -306,7 +306,7 @@ func TestOpenAICodexDesktopSyncOnlyMovesForward(t *testing.T) {
 }
 
 func TestOpenAICodexDesktopSyncKeepsValueOnFetchFailure(t *testing.T) {
-	t.Cleanup(func() { SetCodexClientType("") })
+	t.Cleanup(ResetCodexClientTypeOverride)
 	SetCodexClientType("desktop")
 
 	repo := newCodexVersionSyncSettingRepoStub(nil)

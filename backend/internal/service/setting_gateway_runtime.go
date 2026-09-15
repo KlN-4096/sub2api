@@ -403,7 +403,10 @@ func (s *SettingService) GetOpenAICodexCanonicalUserAgent(ctx context.Context) s
 	version := s.GetOpenAICodexClientVersion(ctx)
 	ua := strings.TrimSpace(s.GetOpenAICodexUserAgent(ctx))
 	if IsCodexDesktopClient() {
-		if ua == "" {
+		// 面板 UA 为空，或恰为 CLI 默认形态（getter 对空值返回的兜底，并非真正自定义）
+		// 时都视为「未设置」：CLI 形态没有 Desktop 官方尾组，若当作已自定义重建失败，
+		// 出站会被钉死在单版本错配身份上。
+		if ua == "" || ua == DefaultOpenAICodexUserAgent {
 			return buildCodexDesktopUserAgent(version, s.GetOpenAICodexDesktopAppVersion(ctx))
 		}
 		if rebuilt := openai.SetCodexDesktopUserAgentVersions(ua, version, s.GetOpenAICodexDesktopAppVersion(ctx)); rebuilt != "" {

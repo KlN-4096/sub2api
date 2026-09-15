@@ -106,7 +106,7 @@ func TestCodexLiveOutboundIdentityManual(t *testing.T) {
 	// codexCLIUserAgentSuffix（既有指纹常量 `(Ubuntu 22.4.0; x86_64) xterm-256color`，
 	// 无尾组）+ GitHub 最新稳定版同步值——与切换 Desktop 前的出站行为完全一致。
 	reset := func() {
-		SetCodexClientType("")
+		ResetCodexClientTypeOverride()
 		SetCodexCanonicalUserAgentResolver(nil)
 	}
 	reset()

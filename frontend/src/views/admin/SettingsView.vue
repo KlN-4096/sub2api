@@ -10044,6 +10044,8 @@ const form = reactive<SettingsForm>({
   // Codex 出站客户端身份（cli|desktop），管理员面板可选、随表单保存
   openai_codex_client_type: "cli",
   openai_codex_desktop_client_version_synced: "",
+  // 只读展示：GitHub alpha prerelease 同步的内嵌 CLI 版本，不参与提交
+  openai_codex_desktop_cli_version_synced: "",
   // codex_cli_only 加固
   min_codex_version: "",
   max_codex_version: "",
@@ -11133,14 +11135,18 @@ function rewritePreviewTrailerVersion(ua: string, version: string): string {
   return ua.slice(0, open + 1) + name + "; " + version + ua.slice(close);
 }
 
-// Desktop 预览用的两个生效版本：CLI 版本（面板位置 1 → 内置快照兜底）、
-// App 版本（面板位置 2 → appcast 同步值 → 内置兜底）。
+// Desktop 预览用的两个生效版本：CLI 版本（面板位置 1 → alpha 同步值 → 内置快照兜底）、
+// App 版本（面板位置 2 → appcast 同步值 → 内置兜底），与后端取值链一致。
 const previewDesktopVersions = computed<[string, string]>(() => {
   const [panelCli, panelApp] = parseDesktopDualVersion(
     form.openai_codex_client_version || "",
   );
   const synced = form.openai_codex_desktop_client_version_synced?.trim() || "";
-  const cli = panelCli || "0.154.0-alpha.6.2";
+  const syncedCli =
+    form.openai_codex_desktop_cli_version_synced?.trim() || "";
+  const cli =
+    panelCli ||
+    (CODEX_VERSION_RE.test(syncedCli) ? syncedCli : "0.154.0-alpha.6.2");
   const app =
     panelApp ||
     (CODEX_VERSION_RE.test(synced) ? synced : "26.908.70816");
