@@ -24,18 +24,12 @@ var ErrSparkShadowResetNotSupported = infraerrors.New(http.StatusConflict, "SPAR
 
 // Endpoints used by the OpenAI/ChatGPT/Codex quota query and reset feature.
 const (
-	chatGPTUsageURL             = "https://chatgpt.com/backend-api/wham/usage"
-	chatGPTRateLimitCreditsURL  = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
-	chatGPTRateLimitResetURL    = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
-	openaiQuotaUpstreamTimeout  = 20 * time.Second
-	openaiQuotaCodexBeta        = "codex-1"
-	openaiQuotaCodexOriginator  = "Codex Desktop"
-	openaiQuotaCodexLanguageTag = "zh-CN"
-	openaiQuotaSecFetchSite     = "none"
-	openaiQuotaSecFetchMode     = "no-cors"
-	openaiQuotaSecFetchDest     = "empty"
-	openaiQuotaResetCreditsKey  = "codex_reset_credit_snapshot"
-	openaiQuotaCreditsKey       = "codex_credits_snapshot"
+	chatGPTUsageURL            = "https://chatgpt.com/backend-api/wham/usage"
+	chatGPTRateLimitCreditsURL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+	chatGPTRateLimitResetURL   = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
+	openaiQuotaUpstreamTimeout = 20 * time.Second
+	openaiQuotaResetCreditsKey = "codex_reset_credit_snapshot"
+	openaiQuotaCreditsKey      = "codex_credits_snapshot"
 )
 
 // OpenAIRateLimitWindow describes a single rate-limit window returned by
@@ -604,14 +598,10 @@ func buildCodexCommonHeaders(accessToken, chatGPTAccountID string, fedRAMP bool)
 	headers := map[string]string{
 		"authorization":      "Bearer " + accessToken,
 		"chatgpt-account-id": chatGPTAccountID,
-		"openai-beta":        openaiQuotaCodexBeta,
-		"oai-language":       openaiQuotaCodexLanguageTag,
-		"originator":         openaiQuotaCodexOriginator,
-		"accept":             "application/json",
-		"sec-fetch-site":     openaiQuotaSecFetchSite,
-		"sec-fetch-mode":     openaiQuotaSecFetchMode,
-		"sec-fetch-dest":     openaiQuotaSecFetchDest,
-		"priority":           "u=4, i",
+		// 与推理面同源的客户端身份。真实 Codex 查额度用的就是推理面那个
+		// User-Agent 构造函数（codex-rs backend-client/src/client.rs 的
+		// BackendClient::from_auth → get_codex_user_agent）。
+		"user-agent": CodexCanonicalUserAgent(),
 	}
 	if fedRAMP {
 		headers["x-openai-fedramp"] = "true"
@@ -652,14 +642,30 @@ func buildCodexSparkWindowExtraUpdates(usage *OpenAIQuotaUsage, now time.Time) m
 			break
 		}
 	}
-	if spark == nil {
+	return buildCodexWindowExtraUpdates(spark, now)
+}
+
+// buildCodexPrimaryWindowExtraUpdates 取 /wham/usage 顶层 rate_limit 的窗口，
+// 即普通 Codex 账号的额度。真实客户端也从这个接口读额度，网关据此不必再向
+// /responses 发合成推理请求去蹭响应头。
+func buildCodexPrimaryWindowExtraUpdates(usage *OpenAIQuotaUsage, now time.Time) map[string]any {
+	if usage == nil {
+		return nil
+	}
+	return buildCodexWindowExtraUpdates(usage.RateLimit, now)
+}
+
+// buildCodexWindowExtraUpdates 把一段 rate_limit 的 primary/secondary 窗口映射成
+// 规范的 codex_5h_* / codex_7d_* extra 键。spark 与普通账号只是取哪一段的差别。
+func buildCodexWindowExtraUpdates(limit *OpenAIRateLimit, now time.Time) map[string]any {
+	if limit == nil {
 		return nil
 	}
 
 	// Reuse OpenAICodexUsageSnapshot / Normalize to map primary/secondary windows
-	// to canonical 5h/7d buckets (same logic as probeOpenAICodexSnapshot).
+	// to canonical 5h/7d buckets (same logic as the legacy /responses probe).
 	snap := &OpenAICodexUsageSnapshot{}
-	if w := spark.PrimaryWindow; w != nil {
+	if w := limit.PrimaryWindow; w != nil {
 		p := w.UsedPercent
 		snap.PrimaryUsedPercent = &p
 		ra := int(w.ResetAfterSeconds)
@@ -667,7 +673,7 @@ func buildCodexSparkWindowExtraUpdates(usage *OpenAIQuotaUsage, now time.Time) m
 		wm := int(w.LimitWindowSeconds / 60)
 		snap.PrimaryWindowMinutes = &wm
 	}
-	if w := spark.SecondaryWindow; w != nil {
+	if w := limit.SecondaryWindow; w != nil {
 		p := w.UsedPercent
 		snap.SecondaryUsedPercent = &p
 		ra := int(w.ResetAfterSeconds)

@@ -50,6 +50,9 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		// Privacy client factory for OpenAI training opt-out
 		providePrivacyClientFactory,
 
+		// Codex backend client factory (quota face; no browser impersonation)
+		provideCodexBackendClientFactory,
+
 		// BuildInfo provider
 		provideServiceBuildInfo,
 		providePluginHostInfo,
@@ -65,6 +68,10 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 
 func providePrivacyClientFactory() service.PrivacyClientFactory {
 	return repository.CreatePrivacyReqClient
+}
+
+func provideCodexBackendClientFactory() service.CodexBackendClientFactory {
+	return repository.CreateCodexBackendReqClient
 }
 
 func provideServiceBuildInfo(buildInfo handler.BuildInfo) service.BuildInfo {

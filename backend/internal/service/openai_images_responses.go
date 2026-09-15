@@ -1834,6 +1834,16 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		return nil, err
 	}
 	upstreamCtx = withOpenAIImagesSelfBuiltRequest(upstreamCtx)
+	// 图片是自建 Responses body：先落设备载体，再允许线协议收口去掉独立安装头。
+	ids := resolveCodexFingerprintIDsFromRequest(c, account, nil)
+	stageCodexFingerprintIDs(c, ids)
+	if codexDeviceWireProfileEnabled(c, account) {
+		responsesBody, _, err = applyCodexFingerprintClientMetadataRaw(responsesBody, ids)
+		if err != nil {
+			return nil, fmt.Errorf("apply image device metadata: %w", err)
+		}
+		stageCodexConvergenceBodyIdentityRaw(c, codexAccountIdentitySource(c, account), responsesBody)
+	}
 	upstreamReq, err := s.buildUpstreamRequest(upstreamCtx, c, account, responsesBody, token, true, parsed.StickySessionSeed(), false)
 	if err != nil {
 		return nil, err
@@ -1850,7 +1860,8 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		if !parsed.Stream {
 			upstreamReq.Header.Set("Accept", "application/json")
 		}
-	} else {
+	} else if !codexDeviceWireProfileEnabled(c, account) {
+		// 双开账号按真 Codex 客户端收口：真客户端不发 OpenAI-Beta。
 		upstreamReq.Header.Set("OpenAI-Beta", "responses=experimental")
 	}
 

@@ -104,14 +104,18 @@ func TestShouldRefreshOpenAICodexSnapshot_SparkShadowIgnoresWSv2(t *testing.T) {
 		t.Fatal("expected fresh spark shadow to skip refresh (TTL not elapsed)")
 	}
 
-	// 反向对照:普通账号无 WSv2 + 过期时间戳→仍不刷(WSv2 门控普通账号的 probe 刷新)。
+	// 普通账号现在也读 /wham/usage，不能再用 WSv2 开关阻止过期快照刷新。
 	normalNoWS := &Account{
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Extra:    map[string]any{"codex_usage_updated_at": staleAt},
 	}
+	if !shouldRefreshOpenAICodexSnapshot(normalNoWS, usage, now) {
+		t.Fatal("expected stale ordinary OAuth snapshot to refresh without WSv2")
+	}
+	normalNoWS.Extra["codex_usage_updated_at"] = freshAt
 	if shouldRefreshOpenAICodexSnapshot(normalNoWS, usage, now) {
-		t.Fatal("expected non-WSv2 normal account to skip codex probe refresh")
+		t.Fatal("expected fresh ordinary OAuth snapshot to keep its TTL")
 	}
 }
 
