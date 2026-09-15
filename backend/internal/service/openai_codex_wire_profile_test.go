@@ -114,16 +114,19 @@ func TestCodexDeviceWireProfileImages(t *testing.T) {
 				require.Equal(t, wantInstall, gjson.GetBytes(up.lastBody, "client_metadata.x-codex-installation-id").String())
 				require.Empty(t, up.lastReq.Header.Get("x-codex-installation-id"))
 				require.Empty(t, up.lastReq.Header.Get("OpenAI-Beta"))
-				// 自建的 Responses body 同样要按真客户端的字段序出站（16ff14c common.rs:282）。
+				// 首键 model 是真客户端的既有事实（16ff14c common.rs:282）。
+				// gpt-image-2 命中 usesCodexDirectImages，上游 0.2.5 起走
+				// buildOpenAIImagesOAuthPayload 的 {model, client_metadata, prompt} 形状，
+				// 不再是 Responses 的 instructions/input/tools。这个 direct 形状真客户端
+				// 的完整字段序我们没有证据，所以只钉有证据的首键，不编造末键要求。
 				keys := topLevelKeys(t, up.lastBody)
 				require.Equal(t, "model", keys[0], "images 出站体首键必须是 model：%v", keys)
-				require.Less(t, indexOf(keys, "instructions"), indexOf(keys, "input"), "%v", keys)
-				require.Less(t, indexOf(keys, "input"), indexOf(keys, "tools"), "%v", keys)
-				require.Equal(t, "client_metadata", keys[len(keys)-1], "%v", keys)
 			} else {
 				require.False(t, gjson.GetBytes(up.lastBody, "client_metadata").Exists())
 				require.Equal(t, wantInstall, up.lastReq.Header.Get("x-codex-installation-id"))
-				require.Equal(t, "responses=experimental", up.lastReq.Header.Get("OpenAI-Beta"))
+				// gpt-image-2 命中 usesCodexDirectImages：上游 0.2.5 起 direct 走自建
+				// payload 与独立端点，一律不发 OpenAI-Beta。双开开关不影响这一点。
+				require.Empty(t, up.lastReq.Header.Get("OpenAI-Beta"))
 			}
 			require.Equal(t, resolveCodexOutboundIdentity("").version, up.lastReq.Header.Get("version"),
 				"version 是 provider 头（model-provider-info/src/lib.rs:397），钉到规范身份")
