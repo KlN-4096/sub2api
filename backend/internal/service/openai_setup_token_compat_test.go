@@ -68,6 +68,7 @@ func TestOpenAIGatewayServiceGetAccessTokenSetupToken(t *testing.T) {
 }
 
 func TestOpenAISetupTokenImagesUsesOAuthDirectPath(t *testing.T) {
+	requireCodexDirectImages(t)
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
