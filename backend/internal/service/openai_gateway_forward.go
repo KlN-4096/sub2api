@@ -36,6 +36,14 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
 		return nil, err
 	}
+	// 时区投影必须抢在任何规范化之前：上游 #7066 会从 input item 删掉
+	// internal_chat_message_metadata_passthrough（ChatGPT 拒收该字段），而本改写正是
+	// 靠它的 create_time 定位消息时刻、靠 content_item_kinds 判定哪段是 environment_context。
+	// 删掉之后再改写只会静默退化成 no-op。放在 prepareCodexAccountIdentitySource 之后是
+	// 因为双开判定读的就是它准备的身份来源。
+	// 各 builder 里的同名调用保留：图片等路径不经过 Forward；重复执行是幂等的
+	// （证据已被删 → no-op；未被删 → 值已是目标时区，next == text.Raw）。
+	body = rewriteCodexEnvironmentTimezone(c, account, body)
 	startTime := time.Now()
 	// 固定渠道映射后的请求级 canonical body；账号 normalize/strip 不得改写跨 failover hint。
 	canonicalImageIntentBody := body
