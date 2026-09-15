@@ -747,6 +747,11 @@ export default {
         codexFingerprintDevice: '仅设备',
         codexFingerprintSession: '设备+会话',
         codexFingerprintFull: '完全收敛',
+        codexUserAgent: 'Codex 出站 User-Agent',
+        codexUserAgentDesc: '该账号出站时自报的客户端标识，HTTP、WS 握手与额度查询共用。留空使用全局设置。'
+          + '要与该账号使用者的真实系统一致：UA 报 Windows、请求体里却是 Linux 路径和 shell，两者互相矛盾。'
+          + '版本号会被网关统一改写为生效版本，填什么都一样。',
+        codexUserAgentPlaceholder: '留空使用全局设置',
         codexImageTool: 'Codex 图片桥接策略',
         codexImageToolDesc:
           '统一控制 Codex /responses 文本请求的 hosted image_generation 桥接和客户端图片工具声明。hosted 工具自动注入仅适用于非 Responses Lite 请求；账号级策略优先于渠道和全局配置，不影响独立图片生成接口。',

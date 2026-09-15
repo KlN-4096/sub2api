@@ -1768,11 +1768,32 @@ func (a *Account) GetOpenAIProtocolAPIKey() string {
 	return a.GetOpenAIApiKey()
 }
 
+// codexAccountUserAgentExtraKey 账号级出站 User-Agent。放 extra 而不是 credentials：
+// 更新账号时后端整体替换 credentials，从前端提交该字段会有覆盖令牌的风险。
+const codexAccountUserAgentExtraKey = "codex_user_agent"
+
+// GetOpenAIUserAgent 返回账号级显式配置的出站 User-Agent：extra.codex_user_agent 优先，
+// 其次是历史的 credentials.user_agent；都没有时返回空串，由调用方回落到全局规范身份。
 func (a *Account) GetOpenAIUserAgent() string {
-	if !a.IsOpenAI() {
+	if a == nil || !a.IsOpenAI() {
 		return ""
 	}
+	if ua := a.getCodexUserAgentOverride(); ua != "" {
+		return ua
+	}
 	return a.GetCredential("user_agent")
+}
+
+// 额度面只跟随显式的新配置；共享校验，但不能因配置无效而跟随遗留凭据 UA。
+func (a *Account) getCodexUserAgentOverride() string {
+	if a == nil || !a.IsOpenAI() {
+		return ""
+	}
+	ua := strings.TrimSpace(a.GetExtraString(codexAccountUserAgentExtraKey))
+	if strings.ContainsFunc(ua, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return ""
+	}
+	return ua
 }
 
 func (a *Account) GetChatGPTAccountID() string {

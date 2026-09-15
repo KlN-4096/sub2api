@@ -93,7 +93,8 @@ func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 	s.sessionStore.Set(sessionID, session)
 
 	// Build authorization URL
-	authURL := openai.BuildAuthorizationURLForPlatform(state, codeChallenge, redirectURI, normalizedPlatform)
+	authURL := openai.BuildAuthorizationURLForPlatform(state, codeChallenge, redirectURI, normalizedPlatform,
+		resolveCodexOutboundIdentity("").originator)
 
 	return &OpenAIAuthURLResult{
 		AuthURL:   authURL,

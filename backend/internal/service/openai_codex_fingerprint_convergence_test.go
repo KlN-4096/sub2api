@@ -995,49 +995,81 @@ func TestCodexFingerprint_ImagesOAuthMatchesResponsesDeviceIdentity(t *testing.T
 		"图片入口与推理入口必须收敛到同一台设备")
 }
 
-// /alpha/search 只对已有的 turn-metadata 做设备收敛。边界依据：真实客户端在该端点
-// 只发 x-codex-turn-metadata 与 originator（codex-rs ext/web-search/src/tool.rs 的
+// /alpha/search 的 turn-metadata 走 MCP 投影，不是 Responses 那一套。边界依据：真实客户端
+// 在该端点只发 x-codex-turn-metadata 与 originator（codex-rs ext/web-search/src/tool.rs 的
 // search_request_headers），不发会话头，故不能顺手补入 Responses 的那一套。
-func TestCodexFingerprint_AlphaSearchConvergesTurnMetadataDeviceOnly(t *testing.T) {
+//
+// 双开与单开在该端点的形态不同，两条都要钉住：
+//
+//	双开：走 MCP 投影。真客户端的模板传的是 installation_id="" / window_id=""，且
+//	     request_kind 为 None 使 has_request_identity=false，于是 installation_id、
+//	     window_id、window_number、context_window_id 被 skip_serializing_if 整个省略
+//	     （16ff14c: core/src/turn_metadata.rs mcp_metadata_template + current_meta_value_for_mcp_request
+//	     里显式 remove 的 agent_name / parent_turn_id / root_turn_id 同理）。省略比补一个
+//	     收敛值更接近真实形态——没有字段就没有可关联的设备标识。
+//	单开：维持既有行为，仍按设备收敛改写 installation_id。
+func TestCodexFingerprint_AlphaSearchTurnMetadataUsesMCPProjection(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-
-	// 双开，与 pro1 线上配置一致。
-	account := newTestOAuthAccount(4502, map[string]any{
-		codexFingerprintModeExtraKey:        "device",
-		codexFingerprintConvergenceExtraKey: true,
-	})
-	account.Name = "oauth-search"
-	account.Status = StatusActive
-	account.Schedulable = true
-	account.Concurrency = 1
-	account.Credentials = map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"}
 
 	svc := &OpenAIGatewayService{cfg: &config.Config{}, toolCorrector: NewCodexToolCorrector()}
 	// 单看「结果 != 客户端原值」不足以证明收敛：账号 scope 本身就会改掉原值，但它是按原值
 	// 派生的，每个客户端各不相同。device 收敛的定义是不同客户端落到同一台设备，故这里用
 	// 两个不同的客户端安装标识跑两遍比对。
-	run := func(clientInstall string) *http.Request {
+	run := func(account *Account, clientInstall string) *http.Request {
 		rec := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(rec)
 		c.Request = httptest.NewRequest(http.MethodPost, "/v1/alpha/search", bytes.NewReader(nil))
 		c.Request.Header.Set("originator", "codex-tui")
 		c.Request.Header.Set("X-Codex-Turn-Metadata",
-			`{"installation_id":"`+clientInstall+`","session_id":"session-`+clientInstall+`"}`)
+			`{"installation_id":"`+clientInstall+`","session_id":"session-`+clientInstall+`","window_id":"w:0","root_turn_id":"r"}`)
 		req, err := svc.buildOpenAIAlphaSearchRequest(context.Background(), c, account, []byte(`{"query":"x"}`), "oauth-token")
 		require.NoError(t, err)
 		return req
 	}
+	newAccount := func(id int64, convergence bool) *Account {
+		account := newTestOAuthAccount(id, map[string]any{
+			codexFingerprintModeExtraKey:        "device",
+			codexFingerprintConvergenceExtraKey: convergence,
+		})
+		account.Name = "oauth-search"
+		account.Status = StatusActive
+		account.Schedulable = true
+		account.Concurrency = 1
+		account.Credentials = map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"}
+		return account
+	}
 
-	reqA, reqB := run("client-install-A"), run("client-install-B")
-	installA := gjson.Get(reqA.Header.Get("X-Codex-Turn-Metadata"), "installation_id").String()
-	installB := gjson.Get(reqB.Header.Get("X-Codex-Turn-Metadata"), "installation_id").String()
-	require.NotEmpty(t, installA)
-	require.NotEqual(t, "client-install-A", installA, "不得原样透传客户端安装标识")
-	require.Equal(t, installA, installB, "device 模式下不同客户端必须收敛到同一台设备")
-	// 边界：不得补入 Responses 的会话头。
-	require.Empty(t, reqA.Header.Get("session-id"))
-	require.Empty(t, reqA.Header.Get("thread-id"))
-	require.Empty(t, reqA.Header.Get("x-client-request-id"))
+	t.Run("双开走 MCP 投影", func(t *testing.T) {
+		// 与 pro1 线上配置一致。
+		reqA := run(newAccount(4502, true), "client-install-A")
+		metadata := reqA.Header.Get("X-Codex-Turn-Metadata")
+		for _, field := range []string{"installation_id", "window_id", "window_number", "context_window_id",
+			"agent_name", "parent_turn_id", "root_turn_id"} {
+			require.False(t, gjson.Get(metadata, field).Exists(), "MCP 投影不发 %s：%s", field, metadata)
+		}
+		// 边界：只删 Responses 专属字段，会话身份仍在（且已按账号隔离改写）。
+		session := gjson.Get(metadata, "session_id")
+		require.True(t, session.Exists(), metadata)
+		require.NotEqual(t, "session-client-install-A", session.String(), "不得原样透传客户端会话")
+	})
+
+	t.Run("单开维持设备收敛", func(t *testing.T) {
+		account := newAccount(4503, false)
+		reqA, reqB := run(account, "client-install-A"), run(account, "client-install-B")
+		installA := gjson.Get(reqA.Header.Get("X-Codex-Turn-Metadata"), "installation_id").String()
+		installB := gjson.Get(reqB.Header.Get("X-Codex-Turn-Metadata"), "installation_id").String()
+		require.NotEmpty(t, installA)
+		require.NotEqual(t, "client-install-A", installA, "不得原样透传客户端安装标识")
+		require.Equal(t, installA, installB, "device 模式下不同客户端必须收敛到同一台设备")
+	})
+
+	// 边界：两种配置都不得补入 Responses 的会话头。
+	for _, account := range []*Account{newAccount(4502, true), newAccount(4503, false)} {
+		req := run(account, "client-install-A")
+		require.Empty(t, req.Header.Get("session-id"))
+		require.Empty(t, req.Header.Get("thread-id"))
+		require.Empty(t, req.Header.Get("x-client-request-id"))
+	}
 }
 
 // codex 复核四 #1：真实客户端的搜索请求体 id 就是会话 ID，与随请求发出的

@@ -1290,7 +1290,7 @@ func (h *AccountHandler) Test(c *gin.Context) {
 	}
 
 	if h.rateLimitService != nil {
-		if _, err := h.rateLimitService.RecoverAccountAfterSuccessfulTest(c.Request.Context(), accountID); err != nil {
+		if _, err := h.rateLimitService.RecoverAccountAfterSuccessfulTest(c.Request.Context(), accountID, service.AccountTestCredentialsOnly(c)); err != nil {
 			_ = c.Error(err)
 		}
 	}

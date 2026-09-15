@@ -424,6 +424,10 @@ func normalizeOpenAICompactRequestBody(body []byte) ([]byte, bool, error) {
 	// 省略），而 store / stream 确实不在该结构里。本函数在 handler 里执行，
 	// 那时还没选出账号（failover 还会换账号），所以只放行不裁剪；是否保留、
 	// 如何做账号隔离由 service 层按账号收口（applyCodexCompactPromptCacheKey）。
+	//
+	// access_programs 同理（CompactionInput.access_programs，common.rs:65）。它在
+	// /responses 上本来就一路原样透传（那条路径没有任何字段裁剪），compact 单独丢弃
+	// 会让同一个账号在两个端点上声明不同的准入等级——那才是确凿的形态矛盾。
 	for _, field := range []string{
 		"model",
 		"input",
@@ -435,6 +439,7 @@ func normalizeOpenAICompactRequestBody(body []byte) ([]byte, bool, error) {
 		"text",
 		"previous_response_id",
 		"prompt_cache_key",
+		"access_programs",
 	} {
 		value := gjson.GetBytes(body, field)
 		if !value.Exists() {

@@ -455,9 +455,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		// x-codex-turn-state 溯源：下游回传由 writeOpenAIPassthroughResponseHeaders
 		// 在各 handler 的写头点强制放行，铸造账号在此统一记录，供出站守卫剥离
 		// failover 换号后的跨账号回带（openai_codex_turn_state.go）。
-		if extractOpenAICodexTurnState(resp.Header) != "" {
-			s.noteOpenAICodexTurnStateProvenance(c, account)
-		}
+		s.noteOpenAICodexTurnStateOrigin(c, account, extractOpenAICodexTurnState(resp.Header))
 
 		if reqStream {
 			result, handleErr := s.handleStreamingResponsePassthrough(ctx, resp, c, account, startTime, reqModel, upstreamPassthroughModel)
@@ -623,9 +621,29 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	// DeepSeek / Kimi 原生 Responses 端点为无状态实现（见 normalizeDeepSeekResponsesRequestBody）。
 	body = normalizeDeepSeekResponsesRequestBody(account, body)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
+	body, err := filterCodexCompactAccessPrograms(c, account, body)
+	if err != nil {
+		return nil, fmt.Errorf("filter compact access programs: %w", err)
+	}
+
+	// 与非透传路径同一条规则。透传的入站若本就是真客户端形态，这一步是恒等变换。
+	body = applyCodexBodyFieldOrder(c, account, targetURL, body)
+
+	// 双开出站时区收口：真客户端把本机时区与当天日期写进 environment_context，客户端在国内、
+	// 出口在美国时两者矛盾。按出口时区改写这两个标签（openai_codex_wire_timezone.go）。
+	body = rewriteCodexEnvironmentTimezone(c, account, body)
+
+	// 上线字节：双开 /responses 的请求体按真客户端默认做 zstd 压缩，与非透传路径同一条规则。
+	wireBody, contentEncoding, err := compressCodexRequestBody(c, account, targetURL, body)
 	if err != nil {
 		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(wireBody))
+	if err != nil {
+		return nil, err
+	}
+	if contentEncoding != "" {
+		req.Header.Set("Content-Encoding", contentEncoding)
 	}
 	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
 
@@ -744,6 +762,10 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	setOpenAICodexRoutingHintFromBody(req.Header, account, body)
 	applyCodexDeviceWireProfile(c, account, req.Header, false)
 	logOpenAIRoutingDiagnosticsFromBody(ctx, account, "http_passthrough", req.Header, body, "not_applicable")
+
+	// 侧信道：按真客户端节奏补一条只读 GET settings/user（openai_codex_side_calls.go）。
+	// 异步执行，读已定稿的身份头，不改本请求。
+	s.scheduleCodexSideCalls(c, account, req)
 
 	return req, nil
 }

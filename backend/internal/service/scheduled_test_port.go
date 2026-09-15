@@ -31,6 +31,10 @@ type ScheduledTestResult struct {
 	StartedAt    time.Time `json:"started_at"`
 	FinishedAt   time.Time `json:"finished_at"`
 	CreatedAt    time.Time `json:"created_at"`
+	// CredentialsOnly：本次只验证了凭据（双开账号的 GET /models 探针），没有跑推理。
+	// 仓库层按显式列清单写入结果表，本字段不在其中；runner 据此只按凭据范围恢复账号状态
+	// （AccountRecoveryOptions.CredentialsOnly）。
+	CredentialsOnly bool `json:"-"`
 }
 
 // ScheduledTestPlanRepository defines the data access interface for test plans.

@@ -1534,6 +1534,10 @@ type openAIModelsRequest struct {
 	credentialAccount   *Account
 	accountConcurrency  int
 	useAPIKeyUpstream   bool
+	// forceHTTP2：双开账号的 /models 与该账号的 /responses 转发走同一协议（h2）。
+	// httpclient 的 transport 设了自定义 DialContext，不强制就会退回 HTTP/1.1，
+	// 同一账号同一主机上出现两种协议画像。
+	forceHTTP2 bool
 	// Cached bodies have already been converted to their requested format.
 	standardModelsList bool
 }
@@ -1623,12 +1627,76 @@ func (c *openAIModelsCache) set(key string, manifest *OpenAIModelsResponse, now 
 // passed through verbatim. Custom API key manifests receive only the narrowly
 // scoped compatibility adjustments required by custom-provider Codex clients.
 func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, account *Account, clientVersion, ifNoneMatch string) (*OpenAIModelsResponse, error) {
+	request, credAccount, err := s.buildCodexModelsManifestRequest(ctx, account, clientVersion)
+	if err != nil {
+		return nil, err
+	}
+	if request.useAPIKeyUpstream {
+		return s.fetchCachedOpenAIModels(ctx, request, s.fetchCodexModelsManifestUpstreamForRequest(request), ifNoneMatch)
+	}
+	return s.fetchCachedOpenAIModels(ctx, request, s.codexModelsOAuthFetch(request, account, credAccount, true), ifNoneMatch)
+}
+
+// codexModelsOAuthFetch 是 OAuth /models 的实际取数闭包，转发与探针共用：agent identity
+// 的 task 失效两侧都恢复后重试。noteAuthErrors 为真（转发）时 401 走转发侧的状态机
+// （handleCodexModelsManifestAccountAuthError：临时下线 + runtime block）；探针传假——它的失败侧
+// 由 testOpenAICodexFreshSessionProbe 按原 /responses 探针的规则写账号状态（401→SetError、
+// 429→限流窗口），与成功侧的 CredentialsOnly 恢复（只清 StatusError）对称。
+func (s *OpenAIGatewayService) codexModelsOAuthFetch(request openAIModelsRequest, account, credAccount *Account, noteAuthErrors bool) func(context.Context, string) (*OpenAIModelsResponse, error) {
+	return func(fetchCtx context.Context, ifNoneMatch string) (*OpenAIModelsResponse, error) {
+		manifest, fetchErr := s.fetchCodexModelsManifestUpstream(fetchCtx, request, ifNoneMatch)
+		if !credAccount.IsOpenAIAgentIdentity() || !isAgentIdentityTaskInvalidCodexModelsError(fetchErr) {
+			if noteAuthErrors {
+				s.handleCodexModelsManifestAccountAuthError(fetchCtx, account, credAccount, fetchErr)
+			}
+			return manifest, fetchErr
+		}
+		expectedTaskID := strings.TrimSpace(credAccount.GetCredential("task_id"))
+		if recoverErr := s.recoverAgentIdentityTask(fetchCtx, credAccount, expectedTaskID); recoverErr != nil {
+			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_AUTH_FAILED", "agent identity task recovery failed: %v", recoverErr)
+		}
+		authHeaders, authErr := s.buildOpenAIAuthenticationHeaders(fetchCtx, credAccount, "")
+		if authErr != nil {
+			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_AUTH_FAILED", "build Codex models authentication after task recovery: %v", authErr)
+		}
+		request.headers.Del("Authorization")
+		request.headers.Del("ChatGPT-Account-ID")
+		for key, values := range authHeaders {
+			for _, value := range values {
+				request.headers.Add(key, value)
+			}
+		}
+		setOpenAIChatGPTAccountHeaders(request.headers, credAccount)
+		return s.fetchCodexModelsManifestUpstream(fetchCtx, request, ifNoneMatch)
+	}
+}
+
+// ProbeCodexModelsManifest 管理端"测试连接"用：绕过账号级缓存，直接向上游拉一次
+// 模型清单。双开账号的探针借此伪装成"刚启动的新 Codex 会话"——真客户端启动后的
+// 第一条请求就是 GET /backend-api/codex/models（codex-rs model-provider/src/
+// models_endpoint.rs list_models → codex-api/src/endpoint/models.rs request_url →
+// provider.build_request，extra headers 为空），只带 provider 头 + originator/UA +
+// 鉴权。自造的 /responses 探针只能带半套 client_metadata，没有任何真客户端会发那种
+// 形态。失败侧不走转发侧的临时下线：调用方（testOpenAICodexFreshSessionProbe）按原 /responses
+// 探针的规则写账号状态（401→SetError、429→限流窗口）；成功侧只证明凭据可用，按 CredentialsOnly
+// 限定恢复范围（只清 StatusError），两侧对称。
+func (s *OpenAIGatewayService) ProbeCodexModelsManifest(ctx context.Context, account *Account) (*OpenAIModelsResponse, error) {
+	request, credAccount, err := s.buildCodexModelsManifestRequest(ctx, account, "")
+	if err != nil {
+		return nil, err
+	}
+	return s.codexModelsOAuthFetch(request, account, credAccount, false)(ctx, "")
+}
+
+// buildCodexModelsManifestRequest 构造 /models 出站请求（URL、头、代理、凭证源），
+// FetchCodexModelsManifest 与 ProbeCodexModelsManifest 共用，保证探针与真实转发同形。
+func (s *OpenAIGatewayService) buildCodexModelsManifestRequest(ctx context.Context, account *Account, clientVersion string) (openAIModelsRequest, *Account, error) {
 	if account == nil {
-		return nil, infraerrors.New(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_ACCOUNT_REQUIRED", "account is required")
+		return openAIModelsRequest{}, nil, infraerrors.New(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_ACCOUNT_REQUIRED", "account is required")
 	}
 	credAccount, err := resolveCredentialAccount(ctx, s.accountRepo, account)
 	if err != nil {
-		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_CREDENTIALS_FAILED", "resolve credential account: %v", err)
+		return openAIModelsRequest{}, nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_CREDENTIALS_FAILED", "resolve credential account: %v", err)
 	}
 
 	clientVersion = strings.TrimSpace(clientVersion)
@@ -1640,35 +1708,38 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 	authToken := ""
 	useAPIKeyUpstream := false
 	appendModelsPath := false
+	// setup-token 与 OAuth 共用 Codex 后端与 bearer，但只在双开（显式 opt-in）时接入 /models：
+	// 非双开 setup-token 维持基线的 502 ACCOUNT_TYPE_UNSUPPORTED（零出站），非双开出站逐字节不变。
+	deviceWireProfile := codexDeviceWireProfileEnabledFor(account, credAccount)
 	switch {
-	case credAccount.IsOpenAIOAuth():
+	case credAccount.IsOpenAIOAuth(), credAccount.IsOpenAIOAuthLike() && deviceWireProfile:
 		authToken = strings.TrimSpace(credAccount.GetOpenAIAccessToken())
 		if authToken == "" && !credAccount.IsOpenAIAgentIdentity() {
-			return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_CODEX_MODELS_TOKEN_MISSING", "account has no Codex backend access token")
+			return openAIModelsRequest{}, nil, infraerrors.New(http.StatusBadGateway, "OPENAI_CODEX_MODELS_TOKEN_MISSING", "account has no Codex backend access token")
 		}
 	case credAccount.IsOpenAIApiKey():
 		baseURL := strings.TrimSpace(credAccount.GetOpenAIBaseURL())
 		authToken = strings.TrimSpace(credAccount.GetOpenAIApiKey())
 		if authToken == "" {
-			return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_CODEX_MODELS_API_KEY_MISSING", "account has no API key for the Codex models upstream")
+			return openAIModelsRequest{}, nil, infraerrors.New(http.StatusBadGateway, "OPENAI_CODEX_MODELS_API_KEY_MISSING", "account has no API key for the Codex models upstream")
 		}
 		normalizedBaseURL, validateErr := s.validateUpstreamBaseURL(baseURL)
 		if validateErr != nil {
-			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_API_KEY_UPSTREAM_INVALID", "invalid Codex models upstream base URL: %v", validateErr)
+			return openAIModelsRequest{}, nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_API_KEY_UPSTREAM_INVALID", "invalid Codex models upstream base URL: %v", validateErr)
 		}
 		requestEndpoint = normalizedBaseURL
 		useAPIKeyUpstream = true
 		appendModelsPath = true
 	default:
-		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_ACCOUNT_TYPE_UNSUPPORTED", "account type %q cannot fetch the Codex models manifest", credAccount.Type)
+		return openAIModelsRequest{}, nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_ACCOUNT_TYPE_UNSUPPORTED", "account type %q cannot fetch the Codex models manifest", credAccount.Type)
 	}
 
 	requestURL, err := buildCodexModelsManifestURL(requestEndpoint, appendModelsPath, clientVersion)
 	if err != nil {
 		if useAPIKeyUpstream {
-			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_API_KEY_UPSTREAM_INVALID", "invalid Codex models upstream base URL: %v", err)
+			return openAIModelsRequest{}, nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_API_KEY_UPSTREAM_INVALID", "invalid Codex models upstream base URL: %v", err)
 		}
-		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_REQUEST_FAILED", "parse codex models request URL: %v", err)
+		return openAIModelsRequest{}, nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_REQUEST_FAILED", "parse codex models request URL: %v", err)
 	}
 
 	headers := make(http.Header)
@@ -1678,7 +1749,7 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 	} else {
 		authHeaders, authErr := s.buildOpenAIAuthenticationHeaders(ctx, credAccount, authToken)
 		if authErr != nil {
-			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_AUTH_FAILED", "build Codex models authentication: %v", authErr)
+			return openAIModelsRequest{}, nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_AUTH_FAILED", "build Codex models authentication: %v", authErr)
 		}
 		for key, values := range authHeaders {
 			for _, value := range values {
@@ -1687,7 +1758,15 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 		}
 		setOpenAIChatGPTAccountHeaders(headers, credAccount)
 	}
-	headers.Set("Accept", "application/json")
+	// Accept：真客户端没有为 /models 显式设置（只有 /responses 设 text/event-stream，
+	// codex-api/src/endpoint/responses.rs:176），出站的是 reqwest 0.12 ClientBuilder 默认的
+	// `accept: */*`（default_headers 只合并不替换；http-client/src/client_builder.rs:276-284）。
+	// 双开账号照此出站，其余账号维持既有的 application/json。
+	if deviceWireProfile {
+		headers.Set("Accept", "*/*")
+	} else {
+		headers.Set("Accept", "application/json")
+	}
 	overrideUA := ""
 	if !useAPIKeyUpstream {
 		overrideUA = credAccount.GetOpenAIUserAgent()
@@ -1719,37 +1798,10 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 		credentialAccount:   credAccount,
 		accountConcurrency:  account.Concurrency,
 		useAPIKeyUpstream:   useAPIKeyUpstream,
+		// 双开只可能是 OAuth 类凭据（codexFingerprintConvergenceEnabled），API-key 上游走 s.httpUpstream。
+		forceHTTP2: deviceWireProfile,
 	}
-	if useAPIKeyUpstream {
-		return s.fetchCachedOpenAIModels(ctx, request, s.fetchCodexModelsManifestUpstreamForRequest(request), ifNoneMatch)
-	}
-	// OAuth 账号同样经过账号级缓存；闭包保留 agent identity 任务恢复逻辑，
-	// 错误时仍交给 handleCodexModelsManifestAccountAuthError 处理账号状态。
-	oauthFetch := func(fetchCtx context.Context, ifNoneMatch string) (*OpenAIModelsResponse, error) {
-		manifest, fetchErr := s.fetchCodexModelsManifestUpstream(fetchCtx, request, ifNoneMatch)
-		if !credAccount.IsOpenAIAgentIdentity() || !isAgentIdentityTaskInvalidCodexModelsError(fetchErr) {
-			s.handleCodexModelsManifestAccountAuthError(fetchCtx, account, credAccount, fetchErr)
-			return manifest, fetchErr
-		}
-		expectedTaskID := strings.TrimSpace(credAccount.GetCredential("task_id"))
-		if recoverErr := s.recoverAgentIdentityTask(fetchCtx, credAccount, expectedTaskID); recoverErr != nil {
-			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_AUTH_FAILED", "agent identity task recovery failed: %v", recoverErr)
-		}
-		authHeaders, authErr := s.buildOpenAIAuthenticationHeaders(fetchCtx, credAccount, "")
-		if authErr != nil {
-			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_AUTH_FAILED", "build Codex models authentication after task recovery: %v", authErr)
-		}
-		request.headers.Del("Authorization")
-		request.headers.Del("ChatGPT-Account-ID")
-		for key, values := range authHeaders {
-			for _, value := range values {
-				request.headers.Add(key, value)
-			}
-		}
-		setOpenAIChatGPTAccountHeaders(request.headers, credAccount)
-		return s.fetchCodexModelsManifestUpstream(fetchCtx, request, ifNoneMatch)
-	}
-	return s.fetchCachedOpenAIModels(ctx, request, oauthFetch, ifNoneMatch)
+	return request, credAccount, nil
 }
 
 func isAgentIdentityTaskInvalidCodexModelsError(err error) bool {
@@ -1765,9 +1817,11 @@ func isAgentIdentityTaskInvalidCodexModelsError(err error) bool {
 // whose OAuth token was revoked upstream stays active and schedulable and
 // keeps being selected for every subsequent /models request (#4544).
 //
-// Scope is deliberately limited to plain OAuth accounts: the manifest
-// endpoint authenticates with the same token as /responses forwarding, so a
-// 401 is authoritative for the account. Agent Identity accounts are excluded
+// Scope is deliberately limited to plain OAuth / setup-token accounts (the
+// latter only reach the manifest endpoint under 双开, see the request
+// builder): the manifest endpoint authenticates with the same bearer as
+// /responses forwarding, so a 401 is authoritative for the account, and the
+// writes below do not depend on a refresh lifecycle. Agent Identity accounts are excluded
 // because their 401s can be task-scoped and have a dedicated recovery flow,
 // and API key manifests come from custom upstreams whose /models auth may
 // diverge from their chat endpoints.
@@ -1775,7 +1829,7 @@ func (s *OpenAIGatewayService) handleCodexModelsManifestAccountAuthError(ctx con
 	if s == nil || account == nil || err == nil {
 		return
 	}
-	if credAccount == nil || !credAccount.IsOpenAIOAuth() || credAccount.IsOpenAIAgentIdentity() {
+	if credAccount == nil || !credAccount.IsOpenAIOAuthLike() || credAccount.IsOpenAIAgentIdentity() {
 		return
 	}
 	var upstreamErr *codexModelsManifestUpstreamError
@@ -1847,6 +1901,11 @@ func (s *OpenAIGatewayService) fetchCodexModelsManifestUpstreamForRequest(reques
 	}
 }
 
+// openAIModelsHTTPClient 是 OAuth /models 出站的共享客户端获取函数。留成包级变量是为了让
+// 测试钉住实际传给 httpclient 的 Options（尤其是 ForceHTTP2 这条从请求构造到 transport 的
+// 承重线）；生产不替换。
+var openAIModelsHTTPClient = httpclient.GetClient
+
 func (s *OpenAIGatewayService) fetchOpenAIModelsUpstream(ctx context.Context, request openAIModelsRequest, ifNoneMatch string) (*OpenAIModelsResponse, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, codexModelsManifestRequestTimeout)
 	defer cancel()
@@ -1872,10 +1931,11 @@ func (s *OpenAIGatewayService) fetchOpenAIModelsUpstream(ctx context.Context, re
 			resp, handled, err = s.pluginManager.RoundTripOpenAIOAuth(reqCtx, req, request.proxyURL, request.credentialAccount)
 		}
 		if !handled {
-			client, clientErr := httpclient.GetClient(httpclient.Options{
+			client, clientErr := openAIModelsHTTPClient(httpclient.Options{
 				ProxyURL:              request.proxyURL,
 				Timeout:               codexModelsManifestRequestTimeout,
 				ResponseHeaderTimeout: 10 * time.Second,
+				ForceHTTP2:            request.forceHTTP2,
 			})
 			if clientErr != nil {
 				return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_PROXY_INVALID", "invalid proxy configuration: %v", clientErr)

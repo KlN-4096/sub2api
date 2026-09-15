@@ -472,23 +472,23 @@ func applyCodexFingerprintHeaders(h http.Header, ids *codexFingerprintIDs) {
 // 替换指定字段后回写。合法对象保留未指定字段（如 sandbox、thread_source）；
 // 非法/非对象值重建为最小合法 metadata，避免 flat 与 embedded identity 分裂。
 func rewriteCodexTurnMetadataFields(h http.Header, fields map[string]any, ids *codexFingerprintIDs) {
-	raw := strings.TrimSpace(h.Get("x-codex-turn-metadata"))
-	if raw == "" {
+	raw := h.Get(openAIWSTurnMetadataHeader)
+	if strings.TrimSpace(raw) == "" {
 		return
 	}
-	var metadata map[string]any
-	if err := json.Unmarshal([]byte(raw), &metadata); err != nil || metadata == nil {
-		metadata = make(map[string]any, len(fields))
-	}
-	preserveCodexConvergenceRootTurn(metadata, ids)
-	for k, v := range fields {
-		metadata[k] = v
-	}
-	rebuilt, err := json.Marshal(metadata)
-	if err != nil {
-		return
-	}
-	h.Set("x-codex-turn-metadata", string(rebuilt))
+	h.Set(openAIWSTurnMetadataHeader, rewriteCodexFingerprintTurnMetadata(raw, fields, ids))
+}
+
+func rewriteCodexFingerprintTurnMetadata(raw string, fields map[string]any, ids *codexFingerprintIDs) string {
+	return rewriteCodexTurnMetadataJSON(raw, true, func(metadata map[string]any) map[string]any {
+		updates := maps.Clone(fields)
+		root, _ := metadata["root_turn_id"].(string)
+		preserveCodexConvergenceRootTurn(metadata, ids)
+		if next, _ := metadata["root_turn_id"].(string); next != root {
+			updates["root_turn_id"] = next
+		}
+		return updates
+	})
 }
 
 // applyCodexFingerprintClientMetadata 按预计算的收敛 ID 改写请求体中的 client_metadata。
@@ -715,7 +715,8 @@ func applyCodexFingerprintClientMetadataRaw(body []byte, ids *codexFingerprintID
 	next := body
 	modified := false
 	if applyCodexFingerprintToClientMetadataMap(existing, ids) {
-		raw, err := json.Marshal(existing)
+		// 上游编码器：不转义 HTML，内嵌 turn-metadata 里的 <>& 才能与刚保住的原字节一致。
+		raw, err := marshalOpenAIUpstreamJSON(existing)
 		if err != nil {
 			return body, false, fmt.Errorf("encode converged client_metadata: %w", err)
 		}
@@ -746,15 +747,5 @@ func rewriteClientMetadataEmbeddedTurnMetadata(clientMetadata map[string]any, fi
 	if !ok || raw == "" {
 		return
 	}
-	var metadata map[string]any
-	if err := json.Unmarshal([]byte(raw), &metadata); err != nil || metadata == nil {
-		metadata = make(map[string]any, len(fields))
-	}
-	preserveCodexConvergenceRootTurn(metadata, ids)
-	for k, v := range fields {
-		metadata[k] = v
-	}
-	if rebuilt, err := json.Marshal(metadata); err == nil {
-		clientMetadata["x-codex-turn-metadata"] = string(rebuilt)
-	}
+	clientMetadata[openAIWSTurnMetadataHeader] = rewriteCodexFingerprintTurnMetadata(raw, fields, ids)
 }

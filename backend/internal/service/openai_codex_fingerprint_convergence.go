@@ -21,7 +21,7 @@ package service
 //  6. 原始值为 UUIDv7 时派生结果保持 v7 并保留 48 位时间戳（codex 的 session/thread/turn/window
 //     均为 Uuid::now_v7；installation_id 为 v4，派生仍为 v4）。
 //
-// 开关关闭时以上全部不生效，出站与上游完全一致。开启开关会让该账号的 v7 类身份一次性轮换。
+// 关闭实验开关不关闭既有账号隔离及复合窗口保形。开启会让该账号的 v7 类身份一次性轮换。
 
 import (
 	"crypto/sha256"
@@ -56,8 +56,13 @@ func codexFingerprintConvergenceEnabled(account *Account) bool {
 
 // 本轮线协议投影只覆盖 device + 实验收敛双开，其他配置保持既有行为。
 func codexDeviceWireProfileEnabled(c *gin.Context, account *Account) bool {
+	return codexDeviceWireProfileEnabledFor(account, codexAccountIdentitySource(c, account))
+}
+
+// codexDeviceWireProfileEnabledFor 是无上下文形态：凭证源已由调用方解析（影子账号 → 凭证账号）。
+func codexDeviceWireProfileEnabledFor(account, credentialAccount *Account) bool {
 	return account != nil && account.GetCodexFingerprintMode() == codexFingerprintDevice &&
-		codexFingerprintConvergenceEnabled(codexAccountIdentitySource(c, account))
+		codexFingerprintConvergenceEnabled(credentialAccount)
 }
 
 // applyCodexCompactPromptCacheKey 收口 compact 请求体的 prompt_cache_key。
@@ -124,6 +129,21 @@ func stripCodexCompactPromptCacheKeyWhenProfileOff(c *gin.Context, account *Acco
 	return next, true
 }
 
+// The handler preserves the explicit optional CompactionInput.access_programs
+// until account selection. Only the device wire profile opts in; never synthesize
+// a program, and keep API-key / opt-out / failover requests on their prior schema.
+//
+// 投影已开时保留，与 /responses 上的既有行为一致——那条路径没有任何字段裁剪，
+// access_programs 一路原样出站，双开账号两个端点因此给出同一个准入等级。
+// 未开投影的账号维持既有的 compact 裁剪（opt-out 字节不变），这是有意保留的差异。
+func filterCodexCompactAccessPrograms(c *gin.Context, account *Account, body []byte) ([]byte, error) {
+	if !isOpenAIResponsesCompactPath(c) || codexDeviceWireProfileEnabled(c, account) ||
+		!gjson.GetBytes(body, "access_programs").Exists() {
+		return body, nil
+	}
+	return sjson.DeleteBytes(body, "access_programs")
+}
+
 // compactPromptCacheSessionEvidence 取 compact 请求可用的会话旁证，顺序与出站会话头一致。
 func compactPromptCacheSessionEvidence(c *gin.Context) string {
 	if c == nil || c.Request == nil {
@@ -147,6 +167,18 @@ func applyCodexDeviceWireProfile(c *gin.Context, account *Account, headers http.
 	}
 	if !websocket {
 		stripOpenAILegacyResponsesBeta(headers)
+		// rollout-trace generates this only for an actual HTTP Responses attempt.
+		// Preserve an explicit value; do not invent one or project it to WS/search/compact.
+		if c != nil && c.Request != nil && c.Request.Method == http.MethodPost &&
+			GetOpenAIClientTransport(c) != OpenAIClientTransportWS && c.Request.URL != nil &&
+			strings.HasSuffix(c.Request.URL.Path, "/responses") && !isOpenAIResponsesCompactPath(c) {
+			// 真客户端每次 attempt 都新铸一个 v4（rollout-trace/src/inference.rs:129-130 start_attempt
+			// → :347-349 Uuid::new_v4），网关同样每次出站新铸：既不让客户端原值经 failover 发给
+			// 两个账号形成跨账号关联，也不会在同账号重试时重复同一个值。
+			if value := c.GetHeader("x-codex-inference-call-id"); strings.TrimSpace(value) != "" {
+				headers.Set("x-codex-inference-call-id", uuid.NewString())
+			}
+		}
 	}
 	if !websocket && isOpenAIResponsesCompactPath(c) {
 		headers.Del("x-client-request-id")
@@ -155,14 +187,84 @@ func applyCodexDeviceWireProfile(c *gin.Context, account *Account, headers http.
 		headers.Del("x-codex-installation-id")
 	}
 	// 只裁剪兼容头的工具清单，不能修改 body 中的完整元数据。
-	raw := headers.Get(openAIWSTurnMetadataHeader)
-	metadata := gjson.Parse(raw)
-	if !metadata.IsObject() || !metadata.Get("tool_namespaces_info").Exists() || !gjson.Valid(raw) {
+	stripCodexTurnMetadataFields(headers, "tool_namespaces_info")
+	// version 头保留：真客户端把 version=CARGO_PKG_VERSION 放在 provider 头里
+	// （16ff14c: model-provider-info/src/lib.rs:397-398 create_openai_provider），
+	// build_request 带上每条 HTTP 请求（codex-api/src/provider.rs:77-86），WS 握手的
+	// merge_request_headers 也以 provider 头为底（endpoint/responses_websocket.rs:490-503）。
+	// 值由 enforceCodexIdentityHeadersWithUA 钉到规范身份，与 UA 版本段同源。
+	if websocket {
+		// 真客户端的 WS 握手显式传 turn_state=None（core/src/client.rs:1241），turn-state
+		// 只走每一帧的 client_metadata["x-codex-turn-state"]（client.rs:1793）。握手上删掉；
+		// 帧内由 applyCodexWSFrameWireProfile 按"缺失才补"填入，真客户端自带的不覆盖。
+		headers.Del(openAICodexTurnStateHeader)
+	}
+}
+
+// SearchClient uses the MCP projection, not Responses request identity
+// (16ff14c: core/src/turn_metadata.rs::current_meta_value_for_mcp_request).
+// Preserve session/thread/turn and unknown product metadata; do not invent context.
+func applyCodexAlphaSearchWireProfile(c *gin.Context, account *Account, headers http.Header, body []byte) {
+	// 基础投影不碰 version（已由 enforceCodexIdentityHeadersWithUA 钉到规范身份）。本函数必须在
+	// 身份收口与账号级覆写之后调用（openai_alpha_search.go），最后读到的 version 才是最终出站值。
+	applyCodexDeviceWireProfile(c, account, headers, false)
+	if headers == nil || !codexDeviceWireProfileEnabled(c, account) {
 		return
 	}
-	if next, err := sjson.Delete(raw, "tool_namespaces_info"); err == nil {
+	stripCodexTurnMetadataFields(headers,
+		"installation_id", "window_id", "window_number", "context_window_id",
+		"agent_name", "parent_turn_id", "root_turn_id", "request_kind", "compaction",
+		"history_ingest_requested", "forked_from_ordinal_exclusive",
+	)
+	// MCP 投影里的 codex_version / model 在真客户端是与出站值同源的：前者是客户端自己的
+	// 编译版本（16ff14c: core/src/turn_metadata.rs CODEX_VERSION_KEY），后者是当前轮次的
+	// 模型 slug（core/src/tools/handlers/extension_tools.rs to_extension_call）。网关会把
+	// version 头钉成规范身份、把请求体的 model 换成账号映射后的模型，两处都不改 metadata
+	// 就会在同一个请求里自报两套值。取最终出站值而不是重新推导，确保同源。
+	alignCodexTurnMetadataFields(headers, map[string]string{
+		"codex_version": headers.Get("version"),
+		"model":         gjson.GetBytes(body, "model").String(),
+	})
+}
+
+// alignCodexTurnMetadataFields 把 turn-metadata 里的字段对齐到实际出站值。
+// 只改已存在的键：入站没有就不补，避免给非 codex 客户端造一个它不会发的字段；
+// 出站值为空时同样跳过，宁可留着客户端原值也不写一个空串。
+func alignCodexTurnMetadataFields(headers http.Header, values map[string]string) {
+	raw := headers.Get(openAIWSTurnMetadataHeader)
+	if !gjson.Valid(raw) || !gjson.Parse(raw).IsObject() {
+		return
+	}
+	next := rewriteCodexTurnMetadataJSON(raw, false, func(metadata map[string]any) map[string]any {
+		updates := make(map[string]any, len(values))
+		for name, value := range values {
+			if value = strings.TrimSpace(value); value == "" {
+				continue
+			}
+			if _, ok := metadata[name]; ok {
+				updates[name] = value
+			}
+		}
+		return updates
+	})
+	if next != raw {
 		headers.Set(openAIWSTurnMetadataHeader, next)
 	}
+}
+
+func stripCodexTurnMetadataFields(headers http.Header, fields ...string) {
+	raw := headers.Get(openAIWSTurnMetadataHeader)
+	if !gjson.Valid(raw) || !gjson.Parse(raw).IsObject() {
+		return
+	}
+	for _, field := range fields {
+		next, err := sjson.Delete(raw, field)
+		if err != nil {
+			return
+		}
+		raw = next
+	}
+	headers.Set(openAIWSTurnMetadataHeader, raw)
 }
 
 // 上游字段表之外、真客户端 client_metadata / x-codex-turn-metadata 里同样携带的身份字段。

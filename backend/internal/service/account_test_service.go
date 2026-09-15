@@ -768,6 +768,15 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	// /responses wire and does NOT apply the legacy compact-only mapping
 	// (post-#5641 semantics: compact_model_mapping is /responses/compact-only).
 	testModelID = account.GetMappedModel(testModelID)
+	// 双开账号：三种探针（normal / compact / image）以及定时测试统一伪装成刚启动的新 Codex
+	// 会话，发真客户端启动后的第一条请求 GET /backend-api/codex/models，而不是自造
+	// /responses——半套 client_metadata、带 responses=experimental 的形态没有任何真客户端
+	// 会发，按 cron 反复发更不行。探针只验证凭据：成功标 CredentialsOnly，管理端与定时任务
+	// 都只按凭据范围恢复账号状态（AccountRecoveryOptions.CredentialsOnly）；失败侧 401/429
+	// 与原探针同责地写回账号状态。
+	if s.codexDeviceProbeAsFreshSession(ctx, account) {
+		return s.testOpenAICodexFreshSessionProbe(c, ctx, account, testModelID)
+	}
 	if mode == AccountTestModeCompact {
 		return s.testOpenAICompactConnection(c, account, testModelID)
 	}
@@ -2724,6 +2733,76 @@ func (s *AccountTestService) processGeminiStream(c *gin.Context, body io.Reader)
 	}
 }
 
+// accountTestCredentialsOnlyKey 标记本次测试只验证了凭据（GET /models 探针），没有跑推理。
+// RunTestBackground 把它带进 ScheduledTestResult.CredentialsOnly，管理端经 AccountTestCredentialsOnly
+// 读取；两条链路都只按"凭据可用"的范围恢复账号状态（AccountRecoveryOptions.CredentialsOnly）。
+const accountTestCredentialsOnlyKey = "account_test_credentials_only"
+
+// AccountTestCredentialsOnly 报告刚结束的这次测试是否只验证了凭据。
+func AccountTestCredentialsOnly(c *gin.Context) bool {
+	return c != nil && c.GetBool(accountTestCredentialsOnlyKey)
+}
+
+// codexDeviceProbeAsFreshSession 判断账号是否走"刚启动的新 Codex 会话"探针：双开
+// （device 模式 + 凭证源开启实验收敛）。判定与真实转发的 codexDeviceWireProfileEnabled
+// 同源，凭证源与转发一样取影子账号解析出的凭证账号。
+func (s *AccountTestService) codexDeviceProbeAsFreshSession(ctx context.Context, account *Account) bool {
+	if account == nil {
+		return false
+	}
+	credentialAccount := account
+	if account.IsCredentialShadow() {
+		resolved, err := resolveCredentialAccount(ctx, s.accountRepo, account)
+		if err != nil {
+			return false
+		}
+		credentialAccount = resolved
+	}
+	return codexDeviceWireProfileEnabledFor(account, credentialAccount)
+}
+
+// testOpenAICodexFreshSessionProbe 双开账号的探针：一次不走缓存的模型清单请求，出站
+// 形态由 buildCodexModelsManifestRequest 与真实 /models 转发共用（见
+// ProbeCodexModelsManifest）。不会发送任何 /responses、/images 请求。
+func (s *AccountTestService) testOpenAICodexFreshSessionProbe(c *gin.Context, ctx context.Context, account *Account, testModelID string) error {
+	if s.openaiGatewayService == nil {
+		return s.sendErrorAndEnd(c, "OpenAI gateway service is not configured for the Codex fresh-session probe")
+	}
+	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
+	manifest, err := s.openaiGatewayService.ProbeCodexModelsManifest(ctx, account)
+	if err != nil {
+		// 失败侧与原 /responses 探针同责（不走转发侧的临时下线）：401 标 StatusError、429 同步
+		// 限流窗口，定时任务才仍能把吊销/限流的账号移出调度；成功侧的 CredentialsOnly 恢复只清
+		// StatusError，与这里对称。
+		var upstreamErr *codexModelsManifestUpstreamError
+		if errors.As(err, &upstreamErr) {
+			switch upstreamErr.statusCode {
+			case http.StatusTooManyRequests:
+				s.reconcileOpenAI429State(ctx, account, upstreamErr.headers, upstreamErr.body)
+			case http.StatusUnauthorized:
+				if s.accountRepo != nil {
+					_ = s.accountRepo.SetError(ctx, account.ID, fmt.Sprintf("Authentication failed (401): %s", string(upstreamErr.body)))
+				}
+			}
+		}
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Codex fresh-session probe (GET /models) failed: %v", err))
+	}
+	if manifest == nil {
+		return s.sendErrorAndEnd(c, "Codex fresh-session probe (GET /models) returned an empty manifest")
+	}
+	s.sendEvent(c, TestEvent{
+		Type: "content",
+		Text: fmt.Sprintf(
+			"Fresh-session probe: GET /backend-api/codex/models returned %d models; no /responses request was sent (device fingerprint convergence).",
+			gjson.GetBytes(manifest.Body, "models.#").Int(),
+		),
+	})
+	// 这次成功只证明了凭据可用：恢复账号状态的两条链路据此只清 StatusError。
+	c.Set(accountTestCredentialsOnlyKey, true)
+	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+	return nil
+}
+
 // createOpenAITestPayload creates a test payload for OpenAI Responses API
 func createOpenAITestPayload(modelID string, isOAuth bool) map[string]any {
 	payload := map[string]any{
@@ -3266,12 +3345,13 @@ func (s *AccountTestService) RunTestBackground(ctx context.Context, accountID in
 	}
 
 	return &ScheduledTestResult{
-		Status:       status,
-		ResponseText: responseText,
-		ErrorMessage: errMsg,
-		LatencyMs:    finishedAt.Sub(startedAt).Milliseconds(),
-		StartedAt:    startedAt,
-		FinishedAt:   finishedAt,
+		Status:          status,
+		ResponseText:    responseText,
+		ErrorMessage:    errMsg,
+		LatencyMs:       finishedAt.Sub(startedAt).Milliseconds(),
+		StartedAt:       startedAt,
+		FinishedAt:      finishedAt,
+		CredentialsOnly: ginCtx.GetBool(accountTestCredentialsOnlyKey),
 	}, nil
 }
 

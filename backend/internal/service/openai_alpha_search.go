@@ -229,7 +229,13 @@ func openAIAlphaSearchSchedulingModel(account *Account, requestedModel string) s
 }
 
 func (s *OpenAIGatewayService) buildOpenAIAlphaSearchResponsesWebSearchRequest(ctx context.Context, c *gin.Context, account *Account, alphaBody []byte, body []byte, token string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatgptCodexURL, bytes.NewReader(body))
+	// 这条兜底同样打 /responses：双开按真客户端默认压缩（PersonalAccessToken 也 uses_codex_backend，
+	// protocol/src/auth.rs），同一账号不能压缩与明文混发。
+	wireBody, contentEncoding, err := compressCodexRequestBody(c, account, chatgptCodexURL, body)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatgptCodexURL, bytes.NewReader(wireBody))
 	if err != nil {
 		return nil, err
 	}
@@ -250,6 +256,9 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchResponsesWebSearchRequest(c
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	if contentEncoding != "" {
+		req.Header.Set("Content-Encoding", contentEncoding)
+	}
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("OpenAI-Beta", "responses=experimental")
 	if turnMetadata := openAIAlphaSearchInboundHeader(c, "X-Codex-Turn-Metadata"); turnMetadata != "" {
@@ -401,14 +410,13 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchRequest(ctx context.Context
 			req.Header.Set("X-Codex-Turn-Metadata", turnMetadata)
 		}
 		applyCodexAccountIdentityHeaders(req.Header, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
-		// 设备指纹收敛只作用于已有的 turn-metadata：真实客户端在该端点只发
-		// x-codex-turn-metadata 与 originator（codex-rs ext/web-search/src/tool.rs 的
-		// search_request_headers），不发会话头，故不能补入 Responses 的那一套。
-		// 不做收敛时 installation_id 仍是按客户端原值派生的，与推理面的固定设备不一致。
-		if ids := resolveCodexFingerprintIDsFromRequest(c, account, nil); ids != nil {
-			rewriteCodexTurnMetadataFields(req.Header, map[string]any{
-				"installation_id": ids.installationID,
-			}, ids)
+		// 双开使用 MCP 投影，不补 Responses 专属设备字段；其他配置维持既有行为。
+		if !codexDeviceWireProfileEnabled(c, account) {
+			if ids := resolveCodexFingerprintIDsFromRequest(c, account, nil); ids != nil {
+				rewriteCodexTurnMetadataFields(req.Header, map[string]any{
+					"installation_id": ids.installationID,
+				}, ids)
+			}
 		}
 		canonical := resolveCodexOutboundIdentity("")
 		if version := openAIAlphaSearchInboundHeader(c, "Version"); version != "" {
@@ -436,7 +444,7 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchRequest(ctx context.Context
 
 	account.ApplyHeaderOverrides(req.Header)
 	stripOpenAIAlphaSearchResponsesHeaders(req.Header)
-	applyCodexDeviceWireProfile(c, account, req.Header, false)
+	applyCodexAlphaSearchWireProfile(c, account, req.Header, body)
 	syncOpenAIAlphaSearchBodySession(c, req, body)
 	return req, nil
 }
