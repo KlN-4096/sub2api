@@ -41,6 +41,7 @@ const (
 	openAIImageMaxDownloadBytes            = 20 << 20 // 20MB per image download
 	openAIImageMaxUploadPartSize           = 20 << 20 // 20MB per multipart upload part
 	openAIImagesResponsesMainModel         = "gpt-5.6-luna"
+	openAIImagesDefaultModel               = "gpt-image-2.5-sunburst"
 	openAIImagesVerbatimPromptInstructions = "When invoking the image_generation tool, use the user's image prompt verbatim. Do not rewrite, expand, summarize, embellish, translate, normalize punctuation, or add or remove visual details or constraints. Preserve the original language, wording, capitalization, quotes, and punctuation exactly."
 )
 
@@ -463,7 +464,7 @@ func applyOpenAIImagesDefaults(req *OpenAIImagesRequest) {
 		req.Model = strings.TrimSpace(req.Model)
 		return
 	}
-	req.Model = "gpt-image-2"
+	req.Model = openAIImagesDefaultModel
 }
 
 func isOpenAIImageGenerationModel(model string) bool {
