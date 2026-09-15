@@ -561,9 +561,10 @@ func TestCPRCodexModelsManifestTargetsGateway(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestCPRBlockedFromOAuthOnlyGroup：require_oauth_only 的活判定在 admin_group.go，
-// 之前改的 account_service.go 是死代码（NewAccountService 从未出现在 wire_gen.go）。
-func TestCPRBlockedFromOAuthOnlyGroup(t *testing.T) {
+// TestOAuthOnlyGroupPredicate：谓词本身的黑名单边界。
+// require_oauth_only 的活判定在 admin_group.go，之前改的 account_service.go 是死代码
+// （NewAccountService 从未出现在 wire_gen.go）。
+func TestOAuthOnlyGroupPredicate(t *testing.T) {
 	require.False(t, accountAllowedInOAuthOnlyGroup(AccountTypeCPR))
 	require.False(t, accountAllowedInOAuthOnlyGroup(AccountTypeAPIKey))
 	// 不得波及 cpr 之外的既有渠道。
@@ -643,4 +644,106 @@ func TestCPRUpstreamModelSync(t *testing.T) {
 	_, err = buildOpenAIAPIKeyModelsRequest(context.Background(),
 		&Account{Platform: PlatformOpenAI, Type: AccountTypeUpstream}, validate)
 	require.Error(t, err)
+}
+
+// --- 第三轮评审补测 ---
+
+// TestCPRPlatformMismatchStillNeverFallsBackToOfficial：守卫必须用 Type 而非
+// IsCPR()。IsCPR() 还要求 platform==openai，而 GetOpenAIBaseURL 对平台错配的
+// cpr 账号返回空串——此时 IsCPR() 为 false，守卫不触发，targetURL 停在
+// api.openai.com，而 GetAccessToken 会把 client key 发过去。
+func TestCPRPlatformMismatchStillNeverFallsBackToOfficial(t *testing.T) {
+	svc := cprTestService()
+	mismatched := newCPRTestAccount()
+	mismatched.Platform = PlatformAnthropic // 写入侧被 validateCPRAccountShape 拦住，这里模拟脏数据
+	delete(mismatched.Credentials, "base_url")
+
+	require.False(t, mismatched.IsCPR(), "前置：平台错配时 IsCPR() 为假")
+	require.Empty(t, mismatched.GetOpenAIBaseURL(), "前置：拿不到任何回落地址")
+
+	_, err := svc.buildOpenAIImagesRequest(context.Background(), newConvTestContext(t, []byte(`{}`)),
+		mismatched, []byte(`{}`), "application/json", cprTestClientKey, openAIImagesGenerationsEndpoint)
+	require.Error(t, err, "images 不得回落 api.openai.com")
+
+	_, err = svc.openAIChatCompletionsTargetURL(mismatched)
+	require.Error(t, err, "chat/completions 不得回落 api.openai.com")
+}
+
+// TestCPRImageTestConnectionNeverTargetsChatGPT：图片「测试连接」的分派此前只认
+// apikey，cpr 落到 OAuth 那条——它会设 req.Host = "chatgpt.com" 并发
+// GetOpenAIAccessToken()（该 getter 只按 platform 门控、不按 type）。
+func TestCPRImageTestConnectionNeverTargetsChatGPT(t *testing.T) {
+	for _, platform := range []string{PlatformOpenAI, PlatformAnthropic} {
+		t.Run(platform, func(t *testing.T) {
+			account := newCPRTestAccount()
+			// platform 错配模拟脏数据：分派若用 IsCPR() 会在这里漏到 OAuth 那条。
+			account.Platform = platform
+			// 改类型后残留的 OAuth 凭据：credentials 是 merge 不是 replace。
+			// 分派漏到 OAuth 时，GetOpenAIAccessToken 只按 platform 门控，会把它发出去。
+			account.Credentials["access_token"] = "leftover-oauth-token"
+
+			upstream := &queuedHTTPUpstream{responses: []*http.Response{
+				newJSONResponse(http.StatusOK, `{"data":[{"b64_json":"aGk="}]}`),
+			}}
+			svc := &AccountTestService{cfg: cprTestConfig(), httpUpstream: upstream}
+			c, _ := newTestContext()
+
+			err := svc.testOpenAIAccountConnection(c, account, "gpt-image-1", "ping", "")
+
+			for _, req := range upstream.requests {
+				require.Equal(t, "127.0.0.1:18081", req.URL.Host, "cpr 只能发往自己的网关")
+				require.NotEqual(t, "chatgpt.com", req.Host)
+			}
+			if platform != PlatformOpenAI {
+				// 平台错配拿不到 base_url：fail-closed，一个字节都不发。
+				require.Error(t, err)
+				require.Empty(t, upstream.requests)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, upstream.requests, 1)
+			require.Equal(t, "Bearer "+cprTestClientKey, upstream.requests[0].Header.Get("Authorization"),
+				"必须用 client key，不得用残留的 access_token")
+		})
+	}
+}
+
+// TestCPRBlockedFromOAuthOnlyGroupBinding：require_oauth_only 分组不得绑定 cpr 账号。
+// CreateGroup 与 UpdateGroup 共用 filterOAuthOnlyGroupAccounts，这里直接测它。
+func TestCPRBlockedFromOAuthOnlyGroupBinding(t *testing.T) {
+	const oauthID, cprID, apikeyID int64 = 11, 22, 33
+	repo := &cprOAuthFilterAccountRepo{accounts: []*Account{
+		{ID: oauthID, Platform: PlatformOpenAI, Type: AccountTypeOAuth},
+		{ID: cprID, Platform: PlatformOpenAI, Type: AccountTypeCPR},
+		{ID: apikeyID, Platform: PlatformOpenAI, Type: AccountTypeAPIKey},
+	}}
+	svc := &adminServiceImpl{accountRepo: repo}
+	group := &Group{ID: 1, Platform: PlatformOpenAI, RequireOAuthOnly: true}
+
+	kept, err := svc.filterOAuthOnlyGroupAccounts(context.Background(), group, []int64{oauthID, cprID, apikeyID})
+	require.NoError(t, err)
+	require.Equal(t, []int64{oauthID}, kept, "cpr 与 apikey 都必须被挡在 require_oauth_only 之外")
+
+	// 关掉开关就不过滤：本改动只收紧 require_oauth_only，不影响普通分组。
+	group.RequireOAuthOnly = false
+	kept, err = svc.filterOAuthOnlyGroupAccounts(context.Background(), group, []int64{oauthID, cprID, apikeyID})
+	require.NoError(t, err)
+	require.Equal(t, []int64{oauthID, cprID, apikeyID}, kept)
+}
+
+type cprOAuthFilterAccountRepo struct {
+	AccountRepository
+	accounts []*Account
+}
+
+func (r *cprOAuthFilterAccountRepo) GetByIDs(_ context.Context, ids []int64) ([]*Account, error) {
+	out := make([]*Account, 0, len(ids))
+	for _, id := range ids {
+		for _, acc := range r.accounts {
+			if acc.ID == id {
+				out = append(out, acc)
+			}
+		}
+	}
+	return out, nil
 }
