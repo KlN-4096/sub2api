@@ -1065,6 +1065,24 @@ export default {
         pleaseEnterBaseUrl: 'Please enter upstream Base URL',
         pleaseEnterApiKey: 'Please enter upstream API Key'
       },
+      // CPR (codex-proxy-rs) relay
+      cpr: {
+        typeHint: 'codex-proxy-rs relay',
+        baseUrl: 'CPR Gateway URL',
+        baseUrlHint: 'Where codex-proxy-rs listens, e.g. http://127.0.0.1:18081. Required; it never falls back to the official endpoint.',
+        clientKey: 'CPR Client Key',
+        clientKeyHint: 'A key created under "Client Keys" in CPR. It should be bound to a single group containing exactly one CPR account.',
+        accountId: 'CPR Account ID',
+        accountIdHint: 'The account id in CPR (looks like acct_xxx), used to read quota.',
+        adminApiKey: 'CPR Admin API Key',
+        adminApiKeyHint: "CPR's admin API key (starts with admin-), used only to read quota and account status.",
+        adminBaseUrl: 'CPR Admin URL (optional)',
+        adminBaseUrlHint: 'Defaults to the gateway URL when left empty.',
+        baseUrlRequired: 'Please enter the CPR gateway URL',
+        clientKeyRequired: 'Please enter the CPR client key',
+        accountIdRequired: 'Please enter the CPR account ID',
+        adminApiKeyRequired: 'Please enter the CPR admin API key'
+      },
       // OAuth flow
       oauth: {
         title: 'Claude Account Authorization',

@@ -57,7 +57,9 @@ func (s *OpenAIGatewayService) buildOpenAIResponsesWSURL(account *Account) (stri
 			targetURL = buildOpenAIResponsesURLForPlatform(account.Platform, validatedURL)
 		}
 	default:
-		targetURL = openaiPlatformAPIURL
+		// 不再兜底到官方端点：未适配的账号类型（当前是 cpr）走到这里会把它的凭据
+		// 发往 api.openai.com。WSv2 对中继账号本版不支持，显式报错。
+		return "", fmt.Errorf("unsupported account type for openai websocket: %s", account.Type)
 	}
 
 	parsed, err := url.Parse(strings.TrimSpace(targetURL))

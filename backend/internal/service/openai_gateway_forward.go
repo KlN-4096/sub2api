@@ -1407,6 +1407,18 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 			}
 			targetURL = buildOpenAIResponsesURLForPlatform(account.Platform, validatedURL)
 		}
+	case AccountTypeCPR:
+		// CPR 中继：必须显式配置 base_url。这里**不能**回落到 openaiPlatformAPIURL——
+		// 那会把 CPR 的 client key 当成 OpenAI API key 发给官方。
+		baseURL := account.GetCPRGatewayBaseURL()
+		if baseURL == "" {
+			return nil, errors.New("cpr account requires credentials.base_url")
+		}
+		validatedURL, err := s.validateUpstreamBaseURL(baseURL)
+		if err != nil {
+			return nil, err
+		}
+		targetURL = buildOpenAIResponsesURL(validatedURL)
 	default:
 		targetURL = openaiPlatformAPIURL
 	}

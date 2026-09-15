@@ -1730,6 +1730,21 @@ func (s *OpenAIGatewayService) buildCodexModelsManifestRequest(ctx context.Conte
 		requestEndpoint = normalizedBaseURL
 		useAPIKeyUpstream = true
 		appendModelsPath = true
+	case credAccount.IsCPR():
+		// Codex CLI 启动的第一条请求就是模型目录；不接的话纯 cpr 分组直接起不来。
+		// CPR 有 GET /v1/models（openai/router.rs:25），形状与 API key 一路相同。
+		baseURL := credAccount.GetCPRGatewayBaseURL()
+		authToken = credAccount.GetCPRClientKey()
+		if baseURL == "" || authToken == "" {
+			return openAIModelsRequest{}, nil, infraerrors.New(http.StatusBadGateway, "OPENAI_CODEX_MODELS_API_KEY_MISSING", "cpr account is missing base_url or client key")
+		}
+		normalizedBaseURL, validateErr := s.validateUpstreamBaseURL(baseURL)
+		if validateErr != nil {
+			return openAIModelsRequest{}, nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_API_KEY_UPSTREAM_INVALID", "invalid Codex models upstream base URL: %v", validateErr)
+		}
+		requestEndpoint = normalizedBaseURL
+		useAPIKeyUpstream = true
+		appendModelsPath = true
 	default:
 		return openAIModelsRequest{}, nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_ACCOUNT_TYPE_UNSUPPORTED", "account type %q cannot fetch the Codex models manifest", credAccount.Type)
 	}

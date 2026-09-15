@@ -1010,21 +1010,32 @@ func (s *AccountTestService) buildOpenAIUpstreamModelsRequest(ctx context.Contex
 // buildOpenAIAPIKeyModelsRequest is shared by admin discovery and public model
 // listing. Codex content negotiation is intentionally absent from this request.
 func buildOpenAIAPIKeyModelsRequest(ctx context.Context, account *Account, validateBaseURL func(string) (string, error)) (*http.Request, error) {
-	if account.Type != AccountTypeAPIKey {
+	var apiKey, baseURL string
+	switch {
+	case account.IsCPR():
+		// CPR 有 GET /v1/models（openai/router.rs:25），形状与 API key 一路相同。
+		// 唯一差别：base_url 缺失必须报错，绝不回落 api.openai.com——那会把
+		// CPR 的 client key 当成 OpenAI API key 明文发出去。
+		apiKey = strings.TrimSpace(account.GetCPRClientKey())
+		baseURL = strings.TrimSpace(account.GetCPRGatewayBaseURL())
+		if baseURL == "" {
+			return nil, newUpstreamModelSyncConfigError("cpr account requires credentials.base_url", nil)
+		}
+	case account.Type == AccountTypeAPIKey:
+		apiKey = strings.TrimSpace(account.GetOpenAIProtocolAPIKey())
+		// 协议感知：Anthropic 协议账号的凭证 base_url 指向 /anthropic 端点，模型
+		// 列表同步需使用 OpenAI 格式 base（供应商 × 模式默认）。
+		baseURL = account.GetOpenAIFormatBaseURL()
+		if strings.TrimSpace(baseURL) == "" {
+			baseURL = "https://api.openai.com"
+		}
+	default:
 		return nil, newUpstreamModelSyncUnsupportedError(
 			fmt.Sprintf("Unsupported OpenAI account type for upstream model sync: %s", account.Type), nil,
 		)
 	}
-	apiKey := strings.TrimSpace(account.GetOpenAIProtocolAPIKey())
 	if apiKey == "" {
 		return nil, newUpstreamModelSyncConfigError("No OpenAI API key is available", nil)
-	}
-
-	// 协议感知：Anthropic 协议账号的凭证 base_url 指向 /anthropic 端点，模型
-	// 列表同步需使用 OpenAI 格式 base（供应商 × 模式默认）。
-	baseURL := account.GetOpenAIFormatBaseURL()
-	if strings.TrimSpace(baseURL) == "" {
-		baseURL = "https://api.openai.com"
 	}
 	normalizedBaseURL, err := validateBaseURL(baseURL)
 	if err != nil {

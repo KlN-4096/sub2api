@@ -1134,6 +1134,24 @@ export default {
         pleaseEnterBaseUrl: '请输入上游 Base URL',
         pleaseEnterApiKey: '请输入上游 API Key'
       },
+      // CPR（codex-proxy-rs）中继
+      cpr: {
+        typeHint: 'codex-proxy-rs 中继',
+        baseUrl: 'CPR 网关地址',
+        baseUrlHint: 'codex-proxy-rs 的监听地址，例如 http://127.0.0.1:18081。必填，且不会回落到官方端点。',
+        clientKey: 'CPR Client Key',
+        clientKeyHint: 'CPR 后台「客户端密钥」里创建的密钥。该密钥应只绑定一个分组，且分组内只有这一个 CPR 账号。',
+        accountId: 'CPR 账号 ID',
+        accountIdHint: 'CPR 后台里这个账号的 id（形如 acct_xxx），用于拉取额度。',
+        adminApiKey: 'CPR Admin API Key',
+        adminApiKeyHint: 'CPR 的管理 API Key（admin- 开头），仅用于读取额度与账号状态。',
+        adminBaseUrl: 'CPR Admin 地址（可选）',
+        adminBaseUrlHint: '留空则与网关地址相同。',
+        baseUrlRequired: '请输入 CPR 网关地址',
+        clientKeyRequired: '请输入 CPR Client Key',
+        accountIdRequired: '请输入 CPR 账号 ID',
+        adminApiKeyRequired: '请输入 CPR Admin API Key'
+      },
       // OAuth flow
       oauth: {
         title: 'Claude 账号授权',
