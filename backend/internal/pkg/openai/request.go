@@ -315,6 +315,42 @@ func SetCodexUserAgentVersion(userAgent, version string) string {
 	return rewriteCodexUATrailerVersion(client+"/"+version+tail, version)
 }
 
+// SetCodexDesktopUserAgentVersions 按 Codex Desktop 的双版本身份重建 UA：
+// 首段版本（内嵌 CLI 快照，如 0.154.0-alpha.6.2）与尾部官方客户端标识组版本
+// （Desktop App 版本，如 26.908.70816）是两个独立声明，分别重建：
+//
+//	Codex Desktop/{cli} ({os}; {arch}) {term} (Codex Desktop; {app})
+//
+// 真实抓包样本：`Codex Desktop/0.154.0-alpha.6.2 (Mac OS 26.5.2; arm64) unknown (Codex Desktop; 26.908.40834)`。
+// UA 不是 `{client}/{version}` 形态、或任一版本为空时返回空串，由调用方决定整体回退。
+// 尾组仅在 name 为官方 originator 时改写（复用 rewriteCodexUATrailerVersion 的保护），
+// OS 组（如 `(Mac OS 26.5.2; arm64)`）不受影响。
+func SetCodexDesktopUserAgentVersions(userAgent, leadingVersion, trailerVersion string) string {
+	ua := strings.TrimSpace(userAgent)
+	leadingVersion = strings.TrimSpace(leadingVersion)
+	trailerVersion = strings.TrimSpace(trailerVersion)
+	if leadingVersion == "" || trailerVersion == "" {
+		return ""
+	}
+	slash := strings.IndexByte(ua, '/')
+	if slash <= 0 {
+		return ""
+	}
+	client := strings.TrimSpace(ua[:slash])
+	if client == "" {
+		return ""
+	}
+	rest := ua[slash+1:]
+	tail := ""
+	if space := strings.IndexByte(rest, ' '); space >= 0 {
+		tail = rest[space:]
+	} else if strings.TrimSpace(rest) == "" {
+		// `client/` 没有版本段，不是可重建的 Codex 形态。
+		return ""
+	}
+	return rewriteCodexUATrailerVersion(client+"/"+leadingVersion+tail, trailerVersion)
+}
+
 // rewriteCodexUATrailerVersion 把尾部官方客户端标识组 `(name; version)` 的版本改成 version。
 // 括号组缺少 `;` 分隔的版本、或 name 不是官方 originator 时原样返回。
 func rewriteCodexUATrailerVersion(ua, version string) string {
@@ -336,6 +372,32 @@ func rewriteCodexUATrailerVersion(ua, version string) string {
 		return ua
 	}
 	return ua[:open+1] + name + "; " + version + ua[open+1+closeIdx:]
+}
+
+// CodexDesktopAppVersionFromUA 提取 Codex Desktop 双版本 UA 尾部标识组的 App 版本：
+// `(Codex Desktop; 26.908.40834)` → `26.908.40834`。非官方标识组或无版本段返回空串。
+// 该组版本与 UA 首段（内嵌 CLI 版本）是两个独立声明，配套 CodexDesktopCLIHeaderVersion 使用。
+func CodexDesktopAppVersionFromUA(userAgent string) string {
+	ua := strings.TrimSpace(userAgent)
+	open := strings.LastIndex(ua, "(")
+	if open < 0 {
+		return ""
+	}
+	closeIdx := strings.Index(ua[open+1:], ")")
+	if closeIdx < 0 {
+		return ""
+	}
+	inner := ua[open+1 : open+1+closeIdx]
+	semi := strings.Index(inner, ";")
+	if semi < 0 {
+		return ""
+	}
+	name := strings.TrimSpace(inner[:semi])
+	version := strings.TrimSpace(inner[semi+1:])
+	if name == "" || version == "" || !IsCodexOfficialClientOriginator(name) {
+		return ""
+	}
+	return version
 }
 
 // codexEngineVersionPattern 提取版本段开头的三段数字 X.Y.Z（忽略 -alpha 等后缀）。

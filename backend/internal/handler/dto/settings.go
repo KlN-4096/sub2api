@@ -217,6 +217,8 @@ type SystemSettings struct {
 	OpenAICodexClientVersion               string `json:"openai_codex_client_version"`
 	OpenAICodexClientVersionSynced         string `json:"openai_codex_client_version_synced"`
 	OpenAICodexVersionAutoSyncEnabled      bool   `json:"openai_codex_version_auto_sync_enabled"`
+	OpenAICodexClientType                  string `json:"openai_codex_client_type"`
+	OpenAICodexDesktopClientVersionSynced  string `json:"openai_codex_desktop_client_version_synced"`
 
 	// codex_cli_only 加固
 	MinCodexVersion                      string `json:"min_codex_version"`

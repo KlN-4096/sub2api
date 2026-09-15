@@ -398,12 +398,15 @@ func ProvideAccountExpiryService(accountRepo AccountRepository) *AccountExpirySe
 
 // ProvideOpenAICodexVersionSyncService creates and starts OpenAICodexVersionSyncService.
 // 出站 Codex 身份的版本号靠它跟随官方发布，无需为了跟版本而发新版本；面板可关闭。
+// 同时把「类型变化立即补同步」钩子注入 SettingService：管理员切换客户端类型后
+// 不必等下一个同步周期，保存即触发。
 func ProvideOpenAICodexVersionSyncService(
 	settingRepo SettingRepository,
 	settingService *SettingService,
 	githubClient GitHubReleaseClient,
 ) *OpenAICodexVersionSyncService {
 	svc := NewOpenAICodexVersionSyncService(settingRepo, settingService, githubClient, openAICodexVersionSyncInterval)
+	SetCodexClientTypeChangeHook(svc.TriggerSyncNow)
 	svc.Start()
 	return svc
 }
@@ -782,10 +785,21 @@ func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupReposit
 		logger.LegacyPrintf("service.setting", "Warning: migrate Grok default text model failed: %v", err)
 	}
 	antigravity.SetUserAgentVersionResolver(svc.GetAntigravityUserAgentVersion)
+	// Codex 出站统一客户端身份（settings: openai_codex_client_type，管理员面板可选）：
+	// 经无参解析器下发（内部 60s TTL 缓存、保存后失效，切换即时生效），
+	// GetOpenAICodexClientVersion / GetOpenAICodexCanonicalUserAgent 按类型走
+	// CLI（既有实现，零改动）或 Desktop 分支。
+	SetCodexClientTypeResolver(func() string {
+		return svc.GetOpenAICodexClientType(context.Background())
+	})
 	// enforceCodexIdentityHeaders 是所有 Codex 出站路径共用的纯函数收口点，拿不到 ctx，
 	// 故注入无参解析器；解析器内部自带 60s TTL 缓存，热路径不触库。
 	SetCodexCanonicalUserAgentResolver(func() string {
 		return svc.GetOpenAICodexCanonicalUserAgent(context.Background())
+	})
+	// Desktop 双版本身份的位置 2（推理面 version 头 = 内嵌 CLI 版本），同样经无参解析器下发。
+	SetCodexDesktopCLIHeaderVersionResolver(func() string {
+		return svc.CodexDesktopCLIHeaderVersion(context.Background())
 	})
 	return svc
 }

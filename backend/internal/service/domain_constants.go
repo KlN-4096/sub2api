@@ -698,6 +698,9 @@ const (
 	// 当客户端 UA 被识别为浏览器（Chrome/Firefox/Safari/Edge 等）时，转发给 OpenAI 上游前会替换为此值，
 	// 用于避免 Cloudflare 对浏览器型 UA 的质询拦截。
 	SettingKeyOpenAICodexUserAgent = "openai_codex_user_agent"
+	// SettingKeyOpenAICodexClientType Codex 出站统一客户端身份类型（cli | desktop），
+	// 管理员面板可选、保存即生效；缺失/非法回退 cli。
+	SettingKeyOpenAICodexClientType = "openai_codex_client_type"
 	// SettingKeyOpenAICodexClientVersion 网关对 ChatGPT 上游声明的 Codex 客户端版本号（管理员覆写）。
 	// 空值表示跟随自动同步值；自动同步也没有结果时回退到内置常量。
 	// 上游在容量紧张时按客户端身份分优先级降载，陈旧版本会被优先丢弃，故该值需保持跟随官方发布。
@@ -708,6 +711,15 @@ const (
 	SettingKeyOpenAICodexClientVersionSynced = "openai_codex_client_version_synced"
 	// SettingKeyOpenAICodexVersionAutoSyncEnabled 是否启用 Codex 客户端版本号自动同步（默认 true）。
 	SettingKeyOpenAICodexVersionAutoSyncEnabled = "openai_codex_version_auto_sync_enabled"
+	// SettingKeyOpenAICodexDesktopClientVersionSynced Desktop 模式下自动同步任务写入的
+	// ChatGPT Desktop App 版本号（Sparkle shortVersionString，如 26.908.70816）。
+	// 与 CLI 的 synced key 分离：两种版本号不同源（appcast vs GitHub releases）、形态不同
+	// （26.x 五段 vs 0.x 三段），共用会把 CompareVersions 比较与回退链搅乱。
+	SettingKeyOpenAICodexDesktopClientVersionSynced = "openai_codex_desktop_client_version_synced"
+	// SettingKeyOpenAICodexDesktopCLIVersionSynced Desktop 模式下自动同步写入的
+	// 内嵌 CLI 版本号（GitHub openai/codex 最新 alpha prerelease，与抓包样本的
+	// 0.x-alpha 形态同源）。与 App 版本 synced key 分离：两者不同源、更新节奏不同。
+	SettingKeyOpenAICodexDesktopCLIVersionSynced = "openai_codex_desktop_cli_version_synced"
 	// SettingKeyOpenAIAllowClaudeCodeCodexPlugin 已废弃：历史全局开关只作为升级迁移输入读取。
 	// 迁移后等价规则写入 SettingKeyCodexCLIOnlyWhitelist，不再参与运行时判定。
 	SettingKeyOpenAIAllowClaudeCodeCodexPlugin = "openai_allow_claude_code_codex_plugin"

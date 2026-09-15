@@ -255,6 +255,7 @@ type UpdateSettingsRequest struct {
 	EnableClientDatelineNormalization      *bool   `json:"enable_client_dateline_normalization"`
 	AntigravityUserAgentVersion            *string `json:"antigravity_user_agent_version"`
 	OpenAICodexUserAgent                   *string `json:"openai_codex_user_agent"`
+	OpenAICodexClientType                  *string `json:"openai_codex_client_type"`
 	OpenAICodexClientVersion               *string `json:"openai_codex_client_version"`
 	OpenAICodexVersionAutoSyncEnabled      *bool   `json:"openai_codex_version_auto_sync_enabled"`
 
@@ -1455,6 +1456,11 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		}
 		req.OpenAICodexClientVersion = &normalized
 	}
+	if req.OpenAICodexClientType != nil {
+		// 出站客户端身份（cli|desktop）：归一化非法值回退 cli（与运行时取值语义一致）。
+		normalized := service.NormalizeCodexClientType(*req.OpenAICodexClientType)
+		req.OpenAICodexClientType = &normalized
+	}
 
 	// codex_cli_only 加固：最低/最高 Codex 版本（空=禁用，或合法 semver；max>=min）
 	if req.MinCodexVersion != "" && !semverPattern.MatchString(req.MinCodexVersion) {
@@ -1753,6 +1759,12 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 				return *req.OpenAICodexUserAgent
 			}
 			return previousSettings.OpenAICodexUserAgent
+		}(),
+		OpenAICodexClientType: func() string {
+			if req.OpenAICodexClientType != nil {
+				return *req.OpenAICodexClientType
+			}
+			return previousSettings.OpenAICodexClientType
 		}(),
 		OpenAICodexClientVersion: func() string {
 			if req.OpenAICodexClientVersion != nil {
@@ -2307,6 +2319,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		EnableClientDatelineNormalization:                      updatedSettings.EnableClientDatelineNormalization,
 		AntigravityUserAgentVersion:                            updatedSettings.AntigravityUserAgentVersion,
 		OpenAICodexUserAgent:                                   updatedSettings.OpenAICodexUserAgent,
+		OpenAICodexClientType:                                  updatedSettings.OpenAICodexClientType,
 		OpenAICodexClientVersion:                               updatedSettings.OpenAICodexClientVersion,
 		OpenAICodexClientVersionSynced:                         updatedSettings.OpenAICodexClientVersionSynced,
 		OpenAICodexVersionAutoSyncEnabled:                      updatedSettings.OpenAICodexVersionAutoSyncEnabled,

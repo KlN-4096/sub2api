@@ -156,6 +156,19 @@ func resolveCodexOutboundIdentity(candidateUA string) codexOutboundIdentity {
 	// 生效版本只有一个来源：规范身份（面板版本号 → 自动同步值 → 内置常量，见
 	// SettingService.GetOpenAICodexClientVersion）。UA 与 version 头由此同源派生。
 	version := codexClientVersionFromUA(canonical)
+	// Desktop 分支：真实客户端是双版本身份——UA 首段与 version 头同为内嵌 CLI 快照
+	// 版本（canonical 的版本段，即面板位置 1），UA 尾部标识组另带 App 版本（面板位置 2 /
+	// appcast 同步值）。单值重建会把尾组 App 版本覆写成 CLI 形态，必须用双版本重建：
+	// 尾组版本取自 canonical UA（GetOpenAICodexCanonicalUserAgent 已按双版本拼装），
+	// 候选 UA 若缺官方尾组则保持原样、由 PairCodexClientIdentity 的自洽性兜底。
+	if IsCodexDesktopClient() {
+		if appVersion := openai.CodexDesktopAppVersionFromUA(canonical); appVersion != "" {
+			if rebuilt := openai.SetCodexDesktopUserAgentVersions(pairedUA, version, appVersion); rebuilt != "" {
+				pairedUA = rebuilt
+			}
+			return codexOutboundIdentity{userAgent: pairedUA, originator: originator, version: version}
+		}
+	}
 	if rebuilt := openai.SetCodexUserAgentVersion(pairedUA, version); rebuilt != "" {
 		pairedUA = rebuilt
 	}

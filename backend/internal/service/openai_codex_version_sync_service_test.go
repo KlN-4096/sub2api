@@ -39,6 +39,19 @@ func (r *codexVersionSyncSettingRepoStub) GetValue(_ context.Context, key string
 	return r.values[key], nil
 }
 
+func (r *codexVersionSyncSettingRepoStub) GetMultiple(_ context.Context, keys []string) (map[string]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.getErr != nil {
+		return nil, r.getErr
+	}
+	out := make(map[string]string, len(keys))
+	for _, key := range keys {
+		out[key] = r.values[key]
+	}
+	return out, nil
+}
+
 func (r *codexVersionSyncSettingRepoStub) Set(_ context.Context, key, value string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -47,6 +60,20 @@ func (r *codexVersionSyncSettingRepoStub) Set(_ context.Context, key, value stri
 	}
 	r.values[key] = value
 	r.writes = append(r.writes, value)
+	return nil
+}
+
+func (r *codexVersionSyncSettingRepoStub) SetMultiple(_ context.Context, settings map[string]string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.setErr != nil {
+		return r.setErr
+	}
+	// 与生产 ent upsert 同语义：整批一起生效。
+	for key, value := range settings {
+		r.values[key] = value
+		r.writes = append(r.writes, value)
+	}
 	return nil
 }
 

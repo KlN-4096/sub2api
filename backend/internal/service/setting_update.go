@@ -483,6 +483,7 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingKeyEnableClientDatelineNormalization] = strconv.FormatBool(settings.EnableClientDatelineNormalization)
 	updates[SettingKeyAntigravityUserAgentVersion] = antigravity.NormalizeUserAgentVersion(settings.AntigravityUserAgentVersion)
 	updates[SettingKeyOpenAICodexUserAgent] = strings.TrimSpace(settings.OpenAICodexUserAgent)
+	updates[SettingKeyOpenAICodexClientType] = NormalizeCodexClientType(settings.OpenAICodexClientType)
 	updates[SettingKeyOpenAICodexClientVersion] = NormalizeCodexClientVersion(settings.OpenAICodexClientVersion)
 	updates[SettingKeyOpenAICodexVersionAutoSyncEnabled] = strconv.FormatBool(settings.OpenAICodexVersionAutoSyncEnabled)
 	// SettingKeyOpenAICodexClientVersionSynced 由自动同步任务独占写入，此处不得覆盖，
@@ -739,6 +740,16 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 	// 版本号缓存只做失效，不在此重算：生效值还取决于自动同步写入的 synced 键，
 	// 这里没有它的最新值，重算会把同步结果覆盖成陈旧值。
 	s.InvalidateOpenAICodexClientVersionCache()
+	// Desktop 双位置版本（面板 `v1|v2`）共用同一面板输入，保存后成对失效。
+	s.InvalidateCodexDesktopPanelVersionsCache()
+	// 客户端身份类型保存后立即失效缓存，出站身份切换即时生效（无需重启）。
+	// 失效前先取缓存中的旧值做对比：类型确实变化时通知同步服务立即补一次同步，
+	// 让新类型的 synced 版本号马上可用（否则要等下一个 6h 周期）。
+	previousClientType := s.GetOpenAICodexClientType(context.Background())
+	s.InvalidateOpenAICodexClientTypeCache()
+	if previousClientType != NormalizeCodexClientType(settings.OpenAICodexClientType) {
+		notifyCodexClientTypeChanged()
+	}
 	openAIAdvancedSchedulerSettingSF.Forget(openAIAdvancedSchedulerSettingKey)
 	openAIAdvancedSchedulerSettingCache.Store(&cachedOpenAIAdvancedSchedulerSetting{
 		lowUpstreamRatePriorityEnabled: settings.OpenAILowUpstreamRatePriorityEnabled,

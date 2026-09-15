@@ -639,6 +639,10 @@ export interface SystemSettings {
   openai_codex_client_version: string;
   openai_codex_client_version_synced: string;
   openai_codex_version_auto_sync_enabled: boolean;
+  /** Codex 出站客户端身份（cli|desktop），管理员面板可选、入库保存 */
+  openai_codex_client_type?: string;
+  /** 只读：Desktop 模式下 appcast 同步的 App 版本号（仅 desktop 模式非空） */
+  openai_codex_desktop_client_version_synced?: string;
   // codex_cli_only 加固
   min_codex_version: string;
   max_codex_version: string;
@@ -956,6 +960,7 @@ export interface UpdateSettingsRequest {
   enable_client_dateline_normalization?: boolean;
   antigravity_user_agent_version?: string;
   openai_codex_user_agent?: string;
+  openai_codex_client_type?: string;
   openai_codex_client_version?: string;
   openai_codex_version_auto_sync_enabled?: boolean;
   // codex_cli_only 加固

@@ -243,6 +243,7 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyEnableClientDatelineNormalization:                  "true",
 		SettingKeyAntigravityUserAgentVersion:                        "",
 		SettingKeyOpenAICodexUserAgent:                               "",
+		SettingKeyOpenAICodexClientType:                              "",
 		SettingKeyOpenAICodexClientVersion:                           "",
 		SettingKeyOpenAICodexClientVersionSynced:                     "",
 		SettingKeyOpenAICodexVersionAutoSyncEnabled:                  "true",
@@ -885,12 +886,20 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	result.OpenAICodexUserAgent = strings.TrimSpace(settings[SettingKeyOpenAICodexUserAgent])
 	result.OpenAICodexClientVersion = NormalizeCodexClientVersion(settings[SettingKeyOpenAICodexClientVersion])
 	result.OpenAICodexClientVersionSynced = NormalizeCodexClientVersion(settings[SettingKeyOpenAICodexClientVersionSynced])
+	// Desktop 模式下补充展示 appcast 同步的 App 版本号（UA 尾部标识组，独立 key，
+	// 与 CLI synced 值不同源）；无同步值时回退编译期兜底，保证前端始终有可展示的生效版本。
+	if IsCodexDesktopClient() {
+		result.OpenAICodexDesktopClientVersionSynced = s.GetOpenAICodexDesktopAppVersion(context.Background())
+	}
 	// 自动同步默认开启：缺失/空值一律视为开启，与 enable_client_dateline_normalization 同一惯例。
 	if v, ok := settings[SettingKeyOpenAICodexVersionAutoSyncEnabled]; ok && v != "" {
 		result.OpenAICodexVersionAutoSyncEnabled = v == "true"
 	} else {
 		result.OpenAICodexVersionAutoSyncEnabled = true
 	}
+	// Codex 出站统一客户端身份：管理员面板可选（cli|desktop），入库保存、保存即生效；
+	// 缺失/非法回退 cli（历史部署未写入该 key 时自然落在默认值上）。
+	result.OpenAICodexClientType = NormalizeCodexClientType(settings[SettingKeyOpenAICodexClientType])
 	// codex_cli_only 加固
 	result.MinCodexVersion = settings[SettingKeyMinCodexVersion]
 	result.MaxCodexVersion = settings[SettingKeyMaxCodexVersion]
