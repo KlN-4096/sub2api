@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -709,6 +710,51 @@ func TestCodexDeviceWireProfileWSFrameBytesOnTheWire(t *testing.T) {
 			for _, raw := range frames {
 				requireCodexWSWireBytes(t, raw, enabled, marker)
 			}
+		})
+	}
+}
+
+// 补验投影完成后的发送边界；真实 ingress/v2/预热接线仍由上面的入口测试覆盖。
+// 使用合法工具 schema 保留非规范空白、数字和转义，不能只比较反序列化后的对象。
+func TestCodexDeviceWireProfileWSProjectedFrameBytesOnTheWire(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const frameTimeout = 2 * time.Second
+	const schema = `{
+  "type" : "object", "properties" : {
+    "value" : { "type" : "number", "default" : 1.2300e+02,
+      "minimum" : -0, "maximum" : 9007199254740993,
+      "description" : "\u0061\/\\\n<>&" }
+  }
+}`
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("enabled=%v", enabled), func(t *testing.T) {
+			account := wireProfileTestAccount(enabled)
+			payload := []byte(`{"type":"response.create","model":"gpt-5.3-codex","tools":[{"type":"function","name":"wire_probe","parameters":` + schema + `}]}`)
+			c := newConvTestContext(t, payload)
+			payload = applyCodexWSFrameWireProfile(c, account, payload, "")
+			require.Equal(t, schema, gjson.GetBytes(payload, "tools.0.parameters").Raw,
+				"夹具必须在投影后仍包含待验的空白、转义与数字原文")
+			expected := bytes.Clone(payload)
+			if !enabled {
+				var encoded bytes.Buffer
+				require.NoError(t, json.NewEncoder(&encoded).Encode(json.RawMessage(payload)))
+				expected = encoded.Bytes()
+			}
+
+			upstream := newCodexWSRealUpstream(t)
+			ctx, cancel := context.WithTimeout(context.Background(), frameTimeout)
+			t.Cleanup(cancel)
+			dialer := &codexWSRealDialer{upstream: upstream}
+			client, _, _, err := dialer.Dial(ctx, "", http.Header{}, "")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = client.Close() })
+			lease := &openAIWSConnLease{conn: newOpenAIWSConn("wire_bytes", account.ID, client, nil)}
+			require.NoError(t, writeCodexWSFrame(ctx, c, account, lease, payload, frameTimeout))
+			_, err = client.ReadMessage(ctx) // 上游记录帧后才回 completed，避免异步采集竞态。
+			require.NoError(t, err)
+			frames := upstream.Frames()
+			require.Len(t, frames, 1)
+			require.Equal(t, expected, frames[0], "双开逐字节写出投影结果；关闭时保留原编码器行为")
 		})
 	}
 }

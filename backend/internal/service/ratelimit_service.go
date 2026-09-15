@@ -2165,7 +2165,8 @@ func (s *RateLimitService) RecoverAccountState(ctx context.Context, accountID in
 		}
 		result.ClearedRateLimit = true
 	}
-	if result.ClearedError || result.ClearedRateLimit {
+	// 凭据探针不证明推理已恢复：内存冷却、重试窗口和 403 计数同样不能主动清掉。
+	if !options.CredentialsOnly && (result.ClearedError || result.ClearedRateLimit) {
 		s.ResetOpenAI403Counter(ctx, accountID)
 		if result.ClearedError && !result.ClearedRateLimit {
 			s.notifyAccountSchedulingBlockCleared(accountID)
