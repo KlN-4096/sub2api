@@ -1450,7 +1450,8 @@ export async function updateRectifierSettings(
 export interface OpenAIFastPolicyRule {
   service_tier: "all" | "priority" | "flex" | "ultrafast" | "missing";
   action: "pass" | "filter" | "block" | "force_priority";
-  scope: "all" | "oauth" | "apikey" | "bedrock";
+  // cpr 是本策略独有的 scope：Beta Policy 只作用于 anthropic-beta，看不到 cpr 账号
+  scope: "all" | "oauth" | "apikey" | "bedrock" | "cpr";
   user_ids?: number[];
   error_message?: string;
   model_whitelist?: string[];
