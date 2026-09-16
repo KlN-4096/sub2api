@@ -224,6 +224,9 @@ func buildCPRRateLimit(quota cprAccountQuota, now time.Time) *OpenAIRateLimit {
 	limit := &OpenAIRateLimit{LimitReached: quota.LimitReached}
 	matched := false
 	for _, window := range quota.Windows {
+		if !isCPRMainCodexLimitLine(window.LimitID) {
+			continue
+		}
 		converted := convertCPRWindow(window, now)
 		if converted == nil {
 			continue
@@ -242,6 +245,21 @@ func buildCPRRateLimit(quota cprAccountQuota, now time.Time) *OpenAIRateLimit {
 	}
 	limit.Allowed = !quota.LimitReached
 	return limit
+}
+
+// isCPRMainCodexLimitLine 判定一个额度窗口是否属于主 Codex 限额线。
+//
+// CPR 会把官方 rate_limits_by_limit_id 的每个桶都列出来，除主线外还有
+// codex_bengalfox（GPT-5.3-Codex-Spark）这类按模型单算的限额族。它们各自
+// 独立起算、重置时间都不同，混进来会让 role 槽位被后写的覆盖——pro1 实测
+// 就是主线 7d 的 5% 被 Spark 的窗口顶成 0%/14%，与官方页面对不上。
+//
+// "codex" 是 CPR 的主线标识（credential/quota/document.rs 的
+// DEFAULT_CODEX_LIMIT_ID，snapshot.rs 的排序里固定排 0）。留空按主线处理：
+// CPR 老版本的单桶视图不带 limitId，那时只有一条线。
+func isCPRMainCodexLimitLine(limitID string) bool {
+	trimmed := strings.TrimSpace(limitID)
+	return trimmed == "" || strings.EqualFold(trimmed, "codex")
 }
 
 func convertCPRWindow(window cprQuotaWindow, now time.Time) *OpenAIRateLimitWindow {

@@ -336,6 +336,49 @@ func TestCPRWindowWithoutPercentIsDropped(t *testing.T) {
 	}}, now))
 }
 
+// TestCPROnlyMainCodexLimitLineIsUsed：只认主 Codex 限额线（limitId=codex），
+// 其余限额族（codex_bengalfox = GPT-5.3-Codex-Spark 等）一律忽略。
+//
+// 数据取自 pro1 线上实测：官方页面显示的 7d 是主线的 5%，而 Spark 的周额度是 14%。
+// 原实现只按 role 选窗口，三个窗口里后写的覆盖先写的，主线 5% 被 Spark 的 0% 顶掉、
+// 7d 变成 Spark 的 14%，展示与调度看到的都是另一条线的数。
+func TestCPROnlyMainCodexLimitLineIsUsed(t *testing.T) {
+	now := time.Now()
+	limit := buildCPRRateLimit(cprAccountQuota{Windows: []cprQuotaWindow{
+		{Role: "primary", LimitID: "codex", WindowSeconds: ptrInt64(604800), UsedPercent: ptrFloat64(5)},
+		{Role: "primary", LimitID: "codex_bengalfox", WindowSeconds: ptrInt64(18000), UsedPercent: ptrFloat64(0)},
+		{Role: "secondary", LimitID: "codex_bengalfox", WindowSeconds: ptrInt64(604800), UsedPercent: ptrFloat64(14)},
+	}}, now)
+	require.NotNil(t, limit)
+	require.NotNil(t, limit.PrimaryWindow)
+	require.Equal(t, float64(5), limit.PrimaryWindow.UsedPercent, "必须是主线的 5%，不是 Spark 的 0%")
+	require.Equal(t, int64(604800), limit.PrimaryWindow.LimitWindowSeconds)
+	require.Nil(t, limit.SecondaryWindow, "Spark 的周额度不能占用 secondary 槽位")
+
+	// 主线同时有 5h 与 7d 时两个槽位都填，Spark 依旧被忽略。
+	both := buildCPRRateLimit(cprAccountQuota{Windows: []cprQuotaWindow{
+		{Role: "primary", LimitID: "codex", WindowSeconds: ptrInt64(18000), UsedPercent: ptrFloat64(3)},
+		{Role: "secondary", LimitID: "codex", WindowSeconds: ptrInt64(604800), UsedPercent: ptrFloat64(5)},
+		{Role: "secondary", LimitID: "codex_bengalfox", WindowSeconds: ptrInt64(604800), UsedPercent: ptrFloat64(14)},
+	}}, now)
+	require.NotNil(t, both)
+	require.Equal(t, float64(3), both.PrimaryWindow.UsedPercent)
+	require.Equal(t, float64(5), both.SecondaryWindow.UsedPercent)
+
+	// 只有非主线窗口时不造空壳——报一个别的限额线的数比没有数更糟。
+	require.Nil(t, buildCPRRateLimit(cprAccountQuota{Windows: []cprQuotaWindow{
+		{Role: "primary", LimitID: "codex_bengalfox", WindowSeconds: ptrInt64(18000), UsedPercent: ptrFloat64(0)},
+		{Role: "secondary", LimitID: "codex_bengalfox", WindowSeconds: ptrInt64(604800), UsedPercent: ptrFloat64(14)},
+	}}, now))
+
+	// limitId 缺失时按主线处理：CPR 老版本的单桶视图不带这个字段。
+	legacy := buildCPRRateLimit(cprAccountQuota{Windows: []cprQuotaWindow{
+		{Role: "primary", WindowSeconds: ptrInt64(18000), UsedPercent: ptrFloat64(7)},
+	}}, now)
+	require.NotNil(t, legacy)
+	require.Equal(t, float64(7), legacy.PrimaryWindow.UsedPercent)
+}
+
 func TestCPRRateLimitedUntilParsed(t *testing.T) {
 	now := time.Now()
 	loc := time.FixedZone("UTC+8", 8*60*60)
