@@ -217,7 +217,9 @@ func (s *AccountTestService) FetchOpenAIAccountModels(ctx context.Context, accou
 	// Codex discovery lists Responses drivers, not image_generation tool models.
 	// Add locally supported image choices only to the OAuth test picker; keep the
 	// shared upstream catalog and API-key discovery authoritative.
-	if account != nil && account.IsOpenAIOAuthLike() {
+	// cpr 的 /v1/models 同样来自 CPR 的 Codex 目录，只列 Responses driver、不含
+	// image_generation 工具模型；而 SupportsOpenAIImageCapability 已把 cpr 列为支持。
+	if account != nil && account.TargetsChatGPTCodexUpstream() {
 		passthrough := account.IsOpenAIPassthroughEnabled()
 		seen := make(map[string]bool, len(payload.Data))
 		for _, model := range payload.Data {
@@ -2237,9 +2239,30 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid base URL: %s", err.Error()))
 		}
 		apiURL = buildOpenAIResponsesURLForPlatform(account.Platform, normalizedBaseURL)
+	case account.IsCPR():
+		// 与本文件普通测试那条 cpr 分支同构：Bearer + 自定义 base_url，
+		// 但绝不回落官方端点——base_url 为空直接报错，而不是把 CPR 的
+		// client key 发给 api.openai.com。
+		authToken = account.GetCPRClientKey()
+		if authToken == "" {
+			return s.sendErrorAndEnd(c, "No CPR client key available")
+		}
+		baseURL := account.GetCPRGatewayBaseURL()
+		if baseURL == "" {
+			return s.sendErrorAndEnd(c, "cpr account requires credentials.base_url")
+		}
+		normalizedBaseURL, err := s.validateUpstreamBaseURL(baseURL)
+		if err != nil {
+			return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid base URL: %s", err.Error()))
+		}
+		apiURL = buildOpenAIResponsesURL(normalizedBaseURL)
 	default:
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Unsupported account type: %s", account.Type))
 	}
+	// 请求体按「上游是谁」构造：cpr 的上游就是 ChatGPT internal API，同样要求
+	// store:false，少了它探针被拒 → openai_compact_supported 假阴性。身份头仍只
+	// 给 oauth（cpr 的身份画像由 CPR 负责）。
+	chatGPTUpstream := isOAuth || account.IsCPR()
 
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
@@ -2247,11 +2270,12 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Flush()
 
-	// 原生 v2 走普通 /responses 线：OAuth 与真实转发一致做上游模型归一化。
-	if isOAuth {
+	// 原生 v2 走普通 /responses 线：与真实转发走同一个模型归一化入口
+	// （对 cpr 当前是空操作——闸门在 UsesOpenAICodexProtocol()，与转发一致）。
+	if chatGPTUpstream {
 		testModelID = normalizeOpenAIModelForUpstream(credentialAccount, testModelID)
 	}
-	payloadBytes, _ := json.Marshal(createOpenAICompactProbePayload(testModelID, isOAuth))
+	payloadBytes, _ := json.Marshal(createOpenAICompactProbePayload(testModelID, chatGPTUpstream))
 	if !agentIdentityTaskRecoveryWasTried(ctx) {
 		s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
 	}

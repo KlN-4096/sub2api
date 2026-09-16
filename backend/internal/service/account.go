@@ -252,6 +252,18 @@ func (a *Account) IsOAuth() bool {
 func (a *Account) IsPrivacySet() bool {
 	switch a.Platform {
 	case PlatformOpenAI:
+		// cpr 中继账号：本门对它不设防。OAuth 凭据在 codex-proxy-rs 手里，
+		// sub2api 既跑不了 EnsureOpenAIPrivacy / ForceOpenAIPrivacy 的探测
+		// （两者都要 access_token），CPR 的管理接口也不暴露训练共享设置
+		// （其源码无任何 privacy/training 处理），因此 extra.privacy_mode
+		// 对 cpr 恒为空。保持 false 的后果是 require_privacy_set 分组永远
+		// 选不出 cpr 账号，且只在 recheck 阶段丢号、报不带过滤原因的裸
+		// "no available accounts"（线上表现为 503）。
+		// 语义上这等于 require_privacy_set 对 cpr 失效：上游账号是否关闭训练
+		// 数据共享，由运维在 ChatGPT 侧自行保证，sub2api 无从验证。
+		if a.Type == AccountTypeCPR {
+			return true
+		}
 		return a.getExtraString("privacy_mode") == PrivacyModeTrainingOff
 	case PlatformAntigravity:
 		return a.getExtraString("privacy_mode") == AntigravityPrivacySet
@@ -862,7 +874,10 @@ func (a *Account) IsModelSupported(requestedModel string) bool {
 	}
 	mapping := a.GetModelMapping()
 	if len(mapping) == 0 {
-		if a.IsOpenAIOAuth() {
+		// cpr 中继到同一个 Codex 后端，外厂模型同样会被不可重试的 400 拒掉，
+		// 必须在调度阶段就跳过，否则请求死在该账号上。setup-token 维持原状
+		// （从未参与这道黑名单），这里刻意不用 TargetsChatGPTCodexUpstream()。
+		if a.IsOpenAIOAuth() || a.IsCPR() {
 			return isOpenAIOAuthServableModel(requestedModel)
 		}
 		if a.Platform == PlatformDeepseek {
@@ -1325,11 +1340,53 @@ func (a *Account) UsesOpenAICodexProtocol() bool {
 	return a != nil && (a.Type == AccountTypeOAuth || a.IsOpenAIOAuthLike())
 }
 
+// TargetsChatGPTCodexUpstream 表示这个账号的请求最终会落到 ChatGPT 的 Codex
+// 后端：oauth / setup-token 直连，cpr 经 codex-proxy-rs 中继。
+//
+// CPR 不是逐字节透传：它会覆写 model（别名层）、删 max_output_tokens /
+// temperature、改写 environment_context 的时区文本与 web_search 的
+// user_location、注入 client_metadata.installation_id、强制 stream:true 并
+// zstd 压缩（providers/openai/src/transport/request.rs、client_sse.rs）。
+// 但它对 namespace / reasoning / input item id / service_tier / include
+// 只读不写，所以本层这几类归一化对 cpr 与 oauth 必须同样生效，且不会与
+// CPR 的改写叠加。
+//
+// 与 IsOpenAIOAuthLike() 的分工——后者表示「本地持有 ChatGPT OAuth 凭据」：
+//   - 按「上游是谁」分流（线协议归一化、429 语义、计费 tier、流终态判定、
+//     compact 归一化）用本函数
+//   - 按「本地有没有 token」分流（token 刷新、隐私探测、/wham/usage、指纹画像）
+//     用 IsOpenAIOAuthLike()
+//
+// 刻意不对齐的一块：UsesOpenAICodexProtocol()（applyCodexOAuthTransform 整套
+// body 变换）对 cpr 保持 false。那套变换会删 internal_chat_message_metadata_
+// passthrough，而 CPR 靠它定位 environment_context 做时区对齐；且 Codex CLI
+// 客户端本就自带 store:false / include。非 Codex 客户端打 cpr 的兼容性是已知缺口。
+func (a *Account) TargetsChatGPTCodexUpstream() bool {
+	return a.IsOpenAIOAuthLike() || a.IsCPR()
+}
+
 func (a *Account) IsOpenAIChatGPTSubscription() bool {
+	// cpr 的上游就是一份真实 ChatGPT 订阅。档位来源两级：凭据里人工写的
+	// plan_type 优先（管理端没有 cpr 的输入框，只能经 API/DB 写，属显式覆盖），
+	// 其次是 CPR admin 探测落在 extra.cpr_plan_type 的值——与列表页
+	// getAccountPlanType 的回退顺序一致。词表与 oauth 同源（CPR 从同一份
+	// OAuth 登录态取 plan，并把 unknown/空归一成缺省），所以沿用同一套
+	// fail-open 判定。setup-token 维持排除：它本就不参与订阅优先调度。
+	if a.IsCPR() {
+		plan := a.GetCredential("plan_type")
+		if strings.TrimSpace(plan) == "" {
+			plan = a.GetExtraString(CPRPlanTypeExtraKey)
+		}
+		return isOpenAIChatGPTSubscriptionPlan(plan)
+	}
 	if !a.IsOpenAIOAuth() {
 		return false
 	}
-	switch strings.ToLower(strings.TrimSpace(a.GetCredential("plan_type"))) {
+	return isOpenAIChatGPTSubscriptionPlan(a.GetCredential("plan_type"))
+}
+
+func isOpenAIChatGPTSubscriptionPlan(planType string) bool {
+	switch strings.ToLower(strings.TrimSpace(planType)) {
 	case "", "free", "abnormal":
 		return false
 	default:

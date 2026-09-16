@@ -29,8 +29,21 @@ const isNonBlankString = (value: unknown): value is string => (
   typeof value === 'string' && value.trim().length > 0
 )
 
+// isOpenAICodexUsageAccount 判定一个 openai 账号是否走 codex 额度口径
+// （codex_5h_* / codex_7d_*）：oauth 直连 /wham/usage，cpr 中继从 CPR 的
+// admin API 取，展示字段与进度条完全相同（后端 getUsageForAccount 也把两者
+// 路由到同一个 getOpenAIUsage）。
+//
+// 单独抽出来是因为这个判定原本在三处各写一遍——AccountUsageCell 的同名
+// computed、AccountsView 的 accountSupportsBatchUsage、以及下面这个刷新 key。
+// cpr 接入时只改了第一处，另两处漏改，表现为 cpr 的用量列恒为 "-"、
+// 每次刷新都要手动点一次查询。
+export const isOpenAICodexUsageAccount = (account: Pick<Account, 'platform' | 'type'>): boolean => (
+  account.platform === 'openai' && (account.type === 'oauth' || account.type === 'cpr')
+)
+
 export const buildOpenAIUsageRefreshKey = (account: Pick<Account, 'id' | 'platform' | 'type' | 'updated_at' | 'last_used_at' | 'rate_limit_reset_at' | 'extra'>): string => {
-  if (account.platform !== 'openai' || account.type !== 'oauth') {
+  if (!isOpenAICodexUsageAccount(account)) {
     return ''
   }
 

@@ -1002,7 +1002,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesErrorResponse(
 	}
 
 	// 主控不可用不代表图片模型配额耗尽，直接透传，避免误冷却整个图片账号池。
-	if account.IsOpenAIOAuthLike() && isOpenAIImagesMainModelError(resp.StatusCode, body) {
+	if account.TargetsChatGPTCodexUpstream() && isOpenAIImagesMainModelError(resp.StatusCode, body) {
 		upErr := openAIImagesUpstreamErrorFromHTTP(resp.StatusCode, resp.Header, body)
 		writeOpenAIImagesUpstreamErrorResponse(c, upErr)
 		return nil, upErr
@@ -1022,7 +1022,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesErrorResponse(
 		shouldDisable,
 		false,
 	)
-	shouldFailover := shouldDisable || (account.IsOpenAIOAuthLike() && resp.StatusCode == http.StatusTooManyRequests && failoverErr.RetryableOnSameAccount)
+	shouldFailover := shouldDisable || (account.TargetsChatGPTCodexUpstream() && resp.StatusCode == http.StatusTooManyRequests && failoverErr.RetryableOnSameAccount)
 	kind := "http_error"
 	if shouldFailover {
 		kind = "failover"

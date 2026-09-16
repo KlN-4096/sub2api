@@ -149,7 +149,9 @@ func applyOpenAICodexBetaFeatures(c *gin.Context, account *Account, h http.Heade
 		ensureOpenAIRemoteCompactionV2BetaFeature(h)
 		return
 	}
-	if account == nil || !account.IsOpenAIOAuthLike() {
+	// 按「上游是谁」判定：cpr 也要会话级补注，否则它只在压缩回合才带这个头，
+	// 正是本函数要消除的形态；CPR 对该头是原样透传（transport/headers.rs）。
+	if account == nil || !account.TargetsChatGPTCodexUpstream() {
 		return
 	}
 	if hasOpenAICodexBetaFeaturesHeader(h) {
