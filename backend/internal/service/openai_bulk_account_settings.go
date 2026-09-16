@@ -196,7 +196,9 @@ func validateBulkOpenAISettingsTargets(
 
 func supportsOpenAILongContextBilling(accountType string) bool {
 	switch accountType {
-	case AccountTypeOAuth, AccountTypeSetupToken, AccountTypeAPIKey:
+	// cpr 必须在列：运行时 IsOpenAILongContextBillingEnabled() 与 openAILongContextBillingGate()
+	// 都只看 platform，单账号编辑也放行，漏掉这里会出现「单改能生效、批量改 400」。
+	case AccountTypeOAuth, AccountTypeSetupToken, AccountTypeAPIKey, AccountTypeCPR:
 		return true
 	default:
 		return false

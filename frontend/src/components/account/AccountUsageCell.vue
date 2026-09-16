@@ -673,7 +673,7 @@ import { ref, computed, onMounted, onBeforeUnmount, onUnmounted, watch } from 'v
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type { Account, AccountUsageInfo, GeminiCredentials, WindowStats } from '@/types'
-import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
+import { buildOpenAIUsageRefreshKey, isOpenAICodexUsageAccount as isOpenAICodexUsageAccountType } from '@/utils/accountUsageRefresh'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import { formatCompactNumber } from '@/utils/format'
 import UsageProgressBar from './UsageProgressBar.vue'
@@ -741,13 +741,9 @@ let desktopViewportMediaQuery: MediaQueryList | null = null
 let desktopViewportListener: ((event: MediaQueryListEvent) => void) | null = null
 let visibilityObserver: IntersectionObserver | null = null
 
-// OpenAI 侧走 Codex 额度口径（codex_5h_* / codex_7d_*）的账号：OAuth 直连上游拿，
-// CPR 中继从 CPR 的 admin API 拿，展示字段与进度条完全相同，所以共用一个判定。
-const isOpenAICodexUsageAccount = computed(
-  () =>
-    props.account.platform === 'openai' &&
-    (props.account.type === 'oauth' || props.account.type === 'cpr')
-)
+// 判定见 @/utils/accountUsageRefresh：AccountsView 的批量取数白名单与刷新 key
+// 共用同一个断言，避免三处各写一遍再漏改其中一处（cpr 接入时就漏了两处）。
+const isOpenAICodexUsageAccount = computed(() => isOpenAICodexUsageAccountType(props.account))
 
 // Show usage windows for OAuth and Setup Token accounts
 const showUsageWindows = computed(() => {

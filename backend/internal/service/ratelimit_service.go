@@ -1150,7 +1150,7 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 	// OpenAI OAuth stays on the same account for the gateway's bounded retry
 	// window. Persisting a rate-limit reset on the first 429 would make the next
 	// retry ineligible and silently turn same-account recovery into a switch.
-	if account != nil && isOpenAIOAuthAccount(account) && s.runtimeBlocker != nil {
+	if account != nil && account.TargetsChatGPTCodexUpstream() && s.runtimeBlocker != nil {
 		if checker, ok := s.runtimeBlocker.(interface {
 			ShouldRetryOpenAIOAuth429(*Account, http.Header, []byte) bool
 		}); ok && checker.ShouldRetryOpenAIOAuth429(account, headers, responseBody) {
@@ -2304,7 +2304,7 @@ func (s *RateLimitService) HandleOpenAIImageRateLimit(ctx context.Context, accou
 // Spark 的 x-codex-* 使用率和 reset 时间只代表 Spark 模型维度，不能写入账号级
 // RateLimitResetAt，否则同一 OAuth 账号上的其他模型也会被错误停调。
 func (s *RateLimitService) HandleOpenAICodexSparkRateLimit(ctx context.Context, account *Account, requestedModel string, statusCode int, headers http.Header, responseBody []byte) bool {
-	if s == nil || account == nil || s.accountRepo == nil || statusCode != http.StatusTooManyRequests || !isOpenAIOAuthAccount(account) {
+	if s == nil || account == nil || s.accountRepo == nil || statusCode != http.StatusTooManyRequests || !account.TargetsChatGPTCodexUpstream() {
 		return false
 	}
 	if !isCodexSparkModel(requestedModel) || !account.ShouldHandleErrorCode(statusCode) {
@@ -2481,7 +2481,7 @@ func (s *RateLimitService) HandleUpstreamModelNotFound(ctx context.Context, acco
 	switch {
 	case isUpstreamModelNotFoundError(statusCode, responseBody):
 		cooldown, reason = upstreamModelNotFoundCooldown, upstreamModelNotFoundReason
-	case isOpenAIOAuthAccount(account) && isOpenAICodexPlanGatedModelError(statusCode, responseBody):
+	case account.TargetsChatGPTCodexUpstream() && isOpenAICodexPlanGatedModelError(statusCode, responseBody):
 		cooldown, reason = upstreamCodexPlanGatedModelCooldown, upstreamCodexPlanGatedModelReason
 	default:
 		return false

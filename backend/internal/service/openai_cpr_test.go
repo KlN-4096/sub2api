@@ -14,7 +14,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"bytes"
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
+	"io"
 )
 
 const (
@@ -236,7 +240,7 @@ func TestCPRExtraUpdatesMatchOAuthDisplayKeys(t *testing.T) {
 	oauthShape := buildCodexWindowExtraUpdates(rateLimit, now)
 	require.NotEmpty(t, oauthShape)
 
-	cprShape := buildCPRCodexExtraUpdates(&CPRAccountState{
+	cprShape := buildCPRCodexExtraUpdates(newCPRTestAccount(), &CPRAccountState{
 		Status: "normal", PlanType: "pro", RateLimit: rateLimit, FetchedAt: now,
 	})
 
@@ -246,7 +250,18 @@ func TestCPRExtraUpdatesMatchOAuthDisplayKeys(t *testing.T) {
 	require.Contains(t, cprShape, "codex_5h_used_percent")
 	require.Contains(t, cprShape, "codex_7d_used_percent")
 	require.Contains(t, cprShape, "codex_usage_updated_at")
-	require.Len(t, cprShape, len(oauthShape), "不得多出 OAuth 路径没有的键")
+
+	// cpr_plan_type 是本条守卫的唯一例外：它不是展示键（前端不读），而是订阅优先
+	// 调度要用的档位，OAuth 那边存在 credentials.plan_type 里、不经本函数。
+	// 这里把它摘掉再比数量，而不是把期望值加一——否则守卫就形同虚设。
+	displayShape := make(map[string]any, len(cprShape))
+	for key, value := range cprShape {
+		if key == CPRPlanTypeExtraKey {
+			continue
+		}
+		displayShape[key] = value
+	}
+	require.Len(t, displayShape, len(oauthShape), "不得多出 OAuth 路径没有的展示键")
 }
 
 // TestCPRExtraUpdatesWithoutWindows 钉住"没有窗口时一个字节都不写"：
@@ -257,7 +272,7 @@ func TestCPRExtraUpdatesMatchOAuthDisplayKeys(t *testing.T) {
 //     cpr_account_status / cpr_error_reason 全仓库零消费者，正是这个写放大的来源。
 func TestCPRExtraUpdatesWithoutWindows(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
-	updates := buildCPRCodexExtraUpdates(&CPRAccountState{Status: "error", ErrorReason: "credential_invalid", FetchedAt: now})
+	updates := buildCPRCodexExtraUpdates(newCPRTestAccount(), &CPRAccountState{Status: "error", ErrorReason: "credential_invalid", FetchedAt: now})
 	require.Empty(t, updates, "没有窗口就什么都不写，与 OAuth 路径一致")
 }
 
@@ -789,4 +804,559 @@ func (r *cprOAuthFilterAccountRepo) GetByIDs(_ context.Context, ids []int64) ([]
 		}
 	}
 	return out, nil
+}
+
+// cprPrivacyGroupRepo 只提供调度链路会用到的 GetByID。
+type cprPrivacyGroupRepo struct {
+	GroupRepository
+	group *Group
+}
+
+func (r *cprPrivacyGroupRepo) GetByID(_ context.Context, id int64) (*Group, error) {
+	if r.group == nil || r.group.ID != id {
+		return nil, nil
+	}
+	return r.group, nil
+}
+
+func (r *cprPrivacyGroupRepo) GetByIDLite(ctx context.Context, id int64) (*Group, error) {
+	return r.GetByID(ctx, id)
+}
+
+// TestCPRAccountSchedulableInRequirePrivacySetGroup 是线上 503 的回归用例
+// （group_id=2，错误是不带过滤统计的裸 "no available accounts"）：
+// require_privacy_set 分组里唯一的 cpr 账号曾被 recheck 阶段的隐私门丢掉，
+// 因为 IsPrivacySet() 对 openai 平台只认 extra.privacy_mode == training_off，
+// 而该键只由 OAuth 探测链路写入，cpr 永远拿不到。现在该门对 cpr 不设防。
+func TestCPRAccountSchedulableInRequirePrivacySetGroup(t *testing.T) {
+	const groupID int64 = 2
+	newAccount := func(privacyMode string) *Account {
+		acc := newCPRTestAccount()
+		acc.GroupIDs = []int64{groupID}
+		if privacyMode != "" {
+			acc.Extra = map[string]any{"privacy_mode": privacyMode}
+		}
+		return acc
+	}
+
+	// LoadBatchEnabled 与线上一致（配置默认 true）：走 Layer1/2/3 那条链路，
+	// 而不是 concurrencyService 缺席时的 selectAccountForModelWithExclusions。
+	cfg := &config.Config{}
+	cfg.Gateway.Scheduling.LoadBatchEnabled = true
+	cfg.Gateway.Scheduling.FallbackMaxWaiting = 100
+	cfg.Gateway.Scheduling.FallbackWaitTimeout = 30 * time.Second
+
+	newService := func(acc *Account) *OpenAIGatewayService {
+		return &OpenAIGatewayService{
+			accountRepo:      schedulerTestOpenAIAccountRepo{accounts: []Account{*acc}},
+			cache:            &schedulerTestGatewayCache{},
+			cfg:              cfg,
+			rateLimitService: newOpenAIAdvancedSchedulerRateLimitService("false"),
+			schedulerSnapshot: &SchedulerSnapshotService{
+				cache: &openAISnapshotCacheStub{
+					snapshotAccounts: []*Account{acc},
+					accountsByID:     map[int64]*Account{acc.ID: acc},
+				},
+				groupRepo: &cprPrivacyGroupRepo{group: &Group{
+					ID:                groupID,
+					Platform:          PlatformOpenAI,
+					RequirePrivacySet: true,
+				}},
+			},
+			concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{}),
+		}
+	}
+
+	gid := groupID
+	// 没有 privacy_mode 的 cpr 账号也必须能被选出来——这正是线上 503 的场景。
+	acc := newAccount("")
+	selection, _, err := newService(acc).SelectAccountWithSchedulerForCapability(
+		context.Background(), &gid, "", "", "gpt-6-astra", nil,
+		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityResponses, false, false, false,
+	)
+	require.NoError(t, err, "隐私门必须对 cpr 不设防，否则又是那条裸 no available accounts")
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, acc.ID, selection.Account.ID)
+
+	// 只开 cpr 这一个口子：其余 openai 账号仍按 privacy_mode 判定。
+	require.False(t, (&Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}).IsPrivacySet())
+	require.False(t, (&Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}).IsPrivacySet())
+	require.True(t, (&Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Extra:    map[string]any{"privacy_mode": PrivacyModeTrainingOff},
+	}).IsPrivacySet())
+}
+
+// TestCPRModelSupportUsesCodexForeignModelBlacklist：空 model_mapping 的 cpr 账号
+// 必须与 oauth 一样排除外厂模型。cpr 的上游就是同一个 ChatGPT/Codex 后端，
+// 原样透传 claude-*/deepseek-* 之类必然被以不可重试的 400 拒绝且不触发 failover，
+// 请求直接死在该账号上（#3662 的原始故障被 cpr 类型重新引入）。
+func TestCPRModelSupportUsesCodexForeignModelBlacklist(t *testing.T) {
+	// 取自 openAIOAuthForeignModelPrefixes + bare k3。注意黑名单里没有 claude-，
+	// 那是刻意的（保守黑名单，未知/自定义别名保持放行），别往里加。
+	foreign := []string{"deepseek-v4-pro", "glm-4.6", "gemini-3-pro", "grok-4", "qwen3-max", "k3"}
+	servable := []string{"gpt-5.6-luna", "gpt-6-astra", "gpt-5.3-codex-spark", "gpt-image-2"}
+
+	for _, typ := range []string{AccountTypeCPR, AccountTypeOAuth} {
+		t.Run(typ, func(t *testing.T) {
+			acc := &Account{Platform: PlatformOpenAI, Type: typ}
+			for _, model := range foreign {
+				require.False(t, acc.IsModelSupported(model), "外厂模型必须被排除: %s", model)
+			}
+			for _, model := range servable {
+				require.True(t, acc.IsModelSupported(model), "Codex 模型必须放行: %s", model)
+			}
+		})
+	}
+
+	// setup-token 从未参与这道黑名单（原判定是 IsOpenAIOAuth()），本次只加 cpr，
+	// 不顺带改它——「不影响 cpr 之外的渠道」。
+	setupToken := &Account{Platform: PlatformOpenAI, Type: AccountTypeSetupToken}
+	require.True(t, setupToken.IsModelSupported("deepseek-v4-pro"))
+
+	// 显式 model_mapping 仍然说了算，黑名单不参与。
+	mapped := &Account{Platform: PlatformOpenAI, Type: AccountTypeCPR,
+		Credentials: map[string]any{"model_mapping": map[string]any{"deepseek-v4-pro": "gpt-5.6-luna"}}}
+	require.True(t, mapped.IsModelSupported("deepseek-v4-pro"))
+
+	// apikey 上游不是 Codex 后端，不受影响。
+	apikey := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	require.True(t, apikey.IsModelSupported("deepseek-v4-pro"))
+}
+
+// TestCPRTransientUpstreamErrorEntersCooldown：CPR 网关抖动（502/503）必须触发
+// 账号+模型级冷却。该冷却只在「上游端点按账号各不相同」时才有意义，所以这里
+// 按 apikey 而非 oauth 对齐——cpr 的 base_url 是每个账号自己的自建网关。
+func TestCPRTransientUpstreamErrorEntersCooldown(t *testing.T) {
+	const model = "gpt-6-astra"
+	for _, status := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
+			repo := &oauth429RateLimitRepo{}
+			rateLimits := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+			svc := &OpenAIGatewayService{rateLimitService: rateLimits}
+			rateLimits.SetAccountRuntimeBlocker(svc)
+
+			cpr := newCPRTestAccount()
+			require.False(t, svc.isOpenAIAccountRequestRuntimeBlocked(cpr, model))
+
+			// 冷却在连续第 2 次失败才生效（recordFailure: streak>=2 才给 blockUntil），
+			// 第 1 次只记流水——单次抖动不该把账号踢出候选。
+			svc.handleOpenAIAccountUpstreamError(context.Background(), cpr, status, http.Header{}, nil, model)
+			require.False(t, svc.isOpenAIAccountRequestRuntimeBlocked(cpr, model), "单次失败不冷却")
+			svc.handleOpenAIAccountUpstreamError(context.Background(), cpr, status, http.Header{}, nil, model)
+
+			require.True(t, svc.isOpenAIAccountRequestRuntimeBlocked(cpr, model),
+				"网关 %d 后必须冷却，否则调度器会反复选中同一个 cpr 账号把 failover 预算烧光", status)
+			// 只冷却出问题的模型，其余模型照常。
+			require.False(t, svc.isOpenAIAccountRequestRuntimeBlocked(cpr, "gpt-5.6-luna"))
+		})
+	}
+}
+
+// TestCPRCompactTestConnectionTargetsGateway：compact 测试连接必须走 CPR 网关，
+// 之前 switch 只有 oauth / apikey 两支，cpr 落到 default 报
+// "Unsupported account type: cpr"，零出站——导致 extra.openai_compact_supported
+// 永远探测不到，compact 调度只能按 unknown 靠运气。
+func TestCPRCompactTestConnectionTargetsGateway(t *testing.T) {
+	account := newCPRTestAccount()
+	upstream := &queuedHTTPUpstream{responses: []*http.Response{
+		newJSONResponse(http.StatusOK, `{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}`),
+	}}
+	svc := &AccountTestService{cfg: cprTestConfig(), httpUpstream: upstream}
+	c, _ := newTestContext()
+
+	_ = svc.testOpenAICompactConnection(c, account, "gpt-5.6-luna")
+
+	require.Len(t, upstream.requests, 1, "必须真的发出一条 compact 探针")
+	require.Equal(t, "127.0.0.1:18081", upstream.requests[0].URL.Host, "只能发往自己的 CPR 网关")
+	require.NotEqual(t, "chatgpt.com", upstream.requests[0].Host)
+	require.Equal(t, "Bearer "+cprTestClientKey, upstream.requests[0].Header.Get("Authorization"))
+	probeBody, err := io.ReadAll(upstream.requests[0].Body)
+	require.NoError(t, err)
+	var probe map[string]any
+	require.NoError(t, json.Unmarshal(probeBody, &probe))
+	require.Equal(t, false, probe["store"],
+		"ChatGPT internal API 要求 store:false，少了探针被拒 → openai_compact_supported 假阴性")
+	require.Equal(t, true, probe["stream"])
+
+	// base_url 为空必须 fail-closed，绝不回落 api.openai.com。
+	noBase := newCPRTestAccount()
+	delete(noBase.Credentials, "base_url")
+	upstream2 := &queuedHTTPUpstream{}
+	svc2 := &AccountTestService{cfg: cprTestConfig(), httpUpstream: upstream2}
+	c2, _ := newTestContext()
+	_ = svc2.testOpenAICompactConnection(c2, noBase, "gpt-5.6-luna")
+	require.Empty(t, upstream2.requests, "缺 base_url 时一个字节都不该发出去")
+}
+
+// TestCPRSharesOAuthUpstreamSemantics：按「上游是谁」分流的判定必须包含 cpr。
+// CPR 会改写 model / max_output_tokens / temperature / environment_context 时区 /
+// web_search user_location / client_metadata.installation_id / stream，但对
+// namespace / reasoning / input item id / service_tier 只读不写（已核
+// codex-proxy-rs providers/openai/src/transport/request.rs），所以本层这几类
+// 归一化对 cpr 与 oauth 必须同样生效，且与 CPR 的改写不相交。
+func TestCPRSharesOAuthUpstreamSemantics(t *testing.T) {
+	cpr := &Account{Platform: PlatformOpenAI, Type: AccountTypeCPR}
+	oauth := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	apikey := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+
+	require.True(t, cpr.TargetsChatGPTCodexUpstream())
+	require.True(t, oauth.TargetsChatGPTCodexUpstream())
+	require.False(t, apikey.TargetsChatGPTCodexUpstream())
+	require.False(t, (&Account{Platform: PlatformGrok, Type: AccountTypeOAuth}).TargetsChatGPTCodexUpstream())
+	require.False(t, (*Account)(nil).TargetsChatGPTCodexUpstream())
+
+	// #4 namespace 清理
+	require.True(t, shouldStripOpenAIResponsesInputNamespaces(cpr, OpenAIUpstreamTransportHTTPSSE, false))
+	// #7 reasoning.effort:"none" 保留（false = 不过滤掉）
+	require.True(t, shouldPreserveOpenAIResponsesNoneReasoningEffort(cpr))
+	require.Equal(t, shouldPreserveOpenAIResponsesNoneReasoningEffort(oauth), shouldPreserveOpenAIResponsesNoneReasoningEffort(cpr),
+		"同一个 Codex 客户端请求打 oauth 和 cpr 必须得到同一个 effort 语义")
+
+	// 工具调用项保留 namespace（非 compact、HTTP）：上游按 namespace 解析历史调用，
+	// 缺字段直接 400 "Missing namespace for function_call"。
+	callBody := []byte(`{"input":[{"type":"function_call","namespace":"n0","name":"one","call_id":"c1","arguments":"{}"}]}`)
+	require.True(t, shouldKeepOpenAIResponsesToolCallNamespaces(cpr, OpenAIUpstreamTransportHTTPSSE, false, false, callBody))
+	require.Equal(t,
+		shouldKeepOpenAIResponsesToolCallNamespaces(oauth, OpenAIUpstreamTransportHTTPSSE, false, false, callBody),
+		shouldKeepOpenAIResponsesToolCallNamespaces(cpr, OpenAIUpstreamTransportHTTPSSE, false, false, callBody))
+
+	// compact 路径：工具声明摊平 + GPT-5.6 的 effort max→xhigh 降级，都按上游判定。
+	require.True(t, shouldFlattenOpenAIResponsesNamespaces(cpr, OpenAIUpstreamTransportHTTPSSE, false, true))
+	require.False(t, shouldFlattenOpenAIResponsesNamespaces(cpr, OpenAIUpstreamTransportHTTPSSE, false, false),
+		"非 compact 且未开账号级摊平开关：与 oauth 一样保持 namespace")
+	compactCtx, _ := newTestContext()
+	compactCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", nil)
+	effortBody := []byte(`{"model":"gpt-5.6-luna","reasoning":{"effort":"max"}}`)
+	cprEffort, cprChanged, err := normalizeOpenAICodexCompactReasoningEffortForAccount(compactCtx, cpr, effortBody)
+	require.NoError(t, err)
+	oauthEffort, oauthChanged, err := normalizeOpenAICodexCompactReasoningEffortForAccount(compactCtx, oauth, effortBody)
+	require.NoError(t, err)
+	require.True(t, oauthChanged, "夹具必须真的触发降级，否则相等断言是空转")
+	require.Equal(t, oauthChanged, cprChanged)
+	require.Equal(t, string(oauthEffort), string(cprEffort))
+
+	// Responses Lite 头：cpr 走 Codex 那套工具投影，而不是 API Key 的 parallel_tool_calls 分支。
+	liteBody := []byte(`{"model":"gpt-5.6-luna","input":"hi","tools":[{"type":"function","name":"x","parameters":{"type":"object"}}]}`)
+	cprLite, _, err := normalizeOpenAIResponsesLitePayloadForAccount(liteBody, cpr)
+	require.NoError(t, err)
+	oauthLite, _, err := normalizeOpenAIResponsesLitePayloadForAccount(liteBody, oauth)
+	require.NoError(t, err)
+	apikeyLite, _, err := normalizeOpenAIResponsesLitePayloadForAccount(liteBody, apikey)
+	require.NoError(t, err)
+	require.Equal(t, string(oauthLite), string(cprLite))
+	require.NotEqual(t, string(apikeyLite), string(cprLite), "夹具必须能区分两条分支，否则相等断言是空转")
+
+	// 计费 tier：ChatGPT Codex 后端对 Fast 轮常报 default，oauth 按请求 tier 结算；
+	// cpr 收到的是同一份响应，不能被降档计费。
+	require.Equal(t, ResolveOpenAIServiceTierBilling(oauth, "priority", "default"), ResolveOpenAIServiceTierBilling(cpr, "priority", "default"))
+	require.Equal(t, "priority", ResolveOpenAIServiceTierBilling(cpr, "priority", "default").Billing)
+	require.Equal(t, "default", ResolveOpenAIServiceTierBilling(apikey, "priority", "default").Billing, "apikey 上游自报 tier 权威，照常降档")
+
+	// 流终态语义：error / response.failed 按 Codex 后端处理。
+	require.True(t, openAICodexFailureTerminal(cpr))
+	require.Equal(t, openAICodexFailureTerminal(oauth), openAICodexFailureTerminal(cpr))
+	require.False(t, openAICodexFailureTerminal(apikey))
+
+	// 调度成本因子：同一份 ChatGPT 订阅，参考倍率与 oauth 相同。
+	now := time.Now()
+	cprRate, cprOK := openAISchedulingRate(cpr, now, 0.35)
+	oauthRate, oauthOK := openAISchedulingRate(oauth, now, 0.35)
+	require.True(t, cprOK)
+	require.Equal(t, oauthOK, cprOK)
+	require.Equal(t, oauthRate, cprRate)
+	_, apikeyOK := openAISchedulingRate(apikey, now, 0.35)
+	require.False(t, apikeyOK, "apikey 没有 billing probe 时无倍率，对照分支可区分")
+
+	// x-codex-beta-features 会话级补注：真实 Codex 每个请求都带；只在压缩回合
+	// 才带是本函数要消除的形态。cpr 与 oauth 同，apikey 不补。
+	betaCtx, _ := newTestContext()
+	betaCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	cprHeader, oauthHeader, apikeyHeader := http.Header{}, http.Header{}, http.Header{}
+	applyOpenAICodexBetaFeatures(betaCtx, cpr, cprHeader)
+	applyOpenAICodexBetaFeatures(betaCtx, oauth, oauthHeader)
+	applyOpenAICodexBetaFeatures(betaCtx, apikey, apikeyHeader)
+	require.NotEmpty(t, cprHeader.Get("x-codex-beta-features"))
+	require.Equal(t, oauthHeader.Get("x-codex-beta-features"), cprHeader.Get("x-codex-beta-features"))
+	require.Empty(t, apikeyHeader.Get("x-codex-beta-features"))
+}
+
+// TestCPRAdminSurfacesMatchOAuth：管理端能力判定。
+func TestCPRAdminSurfacesMatchOAuth(t *testing.T) {
+	require.True(t, canDuplicateAccountType(AccountTypeCPR), "cpr 凭据是静态的，与 apikey 同构，可复制")
+	require.True(t, supportsOpenAILongContextBilling(AccountTypeCPR),
+		"单账号编辑已放行，批量也必须放行，否则单改能生效批量改 400")
+	require.NoError(t, monitorAccountQuotaCapability(&Account{Platform: PlatformOpenAI, Type: AccountTypeCPR}),
+		"渠道监控取数已支持 cpr，这道校验是唯一阻塞点")
+}
+
+// TestCPRPlanTypeDrivesSubscriptionPriority：cpr 的真实上游就是一份 ChatGPT 订阅，
+// 开了「订阅优先」的分组里必须和 oauth 同梯队。此前 IsOpenAIChatGPTSubscription()
+// 第一行就是 !IsOpenAIOAuth() → cpr 永远落到 regularAccounts 被降级。
+// 档位来自 CPR admin 的 planType（cpr 凭据里没有 plan_type），落在
+// extra.cpr_plan_type：走 UpdateExtra 的 JSONB key 级合并，不会跟管理端改凭据打架。
+func TestCPRPlanTypeDrivesSubscriptionPriority(t *testing.T) {
+	newCPR := func(plan string) *Account {
+		acc := &Account{Platform: PlatformOpenAI, Type: AccountTypeCPR}
+		if plan != "" {
+			acc.Extra = map[string]any{CPRPlanTypeExtraKey: plan}
+		}
+		return acc
+	}
+
+	require.True(t, newCPR("pro").IsOpenAIChatGPTSubscription())
+	require.True(t, newCPR("Plus").IsOpenAIChatGPTSubscription(), "档位比较必须忽略大小写")
+	require.False(t, newCPR("free").IsOpenAIChatGPTSubscription())
+	require.False(t, newCPR("abnormal").IsOpenAIChatGPTSubscription())
+	require.False(t, newCPR("").IsOpenAIChatGPTSubscription(), "没探到档位时不得假定是订阅号")
+
+	// 不影响其余类型：oauth 仍读 credentials.plan_type，apikey 仍恒 false。
+	oauth := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Credentials: map[string]any{"plan_type": "pro"}}
+	require.True(t, oauth.IsOpenAIChatGPTSubscription())
+	require.False(t, (&Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+		Credentials: map[string]any{"plan_type": "pro"}}).IsOpenAIChatGPTSubscription())
+
+	// 档位必须真的被 CPR 状态刷新写进 extra，否则上面全是空判定。
+	updates := buildCPRCodexExtraUpdates(newCPR(""), &CPRAccountState{PlanType: "Pro", FetchedAt: time.Now()})
+	require.Equal(t, "Pro", updates[CPRPlanTypeExtraKey])
+
+	// CPR 没返回档位时不写键：mergeAccountExtra 只写不删，写空串会把已知档位抹成未知。
+	require.NotContains(t, buildCPRCodexExtraUpdates(newCPR("Pro"), &CPRAccountState{FetchedAt: time.Now()}),
+		CPRPlanTypeExtraKey)
+
+	// 档位没变也不写：该键不在 schedulerNeutralExtraKeys 里，无条件写会让每次
+	// /usage 刷新都触发一次 UpdateExtra + 调度快照重建。
+	require.NotContains(t,
+		buildCPRCodexExtraUpdates(newCPR("Pro"), &CPRAccountState{PlanType: "pro", FetchedAt: time.Now()}),
+		CPRPlanTypeExtraKey, "大小写不同不算变化")
+}
+
+// TestCPRForwardAppliesCodexBodyNormalizations 从 Forward 入口驱动，钉住转发主线上
+// 按「上游是谁」放行给 cpr 的几处 body 归一化：reasoning.mode、推理内容回放、
+// input item ID 清洗、namespace 清理（工具调用项保留）。之前这几处只有谓词层
+// 断言，把门控改回旧谓词整个包仍全绿。
+func TestCPRForwardAppliesCodexBodyNormalizations(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstreamSSE := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_cpr\",\"model\":\"gpt-5.6-sol\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\ndata: [DONE]\n\n"
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamSSE)),
+	}}
+	cfg := cprTestConfig()
+	svc := &OpenAIGatewayService{
+		cfg:              cfg,
+		httpUpstream:     upstream,
+		cache:            &stubGatewayCache{},
+		openaiWSResolver: NewOpenAIWSProtocolResolver(cfg),
+		toolCorrector:    NewCodexToolCorrector(),
+	}
+	c, _ := newOpenAIImageGenerationControlTestContext(true, "codex_cli_rs/0.144.1")
+	account := newCPRTestAccount()
+
+	body := []byte(`{
+		"model":"gpt-5.6-sol","stream":true,"instructions":"test",
+		"reasoning":{"mode":"pro"},
+		"input":[
+			{"type":"custom_tool_call","id":"fc_wrong_custom","call_id":"call_custom_1","name":"apply_patch","input":"patch"},
+			{"type":"reasoning","id":"rs_1","encrypted_content":"enc","summary":[],"content":[{"type":"reasoning_text","text":"thinking"}]},
+			{"type":"message","namespace":"n1","role":"user","content":[{"type":"input_text","text":"hi"}]},
+			{"type":"function_call","namespace":"n0","name":"one","call_id":"c1","arguments":"{}"}
+		]
+	}`)
+
+	result, err := svc.Forward(context.Background(), c, account, body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, upstream.lastReq)
+	require.Equal(t, "127.0.0.1:18081", upstream.lastReq.URL.Host, "只能发往自己的 CPR 网关")
+	sent := upstream.lastBody
+
+	// reasoning.mode：pro → effort=max，mode 删除
+	require.False(t, gjson.GetBytes(sent, "reasoning.mode").Exists())
+	require.Equal(t, "max", gjson.GetBytes(sent, "reasoning.effort").String())
+
+	items := gjson.GetBytes(sent, "input").Array()
+	require.Len(t, items, 4)
+	byType := map[string]gjson.Result{}
+	for _, item := range items {
+		byType[item.Get("type").String()] = item
+	}
+	// 推理内容回放：非空 content 数组必须删掉，其它字段保留
+	require.False(t, byType["reasoning"].Get("content").Exists())
+	require.Equal(t, "enc", byType["reasoning"].Get("encrypted_content").String())
+	// item ID 清洗：custom_tool_call 带 fc_ 前缀的假 id 删除
+	require.False(t, byType["custom_tool_call"].Get("id").Exists())
+	// namespace：普通 input 项清理，工具调用项保留
+	require.False(t, byType["message"].Get("namespace").Exists())
+	require.Equal(t, "n0", byType["function_call"].Get("namespace").String())
+}
+
+// TestCPRHandle429DefersToSameAccountRetry：ChatGPT Codex 后端的瞬时 429 在有界
+// 重试窗口内不落库限流（否则下一次重试就不可选，同账号恢复被静默变成换号）。
+// cpr 收到的是同一个后端的 429，语义相同。之前只换了谓词没有行为断言，改回
+// 旧谓词整个包仍全绿。
+func TestCPRHandle429DefersToSameAccountRetry(t *testing.T) {
+	repo := &oauth429RateLimitRepo{}
+	rateLimits := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	blocker := &OpenAIGatewayService{}
+	rateLimits.SetAccountRuntimeBlocker(blocker)
+
+	cpr := newCPRTestAccount()
+	headers := http.Header{"Retry-After": []string{"1"}}
+	body := []byte(`{"error":{"type":"rate_limit_error","message":"try again"}}`)
+	require.True(t, blocker.ShouldRetryOpenAIOAuth429(cpr, headers, body), "夹具必须落在瞬时 429 的重试窗口内")
+
+	rateLimits.handle429(context.Background(), cpr, headers, body)
+	require.Equal(t, 0, repo.setRateLimitedCalls, "重试窗口内不得把 cpr 账号标成限流")
+
+	// 对照：apikey 上游不是 Codex 后端，同一份 429 照常落库。
+	apikey := &Account{ID: 4202, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	rateLimits.handle429(context.Background(), apikey, headers, body)
+	require.Equal(t, 1, repo.setRateLimitedCalls)
+}
+
+// TestCPRManualPlanTypeOverridesProbe：凭据里人工写的 plan_type 是显式覆盖，
+// 优先于 CPR 探测落在 extra 的值；空白视为未覆盖。与列表页 getAccountPlanType
+// 的回退顺序一致。
+func TestCPRManualPlanTypeOverridesProbe(t *testing.T) {
+	acc := newCPRTestAccount()
+	acc.Extra[CPRPlanTypeExtraKey] = "pro"
+	require.True(t, acc.IsOpenAIChatGPTSubscription())
+	acc.Credentials["plan_type"] = "free"
+	require.False(t, acc.IsOpenAIChatGPTSubscription(), "人工覆盖优先于探测值")
+	acc.Credentials["plan_type"] = "  "
+	require.True(t, acc.IsOpenAIChatGPTSubscription(), "空白视为未覆盖，回退到探测值")
+}
+
+// TestCPRJoinsOpenAIUpstreamCostPool：成本因子与低倍率优先排序的资格闸门要纳入
+// cpr。之前只钉了 openAISchedulingRate，这两处闸门改回旧谓词整包仍全绿。
+func TestCPRJoinsOpenAIUpstreamCostPool(t *testing.T) {
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	apikey := upstreamCostTestAccount(1, UpstreamBillingProbeStatusOK, 2.0, now.Add(-time.Minute), 30*time.Minute)
+	cpr := newCPRTestAccount()
+
+	factors := openAIUpstreamCostFactors([]*Account{apikey, cpr}, now, 0.35)
+	require.NotEqual(t, openAIUpstreamCostNeutralFactor, factors[apikey.ID], "cpr 进池后样本≥2，apikey 的因子不再中性")
+	require.NotEqual(t, openAIUpstreamCostNeutralFactor, factors[cpr.ID])
+	require.Greater(t, factors[cpr.ID], factors[apikey.ID], "0.35 的 cpr 比 2.0 的 apikey 便宜")
+
+	order := newOpenAILegacyUpstreamRateOrder([]*Account{apikey, cpr}, now, 0.35)
+	require.True(t, order.enabled, "两档不同倍率才启用低倍率优先")
+	require.Negative(t, order.compare(cpr, apikey))
+
+	// 对照：cpr 被闸门排除（= 改回旧谓词）时只剩 1 个样本，全部中性、排序禁用。
+	only := openAIUpstreamCostFactors([]*Account{apikey}, now, 0.35)
+	require.Equal(t, openAIUpstreamCostNeutralFactor, only[apikey.ID])
+	require.False(t, newOpenAILegacyUpstreamRateOrder([]*Account{apikey}, now, 0.35).enabled)
+}
+
+// TestCPRImages429CarriesSameAccountRetryWindow：images 路径的 429 闸门与 /responses
+// 主线同源。cpr 进了 429 延迟（handle429 / markOpenAIOAuth429RateLimited 在窗口内
+// 不落库不熔断），这里若仍按旧谓词判成不可同账号重试，cpr 在 2 分钟窗口内既不
+// 冷却也不重试，调度器会反复选中它反复 429。
+func TestCPRImages429CarriesSameAccountRetryWindow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"gpt-image-1","prompt":"draw a cat","response_format":"b64_json"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+	svc := &OpenAIGatewayService{cfg: cprTestConfig(), httpUpstream: &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Header:     http.Header{"Retry-After": []string{"1"}, "X-Request-Id": []string{"req_img_cpr_429"}},
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"rate limited"}}`)),
+	}}}
+	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
+	require.NoError(t, err)
+	cpr := newCPRTestAccount()
+
+	result, err := svc.ForwardImages(context.Background(), c, cpr, body, parsed, "")
+
+	require.Nil(t, result)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.True(t, failoverErr.RetryableOnSameAccount, "与 oauth 同：瞬时 429 在窗口内同账号重试")
+	require.Equal(t, time.Second, failoverErr.SameAccountRetryDelay)
+}
+
+// TestCPR429FastPathSemanticsMatchOAuth：/responses 主线的 429 快路径三件套
+// 对 cpr 与 oauth 同语义，apikey 不走这套。
+func TestCPR429FastPathSemanticsMatchOAuth(t *testing.T) {
+	repo := &oauth429RateLimitRepo{}
+	rateLimits := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	svc := &OpenAIGatewayService{rateLimitService: rateLimits}
+	rateLimits.SetAccountRuntimeBlocker(svc)
+	headers := http.Header{"Retry-After": []string{"1"}}
+	body := []byte(`{"error":{"type":"rate_limit_error","message":"try again"}}`)
+	cpr := newCPRTestAccount()
+	oauth := &Account{ID: 4204, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	apikey := &Account{ID: 4205, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+
+	require.True(t, svc.shouldRetryOpenAIOAuth429OnSameAccountWithResponse(cpr, http.StatusTooManyRequests, false, headers, body))
+	require.Equal(t,
+		svc.shouldRetryOpenAIOAuth429OnSameAccountWithResponse(oauth, http.StatusTooManyRequests, false, headers, body),
+		svc.shouldRetryOpenAIOAuth429OnSameAccountWithResponse(cpr, http.StatusTooManyRequests, false, headers, body))
+	require.False(t, svc.shouldRetryOpenAIOAuth429OnSameAccountWithResponse(apikey, http.StatusTooManyRequests, false, headers, body))
+
+	svc.markOpenAIOAuth429RateLimited(context.Background(), cpr, headers, body)
+	require.False(t, svc.isOpenAIAccountRuntimeBlocked(cpr), "窗口内不得熔断")
+	require.Equal(t, 0, repo.setRateLimitedCalls)
+
+	switches := openAIOAuth429MaxAccountAttempts + openAIOAuth429StormMaxAccountSwitches
+	require.True(t, svc.ShouldStopOpenAIOAuth429Failover(cpr, http.StatusTooManyRequests, switches, nil))
+	require.Equal(t,
+		svc.ShouldStopOpenAIOAuth429Failover(oauth, http.StatusTooManyRequests, switches, nil),
+		svc.ShouldStopOpenAIOAuth429Failover(cpr, http.StatusTooManyRequests, switches, nil))
+	require.False(t, svc.ShouldStopOpenAIOAuth429Failover(apikey, http.StatusTooManyRequests, switches, nil))
+}
+
+// TestCPRAlphaSearch429CarriesSameAccountRetryWindow：/alpha/search 两条分支的 429
+// 闸门与 /responses 主线同源（同 images）。
+func TestCPRAlphaSearch429CarriesSameAccountRetryWindow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"id":"search-session","model":"gpt-5.6-sol","commands":{}}`)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/alpha/search", bytes.NewReader(body))
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Header: http.Header{
+			"Content-Type": []string{"application/json"},
+			"Retry-After":  []string{"1"},
+			"X-Request-Id": []string{"req_alpha_cpr_429"},
+		},
+		Body: io.NopCloser(strings.NewReader(`{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"rate limited"}}`)),
+	}}
+	service := &OpenAIGatewayService{cfg: cprTestConfig(), httpUpstream: upstream}
+	cpr := newCPRTestAccount()
+
+	result, err := service.ForwardAlphaSearch(context.Background(), c, cpr, body)
+
+	require.Nil(t, result)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.True(t, failoverErr.RetryableOnSameAccount, "与 oauth/setup-token 同：瞬时 429 在窗口内同账号重试")
+	require.Equal(t, "127.0.0.1:18081", upstream.lastReq.URL.Host)
+}
+
+// TestCPRPlanGatedModelCoolsDownLikeOAuth：ChatGPT 账号不支持的模型（400 plan-gated）
+// 对 cpr 与 oauth 同样进入按模型冷却；apikey 上游不是 Codex 后端，不认这条文案。
+func TestCPRPlanGatedModelCoolsDownLikeOAuth(t *testing.T) {
+	repo := &oauth429RateLimitRepo{}
+	rateLimits := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	body := []byte(`{"error":{"message":"The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account."}}`)
+	cpr := newCPRTestAccount()
+	oauth := &Account{ID: 4206, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	apikey := &Account{ID: 4207, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+
+	require.True(t, rateLimits.HandleUpstreamModelNotFound(context.Background(), cpr, "gpt-5.4", http.StatusBadRequest, body))
+	require.Equal(t,
+		rateLimits.HandleUpstreamModelNotFound(context.Background(), oauth, "gpt-5.4", http.StatusBadRequest, body),
+		rateLimits.HandleUpstreamModelNotFound(context.Background(), cpr, "gpt-5.4", http.StatusBadRequest, body))
+	require.False(t, rateLimits.HandleUpstreamModelNotFound(context.Background(), apikey, "gpt-5.4", http.StatusBadRequest, body))
 }

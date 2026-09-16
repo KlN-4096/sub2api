@@ -1025,6 +1025,10 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		"codex_5h_reset_after_seconds",
 		"codex_7d_reset_after_seconds",
 		"codex_usage_updated_at",
+		// cpr 的订阅档位：订阅优先调度分梯队靠它。oauth 的 plan_type 在 credentials
+		// 里、由凭据投影保留；cpr 的在 extra 里，不进白名单就只剩 DB 回退那一次
+		// 能看到，Redis 命中路径上恒被当作非订阅号降到第二梯队。
+		service.CPRPlanTypeExtraKey,
 		"auto_pause_5h_threshold",
 		"auto_pause_7d_threshold",
 		"auto_pause_5h_disabled",

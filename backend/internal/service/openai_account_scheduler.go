@@ -2814,7 +2814,7 @@ func openAIUpstreamCostFactors(accounts []*Account, now time.Time, oauthScheduli
 			continue
 		}
 		factors[account.ID] = openAIUpstreamCostNeutralFactor
-		if !account.IsOpenAIApiKey() && !account.IsOpenAIOAuthLike() {
+		if !account.IsOpenAIApiKey() && !account.TargetsChatGPTCodexUpstream() {
 			continue
 		}
 		eligibleCount++
@@ -2878,7 +2878,7 @@ func newOpenAILegacyUpstreamRateOrder(accounts []*Account, now time.Time, oauthS
 		// 与 openAIUpstreamCostFactors 使用同一道平台门控：只有 OpenAI 平台账号
 		// 的倍率参与 legacy 低倍率优先排序。上游自报倍率来自中转方，不能让它对
 		// 其他平台的调度产生影响——否则自报低价即可吸走流量，而实际结算走本地倍率。
-		if !account.IsOpenAIApiKey() && !account.IsOpenAIOAuthLike() {
+		if !account.IsOpenAIApiKey() && !account.TargetsChatGPTCodexUpstream() {
 			continue
 		}
 		rate, ok := openAISchedulingRate(account, now, oauthSchedulingRateMultiplier)
@@ -2896,7 +2896,9 @@ func newOpenAILegacyUpstreamRateOrder(accounts []*Account, now time.Time, oauthS
 }
 
 func openAISchedulingRate(account *Account, now time.Time, oauthSchedulingRateMultiplier float64) (float64, bool) {
-	if account != nil && account.IsOpenAIOAuthLike() {
+	// cpr 的上游是同一份 ChatGPT 订阅，成本因子与 oauth 同一个参考倍率；
+	// 它没有 upstream billing probe，落到 else 分支会恒为中性因子被排除在排序外。
+	if account != nil && account.TargetsChatGPTCodexUpstream() {
 		return oauthSchedulingRateMultiplier, true
 	}
 	return openAIFreshUpstreamBillingRate(account, now)
