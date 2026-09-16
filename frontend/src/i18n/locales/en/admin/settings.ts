@@ -1122,6 +1122,7 @@ export default {
         scopeOAuth: 'OAuth only',
         scopeAPIKey: 'API Key only',
         scopeBedrock: 'Bedrock only',
+        scopeCPR: 'CPR relay only',
         userIds: 'Specific users',
         userIdsHint: 'Type any part of a user email to search. Leave empty to apply to all Sub2API users. Selected users match requests from their API keys and take precedence over global rules.',
         userSearchPlaceholder: 'Search by user email',

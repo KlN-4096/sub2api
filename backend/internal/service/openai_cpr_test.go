@@ -1134,6 +1134,53 @@ func TestCPRPlanTypeDrivesSubscriptionPriority(t *testing.T) {
 		CPRPlanTypeExtraKey, "大小写不同不算变化")
 }
 
+// TestCPRFastPolicyHasOwnScope 锁定 Fast/Flex Policy 的 cpr 独立 scope。
+//
+// 改动前 betaPolicyScopeMatches 只认 isOAuth/isBedrock 两个布尔，apikey 分支
+// 是 !isOAuth && !isBedrock，cpr 两者皆否 → 被 apikey scope 误命中，管理员
+// 没有任何办法单独给 cpr 配 fast/flex 规则。
+func TestCPRFastPolicyHasOwnScope(t *testing.T) {
+	block := func(scope string) *OpenAIFastPolicySettings {
+		return &OpenAIFastPolicySettings{Rules: []OpenAIFastPolicyRule{{
+			ServiceTier:  OpenAIFastTierAny,
+			Action:       BetaPolicyActionBlock,
+			Scope:        scope,
+			ErrorMessage: "blocked by " + scope,
+		}}}
+	}
+	accounts := map[string]*Account{
+		"cpr":     {Platform: PlatformOpenAI, Type: AccountTypeCPR},
+		"oauth":   {Platform: PlatformOpenAI, Type: AccountTypeOAuth},
+		"apikey":  {Platform: PlatformOpenAI, Type: AccountTypeAPIKey},
+		"bedrock": {Platform: PlatformAnthropic, Type: AccountTypeBedrock},
+	}
+	// scope -> 应当命中的账号集合
+	want := map[string]map[string]bool{
+		BetaPolicyScopeAll:       {"cpr": true, "oauth": true, "apikey": true, "bedrock": true},
+		BetaPolicyScopeOAuth:     {"oauth": true},
+		BetaPolicyScopeAPIKey:    {"apikey": true},
+		BetaPolicyScopeBedrock:   {"bedrock": true},
+		OpenAIFastPolicyScopeCPR: {"cpr": true},
+	}
+	for scope, hits := range want {
+		for name, acc := range accounts {
+			action, _ := evaluateOpenAIFastPolicyWithSettings(block(scope), 1, acc, "gpt-5", OpenAIFastTierPriority)
+			if hits[name] {
+				require.Equal(t, BetaPolicyActionBlock, action, "scope=%s 应命中 %s", scope, name)
+			} else {
+				require.Equal(t, BetaPolicyActionPass, action, "scope=%s 不应命中 %s", scope, name)
+			}
+		}
+	}
+
+	// Anthropic Beta Policy 共用同一个 matcher，但它永远看不到 cpr 账号
+	// （cpr 是 openai 平台），所以那两个调用点固定传 false，行为不变。
+	require.False(t, betaPolicyScopeMatches(OpenAIFastPolicyScopeCPR, false, false, false),
+		"beta policy 侧 cpr scope 恒不命中（fail-closed，且 validScopes 也不放行）")
+	require.True(t, betaPolicyScopeMatches(BetaPolicyScopeAPIKey, false, false, false),
+		"beta policy 侧 apikey scope 仍命中普通 api key 账号")
+}
+
 // TestCPRForwardAppliesCodexBodyNormalizations 从 Forward 入口驱动，钉住转发主线上
 // 按「上游是谁」放行给 cpr 的几处 body 归一化：reasoning.mode、推理内容回放、
 // input item ID 清洗、namespace 清理（工具调用项保留）。之前这几处只有谓词层

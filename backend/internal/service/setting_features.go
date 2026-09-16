@@ -1013,7 +1013,7 @@ func (s *SettingService) SetOpenAIFastPolicySettings(ctx context.Context, settin
 		OpenAIFastPolicyActionForcePriority: true,
 	}
 	validScopes := map[string]bool{
-		BetaPolicyScopeAll: true, BetaPolicyScopeOAuth: true, BetaPolicyScopeAPIKey: true, BetaPolicyScopeBedrock: true,
+		BetaPolicyScopeAll: true, BetaPolicyScopeOAuth: true, BetaPolicyScopeAPIKey: true, BetaPolicyScopeBedrock: true, OpenAIFastPolicyScopeCPR: true,
 	}
 	validTiers := map[string]bool{
 		OpenAIFastTierAny: true, OpenAIFastTierPriority: true, OpenAIFastTierUltrafast: true, OpenAIFastTierFlex: true,

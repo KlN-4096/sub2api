@@ -638,7 +638,7 @@ func (s *GatewayService) evaluateBetaPolicy(ctx context.Context, betaHeader stri
 	isBedrock := account.IsBedrock()
 	var result betaPolicyResult
 	for _, rule := range settings.Rules {
-		if !betaPolicyScopeMatches(rule.Scope, isOAuth, isBedrock) {
+		if !betaPolicyScopeMatches(rule.Scope, isOAuth, isBedrock, false) {
 			continue
 		}
 		effectiveAction, effectiveErrMsg := resolveRuleAction(rule, model)
@@ -699,16 +699,25 @@ func (s *GatewayService) getBetaPolicyFilterSet(ctx context.Context, c *gin.Cont
 }
 
 // betaPolicyScopeMatches checks whether a rule's scope matches the current account type.
-func betaPolicyScopeMatches(scope string, isOAuth bool, isBedrock bool) bool {
+//
+// isCPR 只有 OpenAI Fast Policy 会传 true：cpr 是 openai 平台的中继账号，
+// 永远走不到 anthropic-beta header 的两个调用点，那里固定传 false。因此 Beta
+// Policy 侧若有历史脏数据 scope="cpr"（validScopes 从不放行），行为从 default
+// 的 fail-open 变成恒不命中——刻意如此，注定不适用的规则不该匹配全部账号。
+func betaPolicyScopeMatches(scope string, isOAuth bool, isBedrock bool, isCPR bool) bool {
 	switch scope {
 	case BetaPolicyScopeAll:
 		return true
 	case BetaPolicyScopeOAuth:
 		return isOAuth
 	case BetaPolicyScopeAPIKey:
-		return !isOAuth && !isBedrock
+		// 排除 cpr：它有自己的 scope，落进 apikey 会让「仅 API Key」的规则
+		// 意外套到中继账号上。
+		return !isOAuth && !isBedrock && !isCPR
 	case BetaPolicyScopeBedrock:
 		return isBedrock
+	case OpenAIFastPolicyScopeCPR:
+		return isCPR
 	default:
 		return true // unknown scope → match all (fail-open)
 	}
@@ -824,7 +833,7 @@ func (s *GatewayService) checkBetaPolicyBlockForTokens(ctx context.Context, toke
 		if effectiveAction != BetaPolicyActionBlock {
 			continue
 		}
-		if !betaPolicyScopeMatches(rule.Scope, isOAuth, isBedrock) {
+		if !betaPolicyScopeMatches(rule.Scope, isOAuth, isBedrock, false) {
 			continue
 		}
 		if _, present := tokenSet[rule.BetaToken]; present {

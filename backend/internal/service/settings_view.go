@@ -697,13 +697,21 @@ const (
 	// OpenAIFastPolicyActionForcePriority 会保留 service_tier 字段并强制写成
 	// priority，用于把 flex/auto/default/scale 等已识别 tier 收敛为 fast。
 	OpenAIFastPolicyActionForcePriority = "force_priority"
+
+	// OpenAIFastPolicyScopeCPR 仅匹配 cpr 中继账号，只在本策略可用
+	// （Beta Policy 是 anthropic-beta header 的策略，永远看不到 openai 平台
+	// 的 cpr 账号，其 validScopes 不放行本值）。
+	//
+	// 拆独立 scope 之前 cpr 会被 apikey scope 命中（它既非 oauth 也非
+	// bedrock），管理员无法单独给 cpr 配 fast/flex 规则。
+	OpenAIFastPolicyScopeCPR = "cpr"
 )
 
 // OpenAIFastPolicyRule 单条 OpenAI fast/flex 策略规则
 type OpenAIFastPolicyRule struct {
 	ServiceTier          string   `json:"service_tier"`                     // "priority" | "ultrafast" | "flex" | "missing" | "all"
 	Action               string   `json:"action"`                           // "pass" | "filter" | "block" | "force_priority"
-	Scope                string   `json:"scope"`                            // "all" | "oauth" | "apikey" | "bedrock"
+	Scope                string   `json:"scope"`                            // "all" | "oauth" | "apikey" | "bedrock" | "cpr" (cpr 仅本策略可用)
 	UserIDs              []int64  `json:"user_ids,omitempty"`               // 空=所有 Sub2API 用户；非空=仅指定 API Key 所属用户
 	ErrorMessage         string   `json:"error_message,omitempty"`          // 自定义错误消息 (action=block 时生效)
 	ModelWhitelist       []string `json:"model_whitelist,omitempty"`        // 模型匹配模式列表（为空=对所有模型生效）
