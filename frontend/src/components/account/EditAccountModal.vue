@@ -2378,6 +2378,18 @@
             />
           </div>
           <div>
+            <label class="input-label">{{ t('admin.accounts.openai.turnStateModels') }}</label>
+            <p class="input-hint">{{ t('admin.accounts.openai.turnStateModelsDesc') }}</p>
+            <input
+              v-model="openAITurnStateModels"
+              data-testid="edit-openai-turn-state-models"
+              type="text"
+              spellcheck="false"
+              class="input font-mono text-xs"
+              :placeholder="t('admin.accounts.openai.turnStateModelsPlaceholder')"
+            />
+          </div>
+          <div>
             <label class="input-label">{{ t('admin.accounts.openai.turnStateOverride') }}</label>
             <p class="input-hint">{{ t('admin.accounts.openai.turnStateOverrideDesc') }}</p>
             <p
@@ -2398,9 +2410,14 @@
             <p
               v-if="openAITurnStateOverride.trim()"
               class="mt-1 text-xs"
-              :class="openAITurnStateOverrideLength === 292 ? 'text-green-600 dark:text-green-400' : 'text-gray-500 dark:text-gray-400'"
+              :class="openAITurnStateOverrideExpired
+                ? 'text-red-600 dark:text-red-400'
+                : openAITurnStateOverrideLength === 292
+                  ? 'text-green-600 dark:text-green-400'
+                  : 'text-gray-500 dark:text-gray-400'"
             >
               {{ t('admin.accounts.openai.turnStateOverrideLength', { n: openAITurnStateOverrideLength }) }}
+              <span v-if="openAITurnStateOverrideValidity"> · {{ openAITurnStateOverrideValidity }}</span>
             </p>
           </div>
         </div>
@@ -3155,6 +3172,7 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
+import { decodeTurnState, TURN_STATE_DEFAULT_TTL_MINUTES } from '@/utils/turnState'
 import UpstreamRequestIdHeaderField from '@/components/account/UpstreamRequestIdHeaderField.vue'
 import Toggle from '@/components/common/Toggle.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -3600,6 +3618,41 @@ const readOpenAITurnStateOverride = (extra: unknown): string => {
   return typeof value === 'string' ? value : ''
 }
 const openAITurnStateOverrideLength = computed(() => openAITurnStateOverride.value.trim().length)
+
+// 手填值与候选池同一条 1 小时有效期，过期后后端直接不注入。不显示剩余有效期的话，
+// 「配了但不生效」就完全不可见——这是最难排查的那种失败。
+const openAITurnStateOverrideEnvelope = computed(() =>
+  decodeTurnState(openAITurnStateOverride.value.trim())
+)
+const openAITurnStateOverrideExpiresAt = computed(() => {
+  const env = openAITurnStateOverrideEnvelope.value
+  if (!env) return null
+  return new Date(env.mintedAt.getTime() + TURN_STATE_DEFAULT_TTL_MINUTES * 60_000)
+})
+const openAITurnStateOverrideExpired = computed(() => {
+  const at = openAITurnStateOverrideExpiresAt.value
+  return at != null && at.getTime() <= Date.now()
+})
+const openAITurnStateOverrideValidity = computed(() => {
+  const env = openAITurnStateOverrideEnvelope.value
+  const at = openAITurnStateOverrideExpiresAt.value
+  if (!env || !at) return ''
+  if (openAITurnStateOverrideExpired.value) {
+    return t('admin.accounts.openai.turnStateOverrideExpired', {
+      minted: formatDateTime(env.mintedAt)
+    })
+  }
+  return t('admin.accounts.openai.turnStateOverrideValidUntil', {
+    minutes: Math.max(1, Math.round((at.getTime() - Date.now()) / 60_000)),
+    expires: formatDateTime(at)
+  })
+})
+// 生效模型名单：turn-state 与模型强绑定，换模型那张票就不认了。留空 = 不限模型。
+const openAITurnStateModels = ref('')
+const readOpenAITurnStateModels = (extra: unknown): string => {
+  const value = (extra as Record<string, unknown> | undefined)?.openai_turn_state_models
+  return typeof value === 'string' ? value : ''
+}
 // 自动接管：开了之后手填值不再生效，由系统用候选池里最近一条 292 顶替 312。
 const openAITurnStateAuto = ref(false)
 const readOpenAITurnStateAuto = (extra: unknown): boolean =>
@@ -4140,6 +4193,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	upstreamRequestIdHeader.value = readUpstreamRequestIdHeader(extra)
 	openAITurnStateOverride.value = readOpenAITurnStateOverride(extra)
 	openAITurnStateAuto.value = readOpenAITurnStateAuto(extra)
+	openAITurnStateModels.value = readOpenAITurnStateModels(extra)
 	openAIImagesUrlToB64JsonEnabled.value = extra?.images_url_to_b64_json === true
 	autoPause5hThreshold.value = typeof extra?.auto_pause_5h_threshold === 'number' ? extra.auto_pause_5h_threshold * 100 : null
 	autoPause7dThreshold.value = typeof extra?.auto_pause_7d_threshold === 'number' ? extra.auto_pause_7d_threshold * 100 : null
@@ -5909,6 +5963,19 @@ const handleSubmit = async () => {
         newExtra.openai_turn_state_override = nextTurnStateOverride
       } else {
         delete newExtra.openai_turn_state_override
+      }
+      updatePayload.extra = newExtra
+    }
+
+    // 生效模型名单：同样只在改动时写回。
+    const nextTurnStateModels = openAITurnStateModels.value.trim()
+    if (accountSupportsTurnStateOverride.value && nextTurnStateModels !== readOpenAITurnStateModels(props.account.extra)) {
+      const currentExtra = (updatePayload.extra as Record<string, unknown>) || (props.account.extra as Record<string, unknown>) || {}
+      const newExtra: Record<string, unknown> = { ...currentExtra }
+      if (nextTurnStateModels) {
+        newExtra.openai_turn_state_models = nextTurnStateModels
+      } else {
+        delete newExtra.openai_turn_state_models
       }
       updatePayload.extra = newExtra
     }

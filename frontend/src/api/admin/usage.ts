@@ -82,6 +82,8 @@ export interface CreateUsageCleanupTaskRequest {
 
 export interface AdminUsageQueryParams extends UsageQueryParams {
   user_id?: number
+  // Turn-State 维度筛选:minted/healthy/suspect/sent/injected/auto/auto_stale/manual
+  turn_state?: string | null
   exact_total?: boolean
   billing_mode?: string
   upstream_model_mismatch?: boolean
@@ -126,6 +128,7 @@ export async function getStats(params: {
   stream?: boolean
   native_compaction_v2?: boolean | null
   upstream_model_mismatch?: boolean
+  turn_state?: string | null
   period?: string
   start_date?: string
   end_date?: string

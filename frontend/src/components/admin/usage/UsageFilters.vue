@@ -128,7 +128,7 @@
         </div>
 
         <!-- Native compaction is independent of the transport request type. -->
-        <div v-if="mode !== 'errors'" class="w-full sm:w-auto sm:min-w-[180px]">
+        <div v-if="mode !== 'errors' && mode !== 'cleanup'" class="w-full sm:w-auto sm:min-w-[180px]">
           <label class="input-label">{{ t('usage.compactionFilter') }}</label>
           <Select v-model="filters.native_compaction_v2" :options="compactionOptions" @change="emitChange" />
         </div>
@@ -148,6 +148,11 @@
         <div v-if="mode === 'usage'" class="w-full sm:w-auto sm:min-w-[220px]">
           <label class="input-label">{{ t('admin.usage.upstreamModelAudit') }}</label>
           <Select v-model="filters.upstream_model_mismatch" :options="upstreamModelMismatchOptions" @change="emitChange" />
+        </div>
+
+        <div v-if="mode === 'usage'" class="w-full sm:w-auto sm:min-w-[220px]">
+          <label class="input-label">{{ t('admin.usage.turnStateFilter') }}</label>
+          <Select v-model="filters.turn_state" :options="turnStateOptions" @change="emitChange" />
         </div>
 
         <!-- Error Phase Filter (errors only) -->
@@ -219,7 +224,9 @@ interface Props {
    * errors 模式:隐藏用量专属字段/按钮,显示错误类型+状态码(错误请求 tab 用)
    * ranking 模式:同 usage 但隐藏计费模式筛选与清理/导出按钮(用户排行 tab 用)
    */
-  mode?: 'usage' | 'errors' | 'ranking'
+  // cleanup: 清理弹窗复用这张筛选条，但删除任务的 payload 只认其中一部分维度，
+  // 不支持的维度必须不渲染——显示了却不生效，在不可逆删除上就是删多。
+  mode?: 'usage' | 'errors' | 'ranking' | 'cleanup'
   /** 嵌入统一卡片内使用：去掉自身卡片外观 */
   flat?: boolean
 }
@@ -327,6 +334,19 @@ const upstreamModelMismatchOptions = ref<SelectOption[]>([
   { value: null, label: t('admin.usage.allUpstreamModelAudit') },
   { value: true, label: t('admin.usage.upstreamModelMismatchOnly') },
   { value: false, label: t('admin.usage.upstreamModelMatchedOnly') }
+])
+
+// Turn-State 筛选:前 3 项看上游新铸的 turn_state,后 5 项看本次出站带了什么。
+const turnStateOptions = ref<SelectOption[]>([
+  { value: null, label: t('admin.usage.turnStateAll') },
+  { value: 'minted', label: t('admin.usage.turnStateMintedOnly') },
+  { value: 'healthy', label: t('admin.usage.turnStateHealthyOnly') },
+  { value: 'suspect', label: t('admin.usage.turnStateSuspectOnly') },
+  { value: 'sent', label: t('admin.usage.turnStateSentOnly') },
+  { value: 'injected', label: t('admin.usage.turnStateInjectedOnly') },
+  { value: 'auto', label: t('admin.usage.turnStateSourceAuto') },
+  { value: 'auto_stale', label: t('admin.usage.turnStateSourceAutoStale') },
+  { value: 'manual', label: t('admin.usage.turnStateSourceManual') }
 ])
 
 const emitChange = () => emit('change')

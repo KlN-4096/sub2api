@@ -125,7 +125,7 @@ export default {
         ungrouped: '未分组',
         hint: '显示格式为“分组名 / 基础分 / 粘性加分”。基础分按当前筛选条件限定的候选账号计算，包含优先级、负载、排队、错误率、首包延迟、重置窗口、额度余量、计费倍率等因子；粘性加分只在开启粘性加权时用于 previous_response_id 或 session_hash。分数越大越优先。'
       },
-      usageWindowsHint: '“5h / 7d”是上游账号（如 OpenAI ChatGPT、Claude）官方的滚动用量窗口限制，由上游对账号设定，并非 sub2api 配置，也与你映射的模型无关。窗口滚动到期后用量会自动重置，无法在 sub2api 端解除该限制。',
+      usageWindowsHint: '“5h / 7d”是上游账号（如 OpenAI ChatGPT、Claude）官方的滚动用量窗口限制，由上游对账号设定，并非 sub2api 配置，也与你映射的模型无关。窗口滚动到期后用量会自动重置，无法在 sub2api 端解除该限制。紫色/琥珀色的条目是该账号当前生效的 Codex Turn-State（按模型分），倒计时是这张票自铸造起 1 小时的剩余有效期；琥珀色代表这张票疑似降智。',
       ollamaCloud: {
         title: 'Ollama Cloud 用量',
         sessionSecurityHint: '浏览器会话会加密落库，且只发送到固定的 Ollama 官方设置页。',
@@ -771,10 +771,22 @@ export default {
         turnStateOverrideDesc: '非空时，该账号所有出站请求强制携带这条 x-codex-turn-state，覆盖客户端自己回带的值。留空为关闭。仅用于排查上游回合状态的影响，正常运营不要填。',
         turnStateOverridePlaceholder: '粘贴 gAAAAAB... 开头的 turn-state',
         turnStateOverrideLength: '长度 {n}',
+        turnStateOverrideValidUntil: '剩余有效期约 {minutes} 分钟(到期 {expires})',
+        turnStateOverrideExpired: '已过期(铸于 {minted})，不会再注入，请换一条新的',
         turnStateAuto: '自动接管 turn-state',
         turnStateAutoDesc:
-          '开启后由系统接管：检测到某个会话落在 312 时，自动用该账号最近一条有效的 292 顶替；若注入 292 后上游仍铸出 312，判该候选失效并降级到下一条，候选全部失效则停用账号并写明原因。开启后手填值不再生效。仅覆盖 HTTP 路径，WebSocket 直通不参与自动接管。',
+          '开启后由系统接管：检测到某个会话落在 312 时，自动用该账号同一模型下最近一条有效的 292 顶替；若注入 292 后上游仍铸出 312，判该候选失效并降级到下一条，该模型的候选全部失效则停用账号并写明原因。候选按「账号 × 模型」分桶（turn-state 换模型就不认），自铸造起 1 小时有效，过期不再顶替、直接等下一条新的 292。开启后手填值不再生效。仅覆盖 HTTP 路径，WebSocket 直通不参与自动接管。',
         turnStateAutoTakeover: '已由自动接管',
+        turnStateModels: 'Turn-State 生效模型',
+        turnStateModelsDesc:
+          'turn-state 与模型强绑定，换个模型那张票就不认了。逗号分隔，大小写不敏感，结尾 * 做前缀匹配（如 gpt-5.6*）。留空 = 不限模型。自动接管的候选池本身按「账号 × 模型」分桶，这里是再叠一层限制：名单外的模型完全不注入。',
+        turnStateModelsPlaceholder: 'gpt-5.6-luna, gpt-6*',
+        turnStatePool: {
+          summary: '{n} 个模型有生效的 Turn-State',
+          detail: '{model}：{shape} {health}，铸于 {minted}，到期 {expires}',
+          healthy: '满血',
+          suspect: '疑似降智',
+        },
         compactMode: 'Compact 模式',
         compactModeDesc:
           '控制本账号在 /responses/compact 调度中的参与方式。Auto 跟随探测结果，Force On 强制允许，Force Off 强制排除。',
