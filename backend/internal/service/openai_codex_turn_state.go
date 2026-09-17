@@ -273,11 +273,75 @@ const maxUsageCodexTurnStateLen = 4096
 // OpenAICodexTurnStateOverride 返回账号配置的 turn-state 覆写值；未配置或账号类型
 // 不适用时返回空串。只对最终落到 ChatGPT Codex 后端的账号生效（oauth / setup-token /
 // cpr）——其余上游根本不认这个头，写进去是纯污染。
+// 手填值与候选池同一条有效期：turn-state 自铸造起 1 小时可用，过期就不再注入。
+// 这道闸必须放在这个共享入口上——HTTP 与 WS 两条路径都从这里取值，放到调用点就会
+// 漏掉其中一条。过期后按「未配置」处理：不注入、不报错，等管理员换一条新的。
+//
+// 为什么非加不可：手填只在自动接管关闭时生效，而失效归因（noteOpenAITurnStateRejected）
+// 要求自动接管开着。所以一条过期的手填票会对每个请求注入、每次换回一个 400
+// invalid_encrypted_content，而且永远不会被任何机制发现。
 func (a *Account) OpenAICodexTurnStateOverride() string {
 	if a == nil || !a.TargetsChatGPTCodexUpstream() {
 		return ""
 	}
-	return strings.TrimSpace(a.GetExtraString(openAITurnStateOverrideExtraKey))
+	value := strings.TrimSpace(a.GetExtraString(openAITurnStateOverrideExtraKey))
+	if value == "" || !openAITurnStateBlobExpired(value, a.openAITurnStateStaleAfter(), time.Now()) {
+		return value
+	}
+	logOpenAITurnStateAuto("account=%d manual turn-state override expired, not injecting", a.ID)
+	return ""
+}
+
+// openAITurnStateBlobExpired 判一条 blob 是否已过铸造后 ttl。
+// 信封解不出来时按不过期处理，与候选池的 expired() 同一套取舍：宁可注进去撞一次
+// 400，也不要因为解码失败把整个功能静默关掉。
+func openAITurnStateBlobExpired(blob string, ttl time.Duration, now time.Time) bool {
+	env, ok := parseOpenAITurnStateEnvelope(blob)
+	if !ok || env.MintedAt.IsZero() {
+		return false
+	}
+	return !now.Before(env.MintedAt.Add(ttl))
+}
+
+// openAITurnStateModelsExtraKey 限定 turn-state 注入在哪些模型上生效。逗号分隔，
+// 大小写不敏感，结尾 * 做前缀匹配（如 gpt-5.6*）。留空 = 不限模型。
+//
+// 为什么需要：turn-state 与模型强绑定，换个模型那张票就不认了。名单让管理员能把
+// 手填的那条票钉死在它真正来自的模型上，而不是对该账号的所有请求一律注入。
+const openAITurnStateModelsExtraKey = "openai_turn_state_models"
+
+// openAITurnStateModelAllowed 判本次模型是否在名单内。
+//
+// 两处放行都是刻意的：名单留空 = 不限模型（保持既有行为，不静默改掉已有配置）；
+// 模型识别不出来时也放行——注入本来就是管理员的显式动作，因为拿不到模型名就静默
+// 失效，比偶尔多注一次更难排查。自动接管那条路径不受这个宽松影响：它在
+// pickOpenAITurnStateCandidate 里要求候选的模型必须与本次请求精确相等。
+func (a *Account) openAITurnStateModelAllowed(model string) bool {
+	if a == nil {
+		return false
+	}
+	raw := strings.TrimSpace(a.GetExtraString(openAITurnStateModelsExtraKey))
+	if raw == "" {
+		return true
+	}
+	model = strings.ToLower(strings.TrimSpace(model))
+	if model == "" {
+		return true
+	}
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.ToLower(strings.TrimSpace(entry))
+		switch {
+		case entry == "":
+			continue
+		case strings.HasSuffix(entry, "*"):
+			if strings.HasPrefix(model, strings.TrimSuffix(entry, "*")) {
+				return true
+			}
+		case entry == model:
+			return true
+		}
+	}
+	return false
 }
 
 // applyOpenAICodexTurnStateOverrideWSManualOnly 是 WS 路径的值形态入口：只应用手填覆写。
@@ -294,14 +358,21 @@ func (s *OpenAIGatewayService) applyOpenAICodexTurnStateOverrideWSManualOnly(c *
 	// 整个 WS 上下文都不参与自动接管——包括 WS ingress 的 HTTP 桥，它会拿同一个 c
 	// 去走 passthrough 的出站构建（openai_ws_http_bridge.go），不挡住就漏进去了。
 	markOpenAITurnStateAutoSkipped(c)
+	// 与 HTTP 侧同理：每次重新判定前先清注入标记。attempt 1 走 HTTP 注入过、
+	// attempt 2 failover 到另一个账号且走 WS 时，不清就会把上一个账号的注入值
+	// 记到这一轮的使用记录上（overridden=true / source=manual，而本轮根本没注入）。
+	clearOpenAITurnStateInjected(c)
 	if account == nil || account.IsOpenAITurnStateAutoEnabled() {
 		return current
 	}
-	if manual := account.OpenAICodexTurnStateOverride(); manual != "" {
+	if manual := account.OpenAICodexTurnStateOverride(); manual != "" &&
+		account.openAITurnStateModelAllowed(openAITurnStateRequestModel(c)) {
 		// 记进上下文：帧填充据此判断「本次是不是覆写」，使用记录据此记 overridden/来源。
 		markOpenAITurnStateInjected(c, manual, turnStateSourceManual)
+		markOpenAITurnStateSent(c, account, manual)
 		return manual
 	}
+	markOpenAITurnStateSent(c, account, current)
 	return current
 }
 
@@ -316,22 +387,49 @@ func (s *OpenAIGatewayService) applyOpenAICodexTurnStateOverrideHeader(c *gin.Co
 	if override, _ := s.resolveOpenAITurnStateOverride(c, account); override != "" {
 		h.Set(openAICodexTurnStateHeader, override)
 	}
+	// 记下本次真正出站的值（可能来自客户端回带，也可能是刚注入的）。
+	markOpenAITurnStateSent(c, account, h.Get(openAICodexTurnStateHeader))
 }
 
-// ValidateOpenAITurnStateAutoExtra 校验自动接管开关只能是 bool。
-// 写成字符串 "true" 时 getExtraBool 返回 false，开关静默失效——UI 之外用 API
-// 配置时最容易踩这个。候选池等运行态键由网关维护，不在这里校验。
+// maxOpenAITurnStateModelsLen 是生效模型名单的长度上限。模型名再长也就几十字符，
+// 512 足够列十来个，同时挡住把整段配置误粘进来。
+const maxOpenAITurnStateModelsLen = 512
+
+// ValidateOpenAITurnStateAutoExtra 校验自动接管的两个配置键。
+//
+// 开关只能是 bool：写成字符串 "true" 时 getExtraBool 返回 false，开关静默失效——
+// UI 之外用 API 配置时最容易踩这个。名单只能是字符串，空白视为未配置并移除。
+// 候选池等运行态键由网关维护，不在这里校验。
 func ValidateOpenAITurnStateAutoExtra(extra map[string]any) error {
 	if extra == nil {
 		return nil
 	}
-	raw, ok := extra[openAITurnStateAutoExtraKey]
-	if !ok || raw == nil {
+	if raw, ok := extra[openAITurnStateAutoExtraKey]; ok && raw != nil {
+		if _, ok := raw.(bool); !ok {
+			return fmt.Errorf("%s must be a boolean", openAITurnStateAutoExtraKey)
+		}
+	}
+	raw, ok := extra[openAITurnStateModelsExtraKey]
+	if !ok {
 		return nil
 	}
-	if _, ok := raw.(bool); !ok {
-		return fmt.Errorf("%s must be a boolean", openAITurnStateAutoExtraKey)
+	if raw == nil {
+		// 显式传 JSON null 与传空白等价，都按「未配置」清掉，别在 extra 里留个 null。
+		delete(extra, openAITurnStateModelsExtraKey)
+		return nil
 	}
+	value, ok := raw.(string)
+	if !ok {
+		return fmt.Errorf("%s must be a string", openAITurnStateModelsExtraKey)
+	}
+	if value = strings.TrimSpace(value); value == "" {
+		delete(extra, openAITurnStateModelsExtraKey)
+		return nil
+	}
+	if len(value) > maxOpenAITurnStateModelsLen {
+		return fmt.Errorf("%s exceeds %d characters", openAITurnStateModelsExtraKey, maxOpenAITurnStateModelsLen)
+	}
+	extra[openAITurnStateModelsExtraKey] = value
 	return nil
 }
 
@@ -376,7 +474,11 @@ func ValidateOpenAITurnStateOverrideExtra(extra map[string]any) error {
 // usageCodexTurnStatePtr 从上游响应头取本次新铸的 turn-state，写进使用记录。
 // 与 usageUpstreamRequestIDPtr 同型：取不到返回 nil（列保持 NULL）。
 func usageCodexTurnStatePtr(h http.Header) *string {
-	state := extractOpenAICodexTurnState(h)
+	return truncateUsageTurnState(extractOpenAICodexTurnState(h))
+}
+
+// truncateUsageTurnState 收边到列上限；空值返回 nil（列保持 NULL）。
+func truncateUsageTurnState(state string) *string {
 	if state == "" {
 		return nil
 	}
@@ -406,6 +508,20 @@ func usageCodexTurnStateOverriddenPtr(account *Account, source string) *bool {
 	}
 	overridden := strings.TrimSpace(source) != ""
 	return &overridden
+}
+
+// usageCodexTurnStateSentPtr 记录本次出站实际带的 turn-state。
+// 与 usageCodexTurnStatePtr（上游**新铸**的）分开：带了 turn-state 的请求只有 8%
+// 会拿到新铸值，只记新铸的话，注入场景九成以上都是空的。
+func usageCodexTurnStateSentPtr(account *Account, sent string) *string {
+	if account == nil || !account.TargetsChatGPTCodexUpstream() {
+		return nil
+	}
+	sent = strings.TrimSpace(sent)
+	if sent == "" {
+		return nil
+	}
+	return truncateUsageTurnState(sent)
 }
 
 // usageCodexTurnStateSourcePtr 记录覆写来源：manual / auto / auto_stale，没注入为 nil。

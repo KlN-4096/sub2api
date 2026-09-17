@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -62,12 +63,25 @@ func (r *turnStateAutoRepo) SetError(_ context.Context, _ int64, msg string) err
 	return nil
 }
 
+const turnStateTestModel = "gpt-5.6-luna"
+
+// openAIDegradedTurnStateLen 是实测的「降智」字符长度，只有测试用它造样本：
+// 生产判据是密文块数（openai_codex_turn_state_envelope.go），不是长度。
+const openAIDegradedTurnStateLen = 312
+
 func turnStateAutoCtx(sessionID string) *gin.Context {
+	return turnStateAutoCtxModel(sessionID, turnStateTestModel)
+}
+
+// turnStateAutoCtxModel 造一个带模型归属的请求上下文。出站各路径都会在分发前
+// SetOpsUpstreamModel，自动接管就是从那里读本次模型的。
+func turnStateAutoCtxModel(sessionID, model string) *gin.Context {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	if sessionID != "" {
 		c.Request.Header.Set("Session-Id", sessionID)
 	}
+	SetOpsUpstreamModel(c, model)
 	return c
 }
 
@@ -89,34 +103,67 @@ func turnStateBlob(n int) string {
 	return string(b)
 }
 
-// TestPickOpenAITurnStateCandidate 钉住候选选取：跳过失效、过保鲜期仍可用但换来源。
+// TestPickOpenAITurnStateCandidate 钉住候选选取：跳过失效、跳过过期、只取同模型的。
 func TestPickOpenAITurnStateCandidate(t *testing.T) {
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	stale := time.Hour
+	ttl := time.Hour
+	const m = turnStateTestModel
+	pick := func(pool []openAITurnStateCandidate, model string) (openAITurnStateCandidate, string, bool) {
+		return pickOpenAITurnStateCandidate(pool, model, ttl, now)
+	}
+	fresh := func(blob, model string) openAITurnStateCandidate {
+		return openAITurnStateCandidate{Blob: blob, Model: model, MintedAt: now.Add(-time.Minute)}
+	}
 
-	_, _, ok := pickOpenAITurnStateCandidate(nil, stale, now)
+	_, _, ok := pick(nil, m)
 	require.False(t, ok, "空池不注入")
 
 	pool := []openAITurnStateCandidate{
-		{Blob: "failed", MintedAt: now.Add(-time.Minute), Failed: true},
-		{Blob: "fresh", MintedAt: now.Add(-time.Minute)},
-		{Blob: "old", MintedAt: now.Add(-3 * time.Hour)},
+		{Blob: "failed", Model: m, MintedAt: now.Add(-time.Minute), Failed: true},
+		fresh("fresh", m),
+		{Blob: "old", Model: m, MintedAt: now.Add(-3 * time.Hour)},
 	}
-	got, source, ok := pickOpenAITurnStateCandidate(pool, stale, now)
+	got, source, ok := pick(pool, m)
 	require.True(t, ok)
 	require.Equal(t, "fresh", got.Blob, "失效候选必须跳过")
 	require.Equal(t, turnStateSourceAuto, source)
 
-	// 过保鲜期照用不删：292 太稀缺，只是把来源标成 auto_stale 以便事后统计
-	onlyOld := []openAITurnStateCandidate{{Blob: "old", MintedAt: now.Add(-3 * time.Hour)}}
-	got, source, ok = pickOpenAITurnStateCandidate(onlyOld, stale, now)
-	require.True(t, ok, "过期候选仍然可用")
-	require.Equal(t, "old", got.Blob)
-	require.Equal(t, turnStateSourceAutoStale, source)
+	// 模型是硬门槛：turn-state 与模型强绑定，别的模型的票注进来只会白撞一次 400。
+	_, _, ok = pick(pool, "gpt-6-astra")
+	require.False(t, ok, "别的模型的候选不得注入")
+	got, _, ok = pick([]openAITurnStateCandidate{fresh("luna", m), fresh("astra", "gpt-6-astra")}, "gpt-6-astra")
+	require.True(t, ok)
+	require.Equal(t, "astra", got.Blob, "必须取本模型的那条")
+	_, _, ok = pick(pool, "")
+	require.False(t, ok, "取不到本次模型时不注入")
+	_, _, ok = pick([]openAITurnStateCandidate{fresh("legacy", "")}, m)
+	require.False(t, ok, "没有模型归属的历史条目不得注入")
 
-	allFailed := []openAITurnStateCandidate{{Blob: "a", Failed: true}, {Blob: "", MintedAt: now}}
-	_, _, ok = pickOpenAITurnStateCandidate(allFailed, stale, now)
+	// 有效期是硬门槛：过期就不注入，等下一条自然铸出的 292（对家实时池六张卡实测
+	// 到期 = Fernet 铸造戳 + 1 小时）。
+	_, _, ok = pick([]openAITurnStateCandidate{{Blob: "old", Model: m, MintedAt: now.Add(-3 * time.Hour)}}, m)
+	require.False(t, ok, "过期候选不得注入")
+
+	// 边界：正好满 1 小时算过期，差 1 纳秒还能用。
+	_, _, ok = pick([]openAITurnStateCandidate{{Blob: "edge", Model: m, MintedAt: now.Add(-ttl)}}, m)
+	require.False(t, ok, "铸造后满 ttl 即过期")
+	_, _, ok = pick([]openAITurnStateCandidate{{Blob: "edge", Model: m, MintedAt: now.Add(-ttl + time.Nanosecond)}}, m)
+	require.True(t, ok, "未满 ttl 仍可用")
+
+	// 信封解不出铸造时刻（MintedAt 零值）时按不过期处理，不要静默停掉功能。
+	_, _, ok = pick([]openAITurnStateCandidate{{Blob: "undecodable", Model: m}}, m)
+	require.True(t, ok, "解不出铸造时刻的候选照常可用")
+
+	allFailed := []openAITurnStateCandidate{{Blob: "a", Model: m, Failed: true}, {Blob: "", Model: m, MintedAt: now}}
+	_, _, ok = pick(allFailed, m)
 	require.False(t, ok, "全失效（空 blob 也算不可用）= 耗尽")
+
+	// 耗尽判定不看有效期：过期只是等新票，不该把账号停掉。
+	require.False(t, openAITurnStateModelAlive(allFailed, m))
+	require.True(t, openAITurnStateModelAlive(
+		[]openAITurnStateCandidate{{Blob: "old", Model: m, MintedAt: now.Add(-3 * time.Hour)}}, m),
+		"过期但未失效的候选仍算「降级链没走完」")
+	require.False(t, openAITurnStateModelAlive([]openAITurnStateCandidate{fresh("x", m)}, "gpt-6-astra"))
 }
 
 // TestOpenAITurnStateAutoOnlyInjectsDegradedSessions 钉住方案 B：
@@ -126,7 +173,7 @@ func TestOpenAITurnStateAutoOnlyInjectsDegradedSessions(t *testing.T) {
 	healthy := turnStateBlob(openAIHealthyTurnStateLen)
 	account := turnStateAutoAccount()
 	account.Extra[openAITurnStatePoolExtraKey] = []any{
-		map[string]any{"blob": healthy, "minted_at": time.Now().UTC().Format(time.RFC3339)},
+		map[string]any{"model": turnStateTestModel, "blob": healthy, "minted_at": time.Now().UTC().Format(time.RFC3339)},
 	}
 
 	// 没有 session 判定记录 → 不注入
@@ -158,7 +205,7 @@ func TestOpenAITurnStateAutoBeatsManual(t *testing.T) {
 	account := turnStateAutoAccount()
 	account.Extra[openAITurnStateOverrideExtraKey] = "手填的值"
 	account.Extra[openAITurnStatePoolExtraKey] = []any{
-		map[string]any{"blob": healthy, "minted_at": time.Now().UTC().Format(time.RFC3339)},
+		map[string]any{"model": turnStateTestModel, "blob": healthy, "minted_at": time.Now().UTC().Format(time.RFC3339)},
 	}
 	svc.observeOpenAITurnStateMint(turnStateAutoCtx("sess"), account,
 		turnStateBlob(openAIDegradedTurnStateLen))
@@ -187,7 +234,7 @@ func TestOpenAITurnStateAutoInjectedMintDoesNotResetSession(t *testing.T) {
 	healthy := turnStateBlob(openAIHealthyTurnStateLen)
 	account := turnStateAutoAccount()
 	account.Extra[openAITurnStatePoolExtraKey] = []any{
-		map[string]any{"blob": healthy, "minted_at": time.Now().UTC().Format(time.RFC3339)},
+		map[string]any{"model": turnStateTestModel, "blob": healthy, "minted_at": time.Now().UTC().Format(time.RFC3339)},
 	}
 
 	svc.observeOpenAITurnStateMint(turnStateAutoCtx("sess"), account,
@@ -227,8 +274,8 @@ func TestOpenAITurnStateAutoDegradesThenDisables(t *testing.T) {
 	minted := time.Now().UTC().Format(time.RFC3339)
 	account := turnStateAutoAccount()
 	account.Extra[openAITurnStatePoolExtraKey] = []any{
-		map[string]any{"blob": first, "minted_at": minted},
-		map[string]any{"blob": second, "minted_at": minted},
+		map[string]any{"model": turnStateTestModel, "blob": first, "minted_at": minted},
+		map[string]any{"model": turnStateTestModel, "blob": second, "minted_at": minted},
 	}
 	svc.observeOpenAITurnStateMint(turnStateAutoCtx("sess"), account,
 		turnStateBlob(openAIDegradedTurnStateLen))
@@ -247,11 +294,160 @@ func TestOpenAITurnStateAutoDegradesThenDisables(t *testing.T) {
 	require.Equal(t, []bool{false}, repo.schedulable, "候选耗尽必须停调度")
 	require.Len(t, repo.errors, 1)
 	require.Contains(t, repo.errors[0], "疑似降智")
-	require.Contains(t, repo.errors[0], "312")
+	// 判据是密文块数，不是字符长度——原因里必须写清 10 块这个健康基线。
+	require.Contains(t, repo.errors[0], "10 块")
+	require.Contains(t, repo.errors[0], "疑似判据，不是确证")
 	require.False(t, account.Schedulable)
 
 	// 停掉之后不再注入（池里已无可用候选）
 	require.Empty(t, mustResolve(t, svc, turnStateAutoCtx("sess"), account))
+}
+
+// TestOpenAITurnStateWSClearsInjectionMarkerAcrossAttempts 钉住 failover 串账：
+// attempt 1 走 HTTP 注入过、attempt 2 换号走 WS 时必须清掉注入标记，否则第二个账号
+// 的使用记录会记成 overridden=true / source=manual，而它这一轮根本没注入。
+func TestOpenAITurnStateWSClearsInjectionMarkerAcrossAttempts(t *testing.T) {
+	svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
+	c := turnStateAutoCtx("sess")
+
+	// attempt 1：账号 A 手填覆写生效，标记写进上下文。
+	accountA := turnStateAutoAccount()
+	delete(accountA.Extra, openAITurnStateAutoExtraKey)
+	accountA.Extra[openAITurnStateOverrideExtraKey] = "manual-blob-a"
+	require.Equal(t, "manual-blob-a",
+		svc.applyOpenAICodexTurnStateOverrideWSManualOnly(c, accountA, ""))
+	require.Equal(t, turnStateSourceManual, OpenAITurnStateUsageSource(c))
+
+	// attempt 2：failover 到没有覆写的账号 B，同一个 gin.Context。
+	accountB := turnStateAutoAccount()
+	accountB.ID = 8
+	delete(accountB.Extra, openAITurnStateAutoExtraKey)
+	require.Equal(t, "echoed",
+		svc.applyOpenAICodexTurnStateOverrideWSManualOnly(c, accountB, "echoed"))
+	require.Empty(t, OpenAITurnStateUsageSource(c), "上一个账号的注入标记必须被清掉")
+	require.False(t, *usageCodexTurnStateOverriddenPtr(accountB, OpenAITurnStateUsageSource(c)),
+		"没注入就不该记成覆写")
+}
+
+// TestOpenAITurnStateExpiredCandidatesStayInPool 钉住「过期 ≠ 降级链被消耗」：
+// 入池时不得把过期候选物理删掉，否则同模型下最后一条新鲜候选失败时，
+// 本该还剩的格子已经没了，账号会被提前停掉。
+func TestOpenAITurnStateExpiredCandidatesStayInPool(t *testing.T) {
+	const m = turnStateTestModel
+	repo := newTurnStateAutoRepo()
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	account := turnStateAutoAccount()
+	account.Extra[openAITurnStatePoolSizeExtraKey] = 3
+
+	// 必须种成数组形态：readOpenAITurnStatePool 走 json.Marshal(raw) → Unmarshal，
+	// 种成 JSON 字符串会解成 nil，断言就变成空跑。
+	account.Extra[openAITurnStatePoolExtraKey] = []any{
+		map[string]any{
+			"blob":      "old",
+			"model":     m,
+			"minted_at": time.Now().UTC().Add(-3 * time.Hour).Format(time.RFC3339),
+		},
+	}
+
+	fresh := turnStateBlob(openAIHealthyTurnStateLen)
+	svc.pushOpenAITurnStateCandidate(turnStateAutoCtx("s"), account, fresh)
+
+	pool := readOpenAITurnStatePool(account)
+	require.Len(t, pool, 2, "过期候选不得在入池时被删掉")
+	require.True(t, openAITurnStateModelAlive(pool, m))
+
+	// 新鲜的那条失败 → 池里还剩过期但未失效的一条 → 不该停账号。
+	c := turnStateAutoCtx("s")
+	markOpenAITurnStateInjected(c, fresh, turnStateSourceAuto)
+	svc.recordOpenAITurnStateOutcome(c, account, fresh, false)
+	require.Empty(t, repo.schedulable, "降级链还剩一格就不该停账号")
+
+	// 超出本模型配额时过期条目才出局，数量有界。
+	for i := 1; i <= 3; i++ {
+		svc.pushOpenAITurnStateCandidate(turnStateAutoCtx("s"), account,
+			turnStateBlob(openAIHealthyTurnStateLen-i)+strings.Repeat("y", i))
+	}
+	require.Len(t, readOpenAITurnStatePool(account), 3, "限深仍按模型生效")
+}
+
+// TestOpenAITurnStateAutoIsModelScoped 钉住「turn-state 与模型强绑定」：
+// 候选池、session 降智判定都按 (账号, 模型) 分桶，A 模型的票不会注给 B 模型。
+func TestOpenAITurnStateAutoIsModelScoped(t *testing.T) {
+	const luna, astra = turnStateTestModel, "gpt-6-astra"
+	svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
+	account := turnStateAutoAccount()
+	healthy := turnStateBlob(openAIHealthyTurnStateLen)
+
+	// luna 上自然铸出一条健康票，入池时带上 luna 的归属。
+	svc.observeOpenAITurnStateMint(turnStateAutoCtxModel("s1", luna), account, healthy)
+	pool := readOpenAITurnStatePool(account)
+	require.Len(t, pool, 1)
+	require.Equal(t, luna, pool[0].Model, "候选必须记下铸造它的模型")
+
+	// 同一个 session 在 luna 上被判降智 → luna 注入，astra 不注入。
+	svc.observeOpenAITurnStateMint(turnStateAutoCtxModel("s1", luna), account,
+		turnStateBlob(openAIDegradedTurnStateLen))
+	require.Equal(t, healthy, mustResolve(t, svc, turnStateAutoCtxModel("s1", luna), account))
+	require.Empty(t, mustResolve(t, svc, turnStateAutoCtxModel("s1", astra), account),
+		"换模型就是另一张票，不该沿用 luna 的降智判定")
+
+	// astra 自己被判降智，但池里没有 astra 的票 → 仍然不注入（等它自己铸出 292）。
+	svc.observeOpenAITurnStateMint(turnStateAutoCtxModel("s1", astra), account,
+		turnStateBlob(openAIDegradedTurnStateLen))
+	require.Empty(t, mustResolve(t, svc, turnStateAutoCtxModel("s1", astra), account),
+		"没有本模型的候选就不注入")
+
+	// 取不到本次模型时既不注入也不入池——归不到模型的票没法用。
+	require.Empty(t, mustResolve(t, svc, turnStateAutoCtxModel("s1", ""), account))
+	svc.observeOpenAITurnStateMint(turnStateAutoCtxModel("s2", ""), account,
+		turnStateBlob(openAIHealthyTurnStateLen-1)+"z")
+	require.Len(t, readOpenAITurnStatePool(account), 1, "没有模型归属的票不入池")
+}
+
+// TestOpenAITurnStatePoolDepthIsPerModel 钉住限深按模型算：
+// 全局截断会让活跃模型把冷门模型的票挤光，那个模型就永远补不上。
+func TestOpenAITurnStatePoolDepthIsPerModel(t *testing.T) {
+	const luna, astra = turnStateTestModel, "gpt-6-astra"
+	svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
+	account := turnStateAutoAccount()
+	account.Extra[openAITurnStatePoolSizeExtraKey] = 1
+
+	astraBlob := turnStateBlob(openAIHealthyTurnStateLen)
+	svc.pushOpenAITurnStateCandidate(turnStateAutoCtxModel("s", astra), account, astraBlob)
+	for i := 1; i <= 3; i++ {
+		svc.pushOpenAITurnStateCandidate(turnStateAutoCtxModel("s", luna), account,
+			turnStateBlob(openAIHealthyTurnStateLen-i)+strings.Repeat("z", i))
+	}
+
+	pool := readOpenAITurnStatePool(account)
+	byModel := map[string]int{}
+	for _, c := range pool {
+		byModel[c.Model]++
+	}
+	require.Equal(t, map[string]int{luna: 1, astra: 1}, byModel, "限深必须按模型各算各的")
+	_, _, ok := pickOpenAITurnStateCandidate(pool, astra, time.Hour, time.Now())
+	require.True(t, ok, "冷门模型的票不该被活跃模型挤掉")
+}
+
+// TestOpenAITurnStateModelAllowlist 钉住生效模型名单：逗号分隔、大小写不敏感、
+// 结尾 * 前缀匹配；留空或识别不出模型时放行。
+func TestOpenAITurnStateModelAllowlist(t *testing.T) {
+	a := turnStateAutoAccount()
+	require.True(t, a.openAITurnStateModelAllowed("anything"), "留空 = 不限模型")
+
+	a.Extra[openAITurnStateModelsExtraKey] = " GPT-5.6-Luna , gpt-6* "
+	require.True(t, a.openAITurnStateModelAllowed("gpt-5.6-luna"), "大小写不敏感")
+	require.True(t, a.openAITurnStateModelAllowed("gpt-6-astra"), "结尾 * 前缀匹配")
+	require.False(t, a.openAITurnStateModelAllowed("gpt-5.6-sol"), "名单外必须拦住")
+	require.True(t, a.openAITurnStateModelAllowed(""), "识别不出模型时放行，别静默失效")
+
+	// 名单拦住的模型连自动接管也不注入。
+	svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
+	healthy := turnStateBlob(openAIHealthyTurnStateLen)
+	svc.observeOpenAITurnStateMint(turnStateAutoCtxModel("s", "gpt-5.6-sol"), a, healthy)
+	svc.observeOpenAITurnStateMint(turnStateAutoCtxModel("s", "gpt-5.6-sol"), a,
+		turnStateBlob(openAIDegradedTurnStateLen))
+	require.Empty(t, mustResolve(t, svc, turnStateAutoCtxModel("s", "gpt-5.6-sol"), a))
 }
 
 // TestOpenAITurnStateAutoPushesHealthyMintIntoPool 钉住入池：健康 blob 自动收集、去重、限深。
@@ -312,7 +508,7 @@ func TestOpenAITurnStateAutoSkippedOnWSContext(t *testing.T) {
 	healthy := turnStateBlob(openAIHealthyTurnStateLen)
 	account := turnStateAutoAccount()
 	account.Extra[openAITurnStatePoolExtraKey] = []any{
-		map[string]any{"blob": healthy, "minted_at": time.Now().UTC().Format(time.RFC3339)},
+		map[string]any{"model": turnStateTestModel, "blob": healthy, "minted_at": time.Now().UTC().Format(time.RFC3339)},
 	}
 	svc.observeOpenAITurnStateMint(turnStateAutoCtx("sess"), account,
 		turnStateBlob(openAIDegradedTurnStateLen))
@@ -405,7 +601,7 @@ func TestOpenAITurnStateSessionKeyIsAccountScoped(t *testing.T) {
 	svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
 	healthy := turnStateBlob(openAIHealthyTurnStateLen)
 	minted := time.Now().UTC().Format(time.RFC3339)
-	pool := []any{map[string]any{"blob": healthy, "minted_at": minted}}
+	pool := []any{map[string]any{"model": turnStateTestModel, "blob": healthy, "minted_at": minted}}
 
 	a := turnStateAutoAccount()
 	a.Extra[openAITurnStatePoolExtraKey] = pool
@@ -447,14 +643,14 @@ func TestOpenAITurnStateOutcomeReadsFreshPool(t *testing.T) {
 	// 请求快照：两条候选都还健康
 	stale := turnStateAutoAccount()
 	stale.Extra[openAITurnStatePoolExtraKey] = []any{
-		map[string]any{"blob": injected, "minted_at": minted},
-		map[string]any{"blob": other, "minted_at": minted},
+		map[string]any{"model": turnStateTestModel, "blob": injected, "minted_at": minted},
+		map[string]any{"model": turnStateTestModel, "blob": other, "minted_at": minted},
 	}
 	// DB 侧最新：并发请求已经把 other 标失效了
 	fresh := turnStateAutoAccount()
 	fresh.Extra[openAITurnStatePoolExtraKey] = []any{
-		map[string]any{"blob": injected, "minted_at": minted},
-		map[string]any{"blob": other, "minted_at": minted, "failed": true},
+		map[string]any{"model": turnStateTestModel, "blob": injected, "minted_at": minted},
+		map[string]any{"model": turnStateTestModel, "blob": other, "minted_at": minted, "failed": true},
 	}
 	repo.latest = fresh
 
@@ -478,7 +674,7 @@ func TestOpenAITurnStateObservationDedupedPerContext(t *testing.T) {
 	minted := time.Now().UTC().Format(time.RFC3339)
 	first := turnStateBlob(openAIHealthyTurnStateLen)
 	account.Extra[openAITurnStatePoolExtraKey] = []any{
-		map[string]any{"blob": first, "minted_at": minted},
+		map[string]any{"model": turnStateTestModel, "blob": first, "minted_at": minted},
 	}
 
 	svc.observeOpenAITurnStateMint(turnStateAutoCtx("sess"), account,

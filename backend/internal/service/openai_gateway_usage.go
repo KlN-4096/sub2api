@@ -47,6 +47,8 @@ type OpenAIRecordUsageInput struct {
 	// 空串表示没注入。handler 侧从 gin.Context 取出（OpenAITurnStateUsageSource）：
 	// RecordUsage 是异步的，到这里已经没有 gin.Context 了。
 	TurnStateSource string
+	// TurnStateSent 是本次出站实际带的 turn-state，同样由 handler 从 gin.Context 取。
+	TurnStateSent string
 	ChannelUsageFields
 }
 
@@ -388,6 +390,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		TurnState:                usageCodexTurnStatePtr(result.UpstreamHeaders),
 		TurnStateOverridden:      usageCodexTurnStateOverriddenPtr(account, input.TurnStateSource),
 		TurnStateSource:          usageCodexTurnStateSourcePtr(account, input.TurnStateSource),
+		TurnStateSent:            usageCodexTurnStateSentPtr(account, input.TurnStateSent),
 		Model:                    result.Model,
 		RequestedModel:           requestedModel,
 		UpstreamModel:            optionalTrimmedStringPtr(result.UpstreamModel),

@@ -946,6 +946,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			if reason == "previous_response_not_found" && recoverPrevResponseNotFound(attempt) {
 				continue
 			}
+			// 这里刻意不做 turn-state 失效归因：WS 路径整条都不参与自动接管
+			// （applyOpenAICodexTurnStateOverrideWSManualOnly 会给上下文打 skip 标记），
+			// 归因函数第一行就会返回，写了也是死代码。
 			if reason == "invalid_encrypted_content" && recoverInvalidEncryptedContent(attempt) {
 				continue
 			}
@@ -1133,6 +1136,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			respBody = s.redactAgentIdentitySensitiveBody(ctx, account, respBody)
 			resp.Body = io.NopCloser(bytes.NewReader(respBody))
+			if httpInvalidEncryptedContentRetryTried && resp.StatusCode == http.StatusBadRequest && upstreamCode == "invalid_encrypted_content" {
+				// 已经剥过一次 encrypted reasoning items 还是 400：排除掉 lineage
+				// 这个主因之后，才轮得到「注入的 turn-state 解不开」这个解释。
+				s.noteOpenAITurnStateRejected(c, account)
+			}
 			if !httpInvalidEncryptedContentRetryTried && resp.StatusCode == http.StatusBadRequest && upstreamCode == "invalid_encrypted_content" {
 				decoded, decodeErr := ensureReqBody()
 				if decodeErr != nil {
@@ -1155,6 +1163,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Retrying non-WSv2 request once after invalid_encrypted_content (account: %s)", account.Name)
 					continue
 				}
+				// 请求体里压根没有 encrypted reasoning items，这条 400 就不可能是
+				// lineage 造成的；此时才把账归到本次注入的 turn-state 上。
+				s.noteOpenAITurnStateRejected(c, account)
 				logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Skip non-WSv2 invalid_encrypted_content retry because encrypted reasoning items are missing (account: %s)", account.Name)
 			}
 			if retryBody, reason, changed, retryErr := normalizeOpenAIResponsesRejectedFieldRetryBody(resp.StatusCode, body, respBody); retryErr != nil {

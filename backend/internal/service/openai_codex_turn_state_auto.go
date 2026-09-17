@@ -30,19 +30,20 @@ const (
 	// 以下三个有配置项但不开放前端，按需用 API/DB 改。
 	openAITurnStatePoolSizeExtraKey   = "openai_turn_state_pool_size"
 	openAITurnStateFailThreshExtraKey = "openai_turn_state_fail_threshold"
-	openAITurnStateStaleMinExtraKey   = "openai_turn_state_stale_after_minutes"
+	// openAITurnStateStaleMinExtraKey 是候选的有效期（分钟）。默认 60：实测对家实时池
+	// 每张卡的「到期」都精确等于 Fernet 铸造戳 + 1 小时。键名沿用旧写法，避免已写进
+	// extra 的值失效。
+	openAITurnStateStaleMinExtraKey = "openai_turn_state_stale_after_minutes"
 )
 
 const (
 	defaultOpenAITurnStatePoolSize      = 3
 	defaultOpenAITurnStateFailThreshold = 1
-	defaultOpenAITurnStateStaleMinutes  = 60
-	// openAIHealthyTurnStateLen 是「不降智」的 turn-state 长度。292/312 是实测的
-	// 两个取值（Fernet 信封，密文相差一个 AES 块），运维口径按用户确认：292 = 不降智。
+	// defaultOpenAITurnStateStaleMinutes 是候选有效期：292 自铸造起可用 1 小时。
+	defaultOpenAITurnStateStaleMinutes = 60
+	// openAIHealthyTurnStateLen 是「不降智」的字符长度，只在信封解不开时兜底、
+	// 以及前端展示用。真正的判据是密文块数，见 openai_codex_turn_state_envelope.go。
 	openAIHealthyTurnStateLen = 292
-	// openAIDegradedTurnStateLen 是实测的另一个取值，仅用于禁用原因的措辞。
-	// 判定本身只看「是不是 292」，不枚举长度。
-	openAIDegradedTurnStateLen = 312
 	// openAITurnStateSessionTTL 是 session 长度状态的存活期。turn-state blob 实测
 	// 存活中位 2.6 分钟、最长 33 分钟，1 小时足够覆盖一个会话的活跃期。
 	openAITurnStateSessionTTL = time.Hour
@@ -50,9 +51,10 @@ const (
 
 // turn-state 覆写来源，落 usage_logs.turn_state_source。
 const (
-	turnStateSourceManual    = "manual"
-	turnStateSourceAuto      = "auto"
-	turnStateSourceAutoStale = "auto_stale"
+	turnStateSourceManual = "manual"
+	turnStateSourceAuto   = "auto"
+	// 曾经还有 auto_stale（过保鲜期仍注入）。候选过期改成硬门槛后不再产生，
+	// 历史行与用量筛选项里的这个取值由 usagestats.TurnStateFilterAutoStale 承接。
 )
 
 // gin 上下文键：注入时暂存，响应侧观测到新铸 blob 时读回来做失效判定。
@@ -68,14 +70,41 @@ const (
 	// applyAttemptResponseHeaders 有两个调用点，幂等只靠 c.Writer.Written()，
 	// 同一条 blob 可能被观测两次 → FailStreak 双增、禁用动作连发两次。
 	ctxKeyTurnStateObserved = "openai_turn_state_observed"
+	// ctxKeyTurnStateRejected 与 ctxKeyTurnStateObserved 同理：非 WSv2 路径会在
+	// 剥掉 encrypted reasoning items 后重试一次，同一次注入可能撞两回 400。
+	ctxKeyTurnStateRejected = "openai_turn_state_rejected"
+	// ctxKeyTurnStateSent 记本次出站实际带的 blob，落 usage_logs.turn_state_sent。
+	ctxKeyTurnStateSent = "openai_turn_state_sent"
 )
 
 // openAITurnStateCandidate 是候选池里的一条。
+//
+// Model 是铸出这条 blob 时实际发往上游的模型。turn-state 与模型强绑定，跨模型注入
+// 拿不到满血路由、还会白撞一次 invalid_encrypted_content，所以候选必须带模型、
+// 按模型取。没有 Model 的条目（本功能上线前写进去的）取不出来，等自然过期即可。
 type openAITurnStateCandidate struct {
 	Blob       string    `json:"blob"`
+	Model      string    `json:"model,omitempty"`
 	MintedAt   time.Time `json:"minted_at"`
 	Failed     bool      `json:"failed,omitempty"`
 	FailStreak int       `json:"fail_streak,omitempty"`
+}
+
+// usable 判这条候选此刻能不能注给 model。有效期是硬门槛，见 pickOpenAITurnStateCandidate。
+func (c openAITurnStateCandidate) usable(model string, ttl time.Duration, now time.Time) bool {
+	return c.alive(model) && !c.expired(ttl, now)
+}
+
+// alive 只看「没被判失效」，不看有效期：过期是「这轮不注入」，不是降级链被消耗，
+// 不然池子自然老化就会把账号误停掉。
+func (c openAITurnStateCandidate) alive(model string) bool {
+	if c.Failed || strings.TrimSpace(c.Blob) == "" || c.Model == "" || model == "" {
+		return false
+	}
+	// 大小写不敏感，与 openAITurnStateModelAllowed 的名单匹配保持同一套判据。
+	// 两端都来自 SetOpsUpstreamModel 的同一份值，目前恒等；上游哪天改了模型名的
+	// 大小写，精确比较会让整个功能静默失效，而不是报错。
+	return strings.EqualFold(c.Model, model)
 }
 
 // openAITurnStateSessionState 记录某个 session 是否需要注入。
@@ -148,25 +177,56 @@ func readOpenAITurnStatePool(account *Account) []openAITurnStateCandidate {
 	return pool
 }
 
-// pickOpenAITurnStateCandidate 取栈顶第一条未失效的候选。
-// 超过保鲜期的候选照样返回（只是来源标成 auto_stale）：292 本来就稀缺，按年龄跳过
-// 会让降级链被「过期」而不是「失效」消耗掉，也就验证不了 1 小时到底会不会过期。
-func pickOpenAITurnStateCandidate(pool []openAITurnStateCandidate, staleAfter time.Duration, now time.Time) (openAITurnStateCandidate, string, bool) {
+// pickOpenAITurnStateCandidate 取第一条未失效且未过期的候选。
+//
+// 过期是硬门槛：实测对家的实时池六张卡，每张的「到期」都精确等于 Fernet 铸造戳 + 1
+// 小时，所以 292 的可用期就是 1 小时。过期的 blob 注进去只会白白换来一次
+// invalid_encrypted_content，不如不注入、直接等下一条自然铸出的 292。
+//
+// 注意：这里返回 false 只表示「这一轮不注入」，不是降级链被消耗，所以不会触发禁用。
+func pickOpenAITurnStateCandidate(pool []openAITurnStateCandidate, model string, ttl time.Duration, now time.Time) (openAITurnStateCandidate, string, bool) {
+	if model = strings.TrimSpace(model); model == "" {
+		return openAITurnStateCandidate{}, "", false
+	}
 	for _, c := range pool {
-		if c.Failed || strings.TrimSpace(c.Blob) == "" {
-			continue
+		if c.usable(model, ttl, now) {
+			return c, turnStateSourceAuto, true
 		}
-		source := turnStateSourceAuto
-		if !c.MintedAt.IsZero() && now.Sub(c.MintedAt) > staleAfter {
-			source = turnStateSourceAutoStale
-		}
-		return c, source, true
 	}
 	return openAITurnStateCandidate{}, "", false
 }
 
-// openAITurnStateSessionKey 把 session 状态按凭证域分域：同一个 session id 在不同
-// 账号下是两段独立的上游会话，混用会让 A 账号的降智判定作用到 B 账号。
+// openAITurnStateModelAlive 判该模型下还有没有未失效的候选，用于耗尽判定。
+func openAITurnStateModelAlive(pool []openAITurnStateCandidate, model string) bool {
+	for _, c := range pool {
+		if c.alive(model) {
+			return true
+		}
+	}
+	return false
+}
+
+// openAITurnStateRequestModel 取本次出站实际用的模型。各出站路径都会在分发前
+// SetOpsUpstreamModel，注入点与观测点都在其后，所以这里读到的就是本次尝试的模型。
+// 取不到就返回空——宁可不注入，也不要把票记到错误的模型名下。
+func openAITurnStateRequestModel(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.GetString(OpsUpstreamModelKey))
+}
+
+// expired 判候选是否已过铸造后 ttl。MintedAt 为零值说明信封解不出来，按不过期处理：
+// 宁可注进去撞一次 400，也不要因为解码失败静默停掉整个功能。
+func (c openAITurnStateCandidate) expired(ttl time.Duration, now time.Time) bool {
+	return !c.MintedAt.IsZero() && !now.Before(c.MintedAt.Add(ttl))
+}
+
+// openAITurnStateSessionKey 把 session 状态按「凭证域 + 模型」分域。
+//
+// 分账号：同一个 session id 在不同账号下是两段独立的上游会话，混用会让 A 账号的
+// 降智判定作用到 B 账号。分模型：turn-state 与模型强绑定，同一 session 换模型就是
+// 另一张票，A 模型被判降智不代表 B 模型也要注入。
 func openAITurnStateSessionKey(c *gin.Context, account *Account, sessionID string) string {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
@@ -176,7 +236,11 @@ func openAITurnStateSessionKey(c *gin.Context, account *Account, sessionID strin
 	if owner == "" {
 		return ""
 	}
-	return owner + "\x1f" + sessionID
+	model := openAITurnStateRequestModel(c)
+	if model == "" {
+		return ""
+	}
+	return owner + "\x1f" + sessionID + "\x1f" + model
 }
 
 // openAITurnStateRequestSessionID 取客户端会话标识。两种形态都要认：仓库里其它读会话头
@@ -241,6 +305,11 @@ func (s *OpenAIGatewayService) resolveOpenAITurnStateOverride(c *gin.Context, ac
 	if account == nil {
 		return "", ""
 	}
+	// 名单同时约束手填与自动接管：turn-state 换模型就不认，注给名单外的模型只会
+	// 白撞一次 invalid_encrypted_content。
+	if !account.openAITurnStateModelAllowed(openAITurnStateRequestModel(c)) {
+		return "", ""
+	}
 	if !account.IsOpenAITurnStateAutoEnabled() {
 		if manual := account.OpenAICodexTurnStateOverride(); manual != "" {
 			markOpenAITurnStateInjected(c, manual, turnStateSourceManual)
@@ -257,7 +326,8 @@ func (s *OpenAIGatewayService) resolveOpenAITurnStateOverride(c *gin.Context, ac
 		return "", ""
 	}
 	candidate, source, ok := pickOpenAITurnStateCandidate(
-		readOpenAITurnStatePool(account), account.openAITurnStateStaleAfter(), time.Now())
+		readOpenAITurnStatePool(account), openAITurnStateRequestModel(c),
+		account.openAITurnStateStaleAfter(), time.Now())
 	if !ok {
 		return "", ""
 	}
@@ -300,6 +370,26 @@ func clearOpenAITurnStateInjected(c *gin.Context) {
 		c.Set(ctxKeyTurnStateInjected, "")
 		c.Set(ctxKeyTurnStateSource, "")
 	}
+}
+
+// markOpenAITurnStateSent 记下本次出站实际带的 turn-state（空值不记，保持 NULL）。
+func markOpenAITurnStateSent(c *gin.Context, account *Account, sent string) {
+	if c == nil || account == nil || !account.TargetsChatGPTCodexUpstream() {
+		return
+	}
+	c.Set(ctxKeyTurnStateSent, strings.TrimSpace(sent))
+}
+
+// OpenAITurnStateUsageSent 供 handler 在还持有 gin.Context 时取出出站值。
+func OpenAITurnStateUsageSent(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	if v, ok := c.Get(ctxKeyTurnStateSent); ok {
+		sent, _ := v.(string)
+		return sent
+	}
+	return ""
 }
 
 // openAITurnStateInjectedFromContext 返回本次请求注入的覆写值，没有则空串。
@@ -351,7 +441,7 @@ func (s *OpenAIGatewayService) observeOpenAITurnStateMint(c *gin.Context, accoun
 		}
 		c.Set(ctxKeyTurnStateObserved, minted)
 	}
-	healthy := len(minted) == openAIHealthyTurnStateLen
+	healthy := openAITurnStateHealthy(minted)
 
 	if !account.IsOpenAITurnStateAutoEnabled() {
 		return
@@ -395,6 +485,32 @@ func (s *OpenAIGatewayService) loadOpenAITurnStatePoolFresh(ctx context.Context,
 	return readOpenAITurnStatePool(account)
 }
 
+// noteOpenAITurnStateRejected 上游以 invalid_encrypted_content 拒绝了本次请求。
+//
+// 只在**本次确实注入过** turn-state 时才算到候选头上：这个错码的主用途是 reasoning
+// 的 encrypted_content lineage（见 openai_encrypted_content_lineage.go），跟 turn-state
+// 没关系；不加这道闸就会把别人的锅记到候选上、把好候选判死。
+//
+// 与「铸出更多块」那条判据并列，走同一个 recordOpenAITurnStateOutcome：
+// 阈值、降级链、耗尽停号的语义完全一致。
+func (s *OpenAIGatewayService) noteOpenAITurnStateRejected(c *gin.Context, account *Account) {
+	if s == nil || account == nil || !account.IsOpenAITurnStateAutoEnabled() {
+		return
+	}
+	injected := openAITurnStateInjectedFromContext(c)
+	if injected == "" {
+		return
+	}
+	if c != nil {
+		if seen, _ := c.Get(ctxKeyTurnStateRejected); seen == injected {
+			return
+		}
+		c.Set(ctxKeyTurnStateRejected, injected)
+	}
+	logOpenAITurnStateAuto("account=%d injected turn-state rejected by upstream (invalid_encrypted_content)", account.ID)
+	s.recordOpenAITurnStateOutcome(c, account, injected, false)
+}
+
 // pushOpenAITurnStateCandidate 把新铸的健康 blob 推入候选池栈顶。
 func (s *OpenAIGatewayService) pushOpenAITurnStateCandidate(c *gin.Context, account *Account, blob string) {
 	ctx := turnStateOpCtx(c)
@@ -402,21 +518,44 @@ func (s *OpenAIGatewayService) pushOpenAITurnStateCandidate(c *gin.Context, acco
 	mu.Lock()
 	defer mu.Unlock()
 
+	model := openAITurnStateRequestModel(c)
+	if model == "" {
+		return // 归不到模型的票没法用，收了也只是占位
+	}
+
 	pool := s.loadOpenAITurnStatePoolFresh(ctx, account)
 	for _, existing := range pool {
 		if existing.Blob == blob {
 			return // 同一条 blob 会在一轮内被反复回带，别重复入池
 		}
 	}
-	pool = append([]openAITurnStateCandidate{{Blob: blob, MintedAt: time.Now().UTC()}}, pool...)
-	if size := account.openAITurnStatePoolSize(); len(pool) > size {
-		pool = pool[:size]
+	// 铸造时刻从信封里读（实测比观测时刻早 1–367 秒）；解不出来才退回观测时刻。
+	now := time.Now().UTC()
+	minted := openAITurnStateMintedAt(blob, now)
+
+	// 限深按模型算：全局截断会让活跃模型把冷门模型的票挤光，那个模型就永远补不上。
+	//
+	// 刻意不在这里按有效期清理。过期与失效是两件事：alive() 不看有效期，为的是
+	// 「池子自然老化」不要被当成降级链走完而停掉账号。入池时把过期条目物理删掉
+	// 等于绕过那条不变量——同一模型下最后一条新鲜候选失败时，本该还剩的格子已经
+	// 没了。过期条目靠本模型的配额压力自然出局，数量有界（每模型至多 size 条）。
+	size := account.openAITurnStatePoolSize()
+	kept := make([]openAITurnStateCandidate, 0, len(pool)+1)
+	perModel := map[string]int{model: 1}
+	for _, existing := range pool {
+		if existing.Model == "" || perModel[existing.Model] >= size {
+			continue
+		}
+		perModel[existing.Model]++
+		kept = append(kept, existing)
 	}
+	pool = append([]openAITurnStateCandidate{{Blob: blob, Model: model, MintedAt: minted}}, kept...)
 	s.persistOpenAITurnStatePool(c, account, pool)
 }
 
 // recordOpenAITurnStateOutcome 记录一次注入的结果；候选耗尽时停掉账号调度。
 func (s *OpenAIGatewayService) recordOpenAITurnStateOutcome(c *gin.Context, account *Account, injected string, healthy bool) {
+	model := openAITurnStateRequestModel(c)
 	ctx := turnStateOpCtx(c)
 	mu := openAITurnStatePoolLock(account.ID)
 	mu.Lock()
@@ -446,12 +585,11 @@ func (s *OpenAIGatewayService) recordOpenAITurnStateOutcome(c *gin.Context, acco
 	if !changed {
 		return
 	}
-	if _, _, ok := pickOpenAITurnStateCandidate(pool, account.openAITurnStateStaleAfter(), time.Now()); !ok {
-		exhausted = true
-	}
+	// 耗尽只看「该模型下还有没有未失效的候选」，不看有效期：过期是等新票，不是降级链走完。
+	exhausted = model != "" && !openAITurnStateModelAlive(pool, model)
 	s.persistOpenAITurnStatePool(c, account, pool)
 	if exhausted {
-		s.disableAccountForExhaustedTurnState(c, account, pool)
+		s.disableAccountForExhaustedTurnState(c, account, model, pool)
 	}
 }
 
@@ -489,12 +627,12 @@ func (s *OpenAIGatewayService) persistOpenAITurnStatePool(c *gin.Context, accoun
 //
 // 用 schedulable=false 而不是 temp_unschedulable_until：候选池已空，到点自动恢复
 // 只会立刻再失败一轮。要人工介入（补一条新的 292 或关掉自动接管）才有意义。
-func (s *OpenAIGatewayService) disableAccountForExhaustedTurnState(c *gin.Context, account *Account, pool []openAITurnStateCandidate) {
+func (s *OpenAIGatewayService) disableAccountForExhaustedTurnState(c *gin.Context, account *Account, model string, pool []openAITurnStateCandidate) {
 	if s.accountRepo == nil {
 		return
 	}
 	ctx := turnStateOpCtx(c)
-	reason := buildExhaustedTurnStateReason(pool)
+	reason := buildExhaustedTurnStateReason(model, pool)
 	// 先写原因再停调度：反过来一旦 SetError 失败，管理页看到的就是一个没有任何
 	// 理由的停用账号，比「还在跑但已经标了红」难排查得多。
 	if err := s.accountRepo.SetError(ctx, account.ID, reason); err != nil {
@@ -510,14 +648,16 @@ func (s *OpenAIGatewayService) disableAccountForExhaustedTurnState(c *gin.Contex
 }
 
 // buildExhaustedTurnStateReason 写给管理页看的禁用原因：必须一眼看懂「为什么停了」。
-func buildExhaustedTurnStateReason(pool []openAITurnStateCandidate) string {
+func buildExhaustedTurnStateReason(model string, pool []openAITurnStateCandidate) string {
 	var b strings.Builder
 	fmt.Fprintf(&b,
-		"疑似降智：turn-state 自动接管的候选已全部失效（注入 %d 字符的健康 blob 后，上游仍铸出 %d 字符），已停止调度。",
-		openAIHealthyTurnStateLen, openAIDegradedTurnStateLen)
+		"疑似降智：模型 %s 下 turn-state 自动接管的候选已全部失效（注入密文 %d 块的健康 blob 后，"+
+			"上游仍铸出更多块），已停止调度。块数只能把明文框进 %d 字节的窗口，所以这是疑似判据，不是确证。",
+		model, openAIHealthyTurnStateBlocks, openAITurnStateAESBlockBytes)
+	// 只列这个模型的失效候选：别的模型的票与这次判定无关，列出来只会误导排查。
 	failed := make([]openAITurnStateCandidate, 0, len(pool))
 	for _, c := range pool {
-		if c.Failed {
+		if c.Failed && c.Model == model {
 			failed = append(failed, c)
 		}
 	}
@@ -527,8 +667,13 @@ func buildExhaustedTurnStateReason(pool []openAITurnStateCandidate) string {
 		if len(blob) > 16 {
 			blob = blob[:16] + "…"
 		}
-		fmt.Fprintf(&b, " 候选%d=%s(铸于 %s，连续失败 %d 次)",
-			i+1, blob, c.MintedAt.Format("01-02 15:04"), c.FailStreak)
+		// 解不出信封就退回字符长度，别打印「密文 0 块」——那不是事实，是解码失败。
+		shape := fmt.Sprintf("%d 字符(信封解不开)", len(c.Blob))
+		if env, ok := parseOpenAITurnStateEnvelope(c.Blob); ok {
+			shape = fmt.Sprintf("密文 %d 块", env.CipherBlocks)
+		}
+		fmt.Fprintf(&b, " 候选%d=%s(%s，铸于 %s，连续失败 %d 次)",
+			i+1, blob, shape, c.MintedAt.Format("01-02 15:04"), c.FailStreak)
 	}
 	// 账号已经停调度，不可能自己再铸出新 blob——恢复路径必须是人工的，别写成「等它自愈」。
 	_, _ = b.WriteString(" 处理：关闭自动接管开关后重新启用账号，或先关开关、手填一条新的健康 turn-state 再启用。")

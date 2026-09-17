@@ -1524,7 +1524,7 @@ func TestUsageCodexTurnStateRecording(t *testing.T) {
 	require.False(t, *usageCodexTurnStateOverriddenPtr(cpr, ""), "本次没注入 = false")
 	require.True(t, *usageCodexTurnStateOverriddenPtr(cpr, turnStateSourceManual), "注入了 = true")
 	require.Nil(t, usageCodexTurnStateSourcePtr(cpr, ""), "没注入时来源记 NULL")
-	require.Equal(t, turnStateSourceAutoStale, *usageCodexTurnStateSourcePtr(cpr, turnStateSourceAutoStale))
+	require.Equal(t, turnStateSourceAuto, *usageCodexTurnStateSourcePtr(cpr, turnStateSourceAuto))
 
 	apikey := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
 	require.Nil(t, usageCodexTurnStateOverriddenPtr(apikey, turnStateSourceAuto), "不适用的账号类型记 NULL")

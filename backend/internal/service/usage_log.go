@@ -199,6 +199,9 @@ type UsageLog struct {
 	// TurnStateSource 是覆写来源：manual（手填）/ auto（自动接管）/
 	// auto_stale（自动接管，候选已过保鲜期但仍在用）。没注入为 nil。
 	TurnStateSource *string
+	// TurnStateSent 是本次出站实际带的 turn-state（客户端回带的或注入的）。
+	// 与 TurnState（上游新铸的）分开：带了 turn-state 的请求只有 8% 会拿到新铸值。
+	TurnStateSent *string
 
 	// Cache TTL Override 标记（管理员强制替换了缓存 TTL 计费）
 	CacheTTLOverridden bool
