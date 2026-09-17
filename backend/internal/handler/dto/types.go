@@ -693,6 +693,8 @@ type AdminUsageLog struct {
 	TurnState *string `json:"turn_state,omitempty"`
 	// TurnStateOverridden 表示本次出站带的是账号级 turn-state 覆写值。
 	TurnStateOverridden *bool `json:"turn_state_overridden,omitempty"`
+	// TurnStateSource 是覆写来源：manual / auto / auto_stale。
+	TurnStateSource *string `json:"turn_state_source,omitempty"`
 	// BillingTier 计费层级标签（per_request/image 模式）
 	BillingTier *string `json:"billing_tier,omitempty"`
 

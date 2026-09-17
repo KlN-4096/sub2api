@@ -82,6 +82,7 @@ func (s *OpenAIGatewayService) relayOpenAICodexTurnState(c *gin.Context, account
 	}
 	c.Writer.Header().Set(canonical, state)
 	s.noteOpenAICodexTurnStateOrigin(c, account, state)
+	s.observeOpenAITurnStateMint(c, account, state)
 }
 
 // stageOpenAICodexTurnState 将上游 turn-state 暂存到延迟提交的响应头集合（首输出守卫
@@ -112,6 +113,7 @@ func (s *OpenAIGatewayService) noteStagedOpenAICodexTurnStateCommitted(c *gin.Co
 		return
 	}
 	s.noteOpenAICodexTurnStateOrigin(c, account, staged.Get(openAICodexTurnStateHeader))
+	s.observeOpenAITurnStateMint(c, account, staged.Get(openAICodexTurnStateHeader))
 }
 
 func extractOpenAICodexTurnState(upstream http.Header) string {
@@ -278,27 +280,59 @@ func (a *Account) OpenAICodexTurnStateOverride() string {
 	return strings.TrimSpace(a.GetExtraString(openAITurnStateOverrideExtraKey))
 }
 
-// applyOpenAICodexTurnStateOverride 在出站守卫之后强制改写 turn-state。
+// applyOpenAICodexTurnStateOverrideWSManualOnly 是 WS 路径的值形态入口：只应用手填覆写。
 //
 // 必须排在 guardOpenAICodexTurnStateEcho / guardOpenAICodexTurnStateValue 之后：
 // 守卫只剥不注，覆写是管理员的显式动作，要能盖过剥离结果——否则「配了但不生效」
 // 是最难排查的那种失败。
-func applyOpenAICodexTurnStateOverride(account *Account, current string) string {
-	if override := account.OpenAICodexTurnStateOverride(); override != "" {
-		return override
+//
+// 自动接管刻意不覆盖 WS。它的降智判定和失效判定都挂在「一次请求」的 gin 上下文上，
+// 而下游 WS 直通是一条长连接跑多个回合（openai_ws_v2_passthrough_adapter.go 的帧
+// 循环全程共用同一个 c）：注入标记会在整条连接上粘住，把后续每一轮的铸造结果都算到
+// 第一次注入头上，失效判定直接失真。首版按 HTTP-only 落地，WS 保持既有手填行为。
+func (s *OpenAIGatewayService) applyOpenAICodexTurnStateOverrideWSManualOnly(c *gin.Context, account *Account, current string) string {
+	// 整个 WS 上下文都不参与自动接管——包括 WS ingress 的 HTTP 桥，它会拿同一个 c
+	// 去走 passthrough 的出站构建（openai_ws_http_bridge.go），不挡住就漏进去了。
+	markOpenAITurnStateAutoSkipped(c)
+	if account == nil || account.IsOpenAITurnStateAutoEnabled() {
+		return current
+	}
+	if manual := account.OpenAICodexTurnStateOverride(); manual != "" {
+		// 记进上下文：帧填充据此判断「本次是不是覆写」，使用记录据此记 overridden/来源。
+		markOpenAITurnStateInjected(c, manual, turnStateSourceManual)
+		return manual
 	}
 	return current
 }
 
 // applyOpenAICodexTurnStateOverrideHeader 是请求头形态。未配置时一个字节都不碰
 // （不做多余的 Set，避免改变原有的头顺序/大小写）。
-func applyOpenAICodexTurnStateOverrideHeader(account *Account, h http.Header) {
+func (s *OpenAIGatewayService) applyOpenAICodexTurnStateOverrideHeader(c *gin.Context, account *Account, h http.Header) {
 	if h == nil {
 		return
 	}
-	if override := account.OpenAICodexTurnStateOverride(); override != "" {
+	// 每个 failover attempt 都重新判定：c 在整个重试循环里是同一个。
+	clearOpenAITurnStateInjected(c)
+	if override, _ := s.resolveOpenAITurnStateOverride(c, account); override != "" {
 		h.Set(openAICodexTurnStateHeader, override)
 	}
+}
+
+// ValidateOpenAITurnStateAutoExtra 校验自动接管开关只能是 bool。
+// 写成字符串 "true" 时 getExtraBool 返回 false，开关静默失效——UI 之外用 API
+// 配置时最容易踩这个。候选池等运行态键由网关维护，不在这里校验。
+func ValidateOpenAITurnStateAutoExtra(extra map[string]any) error {
+	if extra == nil {
+		return nil
+	}
+	raw, ok := extra[openAITurnStateAutoExtraKey]
+	if !ok || raw == nil {
+		return nil
+	}
+	if _, ok := raw.(bool); !ok {
+		return fmt.Errorf("%s must be a boolean", openAITurnStateAutoExtraKey)
+	}
+	return nil
 }
 
 // ValidateOpenAITurnStateOverrideExtra 校验并规范化 extra 里的 turn-state 覆写值。
@@ -360,16 +394,28 @@ func usageCodexTurnStatePtr(h http.Header) *string {
 	return &state
 }
 
-// usageCodexTurnStateOverriddenPtr 记录该账号当时是否配置了覆写。
+// usageCodexTurnStateOverriddenPtr 记录本次请求是否真的注入了覆写值。
 //
-// 直接由账号配置推导而不是从出站头回读：覆写在 applyOpenAICodexTurnStateOverride*
-// 里是无条件生效的（配了就写），两者等价，而回读要新开一条贯穿请求-响应的传递通道。
-// 唯一的偏差是请求途中管理员改了配置，可忽略。
-// 账号类型不适用时返回 nil（列保持 NULL），与"配了但没生效"区分开。
-func usageCodexTurnStateOverriddenPtr(account *Account) *bool {
+// source 由 handler 从请求上下文取出后放进 OpenAIRecordUsageInput（RecordUsage 是
+// 异步的，拿不到 gin.Context）。取「实际注入」而非「账号配了开关」：自动接管下
+// 只有被判定降智的 session 才注入，两者并不等价。
+// 账号类型不适用时返回 nil（列保持 NULL），与「没注入」区分开。
+func usageCodexTurnStateOverriddenPtr(account *Account, source string) *bool {
 	if account == nil || !account.TargetsChatGPTCodexUpstream() {
 		return nil
 	}
-	overridden := account.OpenAICodexTurnStateOverride() != ""
+	overridden := strings.TrimSpace(source) != ""
 	return &overridden
+}
+
+// usageCodexTurnStateSourcePtr 记录覆写来源：manual / auto / auto_stale，没注入为 nil。
+func usageCodexTurnStateSourcePtr(account *Account, source string) *string {
+	if account == nil || !account.TargetsChatGPTCodexUpstream() {
+		return nil
+	}
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return nil
+	}
+	return &source
 }

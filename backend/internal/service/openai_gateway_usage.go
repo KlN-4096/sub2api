@@ -43,6 +43,10 @@ type OpenAIRecordUsageInput struct {
 	// Responses handler from stream=true + compaction_trigger. It never stores
 	// the request payload and does not replace the transport request type.
 	NativeCompactionV2 bool
+	// TurnStateSource 是本次请求实际注入的 turn-state 覆写来源（manual/auto/auto_stale），
+	// 空串表示没注入。handler 侧从 gin.Context 取出（OpenAITurnStateUsageSource）：
+	// RecordUsage 是异步的，到这里已经没有 gin.Context 了。
+	TurnStateSource string
 	ChannelUsageFields
 }
 
@@ -382,7 +386,8 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		RequestID:                requestID,
 		UpstreamRequestID:        usageUpstreamRequestIDPtr(account, result.UpstreamHeaders, result.OpenAIWSMode),
 		TurnState:                usageCodexTurnStatePtr(result.UpstreamHeaders),
-		TurnStateOverridden:      usageCodexTurnStateOverriddenPtr(account),
+		TurnStateOverridden:      usageCodexTurnStateOverriddenPtr(account, input.TurnStateSource),
+		TurnStateSource:          usageCodexTurnStateSourcePtr(account, input.TurnStateSource),
 		Model:                    result.Model,
 		RequestedModel:           requestedModel,
 		UpstreamModel:            optionalTrimmedStringPtr(result.UpstreamModel),

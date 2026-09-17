@@ -522,6 +522,12 @@ type OpenAIGatewayService struct {
 	// （铸造者 = 凭证域身份），供出站守卫剥离跨账号回带（设计见 openai_codex_turn_state.go）。
 	openaiCodexTurnStateOrigins sync.Map
 	openaiCodexTurnStateWrites  atomic.Uint64
+
+	// openaiTurnStateSessions: session 分域键 -> openAITurnStateSessionState。
+	// 记录该 session 是否已被判定为降智（需要注入健康 turn-state）。
+	// 只由「未注入请求」铸出的 blob 更新，详见 observeOpenAITurnStateMint。
+	openaiTurnStateSessions      sync.Map
+	openaiTurnStateSessionWrites atomic.Uint64
 	// codexSideCalls：双开账号侧信道 GET 的去重窗口（openai_codex_side_calls.go）。
 	// 由构造器初始化；裸结构体（单元测试）里为 nil，侧信道整体停用。
 	codexSideCalls *codexSideCallState

@@ -1414,6 +1414,7 @@ func TestCPRPlanGatedModelCoolsDownLikeOAuth(t *testing.T) {
 // 其余上游一个字节都不碰；覆写必须能盖过守卫的剥离结果。
 func TestOpenAITurnStateOverrideAppliesToCodexUpstreams(t *testing.T) {
 	const blob = "gAAAAABqqrNHYSOlO_EUJI-hlduVBqJ8slR-floDb7J"
+	svc := &OpenAIGatewayService{}
 	withOverride := func(platform, accType string) *Account {
 		return &Account{
 			Platform: platform,
@@ -1433,15 +1434,16 @@ func TestOpenAITurnStateOverrideAppliesToCodexUpstreams(t *testing.T) {
 
 		h := http.Header{}
 		h.Set(openAICodexTurnStateHeader, "客户端自己回带的旧值")
-		applyOpenAICodexTurnStateOverrideHeader(acc, h)
+		svc.applyOpenAICodexTurnStateOverrideHeader(newTurnStateTestCtx(), acc, h)
 		require.Equal(t, blob, h.Get(openAICodexTurnStateHeader), "覆写必须盖过客户端回带值")
 
 		// 守卫剥光之后（头已不存在）覆写照样要写进去，否则「配了但不生效」
 		stripped := http.Header{}
-		applyOpenAICodexTurnStateOverrideHeader(acc, stripped)
+		svc.applyOpenAICodexTurnStateOverrideHeader(newTurnStateTestCtx(), acc, stripped)
 		require.Equal(t, blob, stripped.Get(openAICodexTurnStateHeader), "守卫剥离后覆写仍须生效")
 
-		require.Equal(t, blob, applyOpenAICodexTurnStateOverride(acc, ""), "值形态（WS 路径）同样生效")
+		require.Equal(t, blob,
+			svc.applyOpenAICodexTurnStateOverrideWSManualOnly(newTurnStateTestCtx(), acc, ""), "值形态（WS 路径）同样生效")
 	}
 
 	// 不适用：上游不是 Codex 后端的账号，一个字节都不能碰
@@ -1454,19 +1456,26 @@ func TestOpenAITurnStateOverrideAppliesToCodexUpstreams(t *testing.T) {
 		require.Empty(t, acc.OpenAICodexTurnStateOverride(), "%s/%s 不该支持覆写", tc.platform, tc.accType)
 
 		h := http.Header{}
-		applyOpenAICodexTurnStateOverrideHeader(acc, h)
+		svc.applyOpenAICodexTurnStateOverrideHeader(newTurnStateTestCtx(), acc, h)
 		require.Empty(t, h.Get(openAICodexTurnStateHeader))
-		require.Equal(t, "原值", applyOpenAICodexTurnStateOverride(acc, "原值"))
+		require.Equal(t, "原值", svc.applyOpenAICodexTurnStateOverrideWSManualOnly(newTurnStateTestCtx(), acc, "原值"))
 	}
 
 	// 未配置 = 功能不存在，出站行为与改动前逐字节一致
 	plain := &Account{Platform: PlatformOpenAI, Type: AccountTypeCPR}
 	h := http.Header{}
 	h.Set(openAICodexTurnStateHeader, "客户端自己回带的值")
-	applyOpenAICodexTurnStateOverrideHeader(plain, h)
+	svc.applyOpenAICodexTurnStateOverrideHeader(newTurnStateTestCtx(), plain, h)
 	require.Equal(t, "客户端自己回带的值", h.Get(openAICodexTurnStateHeader), "未配置时不得改写")
-	require.Equal(t, "原值", applyOpenAICodexTurnStateOverride(plain, "原值"))
+	require.Equal(t, "原值", svc.applyOpenAICodexTurnStateOverrideWSManualOnly(newTurnStateTestCtx(), plain, "原值"))
 	require.Empty(t, (*Account)(nil).OpenAICodexTurnStateOverride(), "nil 账号不 panic")
+}
+
+// newTurnStateTestCtx 造一个最小 gin 上下文：覆写解析会往里写注入标记。
+func newTurnStateTestCtx() *gin.Context {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	return c
 }
 
 // TestValidateOpenAITurnStateOverrideExtra 钉住写入校验：只放行 Fernet 信封形状。
@@ -1512,11 +1521,14 @@ func TestUsageCodexTurnStateRecording(t *testing.T) {
 	require.Equal(t, blob, *usageCodexTurnStatePtr(h))
 
 	cpr := &Account{Platform: PlatformOpenAI, Type: AccountTypeCPR}
-	require.False(t, *usageCodexTurnStateOverriddenPtr(cpr), "未配置覆写 = false")
-	cpr.Extra = map[string]any{openAITurnStateOverrideExtraKey: blob}
-	require.True(t, *usageCodexTurnStateOverriddenPtr(cpr), "配了覆写 = true")
+	require.False(t, *usageCodexTurnStateOverriddenPtr(cpr, ""), "本次没注入 = false")
+	require.True(t, *usageCodexTurnStateOverriddenPtr(cpr, turnStateSourceManual), "注入了 = true")
+	require.Nil(t, usageCodexTurnStateSourcePtr(cpr, ""), "没注入时来源记 NULL")
+	require.Equal(t, turnStateSourceAutoStale, *usageCodexTurnStateSourcePtr(cpr, turnStateSourceAutoStale))
 
-	require.Nil(t, usageCodexTurnStateOverriddenPtr(
-		&Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}), "不适用的账号类型记 NULL")
-	require.Nil(t, usageCodexTurnStateOverriddenPtr(nil))
+	apikey := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	require.Nil(t, usageCodexTurnStateOverriddenPtr(apikey, turnStateSourceAuto), "不适用的账号类型记 NULL")
+	require.Nil(t, usageCodexTurnStateSourcePtr(apikey, turnStateSourceAuto))
+	require.Nil(t, usageCodexTurnStateOverriddenPtr(nil, turnStateSourceManual))
+	require.Nil(t, usageCodexTurnStateSourcePtr(nil, turnStateSourceManual))
 }

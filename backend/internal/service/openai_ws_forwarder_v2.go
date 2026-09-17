@@ -69,11 +69,11 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	if c != nil && c.Request != nil {
 		// 客户端回带的 turn-state：已知由其他账号铸造（failover 换号）则剥离。
 		turnState = s.guardOpenAICodexTurnStateValue(c, account, c.GetHeader(openAIWSTurnStateHeader))
-		turnState = applyOpenAICodexTurnStateOverride(account, turnState)
+		turnState = s.applyOpenAICodexTurnStateOverrideWSManualOnly(c, account, turnState)
 		turnMetadata = strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader))
 	}
 	// 帧内只承载客户端自己持有的值（理由见 ingress 的 clientTurnState 注释）。
-	// 例外：账号配了 turn-state 覆写时，上面 applyOpenAICodexTurnStateOverride 已把
+	// 例外：账号配了 turn-state 覆写时，上面 applyOpenAICodexTurnStateOverrideWSManualOnly 已把
 	// turnState 换成覆写值，这里刻意让它一并进帧——双开握手头被删，帧内是唯一通道。
 	clientTurnState := turnState
 	setOpenAIWSTurnMetadata(payload, turnMetadata)
@@ -140,7 +140,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	if turnState == "" && stateStore != nil && sessionHash != "" {
 		if savedTurnState, ok := stateStore.GetSessionTurnState(groupID, sessionHash); ok {
 			turnState = s.guardOpenAICodexTurnStateValue(c, account, savedTurnState)
-			turnState = applyOpenAICodexTurnStateOverride(account, turnState)
+			turnState = s.applyOpenAICodexTurnStateOverrideWSManualOnly(c, account, turnState)
 		}
 	}
 	preferredConnID := ""

@@ -193,10 +193,12 @@ type UsageLog struct {
 	// TurnState 是上游本次响应头里新铸的 x-codex-turn-state（不透明 Fernet 密文）。
 	// 非 Codex 上游、以及拿不到上游响应头的路径为 nil。
 	TurnState *string
-	// TurnStateOverridden 表示该账号当时配置了 turn-state 覆写
-	// （extra.openai_turn_state_override）。判定只看账号类型不看端点，所以
-	// OAuth/CPR 账号打非 Codex 端点时同样为 true。nil 表示账号类型不适用。
+	// TurnStateOverridden 表示本次出站实际注入了 turn-state 覆写值。
+	// nil 表示账号类型不适用（非 Codex 上游）。
 	TurnStateOverridden *bool
+	// TurnStateSource 是覆写来源：manual（手填）/ auto（自动接管）/
+	// auto_stale（自动接管，候选已过保鲜期但仍在用）。没注入为 nil。
+	TurnStateSource *string
 
 	// Cache TTL Override 标记（管理员强制替换了缓存 TTL 计费）
 	CacheTTLOverridden bool

@@ -694,6 +694,10 @@ export default {
         turnStateOverrideDesc: 'When set, every outbound request from this account carries this x-codex-turn-state, overriding whatever the client echoed. Leave empty to disable. Diagnostic use only.',
         turnStateOverridePlaceholder: 'Paste a turn-state starting with gAAAAAB...',
         turnStateOverrideLength: 'Length {n}',
+        turnStateAuto: 'Auto turn-state takeover',
+        turnStateAutoDesc:
+          'When enabled, the system takes over: once a session is seen at 312, the most recent valid 292 for this account is injected. If the upstream still mints 312 after injection, that candidate is marked failed and the next one is used; when all candidates fail the account is disabled with the reason recorded. The manual value above stops taking effect. HTTP paths only — WebSocket passthrough is not covered.',
+        turnStateAutoTakeover: 'Managed automatically',
         compactMode: 'Compact mode',
         compactModeDesc:
           'Controls how this account participates in /responses/compact routing. Auto follows probe results, Force On always allows, Force Off always excludes.',

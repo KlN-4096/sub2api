@@ -771,6 +771,10 @@ export default {
         turnStateOverrideDesc: '非空时，该账号所有出站请求强制携带这条 x-codex-turn-state，覆盖客户端自己回带的值。留空为关闭。仅用于排查上游回合状态的影响，正常运营不要填。',
         turnStateOverridePlaceholder: '粘贴 gAAAAAB... 开头的 turn-state',
         turnStateOverrideLength: '长度 {n}',
+        turnStateAuto: '自动接管 turn-state',
+        turnStateAutoDesc:
+          '开启后由系统接管：检测到某个会话落在 312 时，自动用该账号最近一条有效的 292 顶替；若注入 292 后上游仍铸出 312，判该候选失效并降级到下一条，候选全部失效则停用账号并写明原因。开启后手填值不再生效。仅覆盖 HTTP 路径，WebSocket 直通不参与自动接管。',
+        turnStateAutoTakeover: '已由自动接管',
         compactMode: 'Compact 模式',
         compactModeDesc:
           '控制本账号在 /responses/compact 调度中的参与方式。Auto 跟随探测结果，Force On 强制允许，Force Off 强制排除。',

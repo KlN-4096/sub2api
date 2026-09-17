@@ -774,7 +774,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if c != nil {
 		// 客户端回带的 turn-state：已知由其他账号铸造（failover 换号）则剥离。
 		turnState = s.guardOpenAICodexTurnStateValue(c, account, c.GetHeader(openAIWSTurnStateHeader))
-		turnState = applyOpenAICodexTurnStateOverride(account, turnState)
+		turnState = s.applyOpenAICodexTurnStateOverrideWSManualOnly(c, account, turnState)
 		turnMetadata = strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader))
 	}
 	identityFirst, identityErr := applyCodexIdentityToWSPayload(c, account, firstClientMessage)

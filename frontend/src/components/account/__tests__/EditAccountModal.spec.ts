@@ -1754,3 +1754,66 @@ describe('EditAccountModal OpenAI 自动使用重置卡', () => {
     wrapper.unmount()
   })
 })
+
+describe('EditAccountModal turn-state 自动接管', () => {
+  const buildCodexAccount = (extra: Record<string, unknown> = {}) =>
+    ({
+      ...buildOpenAIOAuthParentAccount(),
+      extra
+    }) as any
+
+  beforeEach(() => {
+    updateAccountMock.mockReset().mockResolvedValue({})
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+  })
+
+  it('开着开关时手填框置灰并显示「已由自动接管」', async () => {
+    const wrapper = mountModal(buildCodexAccount({ openai_turn_state_auto: true }))
+
+    const textarea = wrapper.get<HTMLTextAreaElement>(
+      'textarea[placeholder="admin.accounts.openai.turnStateOverridePlaceholder"]'
+    )
+    expect(textarea.element.disabled).toBe(true)
+    expect(wrapper.find('[data-testid="edit-openai-turn-state-auto-banner"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('关着开关时手填框可用且无横幅', async () => {
+    const wrapper = mountModal(buildCodexAccount())
+
+    const textarea = wrapper.get<HTMLTextAreaElement>(
+      'textarea[placeholder="admin.accounts.openai.turnStateOverridePlaceholder"]'
+    )
+    expect(textarea.element.disabled).toBe(false)
+    expect(wrapper.find('[data-testid="edit-openai-turn-state-auto-banner"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  // 候选池由后端在保存时强制还原（admin_account.go 的保留清单），前端只负责别把它弄丢。
+  it('打开开关只写 openai_turn_state_auto，候选池原样带回', async () => {
+    const pool = [{ blob: 'gAAAAAB...', minted_at: '2026-09-17T00:00:00Z' }]
+    const wrapper = mountModal(buildCodexAccount({ openai_turn_state_pool: pool }))
+
+    await wrapper.get('[data-testid="edit-openai-turn-state-auto"]').setValue(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra).toMatchObject({ openai_turn_state_auto: true })
+    expect(extra?.openai_turn_state_pool).toEqual(pool)
+    wrapper.unmount()
+  })
+
+  it('关掉开关时把键删掉而不是写 false', async () => {
+    const wrapper = mountModal(buildCodexAccount({ openai_turn_state_auto: true }))
+
+    await wrapper.get('[data-testid="edit-openai-turn-state-auto"]').setValue(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra).toBeDefined()
+    expect(extra).not.toHaveProperty('openai_turn_state_auto')
+    wrapper.unmount()
+  })
+})
