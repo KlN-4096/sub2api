@@ -73,6 +73,9 @@ func TestMigrationsRunner_IsIdempotent_AndSchemaIsUpToDate(t *testing.T) {
 	requireColumn(t, tx, "usage_logs", "openai_ws_mode", "boolean", 0, false)
 	requireColumn(t, tx, "usage_logs", "native_compaction_v2", "boolean", 0, false)
 	requireColumnDefaultContains(t, tx, "usage_logs", "native_compaction_v2", "false")
+	// 239：两列都必须可空——非 Codex 上游与 WS 路径拿不到上游响应头，只能记 NULL。
+	requireColumn(t, tx, "usage_logs", "turn_state", "text", 0, true)
+	requireColumn(t, tx, "usage_logs", "turn_state_overridden", "boolean", 0, true)
 	requireColumn(t, tx, "usage_logs", "image_input_size", "character varying", 32, true)
 	requireColumn(t, tx, "usage_logs", "image_output_size", "character varying", 32, true)
 	requireColumn(t, tx, "usage_logs", "image_size_source", "character varying", 16, true)

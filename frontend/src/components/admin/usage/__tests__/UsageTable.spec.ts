@@ -20,6 +20,9 @@ import UsageTable from '../UsageTable.vue'
 
 const messages: Record<string, string> = {
   'admin.usage.userDeletedBadge': 'Deleted',
+  'admin.usage.turnStateOverriddenShort': 'OVR',
+  'admin.usage.turnStateOverridden': 'Override active',
+  'admin.usage.turnStateCopied': 'Turn-state copied',
   'usage.costDetails': 'Cost Breakdown',
   'admin.usage.inputCost': 'Input Cost',
   'admin.usage.outputCost': 'Output Cost',
@@ -95,6 +98,7 @@ const DataTableStub = {
         <slot name="cell-cost" :row="row" />
         <slot name="cell-request_id" :row="row" />
         <slot name="cell-upstream_request_id" :row="row" />
+        <slot name="cell-turn_state" :row="row" />
       </div>
     </div>
   `,
@@ -665,6 +669,51 @@ describe('admin UsageTable request ID column', () => {
 
     expect(writeText).toHaveBeenCalledWith('20260903082826779695')
     expect(appStoreMocks.showSuccess).toHaveBeenCalledWith('Upstream ID copied')
+  })
+
+  // 长度徽标是这列存在的理由：292 = 不降智，要一眼能挑出来。
+  it.each([
+    [292, true],
+    [312, false],
+  ])('badges a %i-char turn-state as green=%s', async (len, green) => {
+    const blob = 'g'.repeat(len)
+    const wrapper = mount(UsageTable, {
+      props: {
+        data: [{ ...baseImageRow, request_id: '', upstream_request_id: '', turn_state: blob }],
+        loading: false,
+        columns: [{ key: 'turn_state', label: 'Turn-state' }],
+      },
+      global: { stubs: { DataTable: DataTableStub, EmptyState: true, Icon: true, Teleport: true } },
+    })
+
+    expect(wrapper.text()).toContain(String(len))
+    const badge = wrapper.findAll('span').find((n) => n.text() === String(len))
+    expect(badge).toBeTruthy()
+    expect(badge!.classes().some((c) => c.includes('green'))).toBe(green)
+  })
+
+  it('copies the turn-state with its own toast', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const blob = 'gAAAAAB-turn-state'
+
+    const wrapper = mount(UsageTable, {
+      props: {
+        data: [{ ...baseImageRow, request_id: '', upstream_request_id: '', turn_state: blob, turn_state_overridden: true }],
+        loading: false,
+        columns: [{ key: 'turn_state', label: 'Turn-state' }],
+      },
+      global: { stubs: { DataTable: DataTableStub, EmptyState: true, Icon: true, Teleport: true } },
+    })
+
+    expect(wrapper.text()).toContain('OVR')
+    const copyButtons = wrapper.findAll('button[title="Copy to clipboard"]')
+    expect(copyButtons).toHaveLength(1)
+    await copyButtons[0].trigger('click')
+
+    expect(writeText).toHaveBeenCalledWith(blob)
+    // 复用上游ID的文案会弹错提示，这里钉住专属文案
+    expect(appStoreMocks.showSuccess).toHaveBeenCalledWith('Turn-state copied')
   })
 })
 

@@ -291,6 +291,40 @@
           <span v-else class="text-sm text-gray-400 dark:text-gray-500">-</span>
         </template>
 
+        <template #cell-turn_state="{ row }">
+          <div v-if="row.turn_state" class="flex max-w-[200px] items-center gap-1.5">
+            <!-- 长度是这列的重点：292 = 不降智，醒目标出来 -->
+            <span
+              class="shrink-0 rounded px-1.5 py-0.5 font-mono text-[11px] font-semibold"
+              :class="row.turn_state.length === 292
+                ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
+                : 'bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-gray-300'"
+            >
+              {{ row.turn_state.length }}
+            </span>
+            <span
+              v-if="row.turn_state_overridden"
+              class="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+              :title="t('admin.usage.turnStateOverridden')"
+            >
+              {{ t('admin.usage.turnStateOverriddenShort') }}
+            </span>
+            <span class="truncate font-mono text-xs text-gray-500 dark:text-gray-400" :title="row.turn_state">
+              {{ row.turn_state }}
+            </span>
+            <button
+              type="button"
+              class="shrink-0 rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-dark-700 dark:hover:text-gray-300"
+              :class="copiedRequestId === row.turn_state ? 'text-green-500 hover:text-green-500' : ''"
+              :title="copiedRequestId === row.turn_state ? t('keys.copied') : t('keys.copyToClipboard')"
+              @click="copyTurnState(row.turn_state)"
+            >
+              <Icon :name="copiedRequestId === row.turn_state ? 'check' : 'copy'" size="sm" class="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <span v-else class="text-sm text-gray-400 dark:text-gray-500">-</span>
+        </template>
+
         <template #cell-user_agent="{ row }">
           <span v-if="row.user_agent" class="text-sm text-gray-600 dark:text-gray-400 block max-w-[320px] truncate" :title="row.user_agent">{{ formatUserAgent(row.user_agent) }}</span>
           <span v-else class="text-sm text-gray-400 dark:text-gray-500">-</span>
@@ -687,6 +721,9 @@ const copyIdentifier = async (value: string, copiedMessage: string) => {
 const copyRequestId = (requestId: string) => copyIdentifier(requestId, t('admin.usage.requestIdCopied'))
 const copyUpstreamRequestId = (upstreamRequestId: string) =>
   copyIdentifier(upstreamRequestId, t('admin.usage.upstreamRequestIdCopied'))
+
+const copyTurnState = (turnState: string) =>
+  copyIdentifier(turnState, t('admin.usage.turnStateCopied'))
 
 // Tooltip state - cost
 const tooltipVisible = ref(false)

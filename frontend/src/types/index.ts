@@ -1769,6 +1769,10 @@ export interface AdminUsageLog extends UsageLog {
   upstream_model_mismatch?: boolean | null
   model_mapping_chain?: string | null
   upstream_request_id?: string | null
+  // Codex 回合状态：上游本次铸出的 x-codex-turn-state（不透明 Fernet 密文）
+  turn_state?: string | null
+  // 本次出站带的是否为账号级 turn-state 覆写值
+  turn_state_overridden?: boolean | null
 
   // 账号计费倍率（仅管理员可见）
   account_rate_multiplier?: number | null
