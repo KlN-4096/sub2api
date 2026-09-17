@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 
 const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.hoisted(() => ({
   updateAccountMock: vi.fn(),
@@ -28,7 +28,9 @@ vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
       update: updateAccountMock,
-      checkMixedChannelRisk: checkMixedChannelRiskMock
+      checkMixedChannelRisk: checkMixedChannelRiskMock,
+      // turn-state 覆写表的模型下拉走这个接口（AccountTestModal 同款）。
+      getAvailableModels: vi.fn().mockResolvedValue([{ id: 'gpt-5.6-luna' }, { id: 'gpt-6-astra' }])
     },
     settings: {
       getWebSearchEmulationConfig: vi.fn().mockResolvedValue({ enabled: false, providers: [] }),
@@ -1751,6 +1753,122 @@ describe('EditAccountModal OpenAI 自动使用重置卡', () => {
     await wrapper.get('[data-testid="auto-reset-credit-5h-threshold"]').setValue('0')
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
     expect(updateAccountMock).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+})
+
+describe('EditAccountModal turn-state 自动接管', () => {
+  const buildCodexAccount = (extra: Record<string, unknown> = {}) =>
+    ({
+      ...buildOpenAIOAuthParentAccount(),
+      extra
+    }) as any
+
+  beforeEach(() => {
+    updateAccountMock.mockReset().mockResolvedValue({})
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+  })
+
+  it('开着开关时手填框置灰并显示「已由自动接管」', async () => {
+    const wrapper = mountModal(buildCodexAccount({ openai_turn_state_auto: true }))
+
+    const textarea = wrapper.get<HTMLTextAreaElement>(
+      'textarea[placeholder="admin.accounts.openai.turnStateOverridePlaceholder"]'
+    )
+    expect(textarea.element.disabled).toBe(true)
+    expect(wrapper.find('[data-testid="edit-openai-turn-state-auto-banner"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('关着开关时手填框可用且无横幅', async () => {
+    const wrapper = mountModal(buildCodexAccount())
+    // 模型下拉是聚焦才拉的（那条接口对 oauth 有置错误的副作用），且是异步的。
+    await wrapper.get('[data-testid="edit-openai-turn-state-model"]').trigger('focus')
+    await flushPromises()
+
+    const textarea = wrapper.get<HTMLTextAreaElement>(
+      'textarea[placeholder="admin.accounts.openai.turnStateOverridePlaceholder"]'
+    )
+    expect(textarea.element.disabled).toBe(false)
+    expect(wrapper.find('[data-testid="edit-openai-turn-state-auto-banner"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  // 候选池由后端在保存时强制还原（admin_account.go 的保留清单），前端只负责别把它弄丢。
+  it('打开开关只写 openai_turn_state_auto，候选池原样带回', async () => {
+    const pool = [{ blob: 'gAAAAAB...', minted_at: '2026-09-17T00:00:00Z' }]
+    const wrapper = mountModal(buildCodexAccount({ openai_turn_state_pool: pool }))
+
+    await wrapper.get('[data-testid="edit-openai-turn-state-auto"]').setValue(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra).toMatchObject({ openai_turn_state_auto: true })
+    expect(extra?.openai_turn_state_pool).toEqual(pool)
+    wrapper.unmount()
+  })
+
+  it('关掉开关时把键删掉而不是写 false', async () => {
+    const wrapper = mountModal(buildCodexAccount({ openai_turn_state_auto: true }))
+
+    await wrapper.get('[data-testid="edit-openai-turn-state-auto"]').setValue(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra).toBeDefined()
+    expect(extra).not.toHaveProperty('openai_turn_state_auto')
+    wrapper.unmount()
+  })
+
+  // 覆写表是 {模型: blob}：turn-state 绑死在铸它的那个模型上，blob 本身是密文，
+  // 系统无从得知它来自哪个模型，只能由管理员在下拉里指定。
+  it('手填覆写按模型写回，切模型互不覆盖', async () => {
+    const wrapper = mountModal(buildCodexAccount())
+    const select = wrapper.get('[data-testid="edit-openai-turn-state-model"]')
+    // 懒加载：下拉要先聚焦才会去拉模型列表。
+    await select.trigger('focus')
+    await flushPromises()
+
+    const textarea = () =>
+      wrapper.get<HTMLTextAreaElement>(
+        'textarea[placeholder="admin.accounts.openai.turnStateOverridePlaceholder"]'
+      )
+
+    await select.setValue('gpt-5.6-luna')
+    await textarea().setValue('gAAAAAB-luna')
+    await select.setValue('gpt-6-astra')
+    // 切过去是空的：另一个模型的票不该串过来。
+    expect(textarea().element.value).toBe('')
+    await textarea().setValue('gAAAAAB-astra')
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_turn_state_override).toEqual({
+      'gpt-5.6-luna': 'gAAAAAB-luna',
+      'gpt-6-astra': 'gAAAAAB-astra'
+    })
+    wrapper.unmount()
+  })
+
+  it('清空某个模型的票就从表里删掉该模型，而不是留个空串', async () => {
+    const wrapper = mountModal(
+      buildCodexAccount({
+        openai_turn_state_override: { 'gpt-5.6-luna': 'gAAAAAB-luna', 'gpt-6-astra': 'gAAAAAB-astra' }
+      })
+    )
+    await wrapper.get('[data-testid="edit-openai-turn-state-model"]').trigger('focus')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="edit-openai-turn-state-model"]').setValue('gpt-5.6-luna')
+    await wrapper
+      .get('textarea[placeholder="admin.accounts.openai.turnStateOverridePlaceholder"]')
+      .setValue('')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_turn_state_override).toEqual({
+      'gpt-6-astra': 'gAAAAAB-astra'
+    })
     wrapper.unmount()
   })
 })

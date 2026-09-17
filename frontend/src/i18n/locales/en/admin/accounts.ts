@@ -274,7 +274,7 @@ export default {
         ungrouped: 'Ungrouped',
         hint: 'Displayed as "group / base score / sticky bonus". The base score is computed within the current filtered candidate set and includes priority, load, queue depth, error rate, first-token latency, reset window, quota headroom, billing rate, and related factors. The sticky bonus applies only when sticky weighting is enabled for previous_response_id or session_hash. Higher scores are preferred.'
       },
-      usageWindowsHint: '"5h / 7d" are the upstream account\'s official rolling usage windows (e.g. OpenAI ChatGPT, Claude). They are imposed by the upstream provider on the account itself — not configured by sub2api, and unrelated to the models you map. Usage resets automatically once each window rolls over, and the limit cannot be lifted from within sub2api.',
+      usageWindowsHint: '"5h / 7d" are the upstream account\'s official rolling usage windows (e.g. OpenAI ChatGPT, Claude). They are imposed by the upstream provider on the account itself — not configured by sub2api, and unrelated to the models you map. Usage resets automatically once each window rolls over, and the limit cannot be lifted from within sub2api. Purple/amber rows are the Codex turn-states currently in effect for this account (one per model); the countdown is the remainder of the one-hour validity from minting, and amber means the ticket looks degraded.',
       ollamaCloud: {
         title: 'Ollama Cloud usage',
         sessionSecurityHint: 'The browser session is encrypted at rest and sent only to the fixed official settings URL.',
@@ -715,6 +715,26 @@ export default {
         codexImageToolBadgeEnabled: 'Hosted bridge on',
         codexImageToolBadgeDisabled: 'No hosted injection',
         codexImageToolBadgeBlock: 'Client image tools stripped',
+        turnStateOverride: 'Turn-state override',
+        turnStateOverrideDesc: 'One ticket per model: a turn-state is bound to the model that minted it, so it no longer applies once the model changes. Pick a model, paste its blob, and every outbound request on that model carries it, overriding whatever the client echoed. Models with no ticket are left alone. Diagnostic use only.',
+        turnStateOverridePlaceholder: 'Paste a turn-state starting with gAAAAAB...',
+        turnStateOverrideLength: 'Length {n}',
+        turnStateOverrideValidUntil: 'About {minutes} min of validity left (expires {expires})',
+        turnStateOverrideExpired: 'Expired (minted {minted}) — it will not be injected, replace it',
+        turnStateAuto: 'Auto turn-state takeover',
+        turnStateAutoDesc:
+          'When enabled, the system takes over: once a session is seen at 312, the most recent valid 292 for this account and model is injected. If the upstream still mints 312 after injection, that candidate is marked failed and the next one is used; when every candidate for that model fails the account is disabled with the reason recorded. Candidates are bucketed per account and model (a turn-state does not carry across models) and are valid for 1 hour from minting — once expired nothing is injected and the system waits for a fresh 292. The manual value above stops taking effect. HTTP paths only — WebSocket passthrough is not covered.',
+        turnStateAutoTakeover: 'Managed automatically',
+        turnStateModelsEmpty: '(model list unavailable)',
+        turnStateOverrideConfigured: 'Models with a ticket: {models}',
+        turnStatePool: {
+          empty: 'Turn-state —',
+          manualLabel: '{model} (manual)',
+          summary: '{n} model(s) with a live turn-state',
+          detail: '{model}: {shape} {health}, minted {minted}, expires {expires}',
+          healthy: 'full',
+          suspect: 'suspect',
+        },
         compactMode: 'Compact mode',
         compactModeDesc:
           'Controls how this account participates in /responses/compact routing. Auto follows probe results, Force On always allows, Force Off always excludes.',

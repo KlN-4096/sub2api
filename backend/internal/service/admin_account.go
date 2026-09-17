@@ -496,6 +496,12 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err := ValidateUpstreamRequestIDHeaderExtra(accountExtra); err != nil {
 		return nil, err
 	}
+	if err := ValidateOpenAITurnStateOverrideExtra(accountExtra); err != nil {
+		return nil, err
+	}
+	if err := ValidateOpenAITurnStateAutoExtra(accountExtra); err != nil {
+		return nil, err
+	}
 
 	// 绑定分组
 	groupIDs := input.GroupIDs
@@ -608,6 +614,12 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if err := ValidateUpstreamRequestIDHeaderExtra(normalizedExtra); err != nil {
 			return nil, err
 		}
+		if err := ValidateOpenAITurnStateOverrideExtra(normalizedExtra); err != nil {
+			return nil, err
+		}
+		if err := ValidateOpenAITurnStateAutoExtra(normalizedExtra); err != nil {
+			return nil, err
+		}
 	}
 	previousProbeIdentity := upstreamBillingProbeIdentity(account)
 	previousOllamaUsageIdentity := ollamaCloudUsageIdentity(account)
@@ -690,6 +702,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		delete(normalizedExtra, OllamaCloudUsageSnapshotExtraKey)
 		delete(normalizedExtra, OpenCodeGoUsageAutoRefreshExtraKey)
 		delete(normalizedExtra, OpenCodeGoUsageSnapshotExtraKey)
+		// turn-state 候选池由网关在响应路径上维护（含 Failed 标记）。管理端提交的
+		// extra 是打开弹窗那一刻的快照，不剔掉就会把失效候选复活、甚至整池清空。
+		delete(normalizedExtra, openAITurnStatePoolExtraKey)
 		// 保留配额用量和专用服务受管字段，防止普通账号编辑意外覆盖。
 		for _, key := range []string{
 			"quota_used",
@@ -707,6 +722,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			OpenAIAutoResetCreditStateExtraKey,
 			OpenCodeGoUsageAutoRefreshExtraKey,
 			OpenCodeGoUsageSnapshotExtraKey,
+			openAITurnStatePoolExtraKey,
 		} {
 			if v, ok := account.Extra[key]; ok {
 				normalizedExtra[key] = v

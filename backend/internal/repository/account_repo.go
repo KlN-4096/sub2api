@@ -69,6 +69,9 @@ var schedulerNeutralExtraKeys = map[string]struct{}{
 	"codex_referral_snapshot":    {},
 	"grok_billing_snapshot":      {},
 	"session_window_utilization": {},
+	// turn-state 自动接管的候选池是运行态数据，上游每铸出一条健康 blob 就写一次，
+	// 不参与调度决策——不放进来的话每次响应都要重建一次调度快照。
+	"openai_turn_state_pool": {},
 }
 
 const postgresParameterBatchSize = 50000

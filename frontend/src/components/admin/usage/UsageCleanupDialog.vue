@@ -2,6 +2,7 @@
   <BaseDialog :show="show" :title="t('admin.usage.cleanup.title')" width="wide" @close="handleClose">
     <div class="space-y-4">
       <UsageFilters
+        mode="cleanup"
         v-model="localFilters"
         v-model:startDate="localStartDate"
         v-model:endDate="localEndDate"
