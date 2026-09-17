@@ -690,6 +690,10 @@ export default {
         codexImageToolBadgeEnabled: 'Hosted bridge on',
         codexImageToolBadgeDisabled: 'No hosted injection',
         codexImageToolBadgeBlock: 'Client image tools stripped',
+        turnStateOverride: 'Turn-state override',
+        turnStateOverrideDesc: 'When set, every outbound request from this account carries this x-codex-turn-state, overriding whatever the client echoed. Leave empty to disable. Diagnostic use only.',
+        turnStateOverridePlaceholder: 'Paste a turn-state starting with gAAAAAB...',
+        turnStateOverrideLength: 'Length {n}',
         compactMode: 'Compact mode',
         compactModeDesc:
           'Controls how this account participates in /responses/compact routing. Auto follows probe results, Force On always allows, Force Off always excludes.',

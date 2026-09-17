@@ -767,6 +767,10 @@ export default {
         codexImageToolBadgeEnabled: 'Hosted 桥接已开启',
         codexImageToolBadgeDisabled: '不注入 Hosted 工具',
         codexImageToolBadgeBlock: '客户端图片工具已移除',
+        turnStateOverride: 'Turn-State 覆写',
+        turnStateOverrideDesc: '非空时，该账号所有出站请求强制携带这条 x-codex-turn-state，覆盖客户端自己回带的值。留空为关闭。仅用于排查上游回合状态的影响，正常运营不要填。',
+        turnStateOverridePlaceholder: '粘贴 gAAAAAB... 开头的 turn-state',
+        turnStateOverrideLength: '长度 {n}',
         compactMode: 'Compact 模式',
         compactModeDesc:
           '控制本账号在 /responses/compact 调度中的参与方式。Auto 跟随探测结果，Force On 强制允许，Force Off 强制排除。',

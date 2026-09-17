@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -1406,4 +1407,116 @@ func TestCPRPlanGatedModelCoolsDownLikeOAuth(t *testing.T) {
 		rateLimits.HandleUpstreamModelNotFound(context.Background(), oauth, "gpt-5.4", http.StatusBadRequest, body),
 		rateLimits.HandleUpstreamModelNotFound(context.Background(), cpr, "gpt-5.4", http.StatusBadRequest, body))
 	require.False(t, rateLimits.HandleUpstreamModelNotFound(context.Background(), apikey, "gpt-5.4", http.StatusBadRequest, body))
+}
+
+// TestOpenAITurnStateOverrideAppliesToCodexUpstreams 锁定账号级 turn-state 覆写的适用范围
+// 与优先级：oauth / setup-token / cpr 三种落到 ChatGPT Codex 后端的账号都生效，
+// 其余上游一个字节都不碰；覆写必须能盖过守卫的剥离结果。
+func TestOpenAITurnStateOverrideAppliesToCodexUpstreams(t *testing.T) {
+	const blob = "gAAAAABqqrNHYSOlO_EUJI-hlduVBqJ8slR-floDb7J"
+	withOverride := func(platform, accType string) *Account {
+		return &Account{
+			Platform: platform,
+			Type:     accType,
+			Extra:    map[string]any{openAITurnStateOverrideExtraKey: blob},
+		}
+	}
+
+	// 适用：三种都会落到 ChatGPT Codex 后端
+	for _, tc := range []struct{ platform, accType string }{
+		{PlatformOpenAI, AccountTypeOAuth},
+		{PlatformOpenAI, AccountTypeSetupToken},
+		{PlatformOpenAI, AccountTypeCPR},
+	} {
+		acc := withOverride(tc.platform, tc.accType)
+		require.Equal(t, blob, acc.OpenAICodexTurnStateOverride(), "%s/%s 应支持覆写", tc.platform, tc.accType)
+
+		h := http.Header{}
+		h.Set(openAICodexTurnStateHeader, "客户端自己回带的旧值")
+		applyOpenAICodexTurnStateOverrideHeader(acc, h)
+		require.Equal(t, blob, h.Get(openAICodexTurnStateHeader), "覆写必须盖过客户端回带值")
+
+		// 守卫剥光之后（头已不存在）覆写照样要写进去，否则「配了但不生效」
+		stripped := http.Header{}
+		applyOpenAICodexTurnStateOverrideHeader(acc, stripped)
+		require.Equal(t, blob, stripped.Get(openAICodexTurnStateHeader), "守卫剥离后覆写仍须生效")
+
+		require.Equal(t, blob, applyOpenAICodexTurnStateOverride(acc, ""), "值形态（WS 路径）同样生效")
+	}
+
+	// 不适用：上游不是 Codex 后端的账号，一个字节都不能碰
+	for _, tc := range []struct{ platform, accType string }{
+		{PlatformOpenAI, AccountTypeAPIKey},
+		{PlatformAnthropic, AccountTypeOAuth},
+		{PlatformAnthropic, AccountTypeBedrock},
+	} {
+		acc := withOverride(tc.platform, tc.accType)
+		require.Empty(t, acc.OpenAICodexTurnStateOverride(), "%s/%s 不该支持覆写", tc.platform, tc.accType)
+
+		h := http.Header{}
+		applyOpenAICodexTurnStateOverrideHeader(acc, h)
+		require.Empty(t, h.Get(openAICodexTurnStateHeader))
+		require.Equal(t, "原值", applyOpenAICodexTurnStateOverride(acc, "原值"))
+	}
+
+	// 未配置 = 功能不存在，出站行为与改动前逐字节一致
+	plain := &Account{Platform: PlatformOpenAI, Type: AccountTypeCPR}
+	h := http.Header{}
+	h.Set(openAICodexTurnStateHeader, "客户端自己回带的值")
+	applyOpenAICodexTurnStateOverrideHeader(plain, h)
+	require.Equal(t, "客户端自己回带的值", h.Get(openAICodexTurnStateHeader), "未配置时不得改写")
+	require.Equal(t, "原值", applyOpenAICodexTurnStateOverride(plain, "原值"))
+	require.Empty(t, (*Account)(nil).OpenAICodexTurnStateOverride(), "nil 账号不 panic")
+}
+
+// TestValidateOpenAITurnStateOverrideExtra 钉住写入校验：只放行 Fernet 信封形状。
+func TestValidateOpenAITurnStateOverrideExtra(t *testing.T) {
+	// 真实捕获样本（pro3，292 字符）
+	const real = "gAAAAABqqrNHYSOlO_EUJI-hlduVBqJ8slR-floDb7J-ZYvvLXj7WV7dOZ_zk10RDMl_N4dRvG0UqxWR19XdSGbeHFUEAzwv7yQBADQrB1QhpOKkfcUPeSy2qsvZIvq__OHHoF2yCZfSTPq6YvkKahwLUxkeORhQZ9Ug86sMJwkrJXUefsa6fTpRqzZSN7SLphKU-6Ys6FV3GveSXjgk0UcCaKvfShFj4_EmGriyCb-JVoU0D8LJbjsClcivKgDNu1jfZfF-6q8VXHGF1Uck7vDVXdiNh1kRXw=="
+
+	extra := map[string]any{openAITurnStateOverrideExtraKey: real}
+	require.NoError(t, ValidateOpenAITurnStateOverrideExtra(extra))
+	require.Equal(t, real, extra[openAITurnStateOverrideExtraKey])
+
+	// 空白 = 未配置，直接从 extra 移除（否则空串会被当成"已配置"存进 DB）
+	blank := map[string]any{openAITurnStateOverrideExtraKey: "   "}
+	require.NoError(t, ValidateOpenAITurnStateOverrideExtra(blank))
+	require.NotContains(t, blank, openAITurnStateOverrideExtraKey)
+
+	// 没这个键 = 不干预
+	require.NoError(t, ValidateOpenAITurnStateOverrideExtra(map[string]any{"other": 1}))
+	require.NoError(t, ValidateOpenAITurnStateOverrideExtra(nil))
+
+	for name, bad := range map[string]any{
+		"非字符串":     123,
+		"不是base64": "这不是 base64!!",
+		"太短":       "gAAA",
+		"版本字节不对":   base64.URLEncoding.EncodeToString(append([]byte{0x79}, make([]byte, 80)...)),
+		"超长":       strings.Repeat("A", maxOpenAITurnStateOverrideLen+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Error(t, ValidateOpenAITurnStateOverrideExtra(
+				map[string]any{openAITurnStateOverrideExtraKey: bad}))
+		})
+	}
+}
+
+// TestUsageCodexTurnStateRecording 锁定使用记录里两列的取值来源。
+func TestUsageCodexTurnStateRecording(t *testing.T) {
+	const blob = "gAAAAABqqrNHYSOlO_EUJI"
+
+	h := http.Header{}
+	require.Nil(t, usageCodexTurnStatePtr(h), "上游没回该头时记 NULL")
+	require.Nil(t, usageCodexTurnStatePtr(nil))
+	h.Set(openAICodexTurnStateHeader, blob)
+	require.Equal(t, blob, *usageCodexTurnStatePtr(h))
+
+	cpr := &Account{Platform: PlatformOpenAI, Type: AccountTypeCPR}
+	require.False(t, *usageCodexTurnStateOverriddenPtr(cpr), "未配置覆写 = false")
+	cpr.Extra = map[string]any{openAITurnStateOverrideExtraKey: blob}
+	require.True(t, *usageCodexTurnStateOverriddenPtr(cpr), "配了覆写 = true")
+
+	require.Nil(t, usageCodexTurnStateOverriddenPtr(
+		&Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}), "不适用的账号类型记 NULL")
+	require.Nil(t, usageCodexTurnStateOverriddenPtr(nil))
 }

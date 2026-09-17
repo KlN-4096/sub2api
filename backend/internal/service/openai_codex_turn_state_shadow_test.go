@@ -307,3 +307,40 @@ func TestCodexTurnStateShadowRowWSV2OwnerIsParentIdentity(t *testing.T) {
 		})
 	}
 }
+
+// TestOpenAITurnStateOverrideBeatsEchoGuard 钉住账号级覆写与回声守卫的先后顺序。
+//
+// 覆写必须排在 guardOpenAICodexTurnStateEcho 之后：守卫只剥不注，而覆写是管理员的
+// 显式动作。两者顺序颠倒时，凡是守卫会剥的场景（覆写值恰好是别的凭证域铸的——排查
+// 「跨账号复用 turn-state」时这正是主用法）就会「配了但静默失效」。
+func TestOpenAITurnStateOverrideBeatsEchoGuard(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	parent, _, other := codexShadowTestRows(true)
+	const override = "gAAAAABoverride-blob-from-another-credential-domain"
+	if parent.Extra == nil {
+		parent.Extra = map[string]any{}
+	}
+	parent.Extra[openAITurnStateOverrideExtraKey] = override
+
+	cfg := &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}
+	up := &httpUpstreamRecorder{responses: []*http.Response{codexShadowUpstreamResponse(false, "")}}
+	svc := &OpenAIGatewayService{
+		cfg: cfg, httpUpstream: up, toolCorrector: NewCodexToolCorrector(),
+		responseHeaderFilter: compileResponseHeaderFilter(cfg),
+		accountRepo:          &stubQuotaAccountRepo{accounts: map[int64]*Account{parent.ID: parent}},
+	}
+
+	// 前提：把覆写值登记成「由 other 凭证域铸造」，守卫因此一定会剥它。
+	svc.noteOpenAICodexTurnStateOrigin(nil, other, override)
+	require.Empty(t, svc.guardOpenAICodexTurnStateValue(nil, parent, override),
+		"前提不成立：守卫没把这条判为异凭证域，本测试就失去意义")
+
+	body := wireProfileTestBody(t)
+	c := newConvTestContext(t, body)
+	c.Request.Header.Set(openAICodexTurnStateHeader, override)
+	_, err := svc.Forward(context.Background(), c, parent, body)
+	require.NoError(t, err)
+	require.Len(t, up.requests, 1)
+	require.Equal(t, override, up.requests[0].Header.Get(openAICodexTurnStateHeader),
+		"覆写排在守卫之前的话，这里会是空——配置静默失效")
+}

@@ -269,7 +269,13 @@ func applyCodexWSFrameWireProfile(c *gin.Context, account *Account, payload []by
 	if meta := gjson.GetBytes(payload, "client_metadata"); !meta.Exists() || meta.IsObject() {
 		if turnState = strings.TrimSpace(turnState); turnState != "" {
 			existing := gjson.GetBytes(payload, "client_metadata."+openAICodexTurnStateHeader)
-			if existing.Type != gjson.String || strings.TrimSpace(existing.Str) == "" {
+			// 默认「缺失才补」：真客户端自带的 blob 不覆盖。
+			// 但账号级覆写是管理员的显式动作，必须盖过自带值——双开 WS 路径上握手头
+			// 已被 enforceCodexIdentityHeaders 删掉（turn-state 只走帧内），这里再让步
+			// 就等于「配了但静默失效」，而使用记录仍按配置记 overridden=true，
+			// 污染这个功能唯一要产出的诊断数据。
+			if account.OpenAICodexTurnStateOverride() != "" ||
+				existing.Type != gjson.String || strings.TrimSpace(existing.Str) == "" {
 				payload = setCodexWSClientMetadataString(payload, openAICodexTurnStateHeader, turnState)
 			}
 		}
