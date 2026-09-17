@@ -278,6 +278,7 @@ const (
 	TurnStateFilterAuto      = "auto"       // 自动接管注入
 	TurnStateFilterAutoStale = "auto_stale" // 自动接管注入，且候选已过保鲜期
 	TurnStateFilterManual    = "manual"     // 手填覆写注入
+	TurnStateFilterSeed      = "seed"       // 冷启动引子注入
 )
 
 // UsageLogFilters represents filters for usage log queries

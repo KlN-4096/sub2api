@@ -2377,6 +2377,22 @@
               class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
             />
           </div>
+          <div v-if="openAITurnStateAuto">
+            <label class="input-label">{{ t('admin.accounts.openai.turnStateSeed') }}</label>
+            <p class="input-hint">{{ t('admin.accounts.openai.turnStateSeedDesc') }}</p>
+            <textarea
+              v-model="openAITurnStateSeed"
+              data-testid="edit-openai-turn-state-seed"
+              rows="3"
+              spellcheck="false"
+              class="input font-mono text-xs"
+              :placeholder="t('admin.accounts.openai.turnStateSeedPlaceholder')"
+            ></textarea>
+            <p v-if="openAITurnStateSeedValidity" class="mt-1 text-xs"
+               :class="openAITurnStateSeedExpired ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'">
+              {{ openAITurnStateSeedValidity }}
+            </p>
+          </div>
           <div>
             <label class="input-label">{{ t('admin.accounts.openai.turnStateModels') }}</label>
             <p class="input-hint">{{ t('admin.accounts.openai.turnStateModelsDesc') }}</p>
@@ -3647,6 +3663,31 @@ const openAITurnStateOverrideValidity = computed(() => {
     expires: formatDateTime(at)
   })
 })
+// 冷启动引子：只用来换回一条上游新铸的 292，换到就被系统消费掉，不会写死复用。
+const openAITurnStateSeed = ref('')
+const readOpenAITurnStateSeed = (extra: unknown): string => {
+  const value = (extra as Record<string, unknown> | undefined)?.openai_turn_state_seed
+  return typeof value === 'string' ? value : ''
+}
+const openAITurnStateSeedExpiresAt = computed(() => {
+  const env = decodeTurnState(openAITurnStateSeed.value.trim())
+  return env ? new Date(env.mintedAt.getTime() + TURN_STATE_DEFAULT_TTL_MINUTES * 60_000) : null
+})
+const openAITurnStateSeedExpired = computed(() => {
+  const at = openAITurnStateSeedExpiresAt.value
+  return at != null && at.getTime() <= Date.now()
+})
+const openAITurnStateSeedValidity = computed(() => {
+  const at = openAITurnStateSeedExpiresAt.value
+  if (!at) return ''
+  return openAITurnStateSeedExpired.value
+    ? t('admin.accounts.openai.turnStateSeedExpired')
+    : t('admin.accounts.openai.turnStateOverrideValidUntil', {
+        minutes: Math.max(1, Math.round((at.getTime() - Date.now()) / 60_000)),
+        expires: formatDateTime(at)
+      })
+})
+
 // 生效模型名单：turn-state 与模型强绑定，换模型那张票就不认了。留空 = 不限模型。
 const openAITurnStateModels = ref('')
 const readOpenAITurnStateModels = (extra: unknown): string => {
@@ -4194,6 +4235,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	openAITurnStateOverride.value = readOpenAITurnStateOverride(extra)
 	openAITurnStateAuto.value = readOpenAITurnStateAuto(extra)
 	openAITurnStateModels.value = readOpenAITurnStateModels(extra)
+	openAITurnStateSeed.value = readOpenAITurnStateSeed(extra)
 	openAIImagesUrlToB64JsonEnabled.value = extra?.images_url_to_b64_json === true
 	autoPause5hThreshold.value = typeof extra?.auto_pause_5h_threshold === 'number' ? extra.auto_pause_5h_threshold * 100 : null
 	autoPause7dThreshold.value = typeof extra?.auto_pause_7d_threshold === 'number' ? extra.auto_pause_7d_threshold * 100 : null
@@ -5963,6 +6005,19 @@ const handleSubmit = async () => {
         newExtra.openai_turn_state_override = nextTurnStateOverride
       } else {
         delete newExtra.openai_turn_state_override
+      }
+      updatePayload.extra = newExtra
+    }
+
+    // 冷启动引子：只在改动时写回。系统消费后会把它置空，不改就别覆盖回去。
+    const nextTurnStateSeed = openAITurnStateSeed.value.trim()
+    if (accountSupportsTurnStateOverride.value && nextTurnStateSeed !== readOpenAITurnStateSeed(props.account.extra)) {
+      const currentExtra = (updatePayload.extra as Record<string, unknown>) || (props.account.extra as Record<string, unknown>) || {}
+      const newExtra: Record<string, unknown> = { ...currentExtra }
+      if (nextTurnStateSeed) {
+        newExtra.openai_turn_state_seed = nextTurnStateSeed
+      } else {
+        delete newExtra.openai_turn_state_seed
       }
       updatePayload.extra = newExtra
     }

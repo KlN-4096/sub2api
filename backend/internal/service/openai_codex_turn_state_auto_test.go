@@ -4,6 +4,8 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -368,6 +370,147 @@ func TestOpenAITurnStateExpiredCandidatesStayInPool(t *testing.T) {
 			turnStateBlob(openAIHealthyTurnStateLen-i)+strings.Repeat("y", i))
 	}
 	require.Len(t, readOpenAITurnStatePool(account), 3, "限深仍按模型生效")
+}
+
+// turnStateFernetBlob 造一条真 Fernet 信封：0x80 | 8B 大端铸造戳 | 16B IV |
+// blocks×16B 密文 | 32B HMAC。turnStateBlob 造的是纯长度样本，解不出信封，
+// 凡是要测有效期的地方都必须用真的。
+func turnStateFernetBlob(minted time.Time, blocks int) string {
+	raw := make([]byte, 1+8+16+blocks*16+32)
+	raw[0] = 0x80
+	binary.BigEndian.PutUint64(raw[1:9], uint64(minted.Unix()))
+	return base64.URLEncoding.EncodeToString(raw)
+}
+
+// TestOpenAITurnStateManualOverrideExpires 钉住手填覆写也有 1 小时有效期。
+//
+// 不加这道闸的话：手填只在自动接管关闭时生效，而失效归因要求自动接管开着，
+// 所以过期的手填票会每次注入、每次撞 400，并且永远不会被发现。
+func TestOpenAITurnStateManualOverrideExpires(t *testing.T) {
+	now := time.Now().UTC()
+	account := turnStateAutoAccount()
+	delete(account.Extra, openAITurnStateAutoExtraKey)
+
+	fresh := turnStateFernetBlob(now.Add(-5*time.Minute), openAIHealthyTurnStateBlocks)
+	account.Extra[openAITurnStateOverrideExtraKey] = fresh
+	require.Equal(t, fresh, account.OpenAICodexTurnStateOverride(), "未过期照常生效")
+
+	expired := turnStateFernetBlob(now.Add(-2*time.Hour), openAIHealthyTurnStateBlocks)
+	account.Extra[openAITurnStateOverrideExtraKey] = expired
+	require.Empty(t, account.OpenAICodexTurnStateOverride(), "过期的手填值不得再注入")
+
+	// 有效期跟随账号配置。
+	account.Extra[openAITurnStateStaleMinExtraKey] = 180
+	require.Equal(t, expired, account.OpenAICodexTurnStateOverride(), "有效期应跟随配置")
+	delete(account.Extra, openAITurnStateStaleMinExtraKey)
+
+	// 解不出信封的值按不过期处理，别因为解码失败静默关掉功能。
+	account.Extra[openAITurnStateOverrideExtraKey] = turnStateBlob(openAIHealthyTurnStateLen)
+	require.NotEmpty(t, account.OpenAICodexTurnStateOverride())
+
+	// 两条出站路径都要挡住，不能只挡一条。
+	svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
+	account.Extra[openAITurnStateOverrideExtraKey] = expired
+	require.Empty(t, mustResolve(t, svc, turnStateAutoCtx("s"), account), "HTTP 路径")
+	require.Equal(t, "echoed",
+		svc.applyOpenAICodexTurnStateOverrideWSManualOnly(turnStateAutoCtx("s"), account, "echoed"),
+		"WS 路径：过期就当没配，保留客户端回带值")
+}
+
+// TestOpenAITurnStateColdStartSeed 钉住冷启动引子：
+// 池子空时用引子换一条上游新铸的 292 入池，然后把引子消费掉，不再复用。
+func TestOpenAITurnStateColdStartSeed(t *testing.T) {
+	now := time.Now().UTC()
+	seed := turnStateFernetBlob(now.Add(-2*time.Minute), openAIHealthyTurnStateBlocks)
+
+	newAccount := func() *Account {
+		a := turnStateAutoAccount()
+		a.Extra[openAITurnStateSeedExtraKey] = seed
+		return a
+	}
+	degrade := func(svc *OpenAIGatewayService, a *Account) {
+		svc.observeOpenAITurnStateMint(turnStateAutoCtx("s"), a, turnStateBlob(openAIDegradedTurnStateLen))
+	}
+
+	t.Run("换回健康值就入池并消费引子", func(t *testing.T) {
+		repo := newTurnStateAutoRepo()
+		svc := &OpenAIGatewayService{accountRepo: repo}
+		account := newAccount()
+		degrade(svc, account)
+
+		c := turnStateAutoCtx("s")
+		override, source := svc.resolveOpenAITurnStateOverride(c, account)
+		require.Equal(t, seed, override, "池子空时必须拿引子顶上")
+		require.Equal(t, turnStateSourceSeed, source, "来源要与 auto 分开记")
+
+		minted := turnStateFernetBlob(now, openAIHealthyTurnStateBlocks)
+		svc.observeOpenAITurnStateMint(c, account, minted)
+
+		pool := readOpenAITurnStatePool(account)
+		require.Len(t, pool, 1, "引子换回来的健康值必须入池")
+		require.Equal(t, minted, pool[0].Blob)
+		require.Empty(t, account.openAITurnStateSeed(), "引子用完即消费")
+
+		// 之后走自己铸的票，不再复用引子。
+		next, source := svc.resolveOpenAITurnStateOverride(turnStateAutoCtx("s"), account)
+		require.Equal(t, minted, next)
+		require.Equal(t, turnStateSourceAuto, source)
+	})
+
+	t.Run("换回降级值就丢掉，别拿它继续烧请求", func(t *testing.T) {
+		svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
+		account := newAccount()
+		degrade(svc, account)
+
+		c := turnStateAutoCtx("s")
+		require.Equal(t, seed, mustResolve(t, svc, c, account))
+		svc.observeOpenAITurnStateMint(c, account, turnStateBlob(openAIDegradedTurnStateLen))
+
+		require.Empty(t, account.openAITurnStateSeed())
+		require.Empty(t, readOpenAITurnStatePool(account), "降级值不得入池")
+		require.Empty(t, mustResolve(t, svc, turnStateAutoCtx("s"), account))
+	})
+
+	t.Run("撞 400 也丢掉", func(t *testing.T) {
+		svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
+		account := newAccount()
+		degrade(svc, account)
+
+		c := turnStateAutoCtx("s")
+		require.Equal(t, seed, mustResolve(t, svc, c, account))
+		svc.noteOpenAITurnStateRejected(c, account)
+		require.Empty(t, account.openAITurnStateSeed())
+	})
+
+	t.Run("池里有可用候选时不动引子", func(t *testing.T) {
+		svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
+		account := newAccount()
+		healthy := turnStateFernetBlob(now, openAIHealthyTurnStateBlocks)
+		svc.observeOpenAITurnStateMint(turnStateAutoCtx("s"), account, healthy)
+		degrade(svc, account)
+
+		override, source := svc.resolveOpenAITurnStateOverride(turnStateAutoCtx("s"), account)
+		require.Equal(t, healthy, override, "有候选就用候选")
+		require.Equal(t, turnStateSourceAuto, source)
+		require.Equal(t, seed, account.openAITurnStateSeed(), "引子留着备用")
+	})
+
+	t.Run("过期引子不注入", func(t *testing.T) {
+		svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
+		account := turnStateAutoAccount()
+		account.Extra[openAITurnStateSeedExtraKey] = turnStateFernetBlob(now.Add(-2*time.Hour), openAIHealthyTurnStateBlocks)
+		degrade(svc, account)
+		require.Empty(t, mustResolve(t, svc, turnStateAutoCtx("s"), account))
+	})
+
+	t.Run("名单外的模型不动引子", func(t *testing.T) {
+		svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
+		account := newAccount()
+		account.Extra[openAITurnStateModelsExtraKey] = "gpt-6*"
+		degrade(svc, account)
+		require.Empty(t, mustResolve(t, svc, turnStateAutoCtx("s"), account))
+		require.Equal(t, seed, account.openAITurnStateSeed())
+	})
 }
 
 // TestOpenAITurnStateAutoIsModelScoped 钉住「turn-state 与模型强绑定」：

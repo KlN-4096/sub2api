@@ -1778,6 +1778,18 @@ describe('EditAccountModal turn-state 自动接管', () => {
     wrapper.unmount()
   })
 
+  it('冷启动引子只在自动接管开着时出现，且不随开关置灰', async () => {
+    const off = mountModal(buildCodexAccount())
+    expect(off.find('[data-testid="edit-openai-turn-state-seed"]').exists()).toBe(false)
+    off.unmount()
+
+    // 引子是喂给候选池的，所以它跟手填覆写相反：开着接管时才有意义，且必须可编辑。
+    const on = mountModal(buildCodexAccount({ openai_turn_state_auto: true }))
+    const seed = on.get<HTMLTextAreaElement>('[data-testid="edit-openai-turn-state-seed"]')
+    expect(seed.element.disabled).toBe(false)
+    on.unmount()
+  })
+
   it('关着开关时手填框可用且无横幅', async () => {
     const wrapper = mountModal(buildCodexAccount())
 

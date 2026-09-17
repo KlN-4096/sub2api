@@ -762,7 +762,7 @@ const turnStateBadgeText = (blob: string) => {
 // 白名单而不是直接拼 key：拼 key 遇到没见过的取值会把原始 key 显示出来，
 // 比显示一个中性的「覆写」更糟。历史行没有 source 列（overridden 为 true 但
 // source 为 NULL），同样兜底成「覆写」。
-const TURN_STATE_SOURCES = ['manual', 'auto', 'auto_stale'] as const
+const TURN_STATE_SOURCES = ['manual', 'auto', 'auto_stale', 'seed'] as const
 
 const turnStateSourceBadge = (source?: string | null) =>
   source && (TURN_STATE_SOURCES as readonly string[]).includes(source)

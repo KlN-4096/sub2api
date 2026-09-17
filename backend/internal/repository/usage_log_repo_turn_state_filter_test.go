@@ -29,6 +29,7 @@ func TestAppendTurnStateWhereCondition(t *testing.T) {
 		{usagestats.TurnStateFilterAuto, "turn_state_source = $1", []any{"auto"}},
 		{usagestats.TurnStateFilterAutoStale, "turn_state_source = $1", []any{"auto_stale"}},
 		{usagestats.TurnStateFilterManual, "turn_state_source = $1", []any{"manual"}},
+		{usagestats.TurnStateFilterSeed, "turn_state_source = $1", []any{"seed"}},
 	}
 	for _, tc := range cases {
 		t.Run(strings.TrimSpace(tc.filter), func(t *testing.T) {

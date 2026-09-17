@@ -82,7 +82,7 @@ export interface CreateUsageCleanupTaskRequest {
 
 export interface AdminUsageQueryParams extends UsageQueryParams {
   user_id?: number
-  // Turn-State 维度筛选:minted/healthy/suspect/sent/injected/auto/auto_stale/manual
+  // Turn-State 维度筛选:minted/healthy/suspect/sent/injected/auto/auto_stale/manual/seed
   turn_state?: string | null
   exact_total?: boolean
   billing_mode?: string

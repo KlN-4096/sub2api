@@ -564,15 +564,18 @@ export default {
 	  turnStateSourceAuto: '覆写来源:自动接管',
 	  turnStateSourceAutoStale: '覆写来源:自动接管(过保鲜·历史值)',
 	  turnStateSourceManual: '覆写来源:手填',
+	  turnStateSourceSeed: '覆写来源:冷启动引子',
 	  turnStateSourceShort: {
 	    manual: '手填',
 	    auto: '自动',
 	    auto_stale: '自动·旧',
+	    seed: '引子',
 	  },
 	  turnStateSourceLong: {
 	    manual: '本次出站的 turn-state 来自账号上手填的覆写值',
 	    auto: '本次出站的 turn-state 由自动接管从候选池注入',
 	    auto_stale: '历史取值:自动接管注入了已过保鲜期的候选(该行为已废止)',
+	    seed: '本次出站的 turn-state 是冷启动引子:用手填的一次性种子去换一条上游新铸的 292',
 	  },
 	  upstreamModelAudit: '上游模型审计',
 	  allUpstreamModelAudit: '全部响应模型状态',

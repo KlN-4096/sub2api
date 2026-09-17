@@ -567,15 +567,18 @@ export default {
 	  turnStateSourceAuto: 'Override source: auto takeover',
 	  turnStateSourceAutoStale: 'Override source: auto takeover (stale, historical)',
 	  turnStateSourceManual: 'Override source: manual',
+	  turnStateSourceSeed: 'Override source: cold-start seed',
 	  turnStateSourceShort: {
 	    manual: 'MAN',
 	    auto: 'AUTO',
 	    auto_stale: 'AUTO*',
+	    seed: 'SEED',
 	  },
 	  turnStateSourceLong: {
 	    manual: 'Outbound turn-state came from the manual override on the account',
 	    auto: 'Outbound turn-state was injected from the candidate pool by auto takeover',
 	    auto_stale: 'Historical value: auto takeover injected a stale candidate (behaviour retired)',
+	    seed: 'Outbound turn-state was the cold-start seed, used to obtain a freshly minted 292',
 	  },
 	  upstreamModelAudit: 'Upstream model audit',
 	  allUpstreamModelAudit: 'All response model states',

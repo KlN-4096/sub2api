@@ -27,6 +27,11 @@ const (
 	openAITurnStateAutoExtraKey = "openai_turn_state_auto"
 	// openAITurnStatePoolExtraKey 候选池，系统维护。
 	openAITurnStatePoolExtraKey = "openai_turn_state_pool"
+	// openAITurnStateSeedExtraKey 冷启动引子。候选池只能靠「自然铸出的 292」起步，
+	// 一旦账号全面降智（所有 session 都落 312），池子永远填不满、自动接管一直空转。
+	// 管理员手填一条健康 292 当引子，系统用它换回一条上游新铸的 292 入池，然后把引子
+	// 消费掉（置空），之后靠自己铸的票续下去，不再复用这一条。
+	openAITurnStateSeedExtraKey = "openai_turn_state_seed"
 	// 以下三个有配置项但不开放前端，按需用 API/DB 改。
 	openAITurnStatePoolSizeExtraKey   = "openai_turn_state_pool_size"
 	openAITurnStateFailThreshExtraKey = "openai_turn_state_fail_threshold"
@@ -53,6 +58,9 @@ const (
 const (
 	turnStateSourceManual = "manual"
 	turnStateSourceAuto   = "auto"
+	// turnStateSourceSeed 是冷启动引子：注入的是管理员手填的一次性种子，
+	// 与 auto（池里自己铸的候选）分开记，才看得出接管是靠引子起来的还是自举起来的。
+	turnStateSourceSeed = "seed"
 	// 曾经还有 auto_stale（过保鲜期仍注入）。候选过期改成硬门槛后不再产生，
 	// 历史行与用量筛选项里的这个取值由 usagestats.TurnStateFilterAutoStale 承接。
 )
@@ -329,6 +337,11 @@ func (s *OpenAIGatewayService) resolveOpenAITurnStateOverride(c *gin.Context, ac
 		readOpenAITurnStatePool(account), openAITurnStateRequestModel(c),
 		account.openAITurnStateStaleAfter(), time.Now())
 	if !ok {
+		// 冷启动：这个模型下没有可用候选时，用引子去换一条回来。
+		if seed := account.openAITurnStateSeed(); seed != "" {
+			markOpenAITurnStateInjected(c, seed, turnStateSourceSeed)
+			return seed, turnStateSourceSeed
+		}
 		return "", ""
 	}
 	markOpenAITurnStateInjected(c, candidate.Blob, source)
@@ -459,7 +472,48 @@ func (s *OpenAIGatewayService) observeOpenAITurnStateMint(c *gin.Context, accoun
 		}
 		return
 	}
+	if seed := account.openAITurnStateSeed(); seed != "" && injected == seed {
+		s.recordOpenAITurnStateSeedOutcome(c, account, minted, healthy)
+		return
+	}
 	s.recordOpenAITurnStateOutcome(c, account, injected, healthy)
+}
+
+// recordOpenAITurnStateSeedOutcome 处理引子这一轮的结果。
+//
+// 三种结局都把引子置空，所以它确实是「一次性」的——只是这个「一次」指的是
+// 「一直用到换回一个结果为止」，不是「严格只发一条请求」：实测带 turn-state 的请求
+// 只有 8.0% 会拿到新铸值，严格发一次就丢的话 92% 的概率什么都没换到，引子白扔。
+//   - 换回健康 292：入池，引子功成身退。
+//   - 换回降级值：这条引子没用，别再拿它烧请求。
+//   - 撞 400（见 noteOpenAITurnStateRejected）：同上。
+func (s *OpenAIGatewayService) recordOpenAITurnStateSeedOutcome(c *gin.Context, account *Account, minted string, healthy bool) {
+	if healthy {
+		// 引子换回来的这条是自然铸造的结果，配当候选（与「注入请求铸出的值不入池」
+		// 那条反churn规则不冲突：那条防的是候选把自己挤出池，这里池本来就是空的）。
+		s.pushOpenAITurnStateCandidate(c, account, minted)
+		logOpenAITurnStateAuto("account=%d seed consumed: minted a healthy turn-state", account.ID)
+	} else {
+		logOpenAITurnStateAuto("account=%d seed discarded: upstream still minted a degraded turn-state", account.ID)
+	}
+	s.clearOpenAITurnStateSeed(c, account)
+}
+
+// clearOpenAITurnStateSeed 置空引子。用空串而不是删键：UpdateExtra 是 JSONB 合并，
+// 删不掉键，而读取侧把空白一律当未配置。
+func (s *OpenAIGatewayService) clearOpenAITurnStateSeed(c *gin.Context, account *Account) {
+	if account.Extra == nil {
+		account.Extra = map[string]any{}
+	}
+	account.Extra[openAITurnStateSeedExtraKey] = ""
+	if s.accountRepo == nil {
+		return
+	}
+	if err := s.accountRepo.UpdateExtra(turnStateOpCtx(c), account.ID, map[string]any{
+		openAITurnStateSeedExtraKey: "",
+	}); err != nil {
+		logOpenAITurnStateAuto("clear seed failed: account=%d err=%v", account.ID, err)
+	}
 }
 
 // turnStateOpCtx 取一个不随请求取消的 ctx：候选池维护要在响应收尾后照常落库。
@@ -508,6 +562,11 @@ func (s *OpenAIGatewayService) noteOpenAITurnStateRejected(c *gin.Context, accou
 		c.Set(ctxKeyTurnStateRejected, injected)
 	}
 	logOpenAITurnStateAuto("account=%d injected turn-state rejected by upstream (invalid_encrypted_content)", account.ID)
+	if seed := account.openAITurnStateSeed(); seed != "" && injected == seed {
+		// 引子撞 400 就丢掉，别拿一条明显解不开的票继续烧请求。
+		s.clearOpenAITurnStateSeed(c, account)
+		return
+	}
 	s.recordOpenAITurnStateOutcome(c, account, injected, false)
 }
 

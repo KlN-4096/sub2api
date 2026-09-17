@@ -292,6 +292,20 @@ func (a *Account) OpenAICodexTurnStateOverride() string {
 	return ""
 }
 
+// openAITurnStateSeed 返回冷启动引子；未配置、过期或账号类型不适用时返回空串。
+// 与手填覆写同一条有效期：引子也是一张票，过了 1 小时注进去只会白撞 400。
+func (a *Account) openAITurnStateSeed() string {
+	if a == nil || !a.TargetsChatGPTCodexUpstream() {
+		return ""
+	}
+	value := strings.TrimSpace(a.GetExtraString(openAITurnStateSeedExtraKey))
+	if value == "" || !openAITurnStateBlobExpired(value, a.openAITurnStateStaleAfter(), time.Now()) {
+		return value
+	}
+	logOpenAITurnStateAuto("account=%d turn-state seed expired, not injecting", a.ID)
+	return ""
+}
+
 // openAITurnStateBlobExpired 判一条 blob 是否已过铸造后 ttl。
 // 信封解不出来时按不过期处理，与候选池的 expired() 同一套取舍：宁可注进去撞一次
 // 400，也不要因为解码失败把整个功能静默关掉。
@@ -409,14 +423,11 @@ func ValidateOpenAITurnStateAutoExtra(extra map[string]any) error {
 			return fmt.Errorf("%s must be a boolean", openAITurnStateAutoExtraKey)
 		}
 	}
-	raw, ok := extra[openAITurnStateModelsExtraKey]
-	if !ok {
-		return nil
-	}
-	if raw == nil {
+	raw, hasModels := extra[openAITurnStateModelsExtraKey]
+	if !hasModels || raw == nil {
 		// 显式传 JSON null 与传空白等价，都按「未配置」清掉，别在 extra 里留个 null。
 		delete(extra, openAITurnStateModelsExtraKey)
-		return nil
+		return validateOpenAITurnStateBlobExtra(extra, openAITurnStateSeedExtraKey)
 	}
 	value, ok := raw.(string)
 	if !ok {
@@ -424,13 +435,15 @@ func ValidateOpenAITurnStateAutoExtra(extra map[string]any) error {
 	}
 	if value = strings.TrimSpace(value); value == "" {
 		delete(extra, openAITurnStateModelsExtraKey)
-		return nil
+		return validateOpenAITurnStateBlobExtra(extra, openAITurnStateSeedExtraKey)
 	}
 	if len(value) > maxOpenAITurnStateModelsLen {
 		return fmt.Errorf("%s exceeds %d characters", openAITurnStateModelsExtraKey, maxOpenAITurnStateModelsLen)
 	}
 	extra[openAITurnStateModelsExtraKey] = value
-	return nil
+	// 引子会被原样发给上游，粘错内容的代价与手填覆写一样，走同一套信封形状校验。
+	// 折在这里而不是单开一个导出函数：这个函数已经挂在全部 7 个写入点上了。
+	return validateOpenAITurnStateBlobExtra(extra, openAITurnStateSeedExtraKey)
 }
 
 // ValidateOpenAITurnStateOverrideExtra 校验并规范化 extra 里的 turn-state 覆写值。
@@ -438,36 +451,41 @@ func ValidateOpenAITurnStateAutoExtra(extra map[string]any) error {
 // 解出至少 57 字节（1 版本 + 8 时间戳 + 16 IV + 32 HMAC）、首字节 0x80。
 // 这道校验挡的是手滑粘错内容后把垃圾原样发给上游。
 func ValidateOpenAITurnStateOverrideExtra(extra map[string]any) error {
+	return validateOpenAITurnStateBlobExtra(extra, openAITurnStateOverrideExtraKey)
+}
+
+// validateOpenAITurnStateBlobExtra 是手填覆写与冷启动引子共用的形状校验。
+func validateOpenAITurnStateBlobExtra(extra map[string]any, key string) error {
 	if extra == nil {
 		return nil
 	}
-	raw, ok := extra[openAITurnStateOverrideExtraKey]
+	raw, ok := extra[key]
 	if !ok {
 		return nil
 	}
 	value, ok := raw.(string)
 	if !ok {
-		return fmt.Errorf("%s must be a string", openAITurnStateOverrideExtraKey)
+		return fmt.Errorf("%s must be a string", key)
 	}
 	value = strings.TrimSpace(value)
 	if value == "" {
-		delete(extra, openAITurnStateOverrideExtraKey)
+		delete(extra, key)
 		return nil
 	}
 	if len(value) > maxOpenAITurnStateOverrideLen {
-		return fmt.Errorf("%s exceeds %d characters", openAITurnStateOverrideExtraKey, maxOpenAITurnStateOverrideLen)
+		return fmt.Errorf("%s exceeds %d characters", key, maxOpenAITurnStateOverrideLen)
 	}
 	decoded, err := base64.URLEncoding.WithPadding(base64.StdPadding).DecodeString(value)
 	if err != nil {
 		decoded, err = base64.RawURLEncoding.DecodeString(value)
 	}
 	if err != nil {
-		return fmt.Errorf("%s must be urlsafe base64", openAITurnStateOverrideExtraKey)
+		return fmt.Errorf("%s must be urlsafe base64", key)
 	}
 	if len(decoded) < 57 || decoded[0] != 0x80 {
-		return fmt.Errorf("%s does not look like a Codex turn-state blob", openAITurnStateOverrideExtraKey)
+		return fmt.Errorf("%s does not look like a Codex turn-state blob", key)
 	}
-	extra[openAITurnStateOverrideExtraKey] = value
+	extra[key] = value
 	return nil
 }
 

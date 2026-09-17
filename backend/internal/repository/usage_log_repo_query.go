@@ -825,7 +825,8 @@ func appendTurnStateWhereCondition(conditions []string, args []any, filter strin
 		conditions = append(conditions, "turn_state_overridden IS TRUE")
 	case usagestats.TurnStateFilterAuto,
 		usagestats.TurnStateFilterAutoStale,
-		usagestats.TurnStateFilterManual:
+		usagestats.TurnStateFilterManual,
+		usagestats.TurnStateFilterSeed:
 		conditions = append(conditions, fmt.Sprintf("turn_state_source = $%d", len(args)+1))
 		args = append(args, strings.TrimSpace(filter))
 	}
