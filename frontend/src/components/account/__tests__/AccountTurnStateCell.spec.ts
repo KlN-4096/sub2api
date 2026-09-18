@@ -282,4 +282,53 @@ describe('AccountTurnStateCell', () => {
     expect(render(account(undefined)).find('.bar').exists()).toBe(false)
     expect(render(account([{ model: 'm', blob: 'x' }])).find('.bar').exists()).toBe(false)
   })
+
+  // 猎手行：本小时次数 / 下次窗口 / 上次结果，最近 10 次在 tooltip。没开猎手不渲染。
+  it('开了猎手时多一行猎手状态，最近几次在 tooltip 里', () => {
+    const w = render(
+      account([], {
+        openai_turn_state_hunter: { enabled: true, max_per_hour: 30 },
+        openai_turn_state_hunt: {
+          next_at: new Date(Date.now() + 600_000).toISOString(),
+          hour_start: isoAgo(600),
+          hour_count: 3,
+          last: [
+            { at: isoAgo(60), model: 'gpt-6-astra', proxy: 'webshare', status: 200, chars: 312, healthy: false },
+            { at: isoAgo(120), model: 'gpt-6-astra', proxy: 'cox', status: 0, error: 'proxy refused', exit: '203.0.113.7' }
+          ]
+        }
+      })
+    )
+    const line = w.get('[data-testid="account-turn-state-hunter"]')
+    expect(line.text()).toContain('turnStatePool.hunterSummary')
+    expect(line.text()).toContain('"count":3')
+    expect(line.text()).toContain('"max":30')
+    expect(line.text()).toContain('hunterNext')
+    expect(line.text()).toContain('hunterResultMiss')
+    const title = line.attributes('title') ?? ''
+    expect(title.split('\n')).toHaveLength(2)
+    // t 的 mock 会把嵌套的参数再 JSON.stringify 一次，引号被转义，只认键名和数值。
+    expect(title).toContain('hunterResultMiss')
+    expect(title).toContain('312')
+    expect(title).toContain('proxy refused')
+    expect(title).toContain('(203.0.113.7)')
+    expect(title.split('\n')[0]).toContain('"exit":""')
+  })
+
+  it('小时窗过了计数归零、退避到期显示待命；没开猎手整行不渲染', () => {
+    const w = render(
+      account([], {
+        openai_turn_state_hunter: { enabled: true },
+        openai_turn_state_hunt: { next_at: isoAgo(1), hour_start: isoAgo(7200), hour_count: 9, last: [] }
+      })
+    )
+    const line = w.get('[data-testid="account-turn-state-hunter"]')
+    expect(line.text()).toContain('"count":0')
+    expect(line.text()).toContain('"max":30')
+    expect(line.text()).toContain('hunterReady')
+    expect(line.text()).toContain('hunterLastNone')
+
+    expect(render(account([], { openai_turn_state_hunt: { hour_count: 9 } })).find('[data-testid="account-turn-state-hunter"]').exists()).toBe(false)
+    expect(render(account([], { openai_turn_state_hunter: { enabled: false } })).find('[data-testid="account-turn-state-hunter"]').exists()).toBe(false)
+  })
 })

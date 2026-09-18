@@ -81,6 +81,17 @@
           : t('admin.accounts.openai.turnStatePool.summaryObservedOnly', { n: entries.length })
       }}
     </p>
+    <!-- 猎手状态：本小时用了几次、下次开窗、上次摇到什么。最近 10 次在 tooltip 里。
+         只在猎手开着时渲染——没开的账号多一行「猎手 0/30」只是噪音。 -->
+    <p
+      v-if="hunterLine"
+      class="text-[10px]"
+      :class="hunterErrored ? 'text-amber-600 dark:text-amber-400' : 'text-gray-500 dark:text-gray-400'"
+      :title="hunterTitle"
+      data-testid="account-turn-state-hunter"
+    >
+      {{ hunterLine }}
+    </p>
   </div>
 </template>
 
@@ -109,7 +120,7 @@ import {
   TURN_STATE_DEFAULT_TTL_MINUTES,
   TURN_STATE_SHAPES
 } from '@/utils/turnState'
-import { formatDateTime } from '@/utils/format'
+import { formatDateTime, formatTime } from '@/utils/format'
 
 /**
  * 模块级共享时钟。倒计时必须真的走，否则页面一挂就是一张冻结的快照：过期的票不消失、
@@ -403,6 +414,112 @@ const emptyLabel = computed(() =>
       ? 'admin.accounts.openai.turnStatePool.starved'
       : 'admin.accounts.openai.turnStatePool.empty'
   )
+)
+
+/**
+ * 292 猎手（extra.openai_turn_state_hunter 是配置，openai_turn_state_hunt 是运行态）。
+ * 配置只读 enabled 与每小时上限；运行态是猎手每次探测后写的：下次窗口、小时计数、
+ * 最近 10 次。时间戳都来自后端，页面只做展示。
+ */
+interface HuntAttempt {
+  at?: string
+  model?: string
+  proxy?: string
+  status?: number
+  chars?: number
+  healthy?: boolean
+  latency_ms?: number
+  exit?: string
+  error?: string
+}
+interface HuntState {
+  next_at?: string
+  hour_start?: string
+  hour_count?: number
+  last?: HuntAttempt[]
+  last_error?: string
+}
+const TURN_STATE_HUNT_DEFAULT_MAX_PER_HOUR = 30
+
+const hunterMaxPerHour = computed<number | null>(() => {
+  const raw = extra.value['openai_turn_state_hunter']
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const cfg = raw as { enabled?: unknown; max_per_hour?: unknown }
+  if (cfg.enabled !== true) return null
+  return typeof cfg.max_per_hour === 'number' && cfg.max_per_hour > 0
+    ? cfg.max_per_hour
+    : TURN_STATE_HUNT_DEFAULT_MAX_PER_HOUR
+})
+
+const huntState = computed<HuntState>(() => {
+  const raw = extra.value['openai_turn_state_hunt']
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  return raw as HuntState
+})
+
+const parseTime = (raw: unknown): Date | null => {
+  if (typeof raw !== 'string' || !raw) return null
+  const d = new Date(raw)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+const huntAttempts = computed<HuntAttempt[]>(() =>
+  Array.isArray(huntState.value.last) ? huntState.value.last : []
+)
+
+// last_error 也算：「没有可用代理」这类错误不产生探测记录，只写 last_error。
+const hunterErrored = computed(() => !!huntAttempts.value[0]?.error || !!huntState.value.last_error)
+
+const hunterAttemptResult = (a: HuntAttempt) => {
+  if (a.error) return t('admin.accounts.openai.turnStatePool.hunterResultError', { status: a.status || '-', error: a.error })
+  return t(
+    a.healthy
+      ? 'admin.accounts.openai.turnStatePool.hunterResultHit'
+      : 'admin.accounts.openai.turnStatePool.hunterResultMiss',
+    { chars: a.chars ?? '-' }
+  )
+}
+
+const hunterLine = computed(() => {
+  const max = hunterMaxPerHour.value
+  if (max === null) return ''
+  const now = sharedNow.value
+  const st = huntState.value
+  // 小时窗过了就是 0：后端只在下一次探测时才把计数归零，页面不能拿旧计数吓人。
+  const hourStart = parseTime(st.hour_start)
+  const count = hourStart && hourStart.getTime() + 3_600_000 > now ? st.hour_count ?? 0 : 0
+  const nextAt = parseTime(st.next_at)
+  const next =
+    nextAt && nextAt.getTime() > now
+      ? t('admin.accounts.openai.turnStatePool.hunterNext', { time: formatTime(nextAt) })
+      : t('admin.accounts.openai.turnStatePool.hunterReady')
+  const latest = huntAttempts.value[0]
+  const last = latest
+    ? t('admin.accounts.openai.turnStatePool.hunterLast', {
+        result: hunterAttemptResult(latest),
+        proxy: latest.proxy || '-',
+        time: formatTime(parseTime(latest.at) ?? new Date(NaN))
+      })
+    : st.last_error
+      ? t('admin.accounts.openai.turnStatePool.hunterResultError', { status: '-', error: st.last_error })
+      : t('admin.accounts.openai.turnStatePool.hunterLastNone')
+  return t('admin.accounts.openai.turnStatePool.hunterSummary', { count, max, next, last })
+})
+
+const hunterTitle = computed(() =>
+  huntAttempts.value
+    .map((a) =>
+      t('admin.accounts.openai.turnStatePool.hunterDetail', {
+        time: formatDateTime(parseTime(a.at) ?? new Date(NaN)),
+        model: a.model || '-',
+        proxy: a.proxy || '-',
+        // 固定出口探测前解析过出口 IP 才有；轮换端点由供应商选出口，这里为空。
+        exit: a.exit ? ` (${a.exit})` : '',
+        result: hunterAttemptResult(a),
+        latency: typeof a.latency_ms === 'number' ? `${(a.latency_ms / 1000).toFixed(1)}s` : '-'
+      })
+    )
+    .join('\n')
 )
 
 const detailTitle = computed(() =>

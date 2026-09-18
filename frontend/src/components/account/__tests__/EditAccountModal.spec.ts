@@ -32,6 +32,12 @@ vi.mock('@/api/admin', () => ({
       // turn-state 覆写表的模型下拉走这个接口（AccountTestModal 同款）。
       getAvailableModels: vi.fn().mockResolvedValue([{ id: 'gpt-5.6-luna' }, { id: 'gpt-6-astra' }])
     },
+    proxies: {
+      // 292 猎手的代理多选走这个接口，懒加载。
+      getAll: vi.fn().mockResolvedValue([
+        { id: 20, name: 'webshare', protocol: 'socks5', host: 'p.webshare.io', port: 1080 }
+      ])
+    },
     settings: {
       getWebSearchEmulationConfig: vi.fn().mockResolvedValue({ enabled: false, providers: [] }),
       getSettings: vi.fn().mockResolvedValue({})
@@ -1877,6 +1883,77 @@ describe('EditAccountModal turn-state 自动接管', () => {
     expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_turn_state_override).toEqual({
       'gpt-6-astra': 'gAAAAAB-astra'
     })
+    wrapper.unmount()
+  })
+})
+
+describe('EditAccountModal 292 猎手', () => {
+  const buildCodexAccount = (extra: Record<string, unknown> = {}) =>
+    ({
+      ...buildOpenAIOAuthParentAccount(),
+      extra
+    }) as any
+
+  beforeEach(() => {
+    updateAccountMock.mockReset().mockResolvedValue({})
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+  })
+
+  // 猎到的票靠自动接管注入：接管关着时开猎手等于白烧额度，开关直接置灰并说明原因。
+  it('自动接管关着时猎手开关置灰并提示', () => {
+    const wrapper = mountModal(buildCodexAccount())
+    const toggle = wrapper.get<HTMLInputElement>('[data-testid="edit-openai-turn-state-hunter"]')
+    expect(toggle.element.disabled).toBe(true)
+    expect(wrapper.find('[data-testid="edit-openai-turn-state-hunter-needs-auto"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('cpr 账号不显示猎手：出口由 codex-proxy-rs 决定', () => {
+    const wrapper = mountModal({ ...buildCodexAccount({ openai_turn_state_auto: true }), type: 'cpr' })
+    expect(wrapper.find('[data-testid="edit-openai-turn-state-hunter-section"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('开猎手、选模型和代理后只写 openai_turn_state_hunter，留空的数值不写', async () => {
+    const wrapper = mountModal(buildCodexAccount({ openai_turn_state_auto: true }))
+
+    await wrapper.get('[data-testid="edit-openai-turn-state-hunter"]').setValue(true)
+    await flushPromises() // 模型列表与代理列表都是开关打开时才拉的
+    await wrapper.get('[data-testid="edit-openai-turn-state-hunter-models"]').setValue(['gpt-6-astra'])
+    // setValue 按 DOM 的 option.value（字符串）匹配；v-model 再按 :value 绑定回数字。
+    await wrapper.get('[data-testid="edit-openai-turn-state-hunter-proxies"]').setValue(['20'])
+    await wrapper.get('[data-testid="edit-openai-turn-state-hunter-max"]').setValue('40')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra?.openai_turn_state_hunter).toEqual({
+      enabled: true,
+      models: ['gpt-6-astra'],
+      proxy_ids: [20],
+      max_per_hour: 40
+    })
+    expect(extra).not.toHaveProperty('openai_turn_state_hunt')
+    wrapper.unmount()
+  })
+
+  // 关掉开关保留已选的模型/代理，再开时不用重选；运行态键由猎手维护，前端原样带回。
+  it('关掉猎手保留选择，运行态原样带回', async () => {
+    const hunt = { hour_count: 3, last: [] }
+    const wrapper = mountModal(
+      buildCodexAccount({
+        openai_turn_state_auto: true,
+        openai_turn_state_hunter: { enabled: true, models: ['gpt-6-astra'], proxy_ids: [20] },
+        openai_turn_state_hunt: hunt
+      })
+    )
+
+    await wrapper.get('[data-testid="edit-openai-turn-state-hunter"]').setValue(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra?.openai_turn_state_hunter).toEqual({ enabled: false, models: ['gpt-6-astra'], proxy_ids: [20] })
+    expect(extra?.openai_turn_state_hunt).toEqual(hunt)
     wrapper.unmount()
   })
 })
