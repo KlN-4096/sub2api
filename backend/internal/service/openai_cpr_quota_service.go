@@ -102,7 +102,15 @@ type CPRQuotaService struct {
 }
 
 func NewCPRQuotaService(cfg *config.Config) *CPRQuotaService {
-	return &CPRQuotaService{client: &http.Client{Timeout: cprAdminRequestTimeout}, cfg: cfg}
+	return &CPRQuotaService{
+		client: &http.Client{
+			Timeout: cprAdminRequestTimeout,
+			// 不跟随重定向：白名单只校验了初始地址，默认客户端会带着 x-api-key 跟到任意主机
+			// （Go 只在跨域时剥 Authorization，自定义头原样带走）。admin API 没有合法的重定向。
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
+		cfg: cfg,
+	}
 }
 
 // --- CPR admin API 的 wire 结构（只取我们用得到的字段）---

@@ -239,8 +239,9 @@ export default {
           normal: 'RPM 正常',
           tieredNormal: 'RPM 限制 (三区模型) - 正常',
           tieredWarning: 'RPM 限制 (三区模型) - 接近阈值',
-          tieredStickyOnly: 'RPM 限制 (三区模型) - 仅粘性会话 | 缓冲区: {buffer}',
-          tieredBlocked: 'RPM 限制 (三区模型) - 已阻塞 | 缓冲区: {buffer}',
+          // 裸 `|` 是 vue-i18n 的复数分隔符，不带计数的 t() 只渲染第一段；字面量用 {'|'}。
+          tieredStickyOnly: "RPM 限制 (三区模型) - 仅粘性会话 {'|'} 缓冲区: {buffer}",
+          tieredBlocked: "RPM 限制 (三区模型) - 已阻塞 {'|'} 缓冲区: {buffer}",
           stickyExemptNormal: 'RPM 限制 (粘性豁免) - 正常',
           stickyExemptWarning: 'RPM 限制 (粘性豁免) - 接近阈值',
           stickyExemptOver: 'RPM 限制 (粘性豁免) - 超限，仅粘性会话'
@@ -784,7 +785,8 @@ export default {
         turnStateHunter: '292 猎手',
         turnStateHunterDesc:
           '票到期前开窗，经勾选的代理逐个开新会话探测，摇到 292 即入池交给自动接管注入；探测响应头到手即断，主要成本是每次探测的输入 token（含该模型的 base prompt）。开着猎手时池里有票就对所有会话注入。每小时有上限；空闲门槛内没有真实请求的模型不猎。每次探测都新建一条代理连接，webshare 的 -rotate 端点因此每次换出口；其余代理按固定出口处理：探测前先解析出口 IP，同一出口只探一次，铸出 312 的出口 7 天内不再探。',
-        turnStateHunterNeedsAuto: '需要先开启自动接管，否则猎到的票只入池不注入',
+        turnStateHunterNeedsAuto: '需要先开启自动接管，否则猎手不会运行',
+        turnStateHunterInvalid: '猎手开着时必须选择模型（最多 8 个）和代理（最多 64 个）',
         turnStateHunterEffortDefault: '默认（high）',
         turnStateHunterModels: '要猎的模型',
         turnStateHunterProxies: '探测用代理',
@@ -806,6 +808,9 @@ export default {
           hunterSummary: '猎手 本小时 {count}/{max} · {next} · {last}',
           hunterNext: '下次 {time}',
           hunterReady: '待命',
+          hunterGateIdle: '无流量·暂停',
+          hunterGateFresh: '票未到期',
+          hunterNeedsAuto: '猎手 未生效：需先开自动接管',
           // `@` 是 vue-i18n 的链接消息前缀，裸写会在生产构建里抛 SyntaxError 并整块吞掉
           // 账号列的 Turn-State 格子；字面量要用 {'@'}。
           hunterLast: "上次 {result} {'@'}{proxy} {time}",
@@ -972,7 +977,7 @@ export default {
         bulkDisableHint: '保存后将关闭所选账号的请求头覆写并清空已有配置。',
         bulkReplaceHint: '保存后将用下方配置整体替换所选账号已有的请求头覆写配置。',
         bulkEmptyRows: '请至少添加一行请求头再保存；如需清空已有配置，请关闭上方开关。',
-        invalidName: '请求头名称格式不正确（仅允许字母、数字和 !#$%&\'*+-.^_`|~ 字符）',
+        invalidName: "请求头名称格式不正确（仅允许字母、数字和 !#$%&'*+-.^_`{'|'}~ 字符）",
         blockedName: '该请求头不允许覆写（认证头与连接控制头由系统管理）',
         duplicateName: '存在重复的请求头名称（匹配不区分大小写）',
         invalidValue: '请求头值不合法（不允许控制字符，长度不超过 8192）',

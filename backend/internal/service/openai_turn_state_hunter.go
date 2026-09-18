@@ -248,9 +248,17 @@ type openAITurnStateHuntState struct {
 	LastError string                       `json:"last_error,omitempty"`
 	// CapWait 标记 NextAt 是「撞上限等窗」定的（而不是出错退避）：上限调高后本窗还有余量
 	// 就不用等到点，立刻恢复。
-	CapWait   bool      `json:"cap_wait,omitempty"`
+	CapWait bool `json:"cap_wait,omitempty"`
+	// Gate 记录上一次被门槛挡住的原因（idle / fresh），正在猎时为空。不留痕的话
+	// 「票还新鲜」「无真实流量」「模型名配错」在页面上长得一模一样。
+	Gate      string    `json:"gate,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
+
+const (
+	openAITurnStateHuntGateIdle  = "idle"
+	openAITurnStateHuntGateFresh = "fresh"
+)
 
 // waiting 报告现在是否还该等：退避照等；撞上限的等待在上限调高后自动解除。
 func (st *openAITurnStateHuntState) waiting(cfg openAITurnStateHunterConfig, now time.Time) bool {
@@ -296,6 +304,9 @@ func (st *openAITurnStateHuntState) exitCoolingDown(ip string, now time.Time) bo
 
 // aliasExit 把「这个代理也走这个出口」记下来，沿用该出口已有的结果与时间：下一轮这个
 // 代理靠 lastExitOf 就能跳过，不用再回声。
+//
+// 别名条目带的是旧条目的 At，会排在比它新的条目前面——exitCoolingDown 按 IP 取第一条，
+// 别名与原条目是同一个 IP 的同一份结论，结果不受影响；但 Exits 不再严格按时间排序。
 func (st *openAITurnStateHuntState) aliasExit(proxyID int64, ip string) {
 	for _, e := range st.Exits {
 		if e.IP == ip {
@@ -373,6 +384,10 @@ type OpenAITurnStateHunterService struct {
 	// now / sleep 可注入：测试里把随机间隔归零，不真睡。
 	now   func() time.Time
 	sleep func(ctx context.Context, d time.Duration) error
+
+	// cursor 是下个 tick 从哪个账号开始：一轮预算被前面的账号吃光时，后面的不能永远轮不到。
+	// 只在 runOnce 里读写，而 runOnce 串行跑（ticker 循环一次一个）。
+	cursor int
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -479,22 +494,33 @@ func (s *OpenAITurnStateHunterService) runOnce(ctx context.Context) {
 		slog.Warn("openai_turn_state_hunt_list_failed", "error", err)
 		return
 	}
-	for i := range accounts {
+	n := len(accounts)
+	start := 0
+	if n > 0 {
+		start = s.cursor % n
+	}
+	for k := 0; k < n; k++ {
+		i := (start + k) % n
 		if ctx.Err() != nil || s.now().After(deadline) {
+			// 预算在这个账号之前用完：下个 tick 从它开始，别每次都从头数。
+			s.cursor = i
 			return
 		}
 		account := &accounts[i]
 		// 猎手依赖自动接管：票只入池不注入等于白猎。ListByPlatform 本身只返回 active，
 		// 这里的状态检查是双保险。
 		//
-		// 刻意不看 Schedulable：停了调度的降智账号正是要先猎到票再放回调度的那种
-		// （池耗尽停号也只动 Schedulable），看它就死锁。停调度的账号没有真实流量，
-		// 默认的空闲门槛会自己刹车；显式 idle_minutes=-1 表示用户就是要它一直猎。
+		// 刻意不看 Schedulable：停了调度（temp_unschedulable / 手动停调度）的降智账号正是
+		// 要先猎到票再放回调度的那种，看它就死锁。停调度的账号没有真实流量，默认的空闲
+		// 门槛会自己刹车；显式 idle_minutes=-1 表示用户就是要它一直猎。
+		// 池耗尽停号走的是 SetError（status=error），ListByPlatform 直接就不返回它——那条路
+		// 要人工关接管再启用，猎手救不了。
 		if account.Status != StatusActive || !account.IsOpenAITurnStateHunterEnabled() || !account.IsOpenAITurnStateAutoEnabled() {
 			continue
 		}
 		s.huntAccount(ctx, account, deadline)
 	}
+	s.cursor = 0
 }
 
 // huntAccount 对一个账号跑一轮：先算哪些模型缺票，再在这些模型间轮流探测。
@@ -505,14 +531,26 @@ func (s *OpenAITurnStateHunterService) huntAccount(ctx context.Context, account 
 	if st.waiting(cfg, now) {
 		return
 	}
-	st.CapWait = false // 进入新一轮就不再是「等窗」状态；只有再次撞上限才重新标
 	st.rollHour(now)
 	if st.HourCount >= cfg.MaxPerHour {
 		return
 	}
-	wanted := s.modelsNeedingTicket(ctx, account, cfg, now)
+	wanted, gate := s.modelsNeedingTicket(ctx, account, cfg, now)
 	if len(wanted) == 0 {
+		// 被门槛挡住也要留痕，只在原因变化时落库（别每 tick 写一次）。这次落库写回的是整个
+		// st，CapWait 必须原样保留——抹掉它等于把「上限调高立刻恢复」变成死等到点。
+		if st.Gate != gate {
+			st.Gate = gate
+			s.persist(ctx, account, st)
+		}
 		return
+	}
+	// 真的开猎才算「不再等窗」，只有再次撞上限才重新标。门槛痕迹也在这里清掉并落库，
+	// 否则预算没轮到这个账号时页面还写着上一次的「票未到期」。
+	st.CapWait = false
+	if st.Gate != "" {
+		st.Gate = ""
+		s.persist(ctx, account, st)
 	}
 	proxies := s.loadHuntProxies(ctx, cfg.ProxyIDs, now)
 	if len(proxies) == 0 {
@@ -527,10 +565,15 @@ func (s *OpenAITurnStateHunterService) huntAccount(ctx context.Context, account 
 }
 
 // modelsNeedingTicket 返回「有真实流量且票要到期」的模型。
-func (s *OpenAITurnStateHunterService) modelsNeedingTicket(ctx context.Context, account *Account, cfg openAITurnStateHunterConfig, now time.Time) []string {
-	pool := s.gateway.loadOpenAITurnStatePoolFresh(ctx, account)
-	ttl := account.openAITurnStateStaleAfter()
-	wanted := make([]string, 0, len(cfg.Models))
+// modelsNeedingTicket 报告哪些模型该猎；一个都不猎时第二个返回值是原因（idle / fresh）。
+//
+// 空闲判定放在读池之前：读池是一次 GetByID（生产实现连带 loadProxies / loadAccountGroups
+// 共 3 条 SELECT），完全空闲的账号每 tick 都不该付这笔钱。
+//
+// 模型名要填**映射后的上游名**：水位是按 OpsUpstreamModelKey 记的，按下游名配会永远
+// 卡在 idle——这也是 Gate 要留痕的原因之一。
+func (s *OpenAITurnStateHunterService) modelsNeedingTicket(ctx context.Context, account *Account, cfg openAITurnStateHunterConfig, now time.Time) ([]string, string) {
+	active := make([]string, 0, len(cfg.Models))
 	for _, model := range cfg.Models {
 		model = strings.TrimSpace(model)
 		if model == "" {
@@ -539,12 +582,24 @@ func (s *OpenAITurnStateHunterService) modelsNeedingTicket(ctx context.Context, 
 		if cfg.IdleMinutes > 0 && !s.gateway.openAITurnStateTrafficSince(account.ID, model, now.Add(-time.Duration(cfg.IdleMinutes)*time.Minute)) {
 			continue
 		}
+		active = append(active, model)
+	}
+	if len(active) == 0 {
+		return nil, openAITurnStateHuntGateIdle
+	}
+	pool := s.gateway.loadOpenAITurnStatePoolFresh(ctx, account)
+	ttl := account.openAITurnStateStaleAfter()
+	wanted := make([]string, 0, len(active))
+	for _, model := range active {
 		if expiresAt, ok := openAITurnStateNewestUsableExpiry(pool, model, ttl, now); ok && expiresAt.Sub(now) > cfg.lead() {
 			continue
 		}
 		wanted = append(wanted, model)
 	}
-	return wanted
+	if len(wanted) == 0 {
+		return nil, openAITurnStateHuntGateFresh
+	}
+	return wanted, ""
 }
 
 // openAITurnStateNewestUsableExpiry 取该模型最晚到期的可用票的到期时刻。
@@ -791,7 +846,6 @@ func (s *OpenAITurnStateHunterService) probe(ctx context.Context, account *Accou
 		attempt.Error = sanitizeUpstreamErrorMessage(err.Error())
 		return attempt
 	}
-	// 头到手即断：不读 SSE，cancel 让 HTTP/2 发 RST_STREAM，上游停止生成。
 	defer func() { _ = resp.Body.Close() }()
 	attempt.Status = resp.StatusCode
 	if resp.StatusCode != http.StatusOK {
@@ -802,6 +856,10 @@ func (s *OpenAITurnStateHunterService) probe(ctx context.Context, account *Accou
 		}
 		return attempt
 	}
+	// 头到手即断：不读 SSE。提前关体让 HTTP/2 发 RST_STREAM（req.Close 的连接随之关掉），
+	// 上游立刻停止生成——必须排在下面的入池读写库**之前**，数据库慢的时候不能让上游多
+	// 生成一秒。cancel 留给 defer：c 的请求上下文就是 probeCtx，入池还要用它读写库。
+	_ = resp.Body.Close()
 	blob := extractOpenAICodexTurnState(resp.Header)
 	if blob == "" {
 		attempt.Error = "no turn-state in response"
@@ -1082,7 +1140,9 @@ func ValidateOpenAITurnStateHunterExtra(extra map[string]any) error {
 	if v, ok := openAITurnStateHunterNumber(table["lead_minutes"]); ok && v > 0 {
 		lead = v
 	}
-	if stale, ok := openAITurnStateHunterNumber(extra[openAITurnStateStaleMinExtraKey]); ok && stale > 0 && lead >= stale {
+	// stale_after 按运行时同一口径读：getExtraInt = int(parseExtraFloat64)，数字串 "5" 也收、
+	// 小数截断。口径不一致这条交叉校验就会被 "5" 静默跳过、被 10.5 绕过。
+	if stale := float64(int(parseExtraFloat64(extra[openAITurnStateStaleMinExtraKey]))); stale > 0 && lead >= stale {
 		return fmt.Errorf("%s.lead_minutes (%d) must be smaller than %s (%d)", openAITurnStateHunterExtraKey, int(lead), openAITurnStateStaleMinExtraKey, int(stale))
 	}
 	return nil

@@ -331,4 +331,45 @@ describe('AccountTurnStateCell', () => {
     expect(render(account([], { openai_turn_state_hunt: { hour_count: 9 } })).find('[data-testid="account-turn-state-hunter"]').exists()).toBe(false)
     expect(render(account([], { openai_turn_state_hunter: { enabled: false } })).find('[data-testid="account-turn-state-hunter"]').exists()).toBe(false)
   })
+
+  // 后端被门槛挡住时会记原因（gate）：「无流量暂停」和「票未到期」都不能显示成「待命」。
+  it.each([
+    ['idle', 'hunterGateIdle'],
+    ['fresh', 'hunterGateFresh']
+  ])('gate=%s 显示原因而不是待命', (gate, key) => {
+    const w = render(
+      account([], {
+        openai_turn_state_hunter: { enabled: true },
+        openai_turn_state_hunt: { next_at: isoAgo(1), hour_start: isoAgo(60), hour_count: 0, last: [], gate }
+      })
+    )
+    const line = w.get('[data-testid="account-turn-state-hunter"]')
+    expect(line.text()).toContain(key)
+    expect(line.text()).not.toContain('hunterReady')
+    expect(line.classes()).not.toContain('text-amber-600')
+  })
+
+  // 后端要猎手开关与自动接管同时开着才跑：接管关着时不能写「待命」，那是在说一个永远
+  // 不会发生的事。
+  it('猎手开着、自动接管关着：标成未生效并用告警色', () => {
+    const w = render(
+      account([], {
+        openai_turn_state_auto: false,
+        openai_turn_state_hunter: { enabled: true, max_per_hour: 30 },
+        openai_turn_state_hunt: { next_at: isoAgo(1), hour_start: isoAgo(60), hour_count: 2, last: [] }
+      })
+    )
+    const line = w.get('[data-testid="account-turn-state-hunter"]')
+    expect(line.text()).toContain('turnStatePool.hunterNeedsAuto')
+    expect(line.text()).not.toContain('hunterReady')
+    expect(line.classes()).toContain('text-amber-600')
+  })
+
+  // 后端 parseExtraFloat64 收数字串：TTL 口径要一样，否则条子画 60 分钟、后端 10 分钟就不注入。
+  it('stale_after_minutes 是数字串也按它算 TTL', () => {
+    const w = render(account([cand('m', 300)], { openai_turn_state_stale_after_minutes: '10' }))
+    const bar = w.get('.bar')
+    expect(bar.text()).toBe('50')
+    expect(bar.attributes('data-resets')).toBe(new Date((nowSec - 300 + 600) * 1000).toISOString())
+  })
 })

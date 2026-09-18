@@ -1956,4 +1956,39 @@ describe('EditAccountModal 292 猎手', () => {
     expect(extra?.openai_turn_state_hunt).toEqual(hunt)
     wrapper.unmount()
   })
+
+  // retry_minutes 没有 UI 字段（只经 API 写入），改区块里别的项时整个对象会被替换，它得跟着回去。
+  it('改猎手别的项时 retry_minutes 不丢', async () => {
+    const wrapper = mountModal(
+      buildCodexAccount({
+        openai_turn_state_auto: true,
+        openai_turn_state_hunter: { enabled: true, models: ['gpt-6-astra'], proxy_ids: [20], retry_minutes: 30 }
+      })
+    )
+    await flushPromises()
+    await wrapper.get('[data-testid="edit-openai-turn-state-hunter-max"]').setValue('40')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra?.openai_turn_state_hunter).toEqual({
+      enabled: true,
+      models: ['gpt-6-astra'],
+      proxy_ids: [20],
+      max_per_hour: 40,
+      retry_minutes: 30
+    })
+    wrapper.unmount()
+  })
+
+  // 与后端 ValidateOpenAITurnStateHunterExtra 同口径：开着没选模型/代理直接拦下，不发请求。
+  it('猎手开着但没选模型或代理：不提交', async () => {
+    const wrapper = mountModal(buildCodexAccount({ openai_turn_state_auto: true }))
+    await wrapper.get('[data-testid="edit-openai-turn-state-hunter"]').setValue(true)
+    await flushPromises()
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(updateAccountMock).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
 })

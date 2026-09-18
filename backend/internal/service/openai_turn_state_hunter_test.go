@@ -99,16 +99,83 @@ func hunterResp(status int, blob string, body string) (*http.Response, *hunterPr
 
 type hunterAccountRepo struct {
 	*turnStateAutoRepo
+	// others 是多账号用例里 latest 之外的账号；GetByID / UpdateExtra 按 ID 路由。
+	others []*Account
+	// onUpdateExtra 在每次落库时回调：用来断言「落库那一刻上游连接已经挂断」这类顺序。
+	onUpdateExtra func()
 }
 
-// ListByPlatform 每次返回 latest 的副本：生产里每个 tick 都是从 DB 重新读的行。
+func (r *hunterAccountRepo) byID(id int64) *Account {
+	for _, a := range r.others {
+		if a.ID == id {
+			return a
+		}
+	}
+	return r.latest
+}
+
+func (r *hunterAccountRepo) GetByID(_ context.Context, id int64) (*Account, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.getByIDCalls++
+	a := r.byID(id)
+	if a == nil {
+		return nil, errors.New("not found")
+	}
+	return a, nil
+}
+
+// ListByPlatform 返回每个账号的**深拷贝**：生产里每个 tick 都是从 DB 重新读的行，内存里改了
+// 没落库的东西下个 tick 就没了。浅拷贝共享同一张 Extra，删掉生产代码里的 UpdateExtra 调用
+// 测试照样全绿——持久化那一层等于没测。
 func (r *hunterAccountRepo) ListByPlatform(_ context.Context, _ string) ([]Account, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.latest == nil {
 		return nil, nil
 	}
-	return []Account{*r.latest}, nil
+	out := make([]Account, 0, 1+len(r.others))
+	for _, a := range append([]*Account{r.latest}, r.others...) {
+		out = append(out, hunterCloneAccount(a))
+	}
+	return out, nil
+}
+
+// UpdateExtra 模拟 jsonb 顶层键合并写回 DB 侧账号；断言读 h.account 看到的就是落库后的值。
+func (r *hunterAccountRepo) UpdateExtra(_ context.Context, id int64, updates map[string]any) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.extraWrites = append(r.extraWrites, updates)
+	r.getByIDCalls++
+	if r.onUpdateExtra != nil {
+		r.onUpdateExtra()
+	}
+	a := r.byID(id)
+	if a == nil {
+		return errors.New("not found")
+	}
+	if a.Extra == nil {
+		a.Extra = map[string]any{}
+	}
+	for k, v := range updates {
+		a.Extra[k] = v
+	}
+	return nil
+}
+
+// hunterCloneAccount 走一遍 JSON：与 DB 读出来的行同一形态（time.Time 变字符串）。
+func hunterCloneAccount(a *Account) Account {
+	c := *a
+	raw, err := json.Marshal(a.Extra)
+	if err != nil {
+		panic(err) // 用例往 Extra 里放了不可序列化的值，当场炸比静默变 nil 好
+	}
+	var extra map[string]any
+	if err := json.Unmarshal(raw, &extra); err != nil {
+		panic(err)
+	}
+	c.Extra = extra
+	return c
 }
 
 // hunterProber 是出口回声的替身：按代理 URL 里的端口返回固定 IP（同端口同出口），可覆盖。
@@ -213,6 +280,15 @@ func TestOpenAITurnStateHunterHitPoolsAndHangsUp(t *testing.T) {
 	degraded, degradedBody := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks+1), "")
 	healthy, healthyBody := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks), "")
 	h.up.queue = []*http.Response{degraded, healthy}
+	// 第一次落库发生在哪一步不重要，重要的是那一刻正在处理的响应体已经关了。
+	bodyClosedAtFirstWrite, sawWrite := false, false
+	h.repo.onUpdateExtra = func() {
+		if sawWrite {
+			return
+		}
+		sawWrite = true
+		bodyClosedAtFirstWrite = degradedBody.closed
+	}
 
 	h.run(t)
 
@@ -220,6 +296,7 @@ func TestOpenAITurnStateHunterHitPoolsAndHangsUp(t *testing.T) {
 	require.Len(t, h.sleeps, 1, "两次探测之间睡一次随机间隔")
 	require.Equal(t, 0, degradedBody.reads, "头到手即断：不读 SSE")
 	require.True(t, degradedBody.closed && healthyBody.closed, "响应体必须关掉，否则连接池计数不回落")
+	require.True(t, bodyClosedAtFirstWrite, "入池读写库之前就得挂断：数据库慢不能让上游多生成一秒")
 
 	require.Equal(t, h.up.proxyURLs[0], h.up.proxyURLs[1], "-rotate 端点原样用，不改写用户名")
 	for i, u := range h.up.proxyURLs {
@@ -279,6 +356,10 @@ func TestOpenAITurnStateHunterSkipsWhenTicketFresh(t *testing.T) {
 	setPool(now.Add(-5 * time.Minute)) // 还剩 55 分钟
 	h.run(t)
 	require.Empty(t, h.up.requests, "票还够用，不探测")
+	require.Equal(t, openAITurnStateHuntGateFresh, h.state().Gate, "被门槛挡住要留痕，页面才分得清「票还新鲜」和「没在跑」")
+	writes := len(h.repo.extraWrites)
+	h.run(t)
+	require.Len(t, h.repo.extraWrites, writes, "原因没变就不再落库")
 
 	setPool(now.Add(-52 * time.Minute)) // 只剩 8 分钟 < 10
 	healthy, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks), "")
@@ -286,6 +367,7 @@ func TestOpenAITurnStateHunterSkipsWhenTicketFresh(t *testing.T) {
 	h.run(t)
 	require.Len(t, h.up.requests, 1, "到期前 10 分钟开窗")
 	require.Empty(t, h.up.requests[0].Header.Get("x-codex-turn-state"), "池里有票、猎手又开着：探测仍必须裸发，自然铸造")
+	require.Empty(t, h.state().Gate, "开猎就清掉门槛痕迹")
 }
 
 // TestOpenAITurnStateHunterZeroMintedAtStillHunts 钉住：铸造戳解不出来的票到期时刻未知，
@@ -389,6 +471,38 @@ func TestOpenAITurnStateHunterCycleBudget(t *testing.T) {
 	require.Len(t, h.up.requests, 2, "下个 tick 接着猎")
 }
 
+// TestOpenAITurnStateHunterBudgetRotatesAccounts 钉住多账号：一轮预算被前一个账号吃光后，
+// 下个 tick 从没轮到的账号开始，而不是每次都从头数（否则后面的账号永远轮不到）。
+func TestOpenAITurnStateHunterBudgetRotatesAccounts(t *testing.T) {
+	now := time.Now().UTC()
+	first := hunterTestAccount(hunterConfig(nil))
+	second := hunterTestAccount(hunterConfig(nil))
+	second.ID = 9202
+	second.Credentials = map[string]any{"access_token": "second-token", "chatgpt_account_id": "second-account"}
+	h := newHunterHarness(first, hunterWebshareProxy)
+	h.repo.others = []*Account{second}
+	clock := now
+	h.svc.now = func() time.Time { return clock }
+	h.svc.sleep = func(context.Context, time.Duration) error {
+		clock = clock.Add(openAITurnStateHunterCycleBudget + time.Second)
+		return nil
+	}
+	for range 3 {
+		resp, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks+1), "")
+		h.up.queue = append(h.up.queue, resp)
+	}
+
+	h.run(t)
+	require.Len(t, h.up.requests, 1, "第一个账号一次探测后预算就用完")
+	require.Equal(t, "Bearer offline-token", h.up.requests[0].Header.Get("Authorization"))
+
+	h.run(t)
+	require.Len(t, h.up.requests, 2)
+	require.Equal(t, "Bearer second-token", h.up.requests[1].Header.Get("Authorization"), "下个 tick 从第二个账号开始")
+	require.Len(t, readOpenAITurnStateHuntState(second).Last, 1, "第二个账号的运行态落在它自己的行上")
+	require.Len(t, h.state().Last, 1)
+}
+
 // TestOpenAITurnStateHunterNoTurnStateInResponse 钉住 200 却没有 turn-state 头：算错误、
 // 退避 15 分钟、不入池。
 func TestOpenAITurnStateHunterNoTurnStateInResponse(t *testing.T) {
@@ -414,29 +528,37 @@ func TestOpenAITurnStateHunterIdleGate(t *testing.T) {
 
 	h.run(t)
 	require.Empty(t, h.up.requests, "60 分钟内没有真实请求就不猎")
+	require.Equal(t, openAITurnStateHuntGateIdle, h.state().Gate)
+	// stub 的 UpdateExtra 也计入 getByIDCalls（真实实现尾部会同步快照）：两者相等 = 零次纯读池。
+	require.Len(t, h.repo.extraWrites, 1, "只有留痕那一次落库")
+	require.Equal(t, len(h.repo.extraWrites), h.repo.getByIDCalls, "全空闲就不读池")
 
 	seen := now.Add(-time.Minute)
 	h.gw.noteOpenAITurnStateTraffic(h.account.ID, hunterTestModel, seen)
 	h.run(t)
 	require.Len(t, h.up.requests, 1)
 	require.False(t, h.gw.openAITurnStateTrafficSince(h.account.ID, hunterTestModel, seen), "探测不能把自己记成真实流量")
+	require.Empty(t, h.state().Gate)
 }
 
-// TestOpenAITurnStateTrafficOnlyFromRealRequests 钉住水位入口：真实响应记，探测上下文不记。
+// TestOpenAITurnStateTrafficOnlyFromRealRequests 钉住水位入口：真实请求**出站**就记（与上游
+// 响应里有没有 turn-state 头无关），探测上下文不记。
 func TestOpenAITurnStateTrafficOnlyFromRealRequests(t *testing.T) {
 	repo := newTurnStateAutoRepo()
 	account := hunterTestAccount(hunterConfig(nil))
 	repo.latest = account
 	gw := &OpenAIGatewayService{accountRepo: repo}
-	blob := turnStateFernetBlob(time.Now(), openAIHealthyTurnStateBlocks)
+	since := time.Now().Add(-time.Minute)
 
 	probe := turnStateAutoCtxModel("probe", hunterTestModel)
 	probe.Set(ctxKeyTurnStateProbe, true)
-	gw.observeOpenAITurnStateMint(probe, account, blob)
-	require.False(t, gw.openAITurnStateTrafficSince(account.ID, hunterTestModel, time.Now().Add(-time.Minute)))
+	gw.applyOpenAICodexTurnStateOverrideHeader(probe, account, http.Header{})
+	require.False(t, gw.openAITurnStateTrafficSince(account.ID, hunterTestModel, since))
 
-	gw.observeOpenAITurnStateMint(turnStateAutoCtxModel("real", hunterTestModel), account, blob)
-	require.True(t, gw.openAITurnStateTrafficSince(account.ID, hunterTestModel, time.Now().Add(-time.Minute)))
+	// 上游没铸 turn-state 的成功请求也是流量：只在响应头里记的话，缺票的模型会被空闲门槛挡住。
+	gw.applyOpenAICodexTurnStateOverrideHeader(turnStateAutoCtxModel("real", hunterTestModel), account, http.Header{})
+	require.True(t, gw.openAITurnStateTrafficSince(account.ID, hunterTestModel, since))
+	require.False(t, gw.openAITurnStateTrafficSince(account.ID, "gpt-6-other", since), "按模型分桶")
 }
 
 // TestOpenAITurnStateHunterFixedProxiesUsedOnce 钉住「一轮内每个固定出口只用一次」：
@@ -613,6 +735,42 @@ func TestOpenAITurnStateHunterCapRaisedResumesImmediately(t *testing.T) {
 	require.Len(t, h.up.requests, 5, "退避期内上限再高也不探")
 }
 
+// TestOpenAITurnStateHunterCapWaitSurvivesGatePersist 钉住：等窗期间被「票未到期」挡住时
+// 会落库留痕，这次落库不能把 CapWait 抹掉——否则上限调高后本窗余量就用不上了，死等到点。
+func TestOpenAITurnStateHunterCapWaitSurvivesGatePersist(t *testing.T) {
+	now := time.Now().UTC()
+	h := newHunterHarness(hunterTestAccount(hunterConfig(map[string]any{"max_per_hour": 2})), hunterWebshareProxy)
+	setPool := func(minted time.Time) {
+		h.account.Extra[openAITurnStatePoolExtraKey] = []any{map[string]any{
+			"blob": turnStateFernetBlob(minted, openAIHealthyTurnStateBlocks), "model": hunterTestModel, "minted_at": minted,
+		}}
+	}
+	for range 2 {
+		resp, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks+1), "")
+		h.up.queue = append(h.up.queue, resp)
+	}
+	h.run(t)
+	require.Len(t, h.up.requests, 2)
+	require.True(t, h.state().CapWait, "撞上限等窗")
+
+	// 上限调到 4，但此刻票还新鲜：被门槛挡住并留痕，CapWait 要原样留着。
+	h.account.Extra[openAITurnStateHunterExtraKey] = hunterConfig(map[string]any{"max_per_hour": 4})
+	setPool(now.Add(-5 * time.Minute))
+	h.run(t)
+	require.Len(t, h.up.requests, 2)
+	st := h.state()
+	require.Equal(t, openAITurnStateHuntGateFresh, st.Gate)
+	require.True(t, st.CapWait, "留痕不能抹掉等窗标记")
+
+	// 票快到期：本窗余量必须立刻用上，而不是等到 NextAt。
+	setPool(now.Add(-52 * time.Minute))
+	healthy, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks), "")
+	h.up.queue = []*http.Response{healthy}
+	h.run(t)
+	require.Len(t, h.up.requests, 3, "上限已调高、票又快到期：立刻猎")
+	require.Empty(t, h.state().Gate)
+}
+
 // TestOpenAITurnStateHunterBackoffWithoutTouchingAccount 钉住「出错只退避，不改账号状态」：
 // 401 不 SetError、不停号；退避 6 小时；错误信息进运行态。
 func TestOpenAITurnStateHunterBackoffWithoutTouchingAccount(t *testing.T) {
@@ -764,6 +922,12 @@ func TestValidateOpenAITurnStateHunterExtra(t *testing.T) {
 	require.NoError(t, ValidateOpenAITurnStateHunterExtra(map[string]any{
 		openAITurnStateHunterExtraKey: hunterConfig(map[string]any{"lead_minutes": 29}), openAITurnStateStaleMinExtraKey: 30,
 	}))
+	require.Error(t, ValidateOpenAITurnStateHunterExtra(map[string]any{
+		openAITurnStateHunterExtraKey: hunterConfig(map[string]any{"lead_minutes": 30}), openAITurnStateStaleMinExtraKey: "30",
+	}), "stale_after 写成数字串也要比：运行时 parseExtraFloat64 就收字符串")
+	require.Error(t, ValidateOpenAITurnStateHunterExtra(map[string]any{
+		openAITurnStateHunterExtraKey: hunterConfig(map[string]any{"lead_minutes": 10}), openAITurnStateStaleMinExtraKey: 10.5,
+	}), "运行时按 int 截断成 10，10 >= 10 就是永远够不上的窗")
 	require.NoError(t, ValidateOpenAITurnStateHunterExtra(map[string]any{openAITurnStateHunterExtraKey: hunterConfig(map[string]any{"reasoning_effort": "xhigh", "idle_minutes": -1})}))
 
 	cfg, ok := readOpenAITurnStateHunterConfig(&Account{Extra: valid()})

@@ -202,8 +202,11 @@ const extra = computed(
 
 const ttlMs = computed(() => {
   const raw = extra.value['openai_turn_state_stale_after_minutes']
-  const minutes = typeof raw === 'number' && raw > 0 ? raw : TURN_STATE_DEFAULT_TTL_MINUTES
-  return minutes * 60_000
+  // 与后端 getExtraInt 同口径：数字串也收、小数截断、非正数回落默认。另夹一年上限——后端
+  // 没有上限，但天文 TTL 会让 toISOString 抛 RangeError，页面先保住自己。
+  const minutes = typeof raw === 'number' || typeof raw === 'string' ? Math.trunc(Number(raw)) : NaN
+  const valid = Number.isFinite(minutes) && minutes > 0
+  return (valid ? Math.min(minutes, 525_600) : TURN_STATE_DEFAULT_TTL_MINUTES) * 60_000
 })
 
 /**
@@ -438,6 +441,8 @@ interface HuntState {
   hour_count?: number
   last?: HuntAttempt[]
   last_error?: string
+  /** 上次被门槛挡住的原因：idle（无真实流量）/ fresh（票未到期）；正在猎时为空。 */
+  gate?: string
 }
 const TURN_STATE_HUNT_DEFAULT_MAX_PER_HOUR = 30
 
@@ -467,8 +472,16 @@ const huntAttempts = computed<HuntAttempt[]>(() =>
   Array.isArray(huntState.value.last) ? huntState.value.last : []
 )
 
+/**
+ * 后端 runOnce 要求猎手开关与自动接管**同时**开着才跑（票靠接管注入，只猎不注是白烧
+ * 额度）。只看猎手开关的话，接管关着时这行会写着「待命」，而猎手一次都不会运行。
+ */
+const hunterNeedsAuto = computed(() => hunterMaxPerHour.value !== null && isManualMode.value)
+
 // last_error 也算：「没有可用代理」这类错误不产生探测记录，只写 last_error。
-const hunterErrored = computed(() => !!huntAttempts.value[0]?.error || !!huntState.value.last_error)
+const hunterErrored = computed(
+  () => hunterNeedsAuto.value || !!huntAttempts.value[0]?.error || !!huntState.value.last_error
+)
 
 const hunterAttemptResult = (a: HuntAttempt) => {
   if (a.error) return t('admin.accounts.openai.turnStatePool.hunterResultError', { status: a.status || '-', error: a.error })
@@ -483,16 +496,19 @@ const hunterAttemptResult = (a: HuntAttempt) => {
 const hunterLine = computed(() => {
   const max = hunterMaxPerHour.value
   if (max === null) return ''
+  if (hunterNeedsAuto.value) return t('admin.accounts.openai.turnStatePool.hunterNeedsAuto')
   const now = sharedNow.value
   const st = huntState.value
   // 小时窗过了就是 0：后端只在下一次探测时才把计数归零，页面不能拿旧计数吓人。
   const hourStart = parseTime(st.hour_start)
   const count = hourStart && hourStart.getTime() + 3_600_000 > now ? st.hour_count ?? 0 : 0
   const nextAt = parseTime(st.next_at)
+  // 没在等窗时说清楚为什么没在猎：「待命」盖不住「票还新鲜」和「无流量暂停」的区别。
+  const gateKey = st.gate === 'idle' ? 'hunterGateIdle' : st.gate === 'fresh' ? 'hunterGateFresh' : 'hunterReady'
   const next =
     nextAt && nextAt.getTime() > now
       ? t('admin.accounts.openai.turnStatePool.hunterNext', { time: formatTime(nextAt) })
-      : t('admin.accounts.openai.turnStatePool.hunterReady')
+      : t(`admin.accounts.openai.turnStatePool.${gateKey}`)
   const latest = huntAttempts.value[0]
   const last = latest
     ? t('admin.accounts.openai.turnStatePool.hunterLast', {

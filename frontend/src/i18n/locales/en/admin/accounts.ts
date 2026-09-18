@@ -363,8 +363,9 @@ export default {
           normal: 'RPM normal',
           tieredNormal: 'RPM limit (Tiered) - Normal',
           tieredWarning: 'RPM limit (Tiered) - Approaching limit',
-          tieredStickyOnly: 'RPM limit (Tiered) - Sticky only | Buffer: {buffer}',
-          tieredBlocked: 'RPM limit (Tiered) - Blocked | Buffer: {buffer}',
+          // A bare `|` is vue-i18n's plural separator: t() without a count renders only the first form. Use {'|'}.
+          tieredStickyOnly: "RPM limit (Tiered) - Sticky only {'|'} Buffer: {buffer}",
+          tieredBlocked: "RPM limit (Tiered) - Blocked {'|'} Buffer: {buffer}",
           stickyExemptNormal: 'RPM limit (Sticky Exempt) - Normal',
           stickyExemptWarning: 'RPM limit (Sticky Exempt) - Approaching limit',
           stickyExemptOver: 'RPM limit (Sticky Exempt) - Over limit, sticky only'
@@ -708,7 +709,8 @@ export default {
         turnStateHunter: '292 hunter',
         turnStateHunterDesc:
           'Shortly before the live ticket expires, open fresh sessions through the selected proxies until a 292 is minted, then pool it for automatic takeover. Probes hang up as soon as the response headers arrive; the main cost is the input tokens of each probe (including the model base prompt). While the hunter is on, every session gets the pooled ticket. Hourly cap applies; models without real traffic inside the idle window are not hunted. Every probe opens a new proxy connection, so webshare -rotate endpoints change exit per probe; other proxies are treated as fixed exits: the exit IP is resolved before probing, each exit is probed once, and an exit that minted 312 is left alone for 7 days.',
-        turnStateHunterNeedsAuto: 'Enable automatic takeover first, otherwise hunted tickets are pooled but never injected',
+        turnStateHunterNeedsAuto: 'Enable automatic takeover first, otherwise the hunter does not run',
+        turnStateHunterInvalid: 'With the hunter enabled, pick 1–8 models and 1–64 proxies',
         turnStateHunterEffortDefault: 'default (high)',
         turnStateHunterModels: 'Models to hunt',
         turnStateHunterProxies: 'Probe proxies',
@@ -730,6 +732,9 @@ export default {
           hunterSummary: 'hunter {count}/{max} this hour · {next} · {last}',
           hunterNext: 'next {time}',
           hunterReady: 'ready',
+          hunterGateIdle: 'paused: no traffic',
+          hunterGateFresh: 'ticket still fresh',
+          hunterNeedsAuto: 'hunter inactive: enable automatic takeover first',
           // A bare `@` is vue-i18n's linked-message prefix and throws in production builds; use {'@'}.
           hunterLast: "last {result} {'@'}{proxy} {time}",
           hunterLastNone: 'no probe yet',
@@ -903,7 +908,7 @@ export default {
         bulkDisableHint: 'Saving will disable header override and clear existing configuration on the selected accounts.',
         bulkReplaceHint: 'Saving will replace the existing header override configuration on all selected accounts with the rows below.',
         bulkEmptyRows: 'Add at least one header row before saving, or turn the toggle off to clear existing configuration.',
-        invalidName: 'Invalid header name (only letters, digits and !#$%&\'*+-.^_`|~ are allowed)',
+        invalidName: "Invalid header name (only letters, digits and !#$%&'*+-.^_`{'|'}~ are allowed)",
         blockedName: 'This header cannot be overridden (auth and connection-control headers are managed by the system)',
         duplicateName: 'Duplicate header name (matching is case-insensitive)',
         invalidValue: 'Invalid header value (control characters are not allowed; max length 8192)',

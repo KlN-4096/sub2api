@@ -22,8 +22,9 @@ func TestAppendTurnStateWhereCondition(t *testing.T) {
 		{"   ", "", nil},
 		{"bogus", "", nil},
 		{usagestats.TurnStateFilterMinted, "turn_state IS NOT NULL", nil},
-		{usagestats.TurnStateFilterHealthy, "char_length(turn_state) = 292", nil},
-		{usagestats.TurnStateFilterSuspect, "turn_state IS NOT NULL AND char_length(turn_state) <> 292", nil},
+		// individual 292 / team 332 都是健康形态，与 service 的 openAITurnStateShapes 同源。
+		{usagestats.TurnStateFilterHealthy, "char_length(turn_state) IN (292, 332)", nil},
+		{usagestats.TurnStateFilterSuspect, "turn_state IS NOT NULL AND char_length(turn_state) NOT IN (292, 332)", nil},
 		{usagestats.TurnStateFilterSent, "turn_state_sent IS NOT NULL", nil},
 		{usagestats.TurnStateFilterInjected, "turn_state_overridden IS TRUE", nil},
 		{usagestats.TurnStateFilterAuto, "turn_state_source = $1", []any{"auto"}},
