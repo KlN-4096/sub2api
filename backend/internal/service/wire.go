@@ -425,6 +425,15 @@ func ProvideSubscriptionExpiryService(userSubRepo UserSubscriptionRepository, se
 	return svc
 }
 
+// ProvideOpenAITurnStateHunterService creates and starts OpenAITurnStateHunterService.
+// 只对显式开了猎手的 Codex oauth 账号工作；持 leader lock，多实例不会成倍探测。
+func ProvideOpenAITurnStateHunterService(gateway *OpenAIGatewayService, accountRepo AccountRepository, proxyRepo ProxyRepository, exitProber ProxyExitInfoProber, lockCache LeaderLockCache, db *sql.DB) *OpenAITurnStateHunterService {
+	svc := NewOpenAITurnStateHunterService(gateway, accountRepo, proxyRepo, exitProber, openAITurnStateHunterInterval)
+	svc.SetLeaderLock(lockCache, db)
+	svc.Start()
+	return svc
+}
+
 // ProvideTimingWheelService creates and starts TimingWheelService
 func ProvideTimingWheelService() (*TimingWheelService, error) {
 	svc, err := NewTimingWheelService()
@@ -915,6 +924,7 @@ var ProviderSet = wire.NewSet(
 	ProvideOpenAICodexVersionSyncService,
 	ProvideProxyExpiryService,
 	ProvideSubscriptionExpiryService,
+	ProvideOpenAITurnStateHunterService,
 	ProvideTimingWheelService,
 	ProvideDashboardAggregationService,
 	ProvideUsageCleanupService,
