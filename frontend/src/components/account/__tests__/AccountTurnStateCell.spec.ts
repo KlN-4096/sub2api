@@ -62,7 +62,7 @@ const render = (acc: Account) =>
 
 /**
  * 每行折成 `标记|模型名`。标记是独立元素而不是 label 的后缀：label 徽章是 72px + truncate，
- * `{model}(仅观测)` 里的后缀会整个落进省略号，而那是唯一说明这行不会被注入的文字。
+ * `{model}(最近铸出)` 里的后缀会整个落进省略号，而那是唯一说明这行不会被注入的文字。
  */
 const rows = (w: ReturnType<typeof render>) =>
   w.findAll('[data-testid="account-turn-state-row"]').map((r) => {
@@ -97,10 +97,12 @@ describe('AccountTurnStateCell', () => {
     // 所以票失效时它一定在——没有它就不算裸奔，只是没流量。
     const w = render(
       account([cand('expired', 7200), cand('failed', 60, 10, { failed: true })], {
-        openai_turn_state_observed: obs('failed', 60)
+        openai_turn_state_observed: obs('failed', 60, 11)
       })
     )
-    expect(rows(w)).toEqual(['admin.accounts.openai.turnStatePool.observedTag|failed'])
+    // 312 不进展示，所以一行都没有 —— 但它仍然证明了「一分钟前还在铸票」，
+    // 裸奔告警靠的就是这个。
+    expect(rows(w)).toEqual([])
     // 整块消失会让「没票」和「组件没渲染」长得一样，所以要占位。
     // 占位必须带标识：它挤在额度列下方，裸的 - 认不出是什么，等于没显示。
     //
@@ -118,7 +120,7 @@ describe('AccountTurnStateCell', () => {
     const w = render(account([], { openai_turn_state_observed: obs('m', 7200) }))
     expect(w.find('[data-testid="account-turn-state-empty"]').exists()).toBe(false)
     // 过期的观测行照常渲染（它不是票，没有到期这回事，后端也永不删它）。闲置号、刚接手
-    // 的号恰恰最需要页面回答「这个号铸的是 292 还是 312」，按票的口径滤掉就等于在自己
+    // 的号恰恰最需要页面回答「这个号最近铸出来的是什么」，按票的口径滤掉就等于在自己
     // 的动机场景里失效。
     expect(rows(w)).toEqual(['admin.accounts.openai.turnStatePool.observedTag|m'])
     // 此时一条都注不出去，summary 必须换口径说，不能报成「1 个模型有生效的」。
@@ -146,21 +148,19 @@ describe('AccountTurnStateCell', () => {
     expect(w.findAll('.bar')).toHaveLength(1)
   })
 
-  it('关掉自动接管：手填票标「手填」，形态观测仍展示但标「仅观测」', () => {
+  it('关掉自动接管：手填票标「手填」，未降智的观测仍展示但标「最近铸出」', () => {
     const w = render(
       account([cand('stale-pool', 60)], {
         openai_turn_state_auto: false,
         openai_turn_state_override: { other: turnStateFixture(nowSec - 60, 10) },
-        openai_turn_state_observed: obs('other', 30, 11)
+        openai_turn_state_observed: obs('other', 30, 10)
       })
     )
     // 整个顺序都钉住，三件事一次说清：
     //  - 手填那组整体排在观测之前：生效的票要先看见，不能被观测行挤到下面去。
-    //  - 形态观测照样要展示：它是「这个账号现在铸出来的是 292 还是 312」的唯一答案，
-    //    而那正是判断该不该开接管的前提。早先这里是二选一、接管一关就整个不显示，
-    //    于是页面永远回答不了这个问题（2026-09-18 pro1-cpr 铸出 292 却什么都看不到）。
-    //  - 同一个模型（other）在两组里各留一条：合成一组去重的话，运维手填的恰恰是他正
-    //    盯着 312 的那个模型，观测行会被手填行整个吃掉。
+    //  - 未降智的观测照样要展示：接管关着时它是唯一有数据的源，后端那时根本不写候选池。
+    //  - 同一个模型（other）在两组里各留一条：合成一组去重的话，运维盯着的恰恰是那个
+    //    模型，观测行会被手填行整个吃掉。
     //
     // 同时钉住候选池在接管关着时不出现：那是死数据（后端那时根本不写它，留下的最多
     // 再躺 1 小时），拿它冒充观测就是用一条注不出去的票充当现状读数。
@@ -170,15 +170,15 @@ describe('AccountTurnStateCell', () => {
     ])
   })
 
-  it('接管开着：候选池是生效行，形态观测是并列的「仅观测」行，且不计进生效数', () => {
+  it('接管开着：候选池是生效行，形态观测是并列的「最近铸出」行，且不计进生效数', () => {
     const w = render(
-      account([cand('m', 60)], { openai_turn_state_observed: obs('m', 30, 11) })
+      account([cand('m', 60)], { openai_turn_state_observed: obs('m', 30, 12) })
     )
-    // 同一个模型两行并存：生效的那条不带标记，观测那条标「仅观测」。共用一个 seen
+    // 同一个模型两行并存：生效的那条不带标记，观测那条标「最近铸出」。共用一个 seen
     // 去重的话，运维正盯着的那个模型恰好只剩一行，观测值被吃掉。
     expect(rows(w)).toEqual(['|m', 'admin.accounts.openai.turnStatePool.observedTag|m'])
-    // 观测行记的是刚铸出 312：这正是「该不该继续开接管」要看的读数。
-    expect(w.findAll('.bar')[1].attributes('data-color')).toBe('amber')
+    // team 基线的 332 也算健康，照样展示。
+    expect(w.findAll('.bar')[1].attributes('data-color')).toBe('purple')
     // summary 只能报真的会被注入的条数，否则「3 行」会被读成「3 个模型在注入」。
     expect(w.get('[data-testid="account-turn-state-summary"]').text()).toBe(
       'admin.accounts.openai.turnStatePool.summary:{"n":1}'
@@ -186,11 +186,11 @@ describe('AccountTurnStateCell', () => {
   })
 
   it('接管开着、池空但有观测行：仍要报「裸奔」', () => {
-    // 形态观测对所有 Codex 账号都采集，池子空到底时观测行照样在。starved 判据要是看
-    // 总行数，这条告警就永远不会亮——而那恰好是最需要它的时刻：客户端回带什么就原样
-    // 发什么，降智会话下 312 直接出站。
+    // 降智的观测不进展示（用量表每行都写着，账号页再说一遍没意义），但它必须仍然
+    // 参与 starved 判定——「接管开着、在铸 312、一张票都注不出去」正是最该报警的时刻，
+    // 而这个账号一行都不渲染。judging 用 activeCount + hasRecentMint，不是行数。
     const w = render(account([], { openai_turn_state_observed: obs('m', 60, 11) }))
-    expect(w.findAll('.bar')).toHaveLength(1)
+    expect(w.findAll('.bar')).toHaveLength(0)
     const empty = w.get('[data-testid="account-turn-state-empty"]')
     expect(empty.text()).toBe('admin.accounts.openai.turnStatePool.starved')
     expect(empty.attributes('data-starved')).toBe('true')
@@ -210,27 +210,44 @@ describe('AccountTurnStateCell', () => {
     // 这一行要回答的是「铸的是 292 还是 312」，模型名只是附注。因为归不到模型就整条
     // 不展示的话，最该看见的那个读数反而没有。
     const w = render(
-      account([], { openai_turn_state_auto: false, openai_turn_state_observed: obs('', 60, 11) })
+      account([], { openai_turn_state_auto: false, openai_turn_state_observed: obs('', 60, 10) })
     )
     expect(rows(w)).toEqual(['admin.accounts.openai.turnStatePool.observedTag|'])
   })
 
   it.each([
-    [10, true, 'purple'],
-    [11, true, 'amber'],
-    [12, false, 'purple'],
-    [13, false, 'amber']
-  ])('观测行按块数 %i 判健康，不信后端下发的 healthy=%s', (blocks, backendHealthy, color) => {
+    [10, false, true],
+    [11, true, false],
+    [12, false, true],
+    [13, true, false]
+  ])('观测行按块数 %i 判健康，不信后端下发的 healthy=%s', (blocks, backendHealthy, shown) => {
     // 前后端的形态表是两份手抄。读后端的 healthy 就等于同一列用两套判据：哪天漂移了，
-    // 同一个形态会在同一个格子里一行紫一行琥珀，而页面上没有任何东西提示这是判据分歧。
-    // 这里刻意把后端的 healthy 填成与块数相反的值。
+    // 同一个形态的展示与否会前后端打架，而页面上没有任何东西提示这是判据分歧。
+    // 这里刻意把后端的 healthy 填成与块数相反的值 —— 展示与否必须只由块数说了算。
     const w = render(
       account([], {
         openai_turn_state_auto: false,
         openai_turn_state_observed: { ...obs('m', 60, blocks), healthy: backendHealthy }
       })
     )
-    expect(w.get('.bar').attributes('data-color')).toBe(color)
+    expect(w.find('.bar').exists()).toBe(shown)
+  })
+
+  it('每行都把形态数字摆出来，绿/红与用量表同口径', () => {
+    // 进度条和百分比的颜色来自剩余时间（74% → 绿），与健康度无关；不摆数字的话，
+    // 一条票在账号页上只有一条绿条，而用量表里同一条记录写着 292/312。
+    // 手填是唯一可能出现降智值的来源（人手填错），所以用它来取红色那一档。
+    const w = render(
+      account([cand('m', 60, 10)], {
+        openai_turn_state_auto: false,
+        openai_turn_state_override: { bad: turnStateFixture(nowSec - 60, 11) },
+        openai_turn_state_observed: obs('m', 30, 12)
+      })
+    )
+    const chips = w.findAll('[data-testid="account-turn-state-shape"]')
+    expect(chips.map((c) => c.text())).toEqual(['312', '332'])
+    expect(chips[0].classes().join(' ')).toContain('red')
+    expect(chips[1].classes().join(' ')).toContain('green')
   })
 
   it('接管关着且一条票都没有：是「没开」不是「裸奔」', () => {
