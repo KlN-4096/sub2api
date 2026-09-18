@@ -246,7 +246,18 @@ type openAITurnStateHuntState struct {
 	Last      []openAITurnStateHuntAttempt `json:"last"`
 	Exits     []openAITurnStateHuntExit    `json:"exits,omitempty"`
 	LastError string                       `json:"last_error,omitempty"`
-	UpdatedAt time.Time                    `json:"updated_at"`
+	// CapWait 标记 NextAt 是「撞上限等窗」定的（而不是出错退避）：上限调高后本窗还有余量
+	// 就不用等到点，立刻恢复。
+	CapWait   bool      `json:"cap_wait,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// waiting 报告现在是否还该等：退避照等；撞上限的等待在上限调高后自动解除。
+func (st *openAITurnStateHuntState) waiting(cfg openAITurnStateHunterConfig, now time.Time) bool {
+	if !now.Before(st.NextAt) {
+		return false
+	}
+	return !st.CapWait || st.HourCount >= cfg.MaxPerHour
 }
 
 // noteExit 记录出口的最新结果（同一「代理 × IP」只留最新一条，最多 128 条，够 64 个固定
@@ -491,9 +502,10 @@ func (s *OpenAITurnStateHunterService) huntAccount(ctx context.Context, account 
 	cfg, _ := readOpenAITurnStateHunterConfig(account)
 	now := s.now()
 	st := readOpenAITurnStateHuntState(account)
-	if now.Before(st.NextAt) {
+	if st.waiting(cfg, now) {
 		return
 	}
+	st.CapWait = false // 进入新一轮就不再是「等窗」状态；只有再次撞上限才重新标
 	st.rollHour(now)
 	if st.HourCount >= cfg.MaxPerHour {
 		return
@@ -597,6 +609,7 @@ func (s *OpenAITurnStateHunterService) huntModels(ctx context.Context, account *
 		st.rollHour(s.now())
 		if st.HourCount >= cfg.MaxPerHour {
 			st.NextAt = st.HourStart.Add(time.Hour)
+			st.CapWait = true
 			s.persist(ctx, account, *st)
 			return
 		}

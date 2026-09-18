@@ -577,6 +577,42 @@ func TestOpenAITurnStateHunterHourlyCap(t *testing.T) {
 	require.Len(t, h.up.requests, 2)
 }
 
+// TestOpenAITurnStateHunterCapRaisedResumesImmediately 钉住：撞上限的等待在上限调高后立刻
+// 解除；出错退避不受上限影响。
+func TestOpenAITurnStateHunterCapRaisedResumesImmediately(t *testing.T) {
+	now := time.Now().UTC()
+	h := newHunterHarness(hunterTestAccount(hunterConfig(map[string]any{"max_per_hour": 2})), hunterWebshareProxy)
+	for range 4 {
+		resp, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks+1), "")
+		h.up.queue = append(h.up.queue, resp)
+	}
+
+	h.run(t)
+	require.Len(t, h.up.requests, 2)
+	require.True(t, h.state().CapWait, "撞上限等窗")
+
+	h.run(t)
+	require.Len(t, h.up.requests, 2, "上限没变：等窗")
+
+	h.account.Extra[openAITurnStateHunterExtraKey] = hunterConfig(map[string]any{"max_per_hour": 4})
+	h.run(t)
+	require.Len(t, h.up.requests, 4, "上限调到 4：不等到点，本窗余量立刻用上")
+	st := h.state()
+	require.True(t, st.CapWait, "再次撞上限")
+	require.Equal(t, st.HourStart.Add(time.Hour), st.NextAt)
+
+	// 出错退避：上限调高也不解除。
+	h.account.Extra[openAITurnStateHunterExtraKey] = hunterConfig(map[string]any{"max_per_hour": 10})
+	h.up.err = errors.New("dial tcp: proxy refused")
+	h.run(t)
+	require.Len(t, h.up.requests, 5)
+	st = h.state()
+	require.False(t, st.CapWait)
+	h.account.Extra[openAITurnStateHunterExtraKey] = hunterConfig(map[string]any{"max_per_hour": 100})
+	h.run(t)
+	require.Len(t, h.up.requests, 5, "退避期内上限再高也不探")
+}
+
 // TestOpenAITurnStateHunterBackoffWithoutTouchingAccount 钉住「出错只退避，不改账号状态」：
 // 401 不 SetError、不停号；退避 6 小时；错误信息进运行态。
 func TestOpenAITurnStateHunterBackoffWithoutTouchingAccount(t *testing.T) {
