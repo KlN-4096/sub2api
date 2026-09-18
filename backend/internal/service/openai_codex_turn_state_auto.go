@@ -15,8 +15,14 @@ import (
 )
 
 // 自动接管 turn-state：检测到某个 session 落在 312（降智）后，把该账号最近一条
-// 有效的 292 注入该 session 的后续请求；注入后上游若仍铸出 312，判定该候选失效，
-// 降级到下一条；候选全部失效则停掉账号调度并写明原因。
+// 有效的 292 注入该 session 的后续请求；票一直用到自铸造起 1 小时自然过期。
+//
+// 候选失效只有一个来源——上游以 invalid_encrypted_content 拒绝这条 blob。曾经
+// 「注入 292 后上游仍铸出 312」也算失效，那个判据是错的：实测 578 条现网样本里新铸
+// 的块数由账号当时的权重决定，与请求带的那张票无关（「10 块 → 11 块」一次都没发生
+// 过），所以上游铸 312 是账号权重的读数，不是这张票坏了的证据。而 fail_threshold
+// 默认是 1，按那个判据注入一次就报废一张票，池子几分钟见底。
+// 候选全部失效则停掉账号调度并写明原因。
 //
 // 为什么只在「已知 312 的 session」上注入，而不是无条件注入——实测 4262 条
 // /responses：请求不带 turn-state 时 87.1% 会铸出新 blob，带了则只有 8.0%。
@@ -25,8 +31,11 @@ import (
 const (
 	// openAITurnStateAutoExtraKey 总开关。开启后手填覆写完全失效（系统接管）。
 	openAITurnStateAutoExtraKey = "openai_turn_state_auto"
-	// openAITurnStatePoolExtraKey 候选池，系统维护。
+	// openAITurnStatePoolExtraKey 候选池，系统维护。只在自动接管开着时写。
 	openAITurnStatePoolExtraKey = "openai_turn_state_pool"
+	// openAITurnStateObservedExtraKey 每个模型最近一次观测到的形态（不含 blob）。
+	// 对所有 Codex 账号都写，带节流，纯展示用。
+	openAITurnStateObservedExtraKey = "openai_turn_state_observed"
 	// 以下三个有配置项但不开放前端，按需用 API/DB 改。
 	openAITurnStatePoolSizeExtraKey   = "openai_turn_state_pool_size"
 	openAITurnStateFailThreshExtraKey = "openai_turn_state_fail_threshold"
@@ -41,9 +50,6 @@ const (
 	defaultOpenAITurnStateFailThreshold = 1
 	// defaultOpenAITurnStateStaleMinutes 是候选有效期：292 自铸造起可用 1 小时。
 	defaultOpenAITurnStateStaleMinutes = 60
-	// openAIHealthyTurnStateLen 是「不降智」的字符长度，只在信封解不开时兜底、
-	// 以及前端展示用。真正的判据是密文块数，见 openai_codex_turn_state_envelope.go。
-	openAIHealthyTurnStateLen = 292
 	// openAITurnStateSessionTTL 是 session 长度状态的存活期。turn-state blob 实测
 	// 存活中位 2.6 分钟、最长 33 分钟，1 小时足够覆盖一个会话的活跃期。
 	openAITurnStateSessionTTL = time.Hour
@@ -68,8 +74,14 @@ const (
 	ctxKeyTurnStateSkipAuto = "openai_turn_state_skip_auto"
 	// ctxKeyTurnStateObserved 记本次上下文已观测过的 blob：
 	// applyAttemptResponseHeaders 有两个调用点，幂等只靠 c.Writer.Written()，
-	// 同一条 blob 可能被观测两次 → FailStreak 双增、禁用动作连发两次。
-	ctxKeyTurnStateObserved = "openai_turn_state_observed"
+	// 同一条 blob 会被观测两次。观测路径现在不碰 FailStreak、也不会触发禁用（失效
+	// 只由 invalid_encrypted_content 驱动），所以这道闸是纯开销保护：挡掉重复的
+	// 形态写入与入池读写，别让每条响应白付两次。
+	//
+	// 字面量刻意与 extra 键 openAITurnStateObservedExtraKey 区分开：两个命名空间今天
+	// 不相交，但重名会让下一个人一不小心写成 c.Set(openAITurnStateObservedExtraKey, …)
+	// 而静默把这道承重的闸冲掉。
+	ctxKeyTurnStateObserved = "openai_turn_state_observed_ctx"
 	// ctxKeyTurnStateRejected 与 ctxKeyTurnStateObserved 同理：非 WSv2 路径会在
 	// 剥掉 encrypted reasoning items 后重试一次，同一次注入可能撞两回 400。
 	ctxKeyTurnStateRejected = "openai_turn_state_rejected"
@@ -441,10 +453,15 @@ func OpenAITurnStateUsageSource(c *gin.Context) string {
 
 // observeOpenAITurnStateMint 是响应侧唯一入口：上游铸出新 blob 时调用。
 //
-// 两件事：
-//  1. 未注入的请求铸出的长度，决定该 session 是否需要注入（注入后铸出的不回写，
-//     否则注入一生效就把降智标记抹掉，下一轮又变回来，来回跳）。
-//  2. 注入过的请求铸出 312 → 本次注入的候选失效；铸出 292 → 候选有效，streak 清零。
+// 三件事，分别有各自的门禁：
+//  1. **形态观测**（所有 Codex 账号，但只认本次没注入的自然铸造）：把这次铸出来的
+//     块数/字符数记进 openai_turn_state_observed，健康与否都记。账号页靠它回答「这个
+//     号现在铸的是 292 还是 312」，而那是判断该不该开自动接管的前提。带节流，见
+//     noteOpenAITurnStateObservation。
+//  2. **候选入池**（只在自动接管开着时）：健康 blob 进候选池供注入用。这条是同步
+//     读库+写库，只有主动开了接管的诊断账号付这个钱。
+//  3. **session 降智判定**（只在自动接管开着时）：未注入的请求铸出的形态决定该
+//     session 后续要不要注入。
 //
 // 任何一步都不该阻塞响应，失败只记日志。
 func (s *OpenAIGatewayService) observeOpenAITurnStateMint(c *gin.Context, account *Account, minted string) {
@@ -462,33 +479,181 @@ func (s *OpenAIGatewayService) observeOpenAITurnStateMint(c *gin.Context, accoun
 		c.Set(ctxKeyTurnStateObserved, minted)
 	}
 	healthy := openAITurnStateHealthy(minted)
+	injected := openAITurnStateInjectedFromContext(c)
+
+	// 形态观测对所有 Codex 账号都做，与接管开关无关：账号页要能回答「这个号现在铸的是
+	// 292 还是 312」，而那正是判断该不该开接管的前提——关着就什么都不记的话，「没开
+	// 接管」「开了但池空」「正在铸 312」在页面上长得一模一样，等于鸡生蛋。
+	//
+	// 但**只认自然铸造**（本次没注入），与下面的 session 判定同一道闸。这个入口是
+	// 「上游响应里带了这个头就调」，而带 turn-state 的请求只有 8.0% 会重铸、另外 92%
+	// 上游原样回带——注入一开，记下来的就是我们自己那张 292 的回声。页面于是在账号
+	// 仍然铸 312 的时候报绿，运维看绿关掉接管，立刻又吃 312；「正在铸 312」和「接管
+	// 正在生效」被合并成同一种显示，恰好毁掉这条记录存在的理由。
+	//
+	// 只记形态、不记 blob：blob 是上游令牌，无条件存进每个账号的 extra 就等于让它随
+	// 账号列表接口下发、进每一份 DB dump。形态（块数/字符数）足够回答上面那个问题。
+	if injected == "" {
+		s.noteOpenAITurnStateObservation(c, account, minted, healthy)
+	}
 
 	if !account.IsOpenAITurnStateAutoEnabled() {
 		return
 	}
-	injected := openAITurnStateInjectedFromContext(c)
 
-	// 入池不分「有没有注入」：一个 session 被判降智后每条请求都带注入，若入池只认
-	// 未注入的请求，降智账号就永远补不到票——池子只出不进，候选到期后自动接管静默
-	// 停摆。
+	// 入池刻意留在接管门禁之后：它是同步的读库+写库（GetByID 连带 loadProxies /
+	// loadAccountGroups 共 3 条 SELECT，再加一条 UPDATE），就在响应首字节之前、还持着
+	// 账号锁。而「请求不带 turn-state 时 87.1% 会铸出新值」（见文件头），放到门禁之前
+	// 等于给每个 Codex 账号的每一条响应都加上这笔开销——同一行 accounts 每请求一次
+	// UPDATE，行锁排队加死元组堆积。只有主动开了接管的诊断账号该付这个钱。
 	//
-	// 这样不会把「刚注进去、失效计数还没攒够」的候选挤掉，但理由不是「栈顶不被挤」
-	//（pool_size=1 时它就是会被自己挤掉，见 pushOpenAITurnStateCandidate 的限深）。
-	// 真正的不变量是：挤出只发生在 healthy 分支，而那一支下 recordOpenAITurnStateOutcome
-	// 对这条候选只会做一次零值 FailStreak 重置——被挤掉的东西本来也没有要攒的计数。
+	// 入池不分「本次有没有注入」：一个 session 被判降智后每条请求都带注入，若入池只认
+	// 未注入的请求，降智账号就补不到票——池子只出不进，候选到期后自动接管静默停摆。
+	// （补票实际来自同账号其它未降智的 session：降智 session 注入后上游照样铸 312。）
 	if healthy {
 		s.pushOpenAITurnStateCandidate(c, account, minted)
 	}
 
+	// 只在本次没注入时回写 session 判定。
+	//
+	// 这道闸原本的理由是「注入一生效就把降智标记抹掉，两个状态来回跳」，那个理由已经
+	// 不成立：铸什么由账号当时的权重定，与请求带的票无关（见下方长注释），注入并不会
+	// 把铸造结果掰成 292，所以注入时的观测并不比不注入时脏。
+	//
+	// 留着它是因为成本不对称：判过降智之后继续注入几乎不要钱（票已经在池里，注入不
+	// 消耗它），而凭单次健康铸造就停掉注入，下一轮撞上权重抖动就是用户实打实吃一个
+	// 降智回合。代价是恢复判定要晚一步——账号权重回正后，该 session 仍会一直注到
+	// session 标记自己过期（openAITurnStateSessionTTL），此后的请求重新按自然铸造判。
 	if injected == "" {
-		// 自然铸造才代表这个 session 真实落在哪个档位。注入后铸出的结果不回写判定：
-		// 否则注入一生效就把降智标记抹掉，下一轮不注入又铸回 312，两个状态来回跳。
 		if key := openAITurnStateSessionKey(c, account, openAITurnStateRequestSessionID(c)); key != "" {
 			s.setSessionTurnStateNeedsInjection(key, !healthy)
 		}
+	}
+
+	// 刻意不在这里记候选的成败。
+	//
+	// 这里曾经在「注入了 292、上游仍铸出 312」时给该候选记一次失败，而 fail_threshold
+	// 默认是 1——注入一次就报废一张票，池子几分钟见底，接着客户端回带的 312 原样裸奔
+	// 出站，池子恰好空到底时还会直接触发耗尽停号。
+	//
+	// 判据本身是错的：实测 578 条现网样本里，新铸的块数由账号当时的权重决定，与请求
+	// 带的那张票无关（「10 块 → 11 块」一次都没发生过，而「注入有效期内的 292、上游
+	// 仍铸 312」是常态）。上游铸 312 是账号权重的读数，不是这张票坏了的证据。
+	//
+	// 票坏了的硬证据只有一个：上游回 invalid_encrypted_content，那条走
+	// noteOpenAITurnStateRejected。票在此之前一直用到自然过期。
+}
+
+// openAITurnStateObservation 是这个账号最近一次自然铸造出来的 turn-state 形态。
+//
+// **一个账号只存一条，不按模型建表。** 铸什么由账号当时的权重决定，与请求带的票无关，
+// 也与模型无关——这是个账号级读数。按模型建表会付两笔没必要的代价：
+//
+//   - 丢失更新。整张表作为一个顶层键写进 extra，而 JSONB `||` 是顶层键粒度替换。两个
+//     模型的请求各自持有自己的账号快照（每个请求都从 scheduler cache 独立反序列化），
+//     从选号到响应收尾隔着整个上游往返，后写的那张表会把先写的那个模型整条抹掉。抹掉
+//     之后该模型下一条响应查不到上一条 → 节流失效 → 再写一次 → 再有机会丢，双模型并发
+//     下是个自激循环，正好撞在「不能给每条响应加同步读写」上。
+//   - 无界增长。模型键取自下游请求体里的原串（只 TrimSpace，不归一大小写、不过白名单），
+//     大小写变体各占一格，模型本身还随版本轮换。兄弟表 openai_turn_state_override 为此
+//     设了 maxOpenAITurnStateOverrideModels 上限，这里连淘汰都没有。
+//
+// 单条记录把两个问题一起消掉：并发写覆盖的是同样有效的值，条目数恒为 1。Model 降级成
+// 记录里的一个字段，只用来说明「这个读数是哪个模型的请求带回来的」。
+//
+// 刻意不含 blob：这条记录对所有 Codex 账号都写，而 blob 是上游令牌——无条件存进
+// extra 就等于让它随账号列表接口下发、进每一份 DB dump 和账号导出。块数与字符数
+// 足够回答「现在铸的是 292 还是 312」，那是这条记录存在的全部目的。
+type openAITurnStateObservation struct {
+	Model    string    `json:"model"`
+	Blocks   int       `json:"blocks"`
+	Chars    int       `json:"chars"`
+	Healthy  bool      `json:"healthy"`
+	MintedAt time.Time `json:"minted_at"`
+	// ObservedAt 是写下这条记录的时刻，只用于节流。不能拿 MintedAt 当节流基准：那是
+	// blob 自己的信封时间戳，观测到一条已经很老的 blob 时，写进去的还是那个老时间戳，
+	// 下一条响应再判一次还是过期 —— 退化成每响应一次 UPDATE。
+	ObservedAt time.Time `json:"observed_at"`
+}
+
+// openAITurnStateObserveInterval 是形态观测的写节流窗口。
+//
+// 刻意与候选有效期（openai_turn_state_stale_after_minutes，可调）解耦：那是「票还能不能
+// 用」，这是「多久往库里写一次」，共用一个值的话把 stale_after 调小就会把写频顶上去。
+const openAITurnStateObserveInterval = 5 * time.Minute
+
+// readOpenAITurnStateObservation 读形态观测记录。解析失败按「没有」处理。
+//
+// 走 marshal/unmarshal 而不是裸类型断言：extra 是 JSONB，同一个键在「刚写进去」和
+// 「从 DB / Redis 读回来」两条路径上的具体 Go 类型不保证相同，裸断言失败是静默的。
+func readOpenAITurnStateObservation(a *Account) (openAITurnStateObservation, bool) {
+	if a == nil {
+		return openAITurnStateObservation{}, false
+	}
+	raw, ok := a.Extra[openAITurnStateObservedExtraKey]
+	if !ok || raw == nil {
+		return openAITurnStateObservation{}, false
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return openAITurnStateObservation{}, false
+	}
+	var rec openAITurnStateObservation
+	if err := json.Unmarshal(encoded, &rec); err != nil {
+		return openAITurnStateObservation{}, false
+	}
+	return rec, true
+}
+
+// noteOpenAITurnStateObservation 记一次形态观测。所有 Codex 账号都走这条。
+//
+// 带节流：形态没变且上一条写下还不到 openAITurnStateObserveInterval 就不写。上游铸新值
+// 的频率很高（不带 turn-state 的请求 87.1% 会铸），不节流的话这里就是每响应一次 UPDATE，
+// 而 UpdateExtra 对中性键仍会连带一次 GetByID（3 条 SELECT）+ 一次 Redis SetAccount。
+// 形态变了要立刻写——那正是要看的事，不该被节流窗口压住。
+//
+// 读的是请求手里的账号快照，不是 GetByID。单条记录没有候选池那种「并发请求的 Failed 位
+// 不能被抹掉」的不变量要守：并发写覆盖的是同样有效的读数，快照陈旧最多让节流多放过
+// 几次写。
+func (s *OpenAIGatewayService) noteOpenAITurnStateObservation(c *gin.Context, account *Account, blob string, healthy bool) {
+	if s == nil || s.accountRepo == nil || account == nil {
 		return
 	}
-	s.recordOpenAITurnStateOutcome(c, account, injected, healthy)
+	now := time.Now().UTC()
+	next := openAITurnStateObservation{
+		Model:      openAITurnStateRequestModel(c),
+		Chars:      len(blob),
+		Healthy:    healthy,
+		MintedAt:   openAITurnStateMintedAt(blob, now),
+		ObservedAt: now,
+	}
+	if env, ok := parseOpenAITurnStateEnvelope(blob); ok {
+		next.Blocks = env.CipherBlocks
+	}
+
+	if prev, ok := readOpenAITurnStateObservation(account); ok &&
+		prev.Blocks == next.Blocks && prev.Chars == next.Chars &&
+		now.Before(prev.ObservedAt.Add(openAITurnStateObserveInterval)) {
+		return
+	}
+
+	encoded, err := json.Marshal(next)
+	if err != nil {
+		return
+	}
+	var generic map[string]any
+	if err := json.Unmarshal(encoded, &generic); err != nil {
+		return
+	}
+	if account.Extra == nil {
+		account.Extra = map[string]any{}
+	}
+	account.Extra[openAITurnStateObservedExtraKey] = generic
+	if err := s.accountRepo.UpdateExtra(turnStateOpCtx(c), account.ID, map[string]any{
+		openAITurnStateObservedExtraKey: generic,
+	}); err != nil {
+		logOpenAITurnStateAuto("persist observation failed: account=%d err=%v", account.ID, err)
+	}
 }
 
 // turnStateOpCtx 取一个不随请求取消的 ctx：候选池维护要在响应收尾后照常落库。
@@ -520,8 +685,9 @@ func (s *OpenAIGatewayService) loadOpenAITurnStatePoolFresh(ctx context.Context,
 // 的 encrypted_content lineage（见 openai_encrypted_content_lineage.go），跟 turn-state
 // 没关系；不加这道闸就会把别人的锅记到候选上、把好候选判死。
 //
-// 与「铸出更多块」那条判据并列，走同一个 recordOpenAITurnStateOutcome：
-// 阈值、降级链、耗尽停号的语义完全一致。
+// 这是候选失效的**唯一**来源。曾经「注入 292、上游仍铸 312」也会记一次失败，那条
+// 判据已移除——铸什么由账号当时的权重决定，与请求带的那张票无关，把它当失效证据
+// 会在阈值 1 下一次烧掉一张票。
 func (s *OpenAIGatewayService) noteOpenAITurnStateRejected(c *gin.Context, account *Account) {
 	if s == nil || account == nil || !account.IsOpenAITurnStateAutoEnabled() {
 		return
@@ -537,7 +703,7 @@ func (s *OpenAIGatewayService) noteOpenAITurnStateRejected(c *gin.Context, accou
 		c.Set(ctxKeyTurnStateRejected, injected)
 	}
 	logOpenAITurnStateAuto("account=%d injected turn-state rejected by upstream (invalid_encrypted_content)", account.ID)
-	s.recordOpenAITurnStateOutcome(c, account, injected, false)
+	s.recordOpenAITurnStateFailure(c, account, injected)
 }
 
 // pushOpenAITurnStateCandidate 把新铸的健康 blob 推入候选池栈顶。
@@ -582,8 +748,13 @@ func (s *OpenAIGatewayService) pushOpenAITurnStateCandidate(c *gin.Context, acco
 	s.persistOpenAITurnStatePool(c, account, pool)
 }
 
-// recordOpenAITurnStateOutcome 记录一次注入的结果；候选耗尽时停掉账号调度。
-func (s *OpenAIGatewayService) recordOpenAITurnStateOutcome(c *gin.Context, account *Account, injected string, healthy bool) {
+// recordOpenAITurnStateFailure 给一条候选记一次失败；候选耗尽时停掉账号调度。
+//
+// 唯一的调用方是 noteOpenAITurnStateRejected——上游明确拒绝这条 blob 才算失败。
+// 刻意没有「成功」的对侧动作（曾经有过一个重置 FailStreak 的分支）：票用得好好的
+// 时候上游不给任何信号，而「上游铸出 292」不是这张票的功劳（铸什么由账号权重定），
+// 拿它去重置计数只是把同一个误判换个方向再做一遍。
+func (s *OpenAIGatewayService) recordOpenAITurnStateFailure(c *gin.Context, account *Account, injected string) {
 	model := openAITurnStateRequestModel(c)
 	ctx := turnStateOpCtx(c)
 	mu := openAITurnStatePoolLock(account.ID)
@@ -597,21 +768,21 @@ func (s *OpenAIGatewayService) recordOpenAITurnStateOutcome(c *gin.Context, acco
 		if pool[i].Blob != injected {
 			continue
 		}
-		if healthy {
-			if pool[i].FailStreak != 0 {
-				pool[i].FailStreak = 0
-				changed = true
-			}
-		} else {
-			pool[i].FailStreak++
-			changed = true
-			if pool[i].FailStreak >= threshold {
-				pool[i].Failed = true
-			}
+		pool[i].FailStreak++
+		changed = true
+		if pool[i].FailStreak >= threshold {
+			pool[i].Failed = true
 		}
 		break
 	}
 	if !changed {
+		// 注入发生在出站、拒绝发生在上游往返之后，这中间同账号其它 session 只要推进
+		// 满一个池深（默认 3）就会把这张票挤出池子。等 400 回来就找不到它了——失效
+		// 记不上、耗尽判不出、号停不掉，而失效来源本来就只剩这一个稀有事件。
+		// 不打日志的话这种丢失完全不可见。
+		logOpenAITurnStateAuto(
+			"account=%d model=%s rejected turn-state is no longer in pool, failure dropped (pool=%d)",
+			account.ID, model, len(pool))
 		return
 	}
 	// 耗尽只看「该模型下还有没有未失效的候选」，不看有效期：过期是等新票，不是降级链走完。
@@ -679,11 +850,12 @@ func (s *OpenAIGatewayService) disableAccountForExhaustedTurnState(c *gin.Contex
 // buildExhaustedTurnStateReason 写给管理页看的禁用原因：必须一眼看懂「为什么停了」。
 func buildExhaustedTurnStateReason(model string, pool []openAITurnStateCandidate) string {
 	var b strings.Builder
+	// 失效的唯一来源是上游明确拒绝这条 blob（invalid_encrypted_content）。曾经「注入
+	// 292、上游仍铸 312」也算失败，那个判据已移除——铸什么由账号权重定，与带的票无关。
 	fmt.Fprintf(&b,
-		"疑似降智：模型 %s 下 turn-state 自动接管的候选已全部失效（注入 %d 字符的健康 blob 后，"+
-			"上游仍铸出更长的值），已停止调度。判定按密文块数，块数只能把明文框进 %d 字节的窗口，"+
-			"所以这是疑似判据，不是确证。",
-		model, openAIHealthyTurnStateLen, openAITurnStateAESBlockBytes)
+		"模型 %s 下 turn-state 自动接管的候选已全部失效：注入后被上游以 "+
+			"invalid_encrypted_content 拒绝，已停止调度。",
+		model)
 	// 只列这个模型的失效候选：别的模型的票与这次判定无关，列出来只会误导排查。
 	failed := make([]openAITurnStateCandidate, 0, len(pool))
 	for _, c := range pool {
@@ -703,7 +875,9 @@ func buildExhaustedTurnStateReason(model string, pool []openAITurnStateCandidate
 		if env, ok := parseOpenAITurnStateEnvelope(c.Blob); ok {
 			shape = fmt.Sprintf("%d 字符/密文 %d 块", len(c.Blob), env.CipherBlocks)
 		}
-		fmt.Fprintf(&b, " 候选%d=%s(%s，铸于 %s，连续失败 %d 次)",
+		// 「累计」不是「连续」：成功重置那条分支已随错误判据一起删掉，FailStreak 再没有
+		// 清零路径。默认阈值 1 时看不出差别，配成 2 时语义就是「这张票一辈子累计 2 次」。
+		fmt.Fprintf(&b, " 候选%d=%s(%s，铸于 %s，累计失败 %d 次)",
 			i+1, blob, shape, c.MintedAt.Format("01-02 15:04"), c.FailStreak)
 	}
 	// 账号已经停调度，不可能自己再铸出新 blob——恢复路径必须是人工的，别写成「等它自愈」。

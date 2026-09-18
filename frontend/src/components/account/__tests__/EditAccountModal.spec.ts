@@ -1756,6 +1756,27 @@ describe('EditAccountModal turn-state 自动接管', () => {
     checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
   })
 
+  /**
+   * CPR 账号的 ProxySelector 只作用于 sub2api → CPR 这一跳，真正出上游的是 CPR 自己绑的
+   * 代理。没有这句提示的话，运维在这里换个代理会以为出口跟着变了，而实际一点没变——
+   * 这正是 292 探测要按 IP 轮换时第一个会踩的坑。
+   */
+  it('有 CPR 出口信息时在代理选择器下方提示真实出口', () => {
+    const wrapper = mountModal(
+      buildCodexAccount({ cpr_outbound_proxy: 'socks5h://198.51.100.7:1080' })
+    )
+    expect(wrapper.get('[data-testid="edit-account-cpr-outbound"]').text()).toBe(
+      'admin.accounts.cprOutboundHint'
+    )
+    wrapper.unmount()
+  })
+
+  it('没有 CPR 出口信息时不占位', () => {
+    const wrapper = mountModal(buildCodexAccount())
+    expect(wrapper.find('[data-testid="edit-account-cpr-outbound"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('开着开关时手填框置灰并显示「已由自动接管」', async () => {
     const wrapper = mountModal(buildCodexAccount({ openai_turn_state_auto: true }))
 

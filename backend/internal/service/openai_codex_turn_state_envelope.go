@@ -17,11 +17,11 @@ import (
 //     中位 10 秒、最长 367 秒；同一条 blob 的时间戳恒定（1300 个唯一 blob，0 漂移）。
 //     过期由验证方自己定 TTL，信封里没有这个值——别把它当过期时间用。
 //
-//  2. 密文块数把明文框进一个 16 字节的窗口。实测只见过两种：
+//  2. 密文块数把明文框进一个 16 字节的窗口。individual 号上实测见过两种：
 //     292 字符 → 密文 160B = 10 块 → 明文 144–159B（1245 条）
 //     312 字符 → 密文 176B = 11 块 → 明文 160–175B（55 条）
-//     运维口径「292 = 不降智」等价于「密文 10 块」。用块数而不是字符长度做判据：
-//     字符长度受 base64 padding 影响，块数还能如实报出第三种取值。
+//     团队号整体高两块：332 正常 / 356 降智，见 openAITurnStateShapes。用块数而不是
+//     字符长度做判据：字符长度受 base64 padding 影响，块数还能如实报出表外的取值。
 //
 // **块数只把明文框进 16 字节的窗口，所以这是疑似判据，不是确证。**
 const (
@@ -29,9 +29,24 @@ const (
 	openAITurnStateFernetOverhead = 1 + 8 + 16 + 32
 	openAITurnStateFernetVersion  = 0x80
 	openAITurnStateAESBlockBytes  = 16
-	// openAIHealthyTurnStateBlocks 是「不降智」的密文块数基线。
-	openAIHealthyTurnStateBlocks = 10
 )
+
+// openAITurnStateShapes 是实测的「正常」形态表。
+//
+// individual 10 块 / 292 字符，team 12 块 / 332；降智一律是各自基线上多出恰好一块
+// （11 块 / 312、13 块 / 356）。两种形态各有各的基线，不能拿一个阈值切——只认
+// individual 的话，team 号铸出来的每一条都会被判降智。
+//
+// 反过来也成立：两种正常块数（10 / 12）互不冲突，两个降智值（11 / 13）也都不在正常
+// 集合里，所以不需要给账号配类型，命中任一正常值即判健康。
+//
+// 判据强度要清楚：PKCS7 填充下块数只能把明文框进一个 16 字节窗口，多一块只说明明文
+// 跨过了一次边界，不等于内容正好多了 16 字节。上游换了状态结构就要重新标定——表单独
+// 放在这里，就是为了到时候好找。
+var openAITurnStateShapes = [...]struct{ Blocks, Chars int }{
+	{Blocks: 10, Chars: 292}, // individual
+	{Blocks: 12, Chars: 332}, // team
+}
 
 // openAITurnStateEnvelope 是解出来的信封头部信息。
 type openAITurnStateEnvelope struct {
@@ -83,9 +98,20 @@ func parseOpenAITurnStateEnvelope(blob string) (openAITurnStateEnvelope, bool) {
 // blob 默认当健康——那会让它进候选池，之后每次注入都白费一轮观测。
 func openAITurnStateHealthy(blob string) bool {
 	if env, ok := parseOpenAITurnStateEnvelope(blob); ok {
-		return env.CipherBlocks == openAIHealthyTurnStateBlocks
+		for _, shape := range openAITurnStateShapes {
+			if env.CipherBlocks == shape.Blocks {
+				return true
+			}
+		}
+		return false
 	}
-	return len(strings.TrimSpace(blob)) == openAIHealthyTurnStateLen
+	n := len(strings.TrimSpace(blob))
+	for _, shape := range openAITurnStateShapes {
+		if n == shape.Chars {
+			return true
+		}
+	}
+	return false
 }
 
 // openAITurnStateMintedAt 返回铸造时刻；解不出来时用 fallback（通常是观测时刻）。

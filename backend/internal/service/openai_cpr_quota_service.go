@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
 	"sync"
 )
 
@@ -63,6 +64,10 @@ const (
 // Redis 命中路径上的投影账号就看不到档位，订阅优先调度对 cpr 形同虚设。
 const CPRPlanTypeExtraKey = "cpr_plan_type"
 
+// CPROutboundProxyExtraKey 存 CPR 侧的出站代理端点（已脱敏，不含凭据）。纯展示，
+// 不参与调度，因此在 schedulerNeutralExtraKeys 里。
+const CPROutboundProxyExtraKey = "cpr_outbound_proxy"
+
 // CPRAccountState 是一次 admin 查询的归一化结果。
 type CPRAccountState struct {
 	AccountID        string
@@ -75,8 +80,10 @@ type CPRAccountState struct {
 	RateLimitedUntil *time.Time
 	RateLimit        *OpenAIRateLimit
 	// LimitIDs 是 CPR 返回的全部额度窗口的 limitId（含空串），只用于诊断日志。
-	LimitIDs  []string
-	FetchedAt time.Time
+	LimitIDs []string
+	// OutboundProxyEndpoint 是 CPR 侧的出站代理（已由 CPR 脱敏，不含凭据）。
+	OutboundProxyEndpoint string
+	FetchedAt             time.Time
 }
 
 // Schedulable 报告 CPR 是否会把请求路由给这个账号。CPR 的 scheduling_blocker
@@ -118,6 +125,13 @@ type cprAccountView struct {
 	ErrorReason string          `json:"errorReason"`
 	Enabled     bool            `json:"enabled"`
 	Quota       cprAccountQuota `json:"quota"`
+	// OutboundProxyEndpoint 是这个 CPR 账号真正的出站代理，形如 socks5h://host:port。
+	// sub2api 账号上绑的 proxy 只作用于 sub2api→CPR 那一跳，对 cpr 账号而言那是
+	// 127.0.0.1，真正决定出口 IP 的是这里。
+	//
+	// 实测 CPR 返回的是脱敏值（不含 user:pass），但那是上游的行为、不是我们能保证的
+	// 不变量——存之前一律过 sanitizeCPROutboundProxy 再剥一次。
+	OutboundProxyEndpoint string `json:"outboundProxyEndpoint"`
 }
 
 type cprAccountQuota struct {
@@ -204,20 +218,51 @@ func (s *CPRQuotaService) FetchAccountState(ctx context.Context, account *Accoun
 	return buildCPRAccountState(&detail.Account, now), nil
 }
 
+// sanitizeCPROutboundProxy 把 CPR 返回的出站代理端点剥成可安全持久化+外显的形态。
+//
+// 为什么不能直接存：这个值来自 CPR（独立仓库的上游服务）。实测它返回的是脱敏值，
+// 但那是观察不是不变量——CPR 换版本、换配置，或某个账号配的是带认证的 socks5，
+// `socks5h://user:pass@host:port` 就会落进 accounts.extra，随账号列表接口下发，
+// 在管理页的代理列和编辑弹窗里明文显示密码。
+//
+// 本仓库对代理 URL 有硬约定（见 internal/pkg/proxyurl 的包文档：所有解析必须过
+// Parse，禁止直接 url.Parse），这里照办：解得开就重组成 scheme://host:port，解不开就
+// 整个丢弃——宁可页面上不显示出口，也不要把一个没验证过的字符串存下来外显。
+//
+// **无论有没有 userinfo 都走重组**，不能在 User == nil 时把原串放行：凭据也可能藏在
+// path / query / fragment 里（`http://host:8080/?token=xxx`），那些同样会落进
+// accounts.extra、随账号列表接口下发、在管理页明文显示。这个函数的全部理由就是
+// 「CPR 返回什么不是我们能保证的不变量」，留一条原串直通的出口等于没写。
+// proxyurl.Parse 已经保证 scheme 在白名单内、Host 非空（socks5 还会升成 socks5h），
+// 重组是安全的。
+func sanitizeCPROutboundProxy(cprAccountID, raw string) string {
+	_, parsed, err := proxyurl.Parse(raw)
+	if err != nil || parsed == nil {
+		if strings.TrimSpace(raw) != "" && err != nil {
+			slog.Warn("cpr_outbound_proxy_unparsable", "cpr_account_id", cprAccountID, "error", err)
+		}
+		return ""
+	}
+	parsed.User = nil
+	parsed.Path, parsed.RawQuery, parsed.Fragment = "", "", ""
+	return parsed.String()
+}
+
 // buildCPRAccountState 把 CPR 的账号视图翻译成 sub2api 的额度模型。
 func buildCPRAccountState(view *cprAccountView, now time.Time) *CPRAccountState {
 	if view == nil {
 		return nil
 	}
 	state := &CPRAccountState{
-		AccountID:    strings.TrimSpace(view.ID),
-		Status:       strings.TrimSpace(view.Status),
-		PlanType:     strings.TrimSpace(view.PlanType),
-		Email:        strings.TrimSpace(view.Email),
-		ErrorReason:  strings.TrimSpace(view.ErrorReason),
-		Enabled:      view.Enabled,
-		LimitReached: view.Quota.LimitReached,
-		FetchedAt:    now,
+		AccountID:             strings.TrimSpace(view.ID),
+		Status:                strings.TrimSpace(view.Status),
+		PlanType:              strings.TrimSpace(view.PlanType),
+		Email:                 strings.TrimSpace(view.Email),
+		ErrorReason:           strings.TrimSpace(view.ErrorReason),
+		Enabled:               view.Enabled,
+		LimitReached:          view.Quota.LimitReached,
+		OutboundProxyEndpoint: sanitizeCPROutboundProxy(view.ID, view.OutboundProxyEndpoint),
+		FetchedAt:             now,
 	}
 	if until := parseCPRDisplayTime(view.Quota.RateLimitedUntil); until != nil {
 		state.RateLimitedUntil = until
@@ -384,6 +429,24 @@ func buildCPRCodexExtraUpdates(account *Account, state *CPRAccountState) map[str
 			updates = make(map[string]any, 1)
 		}
 		updates[CPRPlanTypeExtraKey] = plan
+	}
+	// 出站代理：cpr 账号真正的出口 IP 由 CPR 侧这个字段决定，sub2api 账号上绑的 proxy
+	// 只作用于 sub2api→CPR 那一跳（127.0.0.1），在账号页上看着像出口其实不是。不显示
+	// 出来就没法回答「这个号现在从哪出去」，而那是排 turn-state / 降智问题的第一个问题。
+	//
+	// 与档位同一套写入条件：空值不写（mergeAccountExtra 只写不删，写空串会把已知值抹掉），
+	// 没变不写（否则每次 /usage 刷新都触发一次 UpdateExtra）。该键是纯展示，已放进
+	// schedulerNeutralExtraKeys，写入不牵连调度快照重建。
+	endpoint := strings.TrimSpace(state.OutboundProxyEndpoint)
+	knownEndpoint := ""
+	if account != nil {
+		knownEndpoint = strings.TrimSpace(account.GetExtraString(CPROutboundProxyExtraKey))
+	}
+	if endpoint != "" && endpoint != knownEndpoint {
+		if updates == nil {
+			updates = make(map[string]any, 1)
+		}
+		updates[CPROutboundProxyExtraKey] = endpoint
 	}
 	return updates
 }
