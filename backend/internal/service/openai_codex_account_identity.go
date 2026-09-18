@@ -294,3 +294,47 @@ func applyCodexAccountIdentityHeaders(headers http.Header, account *Account, api
 		headers.Set(openAIWSTurnMetadataHeader, scopeCodexAccountTurnMetadata(raw, account, apiKeyID))
 	}
 }
+
+// stageCodexOAuthIdentity 把 Codex OAuth 请求体里的身份字段收口，并把出站头要用的
+// IDs 暂存进上下文。Forward 与 turn-state 猎手的探测共用这一段，**顺序敏感**：
+//
+//  1. 带真实 device_id 时补齐 client_metadata 安装标识（compact 形态没有 client_metadata，跳过）。
+//  2. 解析指纹 IDs。compact 形态只跳过请求体侧：真实 Codex 的 compact 请求体同样没有
+//     client_metadata（codex-rs core/src/client.rs 的 compact 请求结构无该字段），但出站头
+//     照发 x-codex-installation-id 与 session-id / thread-id（同文件 compact_conversation_history
+//     的 extra_headers）。故头侧的 IDs 解析与暂存不能跟着体侧一起跳过，否则同一账号的
+//     compact 请求会带着另一套按客户端原值派生的设备身份出站。
+//  3. 账号命名空间改写 client_metadata。命名空间与指纹收敛正交：保留每个客户端的身份基数，
+//     但 failover 之后绝不把同一组 Codex IDs 复用到另一份 OAuth 凭据上。
+//  4. 指纹收敛改写 client_metadata：请求体和出站头共享同一份 IDs（turn_id 等随机字段一致）。
+//  5. stageCodexFingerprintIDs 无条件覆写（含 nil）：failover 从收敛账号切到 off 账号时，
+//     上一账号的 IDs 不得残留。
+//  6. 暂存体内已派生的会话身份，供出站头在入站没有连字符会话头时重建。排在指纹改写
+//     之后，否则 session/full 模式会存下一份过期的 session；compact 形态跳过，那时体内
+//     还是客户端原值，不能拿来当出站头。
+//
+// 返回请求体是否被改写。调用方若要读原始 prompt_cache_key，必须在调用前读。
+func stageCodexOAuthIdentity(c *gin.Context, account *Account, decoded map[string]any, isCompactRequest bool) bool {
+	modified := !isCompactRequest && applyCodexClientMetadata(decoded, account)
+	var fpIDs *codexFingerprintIDs
+	if isCompactRequest {
+		fpIDs = resolveCodexFingerprintIDsFromRequest(c, account, nil)
+		if applyCodexCompactPromptCacheKey(c, account, decoded) {
+			modified = true
+		}
+	} else {
+		fpIDs = resolveCodexFingerprintIDsWithBody(c, account, nil, decoded["client_metadata"])
+	}
+	source := codexAccountIdentitySource(c, account)
+	if !isCompactRequest && applyCodexAccountIdentityClientMetadataMap(decoded, source, getAPIKeyIDFromContext(c)) {
+		modified = true
+	}
+	if !isCompactRequest && fpIDs != nil && applyCodexFingerprintClientMetadata(decoded, fpIDs) {
+		modified = true
+	}
+	stageCodexFingerprintIDs(c, fpIDs)
+	if !isCompactRequest {
+		stageCodexConvergenceBodyIdentityMap(c, source, decoded)
+	}
+	return modified
+}
