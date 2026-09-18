@@ -30,11 +30,16 @@ type turnStateAutoRepo struct {
 	extraWrites []map[string]any
 	schedulable []bool
 	errors      []string
+	// getByIDCalls 数同步读库次数。入池那条路每次要 GetByID（生产实现还连带
+	// loadProxies / loadAccountGroups 共 3 条 SELECT），而它在响应首字节之前、
+	// 持着账号锁——所以「接管关着的账号一次都不该读」是条要守的不变量。
+	getByIDCalls int
 }
 
 func (r *turnStateAutoRepo) GetByID(_ context.Context, _ int64) (*Account, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.getByIDCalls++
 	if r.latest == nil {
 		return nil, errors.New("not found")
 	}
@@ -45,10 +50,15 @@ func newTurnStateAutoRepo() *turnStateAutoRepo {
 	return &turnStateAutoRepo{accountRepoStub: &accountRepoStub{}}
 }
 
+// UpdateExtra 也自增 getByIDCalls：真实的 accountRepository.UpdateExtra 尾部无条件调
+// syncSchedulerAccountSnapshot → GetByID（连带 loadProxies / loadAccountGroups 共 3 条
+// SELECT）+ 一次 Redis SetAccount。stub 里只 append 的话，「响应路径上读了几次库」这个
+// 断言看不到这一层，会恒绿。
 func (r *turnStateAutoRepo) UpdateExtra(_ context.Context, _ int64, updates map[string]any) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.extraWrites = append(r.extraWrites, updates)
+	r.getByIDCalls++
 	return nil
 }
 
@@ -68,9 +78,15 @@ func (r *turnStateAutoRepo) SetError(_ context.Context, _ int64, msg string) err
 
 const turnStateTestModel = "gpt-5.6-luna"
 
-// openAIDegradedTurnStateLen 是实测的「降智」字符长度，只有测试用它造样本：
-// 生产判据是密文块数（openai_codex_turn_state_envelope.go），不是长度。
-const openAIDegradedTurnStateLen = 312
+// 实测的 individual 号形态，只有测试用它们造样本——生产判据是 openAITurnStateShapes
+// 那张表（含 team 形态）。放在测试侧而不是生产侧：留在生产侧就是 unused，而 292 / 312 /
+// 10 这几个数在测试里比 openAITurnStateShapes[0].Chars 直观得多。
+// 与 openAITurnStateShapes 的一致性由 TestOpenAITurnStateShapeTable 钉住。
+const (
+	openAIHealthyTurnStateLen    = 292
+	openAIDegradedTurnStateLen   = 312
+	openAIHealthyTurnStateBlocks = 10
+)
 
 func turnStateAutoCtx(sessionID string) *gin.Context {
 	return turnStateAutoCtxModel(sessionID, turnStateTestModel)
@@ -320,7 +336,11 @@ func mustResolve(t *testing.T, svc *OpenAIGatewayService, c *gin.Context, accoun
 }
 
 // TestOpenAITurnStateAutoDegradesThenDisables 钉住失效链路：
-// 注入 292 回来仍是 312 → 该候选失效 → 降级到下一条 → 全部失效 → 停调度并写明原因。
+// 注入的票被上游以 invalid_encrypted_content 拒绝 → 该候选失效 → 降级到下一条 →
+// 全部失效 → 停调度并写明原因。
+//
+// 驱动失效的**只能**是这条硬证据。曾经「注入 292、上游仍铸 312」也会记一次失败，
+// 那个判据是错的，已移除——见 TestOpenAITurnStateInjectedTicketSurvivesDegradedMint。
 func TestOpenAITurnStateAutoDegradesThenDisables(t *testing.T) {
 	repo := newTurnStateAutoRepo()
 	svc := &OpenAIGatewayService{accountRepo: repo}
@@ -337,25 +357,22 @@ func TestOpenAITurnStateAutoDegradesThenDisables(t *testing.T) {
 	svc.observeOpenAITurnStateMint(turnStateAutoCtx("sess"), account,
 		turnStateBlob(openAIDegradedTurnStateLen))
 
-	// 第 1 轮：注入 first，上游仍铸 312 → 默认阈值 1，first 立即失效
+	// 第 1 轮：注入 first，上游拒绝这条 blob → 默认阈值 1，first 立即失效
 	c := turnStateAutoCtx("sess")
 	require.Equal(t, first, mustResolve(t, svc, c, account))
-	svc.observeOpenAITurnStateMint(c, account, turnStateBlob(openAIDegradedTurnStateLen))
+	svc.noteOpenAITurnStateRejected(c, account)
 	require.Empty(t, repo.schedulable, "还有候选就不该停账号")
 
 	// 第 2 轮：降级到 second
 	c = turnStateAutoCtx("sess")
 	require.Equal(t, second, mustResolve(t, svc, c, account), "必须降级到下一条候选")
-	svc.observeOpenAITurnStateMint(c, account, turnStateBlob(openAIDegradedTurnStateLen))
+	svc.noteOpenAITurnStateRejected(c, account)
 
 	require.Equal(t, []bool{false}, repo.schedulable, "候选耗尽必须停调度")
 	require.Len(t, repo.errors, 1)
-	require.Contains(t, repo.errors[0], "疑似降智")
-	// 原因里必须写清 292 这个健康基线（运维实际在说的就是这个数），
-	// 并注明判定走的是密文块数、是疑似不是确证。
-	require.Contains(t, repo.errors[0], "292 字符")
-	require.Contains(t, repo.errors[0], "密文块数")
-	require.Contains(t, repo.errors[0], "疑似判据，不是确证")
+	// 原因里必须写清失效的真实来源，别再写成「上游仍铸出更长的值」——那个判据已移除。
+	require.Contains(t, repo.errors[0], "invalid_encrypted_content")
+	require.Contains(t, repo.errors[0], "候选已全部失效")
 	require.False(t, account.Schedulable)
 
 	// 停掉之后不再注入（池里已无可用候选）
@@ -418,7 +435,7 @@ func TestOpenAITurnStateExpiredCandidatesStayInPool(t *testing.T) {
 	// 新鲜的那条失败 → 池里还剩过期但未失效的一条 → 不该停账号。
 	c := turnStateAutoCtx("s")
 	markOpenAITurnStateInjected(c, fresh, turnStateSourceAuto)
-	svc.recordOpenAITurnStateOutcome(c, account, fresh, false)
+	svc.recordOpenAITurnStateFailure(c, account, fresh)
 	require.Empty(t, repo.schedulable, "降级链还剩一格就不该停账号")
 
 	// 超出本模型配额时过期条目才出局，数量有界。
@@ -615,11 +632,19 @@ func TestOpenAITurnStateAutoPushesHealthyMintIntoPool(t *testing.T) {
 	require.Len(t, pool, 2, "池深必须按配置截断")
 	require.Equal(t, blobs[2], pool[0].Blob, "最新的在栈顶")
 	require.Equal(t, blobs[1], pool[1].Blob)
+	// 每次写库只碰一个键：候选池与形态观测各写各的，绝不把两者合成一条 UPDATE——
+	// 合并写会让候选池跟着观测的节流走，反过来也一样。
 	require.NotEmpty(t, repo.extraWrites)
+	poolWrites := 0
 	for _, w := range repo.extraWrites {
-		require.Contains(t, w, openAITurnStatePoolExtraKey, "只写候选池这一个键")
-		require.Len(t, w, 1)
+		require.Len(t, w, 1, "一次 UpdateExtra 只写一个键")
+		if _, ok := w[openAITurnStatePoolExtraKey]; ok {
+			poolWrites++
+			continue
+		}
+		require.Contains(t, w, openAITurnStateObservedExtraKey, "除候选池外只允许形态观测")
 	}
+	require.Equal(t, 3, poolWrites, "三条不同的健康 blob 各入池一次，回带重复的不重复写")
 }
 
 // TestOpenAITurnStateAutoIgnoresNonCodexAccounts 钉住适用范围：非 Codex 上游一个字节都不碰。
@@ -774,9 +799,9 @@ func TestOpenAITurnStateSessionIDAcceptsUnderscoreHeader(t *testing.T) {
 		"只发 session_id 的客户端不能静默失去这个功能")
 }
 
-// TestOpenAITurnStateOutcomeReadsFreshPool 钉住「不拿陈旧快照做读-改-写」：
+// TestOpenAITurnStateFailureReadsFreshPool 钉住「不拿陈旧快照做读-改-写」：
 // 请求手里的 *Account 是选号时刻的，并发请求可能已经把别的候选标失效了。
-func TestOpenAITurnStateOutcomeReadsFreshPool(t *testing.T) {
+func TestOpenAITurnStateFailureReadsFreshPool(t *testing.T) {
 	repo := newTurnStateAutoRepo()
 	svc := &OpenAIGatewayService{accountRepo: repo}
 	injected := turnStateBlob(openAIHealthyTurnStateLen)
@@ -800,8 +825,8 @@ func TestOpenAITurnStateOutcomeReadsFreshPool(t *testing.T) {
 	c := turnStateAutoCtx("sess")
 	svc.observeOpenAITurnStateMint(c, stale, turnStateBlob(openAIDegradedTurnStateLen))
 	require.Equal(t, injected, mustResolve(t, svc, c, stale))
-	// 注入的这条也回 312 → 两条都失效 → 必须停号
-	svc.observeOpenAITurnStateMint(c, stale, turnStateBlob(openAIDegradedTurnStateLen)+"x")
+	// 注入的这条也被上游拒绝 → 两条都失效 → 必须停号
+	svc.noteOpenAITurnStateRejected(c, stale)
 
 	require.Equal(t, []bool{false}, repo.schedulable,
 		"拿陈旧快照的话 other 的 Failed 位会被抹掉，永远判不出耗尽")
@@ -837,9 +862,31 @@ func TestOpenAITurnStateInjectionReadsFreshPool(t *testing.T) {
 		"读陈旧快照的话新补的票要等一轮 rebuild 才注得出去")
 }
 
-// TestOpenAITurnStateObservationDedupedPerContext 钉住同一条 blob 不重复计账：
-// applyAttemptResponseHeaders 有两个调用点，幂等只靠 c.Writer.Written()。
+// TestOpenAITurnStateObservationDedupedPerContext 钉住 ctxKeyTurnStateObserved 这道闸：
+// applyAttemptResponseHeaders 有两个调用点，幂等只靠 c.Writer.Written()，同一条 blob
+// 会被观测两次。
+//
+// 判据取读库次数而不是写库次数：入池自己按 blob 去重、形态观测自己带节流，重复观测
+// 最终都不会写错值——白付的是那几趟库操作，全在响应首字节之前。一次观测该有 3 次：
+// 形态写入、入池前的 loadOpenAITurnStatePoolFresh、入池写入（后两者各自连带一次
+// GetByID，共 3 条 SELECT）。闸门没了这里会变成 6，而那正是它存在的全部理由。
 func TestOpenAITurnStateObservationDedupedPerContext(t *testing.T) {
+	repo := newTurnStateAutoRepo()
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	account := turnStateAutoAccount()
+	blob := turnStateBlob(openAIHealthyTurnStateLen)
+
+	c := turnStateAutoCtx("sess")
+	svc.observeOpenAITurnStateMint(c, account, blob)
+	svc.observeOpenAITurnStateMint(c, account, blob) // 第二个调用点
+
+	require.Equal(t, 3, repo.getByIDCalls, "同一条 blob 在一个上下文里不该把读库付两遍")
+	require.Len(t, readOpenAITurnStatePool(account), 1)
+}
+
+// TestOpenAITurnStateRejectionDedupedPerContext 钉住同一条 blob 不重复计失败：
+// 非 WSv2 路径会在剥掉 encrypted reasoning items 后重试一次，同一次注入可能撞两回 400。
+func TestOpenAITurnStateRejectionDedupedPerContext(t *testing.T) {
 	repo := newTurnStateAutoRepo()
 	svc := &OpenAIGatewayService{accountRepo: repo}
 	account := turnStateAutoAccount()
@@ -855,13 +902,263 @@ func TestOpenAITurnStateObservationDedupedPerContext(t *testing.T) {
 
 	c := turnStateAutoCtx("sess")
 	require.Equal(t, first, mustResolve(t, svc, c, account))
-	degraded := turnStateBlob(openAIDegradedTurnStateLen)
-	svc.observeOpenAITurnStateMint(c, account, degraded)
-	svc.observeOpenAITurnStateMint(c, account, degraded) // 第二个调用点
+	svc.noteOpenAITurnStateRejected(c, account)
+	svc.noteOpenAITurnStateRejected(c, account) // 第二个调用点
 
 	pool := readOpenAITurnStatePool(account)
 	require.Len(t, pool, 1)
-	require.Equal(t, 1, pool[0].FailStreak, "同一条 blob 观测两次只能记一次失败")
+	require.Equal(t, 1, pool[0].FailStreak, "同一条 blob 在一个上下文里被拒两次只能记一次失败")
 	require.False(t, pool[0].Failed, "阈值 2 时一次失败还不该判失效")
 	require.Empty(t, repo.schedulable)
+}
+
+// TestOpenAITurnStateShapeTable 钉住正常形态表：individual 10 块/292，team 12 块/332。
+//
+// 降智一律是各自基线上多出恰好一块（11/312、13/356），两种形态各有各的基线，不能拿
+// 一个阈值切。只认 individual 的话，team 号铸出来的每一条都会被判降智：自动接管会
+// 一直注入、一直判失效，最后把号停掉，而那个号从头到尾都是正常的。
+func TestOpenAITurnStateShapeTable(t *testing.T) {
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name    string
+		blocks  int
+		healthy bool
+	}{
+		{"individual 正常", 10, true},
+		{"individual 降智", 11, false},
+		{"team 正常", 12, true},
+		{"team 降智", 13, false},
+	} {
+		require.Equal(t, tc.healthy,
+			openAITurnStateHealthy(turnStateFernetBlob(now, tc.blocks)), tc.name)
+	}
+
+	// 信封解不开时退回字符长度，同样要认两种形态。
+	require.True(t, openAITurnStateHealthy(turnStateBlob(292)), "individual 长度兜底")
+	require.True(t, openAITurnStateHealthy(turnStateBlob(332)), "team 长度兜底")
+	require.False(t, openAITurnStateHealthy(turnStateBlob(312)), "312 是 individual 的降智值")
+	require.False(t, openAITurnStateHealthy(turnStateBlob(356)), "356 是 team 的降智值")
+}
+
+// TestOpenAITurnStateObservedWithAutoDisabled 钉住：自动接管关着时，
+// **记形态、不入池、不读库**。
+//
+// 三条缺一不可：
+//   - 记形态：账号页上「没开接管」「开了但池空」「正在铸 312」长得一模一样的话，
+//     运维没法判断该不该开接管——而这个决策恰恰只在铸 312 的时候才需要做。
+//     2026-09-18 pro1-cpr 上游确实铸出过两条 292，就是被旧门禁整个丢掉的。
+//   - 不入池：入池是同步读库+写库，在响应首字节之前、持着账号锁。而不带 turn-state
+//     的请求 87.1% 会铸出新值，放开门禁等于给每个 Codex 账号的每条响应都加上
+//     3 条 SELECT + 1 条 UPDATE，同一行 accounts 每请求一次 UPDATE。
+//   - 不入池不代表不写库：观测本身要写一次，那是这条记录存在的代价，用节流兜住
+//     （见 TestOpenAITurnStateObservationIsThrottled）。这里钉的是「除此之外没有别的
+//     库操作」——stub 的 UpdateExtra 也会自增 getByIDCalls，模拟真实 repo 尾部那次
+//     syncSchedulerAccountSnapshot 连带的 GetByID。
+func TestOpenAITurnStateObservedWithAutoDisabled(t *testing.T) {
+	repo := newTurnStateAutoRepo()
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	account := turnStateAutoAccount()
+	delete(account.Extra, openAITurnStateAutoExtraKey)
+	require.False(t, account.IsOpenAITurnStateAutoEnabled(), "前提：自动接管是关的")
+
+	svc.observeOpenAITurnStateMint(turnStateAutoCtx("sess"), account,
+		turnStateFernetBlob(time.Now().UTC(), openAIHealthyTurnStateBlocks))
+
+	observed, ok := readOpenAITurnStateObservation(account)
+	require.True(t, ok, "接管关着也要记形态")
+	require.Equal(t, 10, observed.Blocks)
+	require.True(t, observed.Healthy)
+	require.Equal(t, turnStateTestModel, observed.Model)
+
+	require.Empty(t, readOpenAITurnStatePool(account), "接管关着不得入池")
+	require.Equal(t, 1, repo.getByIDCalls, "接管关着时，一次观测只该带来那一次写库")
+
+	// 312 同样要记 —— 这正是「该不该开接管」需要看到的那一半。旧实现只在 healthy 时
+	// 采集，于是铸 312 的账号页面永远是空的，需求在它自己的动机场景里失效。
+	svc.observeOpenAITurnStateMint(turnStateAutoCtxModel("sess2", "other-model"), account,
+		turnStateFernetBlob(time.Now().UTC(), openAIHealthyTurnStateBlocks+1))
+	observed, ok = readOpenAITurnStateObservation(account)
+	require.True(t, ok)
+	require.Equal(t, 11, observed.Blocks)
+	require.False(t, observed.Healthy, "312 要记成不健康，但必须记")
+	require.Equal(t, "other-model", observed.Model, "单条记录：新读数直接覆盖，不按模型建表")
+	require.Empty(t, readOpenAITurnStatePool(account), "降智值照旧不入池")
+
+	// 断言「不注入」之前要先把另外两个可能的原因排掉，否则它是双因空转：把 auto 门禁
+	// 删掉照样绿。这里同时喂上 session 降智判定和一张可用票，让 auto 门禁成为唯一变量。
+	// 放在最后做，因为往池里塞票会污染上面那几条「不得入池」的断言。
+	injectCtx := turnStateAutoCtx("sess")
+	key := openAITurnStateSessionKey(injectCtx, account, openAITurnStateRequestSessionID(injectCtx))
+	require.NotEmpty(t, key)
+	svc.setSessionTurnStateNeedsInjection(key, true)
+	account.Extra[openAITurnStatePoolExtraKey] = []any{
+		map[string]any{"model": turnStateTestModel, "blob": turnStateBlob(openAIHealthyTurnStateLen),
+			"minted_at": time.Now().UTC().Format(time.RFC3339)},
+	}
+	require.Empty(t, mustResolve(t, svc, injectCtx, account),
+		"接管关着就不注入——哪怕 session 判过降智、池里也有可用的票")
+}
+
+// TestOpenAITurnStateObservationIsThrottled 钉住形态观测的节流。
+//
+// 不节流的话这条路就是每响应一次 UPDATE（不带 turn-state 的请求 87.1% 会铸新值）。
+// 形态没变且上一条还在有效期内就不写；形态变了要写（那正是要看的事），上一条过期了
+// 也要写（否则页面的到期倒计时会停在一个早该消失的值上）。
+func TestOpenAITurnStateObservationIsThrottled(t *testing.T) {
+	repo := newTurnStateAutoRepo()
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	account := turnStateAutoAccount()
+	delete(account.Extra, openAITurnStateAutoExtraKey)
+	now := time.Now().UTC()
+
+	countObservationWrites := func() int {
+		n := 0
+		for _, w := range repo.extraWrites {
+			if _, ok := w[openAITurnStateObservedExtraKey]; ok {
+				n++
+			}
+		}
+		return n
+	}
+
+	// 同一形态连观测三次（每次都是不同的 blob，只是块数相同）：只该写一次。
+	for i := 0; i < 3; i++ {
+		svc.observeOpenAITurnStateMint(turnStateAutoCtx("s"), account,
+			turnStateFernetBlob(now.Add(time.Duration(i)*time.Second), openAIHealthyTurnStateBlocks))
+	}
+	require.Equal(t, 1, countObservationWrites(), "形态没变、上一条没过期，不该反复写库")
+
+	// 形态变了：必须写。
+	svc.observeOpenAITurnStateMint(turnStateAutoCtx("s"), account,
+		turnStateFernetBlob(now, openAIHealthyTurnStateBlocks+1))
+	require.Equal(t, 2, countObservationWrites(), "形态变化是要看的事，必须写")
+
+	// 节流窗口过去了：形态相同也要续写一条，页面上的「最近观测于」才不会一直停在
+	// 一个很久以前的时刻。把上一条的 observed_at 改老来模拟。
+	account.Extra[openAITurnStateObservedExtraKey] = map[string]any{
+		"model": turnStateTestModel, "blocks": openAIHealthyTurnStateBlocks + 1,
+		"chars": openAIDegradedTurnStateLen, "healthy": false,
+		"minted_at":   now.Format(time.RFC3339),
+		"observed_at": now.Add(-2 * openAITurnStateObserveInterval).Format(time.RFC3339),
+	}
+	svc.observeOpenAITurnStateMint(turnStateAutoCtx("s"), account,
+		turnStateFernetBlob(now, openAIHealthyTurnStateBlocks+1))
+	require.Equal(t, 3, countObservationWrites(), "过了节流窗口要续写")
+
+	// 节流基准必须是「上次写库时刻」，不是 blob 的铸造时刻。观测到一条已经很老的 blob
+	// 时，若拿 minted_at 判，写进去的还是那个老时间戳，下一条响应再判一次还是过期
+	// —— 退化成每响应一次 UPDATE。这里连喂 4 条同形态的老 blob，只应有第一条写进去。
+	before := countObservationWrites()
+	stale := now.Add(-3 * time.Hour)
+	for i := 0; i < 4; i++ {
+		svc.observeOpenAITurnStateMint(turnStateAutoCtx("s"), account,
+			turnStateFernetBlob(stale.Add(time.Duration(i)*time.Second), openAIHealthyTurnStateBlocks))
+	}
+	require.Equal(t, before+1, countObservationWrites(),
+		"老 blob 连续回带时不得每响应写一次库")
+}
+
+// TestOpenAITurnStateObservationIgnoresEchoedInjection 钉住：注入生效时不记形态观测。
+//
+// 这个入口是「上游响应里带了这个头就调」，而带 turn-state 的请求只有 8.0% 会重铸、
+// 另外 92% 上游原样回带。不设闸的话，接管一开记下来的就是我们自己注进去那张 292 的
+// 回声：页面在账号仍然铸 312 的时候报绿，运维看绿关掉接管立刻又吃 312，而「正在铸
+// 312」和「接管正在生效」被合并成同一种显示——恰好毁掉这条记录存在的理由。
+func TestOpenAITurnStateObservationIgnoresEchoedInjection(t *testing.T) {
+	svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
+	account := turnStateAutoAccount()
+	healthy := turnStateBlob(openAIHealthyTurnStateLen)
+	account.Extra[openAITurnStatePoolExtraKey] = []any{
+		map[string]any{"model": turnStateTestModel, "blob": healthy,
+			"minted_at": time.Now().UTC().Format(time.RFC3339)},
+	}
+
+	// 先让这个 session 被判降智：一次自然铸造的 312，这条要记。
+	svc.observeOpenAITurnStateMint(turnStateAutoCtx("sess"), account,
+		turnStateFernetBlob(time.Now().UTC(), openAIHealthyTurnStateBlocks+1))
+	observed, ok := readOpenAITurnStateObservation(account)
+	require.True(t, ok)
+	require.Equal(t, 11, observed.Blocks, "前提：自然铸造的 312 记下来了")
+
+	c := turnStateAutoCtx("sess")
+	require.Equal(t, healthy, mustResolve(t, svc, c, account), "前提：这张 292 正在注入")
+
+	// 上游把注入的那张 292 原样回带。形态观测不得把它当成「这个号现在铸 292」。
+	svc.observeOpenAITurnStateMint(c, account, healthy)
+
+	observed, ok = readOpenAITurnStateObservation(account)
+	require.True(t, ok)
+	require.Equal(t, 11, observed.Blocks,
+		"注入的回声不是这个号铸出来的——记下去页面就会在仍铸 312 时报绿")
+	require.False(t, observed.Healthy)
+}
+
+// TestOpenAITurnStateInjectedTicketSurvivesDegradedMint 钉住：注入后上游仍铸出 312，
+// 不得判这张票失效。
+//
+// 实测结论（memory turn-state-remint-rules，578 条现网样本）：新铸的块数由账号当时的
+// 权重决定，与请求里带的那张票无关——「10 块 → 11 块」从未发生，而「注入有效期内的
+// 292、上游仍铸 312」是常态。把后者当成「这张票坏了」，而 fail_threshold 默认又是 1，
+// 于是每注入一次就烧掉一张票，池子几分钟见底，接着客户端的 312 原样裸奔出站。
+// 2026-09-18 用户反馈「这个头才拿到半分钟呀，这么快就过期了吗」就是这条——不是过期，
+// 是被误判失效。
+//
+// 票坏了的硬证据只有一个：上游回 invalid_encrypted_content，那条走
+// noteOpenAITurnStateRejected，不在这里。
+func TestOpenAITurnStateInjectedTicketSurvivesDegradedMint(t *testing.T) {
+	svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
+	account := turnStateAutoAccount()
+	healthy := turnStateBlob(openAIHealthyTurnStateLen)
+	account.Extra[openAITurnStatePoolExtraKey] = []any{
+		map[string]any{"model": turnStateTestModel, "blob": healthy,
+			"minted_at": time.Now().UTC().Format(time.RFC3339)},
+	}
+
+	svc.observeOpenAITurnStateMint(turnStateAutoCtx("sess"), account,
+		turnStateBlob(openAIDegradedTurnStateLen))
+	c := turnStateAutoCtx("sess")
+	require.Equal(t, healthy, mustResolve(t, svc, c, account), "前提：这张票正在注入")
+
+	// 注入生效的这一轮，上游仍铸出 312 —— 账号权重低的读数，不是票的失效证据。
+	svc.observeOpenAITurnStateMint(c, account, turnStateBlob(openAIDegradedTurnStateLen))
+
+	pool := readOpenAITurnStatePool(account)
+	var ticket *openAITurnStateCandidate
+	for i := range pool {
+		if pool[i].Blob == healthy {
+			ticket = &pool[i]
+		}
+	}
+	require.NotNil(t, ticket, "票必须还在池子里")
+	require.False(t, ticket.Failed, "上游铸 312 不是这张票的失效证据")
+	require.Zero(t, ticket.FailStreak, "更不该记失败计数")
+
+	require.Equal(t, healthy, mustResolve(t, svc, turnStateAutoCtx("sess"), account),
+		"票没坏就该继续用到自然过期")
+}
+
+// TestOpenAITurnStateShapeTableIsSelfConsistent 把形态表的两条性质变成被守住的不变量。
+//
+// 表里的 Blocks 与 Chars 现在只是两个并排写死的数,没人拦它们对不上:Chars 打错只会让
+// 「信封解不开时退回字符长度」那条路静默失效,而新增一个形态时若它的降智值(blocks+1)
+// 撞进正常集合,整张表就废了。两条断言成本近乎为零,加一个形态时会立刻报警。
+//
+// 算术关系:base64 长度 = 4*ceil((57 + 16*blocks)/3)。
+func TestOpenAITurnStateShapeTableIsSelfConsistent(t *testing.T) {
+	normal := make(map[int]bool, len(openAITurnStateShapes))
+	for _, shape := range openAITurnStateShapes {
+		raw := openAITurnStateFernetOverhead + openAITurnStateAESBlockBytes*shape.Blocks
+		want := 4 * ((raw + 2) / 3)
+		require.Equal(t, want, shape.Chars,
+			"形态 %d 块的字符数对不上 base64 长度", shape.Blocks)
+		normal[shape.Blocks] = true
+	}
+	for _, shape := range openAITurnStateShapes {
+		require.False(t, normal[shape.Blocks+1],
+			"形态 %d 块的降智值(%d 块)撞进了正常集合,整张表的判据就废了",
+			shape.Blocks, shape.Blocks+1)
+	}
+	// 与前端 frontend/src/utils/turnState.ts 的 TURN_STATE_SHAPES 是两份拷贝,
+	// 唯一的约束是注释里那句「改一边要改两边」。这里至少钉住本侧的自洽。
+	require.Len(t, openAITurnStateShapes, 2, "改形态表时记得同步前端 TURN_STATE_SHAPES")
 }

@@ -1681,6 +1681,16 @@
           <ProxyAdBanner />
         </div>
         <ProxySelector v-model="form.proxy_id" :proxies="proxies" />
+        <!-- cpr 账号：上面这个选择器改的是 sub2api→CPR 那一跳（现网 127.0.0.1），
+             真正的出口 IP 由 CPR 侧的账号配置决定。不说明的话，在这里换代理会被
+             当成「换出口」，而它一点用都没有。 -->
+        <p
+          v-if="cprOutboundProxy"
+          class="mt-1 text-xs text-amber-600 dark:text-amber-400"
+          data-testid="edit-account-cpr-outbound"
+        >
+          {{ t('admin.accounts.cprOutboundHint', { endpoint: cprOutboundProxy }) }}
+        </p>
       </div>
 
       <UpstreamRequestIdHeaderField
@@ -2414,7 +2424,7 @@
               class="mt-1 text-xs"
               :class="openAITurnStateOverrideExpired
                 ? 'text-red-600 dark:text-red-400'
-                : openAITurnStateOverrideLength === TURN_STATE_HEALTHY_CHARS
+                : openAITurnStateOverrideHealthy
                   ? 'text-green-600 dark:text-green-400'
                   : 'text-gray-500 dark:text-gray-400'"
             >
@@ -3178,9 +3188,10 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import {
+  cprOutboundProxy as readCPROutboundProxy,
   decodeTurnState,
-  TURN_STATE_DEFAULT_TTL_MINUTES,
-  TURN_STATE_HEALTHY_CHARS
+  isTurnStateHealthy,
+  TURN_STATE_DEFAULT_TTL_MINUTES
 } from '@/utils/turnState'
 import UpstreamRequestIdHeaderField from '@/components/account/UpstreamRequestIdHeaderField.vue'
 import Toggle from '@/components/common/Toggle.vue'
@@ -3691,6 +3702,16 @@ const ensureTurnStateModelOptions = () => {
 
 const openAITurnStateOverrideLength = computed(() => turnStateSelectedBlob.value.trim().length)
 
+/**
+ * 手填的这条是不是落在正常形态上。走 isTurnStateHealthy 而不是比某个字符数：
+ * 后者写死 individual 的 292，team 号用户粘一条合法的 332 拿不到绿色确认，会停在
+ * 灰色「未知」——同一条 blob 在账号列表里是满血、在这里却说不出话，三处口径不一。
+ * 块数判据也不受 base64 padding 影响。
+ */
+const openAITurnStateOverrideHealthy = computed(() =>
+  isTurnStateHealthy(turnStateSelectedBlob.value.trim())
+)
+
 // 手填值与候选池同一条 1 小时有效期，过期后后端直接不注入。不显示剩余有效期的话，
 // 「配了但不生效」就完全不可见——这是最难排查的那种失败。
 const openAITurnStateOverrideEnvelope = computed(() =>
@@ -3719,6 +3740,15 @@ const openAITurnStateOverrideValidity = computed(() => {
     expires: formatDateTime(at)
   })
 })
+
+/**
+ * cpr 账号在 CPR 侧绑的出站代理。只对 cpr 账号有值。
+ *
+ * 它存在的理由是本弹窗里的 ProxySelector 具有误导性：那个选择器改的是 sub2api→CPR
+ * 的一跳，而 cpr 账号的这一跳是 127.0.0.1，真正的出口在 CPR 自己的配置里。
+ * 读取与脱敏走共享的 readCPROutboundProxy（见 utils/turnState）。
+ */
+const cprOutboundProxy = computed(() => readCPROutboundProxy(props.account))
 
 // 自动接管：开了之后手填值不再生效，由系统用候选池里最近一条 292 顶替 312。
 const openAITurnStateAuto = ref(false)

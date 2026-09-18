@@ -523,6 +523,9 @@ export default {
       recoverStateSuccess: 'Account state recovered successfully',
       recoverStateFailed: 'Failed to recover account state',
       fallbackActive: 'Fallback',
+      cprOutbound: 'CPR exit',
+      cprOutboundHint:
+        'The real exit is set on CPR: {endpoint}. The proxy above only covers the sub2api → CPR hop.',
       fallbackActiveTip: 'Origin proxy {origin} expired',
       revertProxy: 'Revert proxy',
       revertProxySuccess: 'Successfully reverted to original proxy',
@@ -704,8 +707,11 @@ export default {
         turnStateOverrideConfigured: 'Models with a ticket: {models}',
         turnStatePool: {
           empty: 'Turn-state —',
-          manualLabel: '{model} (manual)',
+          starved: 'Turn-state: no ticket, passing through',
+          manualTag: 'manual',
+          observedTag: 'observed',
           summary: '{n} model(s) with a live turn-state',
+          summaryObservedOnly: '{n} observed only, none in use',
           detail: '{model}: {shape} {health}, minted {minted}, expires {expires}',
           healthy: 'full',
           suspect: 'suspect',
