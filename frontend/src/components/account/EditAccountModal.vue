@@ -3842,6 +3842,8 @@ interface TurnStateHunterConfig {
   gap_seconds: number | null
   lead_minutes: number | null
   idle_minutes: number | null
+  // 没有 UI 字段，只经 API 写入；这里带上是为了改动区块里别的项时不把它丢掉。
+  retry_minutes: number | null
   reasoning_effort: string
 }
 const turnStateHunterEfforts = ['minimal', 'low', 'medium', 'high', 'xhigh']
@@ -3853,6 +3855,7 @@ const emptyTurnStateHunter = (): TurnStateHunterConfig => ({
   gap_seconds: null,
   lead_minutes: null,
   idle_minutes: null,
+  retry_minutes: null,
   reasoning_effort: ''
 })
 const readOpenAITurnStateHunter = (extra: unknown): TurnStateHunterConfig => {
@@ -3872,6 +3875,7 @@ const readOpenAITurnStateHunter = (extra: unknown): TurnStateHunterConfig => {
   cfg.gap_seconds = int('gap_seconds')
   cfg.lead_minutes = int('lead_minutes')
   cfg.idle_minutes = int('idle_minutes')
+  cfg.retry_minutes = int('retry_minutes')
   cfg.reasoning_effort = typeof table.reasoning_effort === 'string' ? table.reasoning_effort : ''
   return cfg
 }
@@ -3884,7 +3888,8 @@ const normalizeTurnStateHunter = (cfg: TurnStateHunterConfig): Record<string, un
     ['max_per_hour', cfg.max_per_hour],
     ['gap_seconds', cfg.gap_seconds],
     ['lead_minutes', cfg.lead_minutes],
-    ['idle_minutes', cfg.idle_minutes]
+    ['idle_minutes', cfg.idle_minutes],
+    ['retry_minutes', cfg.retry_minutes]
   ]
   for (const [key, value] of numeric) {
     if (typeof value === 'number' && Number.isFinite(value) && value !== 0) out[key] = value
@@ -5472,6 +5477,18 @@ const handleSubmit = async () => {
 		const thresholds = [autoResetCredit5hThreshold.value, autoResetCredit7dThreshold.value]
 		if (thresholds.some((value) => !Number.isFinite(value) || value < 0.1 || value > 100)) {
 			appStore.showError(t('admin.accounts.autoResetCredit.thresholdInvalid'))
+			return
+		}
+	}
+
+	// 与后端 ValidateOpenAITurnStateHunterExtra 同口径：开着必须有模型和代理，且各有上限；
+	// 不拦的话用户吃到的是后端 400 的英文原文。
+	if (accountSupportsTurnStateHunter.value && openAITurnStateHunter.value.enabled) {
+		const hunter = normalizeTurnStateHunter(openAITurnStateHunter.value)
+		const models = (hunter?.models as string[] | undefined) ?? []
+		const proxies = (hunter?.proxy_ids as number[] | undefined) ?? []
+		if (!models.length || !proxies.length || models.length > 8 || proxies.length > 64) {
+			appStore.showError(t('admin.accounts.openai.turnStateHunterInvalid'))
 			return
 		}
 	}

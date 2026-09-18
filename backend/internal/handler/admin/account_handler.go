@@ -1657,6 +1657,13 @@ func (h *AccountHandler) ApplyOAuthCredentials(c *gin.Context) {
 		return
 	}
 
+	// 换了 ChatGPT 账号：旧账号铸的 turn-state 票对新凭据是跨凭证域回放，清掉运行态。
+	if service.OpenAITurnStateIdentityChanged(existing, req.Credentials) {
+		if clearErr := h.adminService.ClearOpenAITurnStateRuntimeExtra(ctx, accountID); clearErr != nil {
+			slog.Warn("apply_oauth_credentials.clear_turn_state_failed", "account_id", accountID, "err", clearErr)
+		}
+	}
+
 	// 增量合并 Extra（JSONB key 级 merge，绝不覆盖 base_rpm / window_cost_limit /
 	// max_sessions / quota_* / privacy_mode 等持久化键）。
 	// best-effort：失败仅记日志；下方 ClearAccountError 会从 DB 重新读取最新 account，

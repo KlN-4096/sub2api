@@ -1318,7 +1318,8 @@ func (r *accountRepository) ListByPlatform(ctx context.Context, platform string)
 			dbaccount.PlatformEQ(platform),
 			dbaccount.StatusEQ(service.StatusActive),
 		).
-		Order(dbent.Asc(dbaccount.FieldPriority)).
+		// 次级按 ID：同 priority 的行没有次级键时顺序随堆序漂移，猎手的跨 tick 游标靠不住。
+		Order(dbent.Asc(dbaccount.FieldPriority), dbent.Asc(dbaccount.FieldID)).
 		All(ctx)
 	if err != nil {
 		return nil, err

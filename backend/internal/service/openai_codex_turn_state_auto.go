@@ -484,10 +484,6 @@ func (s *OpenAIGatewayService) observeOpenAITurnStateMint(c *gin.Context, accoun
 		}
 		c.Set(ctxKeyTurnStateObserved, minted)
 	}
-	// 真实流量水位：猎手只在有人用的模型上续票。探测自己不算。
-	if !openAITurnStateProbeContext(c) {
-		s.noteOpenAITurnStateTraffic(account.ID, openAITurnStateRequestModel(c), time.Now())
-	}
 	healthy := openAITurnStateHealthy(minted)
 	injected := openAITurnStateInjectedFromContext(c)
 
