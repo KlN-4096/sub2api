@@ -61,19 +61,3 @@ export const targetsCodexUpstream = (account: {
 }): boolean =>
   account?.platform === 'openai' &&
   ['oauth', 'setup-token', 'cpr'].includes(String(account?.type ?? ''))
-
-/**
- * turnStateModelAllowed 与后端 openAITurnStateModelAllowed 对齐：
- * 逗号分隔、大小写不敏感、结尾 * 前缀匹配；名单留空或模型识别不出来时放行。
- */
-export const turnStateModelAllowed = (raw: unknown, model: string): boolean => {
-  const list = typeof raw === 'string' ? raw.trim() : ''
-  if (!list) return true
-  const target = model.trim().toLowerCase()
-  if (!target) return true
-  return list.split(',').some((entry) => {
-    const e = entry.trim().toLowerCase()
-    if (!e) return false
-    return e.endsWith('*') ? target.startsWith(e.slice(0, -1)) : e === target
-  })
-}

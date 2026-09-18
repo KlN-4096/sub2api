@@ -346,8 +346,7 @@ const turnStateOptions = ref<SelectOption[]>([
   { value: 'injected', label: t('admin.usage.turnStateInjectedOnly') },
   { value: 'auto', label: t('admin.usage.turnStateSourceAuto') },
   { value: 'auto_stale', label: t('admin.usage.turnStateSourceAutoStale') },
-  { value: 'manual', label: t('admin.usage.turnStateSourceManual') },
-  { value: 'seed', label: t('admin.usage.turnStateSourceSeed') }
+  { value: 'manual', label: t('admin.usage.turnStateSourceManual') }
 ])
 
 const emitChange = () => emit('change')

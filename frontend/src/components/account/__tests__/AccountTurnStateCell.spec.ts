@@ -70,7 +70,9 @@ describe('AccountTurnStateCell', () => {
 
   it('过期与已失效的票都不展示——运维要看的是「现在能用的」', () => {
     const w = render(account([cand('expired', 7200), cand('failed', 60, 10, { failed: true })]))
-    expect(w.find('[data-testid="account-turn-state-cell"]').exists()).toBe(false)
+    expect(w.findAll('.bar')).toHaveLength(0)
+    // 整块消失会让「没票」和「组件没渲染」长得一样，所以要占位。
+    expect(w.get('[data-testid="account-turn-state-cell"]').text()).toBe('-')
   })
 
   it('倒计时是活的：时间推进到过期后条目消失', async () => {
@@ -92,20 +94,13 @@ describe('AccountTurnStateCell', () => {
     expect(w.findAll('.bar')).toHaveLength(1)
   })
 
-  it('关掉自动接管就不展示——池子还在，但一条都不会被注入', () => {
+  it('关掉自动接管就显示占位——池子还在，但一条都不会被注入', () => {
     const w = render(account([cand('m', 60)], { openai_turn_state_auto: false }))
-    expect(w.find('[data-testid="account-turn-state-cell"]').exists()).toBe(false)
+    expect(w.findAll('.bar')).toHaveLength(0)
+    expect(w.get('[data-testid="account-turn-state-cell"]').text()).toBe('-')
   })
 
-  it('生效模型名单外的票不展示', () => {
-    const acc = account([cand('gpt-5.6-luna', 60), cand('gpt-6-astra', 60)], {
-      openai_turn_state_models: 'gpt-6*'
-    })
-    const bars = render(acc).findAll('.bar')
-    expect(bars.map((b) => b.attributes('data-label'))).toEqual(['gpt-6-astra'])
-  })
-
-  it('非 Codex 上游的账号不展示', () => {
+  it('非 Codex 上游的账号整块不展示', () => {
     const acc = account([cand('m', 60)])
     ;(acc as unknown as Record<string, unknown>).type = 'apikey'
     expect(render(acc).find('[data-testid="account-turn-state-cell"]').exists()).toBe(false)

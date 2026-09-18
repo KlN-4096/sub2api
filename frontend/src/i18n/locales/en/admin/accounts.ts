@@ -691,7 +691,7 @@ export default {
         codexImageToolBadgeDisabled: 'No hosted injection',
         codexImageToolBadgeBlock: 'Client image tools stripped',
         turnStateOverride: 'Turn-state override',
-        turnStateOverrideDesc: 'When set, every outbound request from this account carries this x-codex-turn-state, overriding whatever the client echoed. Leave empty to disable. Diagnostic use only.',
+        turnStateOverrideDesc: 'One ticket per model: a turn-state is bound to the model that minted it, so it no longer applies once the model changes. Pick a model, paste its blob, and every outbound request on that model carries it, overriding whatever the client echoed. Models with no ticket are left alone. Diagnostic use only.',
         turnStateOverridePlaceholder: 'Paste a turn-state starting with gAAAAAB...',
         turnStateOverrideLength: 'Length {n}',
         turnStateOverrideValidUntil: 'About {minutes} min of validity left (expires {expires})',
@@ -700,16 +700,10 @@ export default {
         turnStateAutoDesc:
           'When enabled, the system takes over: once a session is seen at 312, the most recent valid 292 for this account and model is injected. If the upstream still mints 312 after injection, that candidate is marked failed and the next one is used; when every candidate for that model fails the account is disabled with the reason recorded. Candidates are bucketed per account and model (a turn-state does not carry across models) and are valid for 1 hour from minting — once expired nothing is injected and the system waits for a fresh 292. The manual value above stops taking effect. HTTP paths only — WebSocket passthrough is not covered.',
         turnStateAutoTakeover: 'Managed automatically',
-        turnStateSeed: 'Turn-state cold-start seed',
-        turnStateSeedDesc:
-          'The candidate pool can only bootstrap from a 292 the upstream mints on its own. Once an account is fully degraded (every session lands on 312) the pool never fills and auto takeover spins idle. Paste a healthy 292 here as a seed: the system uses it to obtain a freshly minted 292, puts that in the pool, and then clears the seed — from there it continues on tickets it minted itself rather than reusing this one. If the exchange comes back degraded, or hits a 400, the seed is cleared too. Note that "used once" means "used until it yields a result", not "sent on exactly one request": only 8% of requests carrying a turn-state get a new one back. The seed is also valid for one hour and is subject to the model list below.',
-        turnStateSeedExpired: 'The seed has expired and will not be injected; replace it',
-        turnStateSeedPlaceholder: 'Paste a healthy 292 (starts with gAAAAAB...) as the seed',
-        turnStateModels: 'Turn-state models',
-        turnStateModelsDesc:
-          'A turn-state is bound to the model that minted it — switch models and the ticket no longer applies. Comma separated, case-insensitive, a trailing * matches by prefix (e.g. gpt-5.6*). Leave empty for no restriction. The auto-takeover pool is already bucketed per account and model; this adds a second limit: models outside the list are never injected.',
-        turnStateModelsPlaceholder: 'gpt-5.6-luna, gpt-6*',
+        turnStateModelsEmpty: '(model list unavailable)',
+        turnStateOverrideConfigured: 'Models with a ticket: {models}',
         turnStatePool: {
+          manualLabel: '{model} (manual)',
           summary: '{n} model(s) with a live turn-state',
           detail: '{model}: {shape} {health}, minted {minted}, expires {expires}',
           healthy: 'full',

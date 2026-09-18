@@ -704,11 +704,15 @@ describe('admin UsageTable request ID column', () => {
     expect(blob).toHaveLength(len)
 
     const wrapper = mountTurnState({ turn_state: blob })
-    const badge = wrapper.findAll('span').find((n) => n.text() === `blocks:${blocks}`)
-    expect(badge, '徽标必须显示块数而不是字符长度').toBeTruthy()
+    const badge = wrapper.findAll('span').find((n) => n.text() === String(len))
+    expect(badge, '徽标必须显示字符长度（292/312），块数只作判据').toBeTruthy()
     expect(badge!.classes().some((c) => c.includes('green'))).toBe(green)
     // 非健康必须是红色告警，不能退回中性灰——徽标语义就是「一眼看出降智」。
     expect(badge!.classes().some((c) => c.includes('red'))).toBe(!green)
+    // 徽标文本现在只是字符长度，真信封与 'g'.repeat(292) 产出完全一样的文本和颜色。
+    // 这道断言是全套测试里唯一还依赖 decodeTurnState 返回值的闸：把它改成 return null
+    // 整套就会退回长度兜底而照样绿——这个仓库以前正是这么踩过的。
+    expect(badge!.attributes('title')).toContain('turnStateHint')
   })
 
   it('解不出信封时退回字符长度（老判据）', async () => {
@@ -716,6 +720,7 @@ describe('admin UsageTable request ID column', () => {
     const badge = wrapper.findAll('span').find((n) => n.text() === '292')
     expect(badge).toBeTruthy()
     expect(badge!.classes().some((c) => c.includes('green'))).toBe(true)
+    expect(badge!.attributes('title')).toContain('turnStateUndecodable')
   })
 
   it.each([

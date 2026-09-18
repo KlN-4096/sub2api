@@ -768,7 +768,7 @@ export default {
         codexImageToolBadgeDisabled: '不注入 Hosted 工具',
         codexImageToolBadgeBlock: '客户端图片工具已移除',
         turnStateOverride: 'Turn-State 覆写',
-        turnStateOverrideDesc: '非空时，该账号所有出站请求强制携带这条 x-codex-turn-state，覆盖客户端自己回带的值。留空为关闭。仅用于排查上游回合状态的影响，正常运营不要填。',
+        turnStateOverrideDesc: '按模型各填一条：turn-state 绑死在铸它的那个模型上，换模型那张票就不认了。选中模型后填入的 blob，会让该账号所有走这个模型的出站请求强制携带它，覆盖客户端自己回带的值。没配票的模型不注入。仅用于排查上游回合状态的影响，正常运营不要填。',
         turnStateOverridePlaceholder: '粘贴 gAAAAAB... 开头的 turn-state',
         turnStateOverrideLength: '长度 {n}',
         turnStateOverrideValidUntil: '剩余有效期约 {minutes} 分钟(到期 {expires})',
@@ -777,16 +777,10 @@ export default {
         turnStateAutoDesc:
           '开启后由系统接管：检测到某个会话落在 312 时，自动用该账号同一模型下最近一条有效的 292 顶替；若注入 292 后上游仍铸出 312，判该候选失效并降级到下一条，该模型的候选全部失效则停用账号并写明原因。候选按「账号 × 模型」分桶（turn-state 换模型就不认），自铸造起 1 小时有效，过期不再顶替、直接等下一条新的 292。开启后手填值不再生效。仅覆盖 HTTP 路径，WebSocket 直通不参与自动接管。',
         turnStateAutoTakeover: '已由自动接管',
-        turnStateSeed: 'Turn-State 冷启动引子',
-        turnStateSeedDesc:
-          '候选池只能靠「上游自然铸出的 292」起步。账号一旦全面降智(所有会话都落 312)，池子永远填不满、自动接管一直空转。在这里手填一条健康的 292 当引子，系统会用它去换一条上游新铸的 292 入池，然后把引子清空——之后靠自己铸的票续下去，不会写死复用这一条。换回来的是降级值、或者撞了 400，同样清空(那条引子没用，不再拿它烧请求)。注意「用一次」指的是「一直用到换回一个结果为止」，不是「只发一条请求」：实测带 turn-state 的请求只有 8% 会拿到新铸值。引子同样只有 1 小时有效期，并受上面的生效模型名单约束。',
-        turnStateSeedExpired: '引子已过期，不会再注入，请换一条新的',
-        turnStateSeedPlaceholder: '粘贴一条健康的 292(gAAAAAB... 开头)当引子',
-        turnStateModels: 'Turn-State 生效模型',
-        turnStateModelsDesc:
-          'turn-state 与模型强绑定，换个模型那张票就不认了。逗号分隔，大小写不敏感，结尾 * 做前缀匹配（如 gpt-5.6*）。留空 = 不限模型。自动接管的候选池本身按「账号 × 模型」分桶，这里是再叠一层限制：名单外的模型完全不注入。',
-        turnStateModelsPlaceholder: 'gpt-5.6-luna, gpt-6*',
+        turnStateModelsEmpty: '(拉不到模型列表)',
+        turnStateOverrideConfigured: '已配票的模型：{models}',
         turnStatePool: {
+          manualLabel: '{model}(手填)',
           summary: '{n} 个模型有生效的 Turn-State',
           detail: '{model}：{shape} {health}，铸于 {minted}，到期 {expires}',
           healthy: '满血',

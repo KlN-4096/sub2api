@@ -293,7 +293,7 @@
 
         <template #cell-turn_state="{ row }">
           <div v-if="row.turn_state" class="flex max-w-[220px] items-center gap-1.5">
-            <!-- 判据是密文块数：10 块 = 不降智。块数只把明文框进 16 字节的窗口，是疑似不是确证 -->
+            <!-- 显示字符数（292 = 不降智）；判定仍按密文块数，块数只把明文框进 16 字节的窗口，是疑似不是确证 -->
             <span
               class="shrink-0 rounded px-1.5 py-0.5 font-mono text-[11px] font-semibold"
               :class="turnStateBadgeClass(row.turn_state)"
@@ -750,19 +750,16 @@ const copyUpstreamRequestId = (upstreamRequestId: string) =>
 const copyTurnState = (turnState: string) =>
   copyIdentifier(turnState, t('admin.usage.turnStateCopied'))
 
-// turn-state 是 Fernet 信封：0x80 | 8B 大端铸造时间戳 | 16B IV | AES-CBC 密文 | 32B HMAC。
-// 只读明文头部（不解密），拿密文块数与铸造时刻。基线 10 块 = 不降智。
-// 解不出信封时退回字符长度（老判据），别把解不开的当健康。
-const turnStateBadgeText = (blob: string) => {
-  const env = decodeTurnState(blob)
-  return env ? t('admin.usage.turnStateBlocks', { n: env.blocks }) : String(blob.length)
-}
+// 徽章直接显示字符长度：292 / 312 是运维实际在说的那两个数，比「10 块 / 11 块」直观，
+// 而且一一对应（每块 16 字节 → 差一块正好差 20 个 base64 字符），不损失信息。
+// 健康判定仍走密文块数（isTurnStateHealthy），那才是真判据。
+const turnStateBadgeText = (blob: string) => String(blob.length)
 
 // 覆写来源徽标：后端存的是 manual/auto/auto_stale 枚举，直接渲染就是一串英文。
 // 白名单而不是直接拼 key：拼 key 遇到没见过的取值会把原始 key 显示出来，
 // 比显示一个中性的「覆写」更糟。历史行没有 source 列（overridden 为 true 但
 // source 为 NULL），同样兜底成「覆写」。
-const TURN_STATE_SOURCES = ['manual', 'auto', 'auto_stale', 'seed'] as const
+const TURN_STATE_SOURCES = ['manual', 'auto', 'auto_stale'] as const
 
 const turnStateSourceBadge = (source?: string | null) =>
   source && (TURN_STATE_SOURCES as readonly string[]).includes(source)

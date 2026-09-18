@@ -1,9 +1,13 @@
 <template>
-  <div v-if="entries.length" class="mt-1 space-y-1" data-testid="account-turn-state-cell">
+  <div v-if="isCodexAccount" class="mt-1 space-y-1" data-testid="account-turn-state-cell">
+    <!-- 没有生效的票也要占位：整块消失时，「没开接管」「开了但池空」「票全过期了」
+         在页面上长得一模一样，运维只能靠猜。非 Codex 上游的账号根本没有这个头，
+         那才是真该整块消失的情况。 -->
+    <p v-if="!entries.length" class="text-sm text-gray-400 dark:text-gray-500">-</p>
     <UsageProgressBar
       v-for="entry in entries"
       :key="entry.model"
-      :label="entry.model"
+      :label="entry.label"
       label-width="auto"
       :utilization="entry.remainingPercent"
       :resets-at="entry.expiresAt"
@@ -11,7 +15,7 @@
       :color="entry.healthy ? 'purple' : 'amber'"
       :data-testid="`account-turn-state-${entry.model}`"
     />
-    <p class="text-[10px] text-gray-400" :title="detailTitle">
+    <p v-if="entries.length" class="text-[10px] text-gray-400" :title="detailTitle">
       {{ t('admin.accounts.openai.turnStatePool.summary', { n: entries.length }) }}
     </p>
   </div>
@@ -31,11 +35,9 @@ import UsageProgressBar from './UsageProgressBar.vue'
 import type { Account } from '@/types'
 import {
   decodeTurnState,
+  isTurnStateHealthy,
   targetsCodexUpstream,
-  turnStateModelAllowed,
-  TURN_STATE_DEFAULT_TTL_MINUTES,
-  TURN_STATE_HEALTHY_BLOCKS,
-  TURN_STATE_HEALTHY_CHARS
+  TURN_STATE_DEFAULT_TTL_MINUTES
 } from '@/utils/turnState'
 import { formatDateTime } from '@/utils/format'
 
@@ -89,20 +91,47 @@ const ttlMs = computed(() => {
 /**
  * 展示的是「当前真的会被注入的票」，不是「池子里还躺着什么」。所以除了 Codex 上游、
  * 未失效、未过期，还要满足：自动接管开着（关了之后池子还会留最多 1 小时，那段时间
- * 里一条都不会被注入），且模型在生效名单内。
+ * 里一条都不会被注入）。
  */
+// 只有最终落到 ChatGPT Codex 后端的账号才有这个头（oauth / setup-token / cpr）。
+const isCodexAccount = computed(() => targetsCodexUpstream(props.account))
+
+/**
+ * 自动接管关着时生效的是手填覆写表——后端的分支正好相反（开了自动就完全忽略手填）。
+ * 不展示它的话，「票正在注入」的账号格子上会写着「没有生效的票」，那比整块不渲染更糟：
+ * 歧义换成了错误断言。
+ *
+ * 铸造时刻只能从信封自己解：手填票没有后端写的 minted_at。解不出就不展示这一条，
+ * 与候选池「没有 minted_at 就跳过」同一套降级——算不出到期时间的进度条是假的。
+ */
+const manualOverrides = computed<PoolCandidate[]>(() => {
+  const raw = extra.value['openai_turn_state_override']
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return []
+  const out: PoolCandidate[] = []
+  for (const [model, blob] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof blob !== 'string' || !blob.trim() || !model.trim()) continue
+    const env = decodeTurnState(blob.trim())
+    if (!env) continue
+    out.push({ model: model.trim(), blob: blob.trim(), minted_at: env.mintedAt.toISOString() })
+  }
+  return out
+})
+
+const isManualMode = computed(
+  () => isCodexAccount.value && extra.value['openai_turn_state_auto'] !== true
+)
+
 const pool = computed<PoolCandidate[]>(() => {
-  // 只有最终落到 ChatGPT Codex 后端的账号才有这个头（oauth / setup-token / cpr）。
-  if (!targetsCodexUpstream(props.account)) return []
-  if (extra.value['openai_turn_state_auto'] !== true) return []
+  if (!isCodexAccount.value) return []
+  if (isManualMode.value) return manualOverrides.value
   const raw = extra.value['openai_turn_state_pool']
   return Array.isArray(raw) ? (raw as PoolCandidate[]) : []
 })
 
 interface PoolEntry {
   model: string
+  label: string
   blob: string
-  blocks: number | null
   healthy: boolean
   mintedAt: Date
   expiresAt: string
@@ -125,18 +154,18 @@ const entries = computed<PoolEntry[]>(() => {
     const model = String(c?.model ?? '').trim()
     const blob = String(c?.blob ?? '').trim()
     if (!model || !blob || c?.failed || seen.has(model)) continue
-    if (!turnStateModelAllowed(extra.value['openai_turn_state_models'], model)) continue
     const minted = c?.minted_at ? new Date(c.minted_at) : null
     if (!minted || Number.isNaN(minted.getTime())) continue
     const expires = minted.getTime() + ttlMs.value
     if (expires <= now) continue
     seen.add(model)
-    const env = decodeTurnState(blob)
     out.push({
       model,
+      label: isManualMode.value
+        ? t('admin.accounts.openai.turnStatePool.manualLabel', { model })
+        : model,
       blob,
-      blocks: env?.blocks ?? null,
-      healthy: env ? env.blocks === TURN_STATE_HEALTHY_BLOCKS : blob.length === TURN_STATE_HEALTHY_CHARS,
+      healthy: isTurnStateHealthy(blob),
       mintedAt: minted,
       expiresAt: new Date(expires).toISOString(),
       remainingPercent: Math.round(((expires - now) / ttlMs.value) * 100)
@@ -149,8 +178,8 @@ const detailTitle = computed(() =>
   entries.value
     .map((e) =>
       t('admin.accounts.openai.turnStatePool.detail', {
-        model: e.model,
-        shape: e.blocks == null ? `${e.blob.length}c` : `${e.blocks}x16B`,
+        model: e.label,
+        shape: `${e.blob.length}c`,
         health: t(
           e.healthy
             ? 'admin.accounts.openai.turnStatePool.healthy'
