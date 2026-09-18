@@ -528,6 +528,8 @@ type OpenAIGatewayService struct {
 	// 只由「未注入请求」铸出的 blob 更新，详见 observeOpenAITurnStateMint。
 	openaiTurnStateSessions      sync.Map
 	openaiTurnStateSessionWrites atomic.Uint64
+	// openaiTurnStateTraffic: 账号+模型 -> 最近一次真实请求时刻，turn-state 猎手的空闲门槛依据。
+	openaiTurnStateTraffic sync.Map
 	// codexSideCalls：双开账号侧信道 GET 的去重窗口（openai_codex_side_calls.go）。
 	// 由构造器初始化；裸结构体（单元测试）里为 nil，侧信道整体停用。
 	codexSideCalls *codexSideCallState
