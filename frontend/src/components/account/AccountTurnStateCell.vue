@@ -18,7 +18,7 @@
     >
       {{ emptyLabel }}
     </p>
-    <!-- key 必须带上 active：同一个模型现在可能同时有「手填」和「仅观测」两行，
+    <!-- key 必须带上 active：同一个模型现在可能同时有「手填」和「最近铸出」两行，
          只用 model 会撞 key，Vue 会告警并错误复用节点。 -->
     <div
       v-for="entry in entries"
@@ -26,9 +26,9 @@
       class="flex items-center gap-1"
       data-testid="account-turn-state-row"
     >
-      <!-- 「手填」「仅观测」这两个标记必须待在进度条外面。UsageProgressBar 的 label
+      <!-- 「手填」「最近铸出」这两个标记必须待在进度条外面。UsageProgressBar 的 label
            徽章是 max-w-[72px] truncate + 10px 字号（约 12 个字符），而模型名本身就有
-           12 个字符（gpt-5.6-luna），写成 `{model}(仅观测)` 的话后缀会整个落进省略号
+           12 个字符（gpt-5.6-luna），写成 `{model}(最近铸出)` 的话后缀会整个落进省略号
            里——而那是唯一说明「这一行不会被注入」的文字，剩下的区分就只有 opacity-60，
            形态相同时（手填 292 + 观测 292）两行同色同文，等于分不出来。 -->
       <span
@@ -37,6 +37,23 @@
         data-testid="account-turn-state-tag"
       >
         {{ entry.tag }}
+      </span>
+      <!-- 形态数字。整行最要紧的一个事实就是它（292 还是 312），而 UsageProgressBar 里
+           进度条和百分比的颜色来自**剩余时间**（还剩 44 分钟 → 74% → 绿），与健康度
+           无关；`color` 属性只染那个会被截断的模型名药丸。不把数字摆出来的话，一条
+           312 的读数在账号页上就是一条绿条，而用量表里同一条记录明晃晃写着红色 312
+           ——2026-09-18 用户正是这么读错的。绿/红与用量表 turnStateBadgeClass 同口径，
+           两个页面共用一套词汇。 -->
+      <span
+        class="shrink-0 rounded px-1 text-[9px] font-medium leading-4"
+        :class="
+          entry.healthy
+            ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
+            : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+        "
+        data-testid="account-turn-state-shape"
+      >
+        {{ entry.chars }}
       </span>
       <UsageProgressBar
         class="min-w-0 flex-1"
@@ -77,8 +94,9 @@
  *  - openai_turn_state_pool：候选池，只在自动接管开着时由网关维护，带 blob。
  *  - openai_turn_state_override：手填覆写，只在自动接管关着时生效，带 blob。
  *  - openai_turn_state_observed：形态观测，所有 Codex 账号都记，**不带 blob**
- *    （blob 是上游令牌，后端刻意只存块数/字符数）。它是「这个号现在铸的是 292 还是
- *    312」的唯一答案，也是唯一在接管关着时也有数据的源。
+ *    （blob 是上游令牌，后端刻意只存块数/字符数）。接管关着时它是唯一有数据的源。
+ *    **只有未降智的进展示**：一条 312 永远注不出去，摆在票旁边只会被读成票，而
+ *    「这个号在铸 312」用量表每行都写着。降智那条仍参与 starved 判定，见下。
  */
 import { computed, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -157,7 +175,7 @@ interface ShapeObservation {
  *
  * active = 「这条票现在真的会被注入」，由本组件按后端的注入分支推出来，不是后端下发的
  * 字段。必填而不是可选：可选 + `!== false` 的默认方向是「没打标就当正在注入」，错在
- * 危险的那一侧——将来多一条供数路径忘了打标，一条仅观测的记录就会被渲染成正在注入。
+ * 危险的那一侧——将来多一条供数路径忘了打标，一条只是观测到的记录就会被渲染成正在注入。
  */
 interface PoolTicket {
   model: string
@@ -240,8 +258,11 @@ const candidatePool = computed<PoolTicket[]>(() => {
 })
 
 /**
- * 网关对所有 Codex 账号采集的形态观测，与接管开关无关。健康与否都记——正在铸 312
- * 恰恰是最需要在页面上看到的那一半。最多一条。
+ * 网关对所有 Codex 账号采集的形态观测，与接管开关无关，最多一条。
+ *
+ * 健康与否都解出来，但**只有健康的进展示**（见 poolGroups）。降智那条留着是因为
+ * starved 要靠它回答「这个号在不在跑流量」——展示上没意义（一条永远注不出去的 312
+ * 摆在票旁边只会被读成票），判定上不可替代。
  */
 const observedShapes = computed<PoolTicket[]>(() => {
   const raw = extra.value['openai_turn_state_observed']
@@ -254,7 +275,7 @@ const observedShapes = computed<PoolTicket[]>(() => {
   return [
     {
       // 后端不要求能归到模型（归不到也照样是个有效的形态读数），徽章上留空比整条不
-      // 展示好：这一行要回答的是「铸的是 292 还是 312」，模型名只是附注。
+      // 展示好：这一行要说的是「最近铸出来的是这个形态」，模型名只是附注。
       model: typeof model === 'string' ? model.trim() : '',
       chars,
       // 走块数而不是 chars：块数是真判据，字符长度受 base64 padding 影响。
@@ -269,23 +290,25 @@ const observedShapes = computed<PoolTicket[]>(() => {
  * 两件事要同时说清楚：现在有哪些票，以及其中哪些**真的会被注入**。后端的分支是
  * 自动接管开着就只认候选池、完全忽略手填；关着就只认手填。
  *
- * 观测行两种模式下都展示（标成「仅观测」）：那是「这个账号现在铸出来的是 292 还是
- * 312」的唯一答案，而那正是判断该不该开接管的前提。接管关着时它更是唯一有数据的
- * 源——后端那时根本不写候选池。
+ * 观测行两种模式下都展示（标成「最近铸出」），但**只展示未降智的**：一条 312 永远
+ * 注不出去，摆在票旁边只会被读成票（2026-09-18 用户就是这么读的），而「这个号在铸
+ * 312」用量表每行都写着，不需要账号页再说一遍。降智那条仍参与 starved 判定。
  *
  * 返回的是**分组**而不是拼好的一串：entries 要在每组内部各自按模型去重。合成一组
- * 去重的话，同一个模型下生效票会把观测行整个吃掉——而运维盯着的恰恰是那个模型，
- * 于是最需要看到观测值的那一行反而没有，上面那条理由在它自己的动机场景里就失效了。
+ * 去重的话，同一个模型下生效票会把观测行整个吃掉——而运维盯着的恰恰是那个模型。
  */
 const poolGroups = computed<PoolTicket[][]>(() => {
   if (!isCodexAccount.value) return []
-  return [isManualMode.value ? manualOverrides.value : candidatePool.value, observedShapes.value]
+  return [
+    isManualMode.value ? manualOverrides.value : candidatePool.value,
+    observedShapes.value.filter((o) => o.healthy)
+  ]
 })
 
 interface PoolEntry {
   model: string
   label: string
-  /** 「手填」/「仅观测」标记；空串表示这行就是当前生效的自动注入票。 */
+  /** 「手填」/「最近铸出」标记；空串表示这行就是当前生效的自动注入票。 */
   tag: string
   chars: number
   healthy: boolean
@@ -306,7 +329,7 @@ interface PoolEntry {
 const entries = computed<PoolEntry[]>(() => {
   const now = sharedNow.value
   const out: PoolEntry[] = []
-  // 每组各自去重：同一个模型在「生效」和「仅观测」下各留一条，互不吞没。
+  // 每组各自去重：同一个模型在「生效」和「最近铸出」下各留一条，互不吞没。
   for (const group of poolGroups.value) {
     const seen = new Set<string>()
     for (const c of group) {
@@ -324,7 +347,7 @@ const entries = computed<PoolEntry[]>(() => {
         model: c.model,
         label: c.model,
         // 三种标法互斥：接管开着 → 候选池生效，不标；接管关着 → 手填生效标「手填」；
-        // 形态观测一律标「仅观测」。不标的话「正在注入」和「只是看到过」在页面上长得
+        // 形态观测一律标「最近铸出」。不标的话「正在注入」和「只是看到过」在页面上长得
         // 一模一样。
         tag: c.active
           ? isManualMode.value
@@ -344,7 +367,7 @@ const entries = computed<PoolEntry[]>(() => {
 })
 
 /**
- * 真正会被注入的条数。summary 只能报这个数——把仅观测的行算进去，就会出现「接管关着、
+ * 真正会被注入的条数。summary 只能报这个数——把观测行算进去，就会出现「接管关着、
  * 一条手填都没有、池子里 3 条观测」却写着「3 个模型有生效的 Turn-State」，而实际注入
  * 数是 0。那正是这个组件早先犯过的错：歧义换成了错误断言。
  */
