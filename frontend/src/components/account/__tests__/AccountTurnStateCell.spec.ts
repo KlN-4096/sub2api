@@ -72,7 +72,9 @@ describe('AccountTurnStateCell', () => {
     const w = render(account([cand('expired', 7200), cand('failed', 60, 10, { failed: true })]))
     expect(w.findAll('.bar')).toHaveLength(0)
     // 整块消失会让「没票」和「组件没渲染」长得一样，所以要占位。
-    expect(w.get('[data-testid="account-turn-state-cell"]').text()).toBe('-')
+    // 占位必须带标识：它挤在额度列下方，裸的 - 认不出是什么，等于没显示。
+    expect(w.get('[data-testid="account-turn-state-empty"]').text())
+      .toBe('admin.accounts.openai.turnStatePool.empty')
   })
 
   it('倒计时是活的：时间推进到过期后条目消失', async () => {
@@ -97,7 +99,9 @@ describe('AccountTurnStateCell', () => {
   it('关掉自动接管就显示占位——池子还在，但一条都不会被注入', () => {
     const w = render(account([cand('m', 60)], { openai_turn_state_auto: false }))
     expect(w.findAll('.bar')).toHaveLength(0)
-    expect(w.get('[data-testid="account-turn-state-cell"]').text()).toBe('-')
+    // 占位必须带标识：它挤在额度列下方，裸的 - 认不出是什么，等于没显示。
+    expect(w.get('[data-testid="account-turn-state-empty"]').text())
+      .toBe('admin.accounts.openai.turnStatePool.empty')
   })
 
   it('非 Codex 上游的账号整块不展示', () => {

@@ -780,6 +780,7 @@ export default {
         turnStateModelsEmpty: '(拉不到模型列表)',
         turnStateOverrideConfigured: '已配票的模型：{models}',
         turnStatePool: {
+          empty: 'Turn-State -',
           manualLabel: '{model}(手填)',
           summary: '{n} 个模型有生效的 Turn-State',
           detail: '{model}：{shape} {health}，铸于 {minted}，到期 {expires}',

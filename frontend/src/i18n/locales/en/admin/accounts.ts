@@ -703,6 +703,7 @@ export default {
         turnStateModelsEmpty: '(model list unavailable)',
         turnStateOverrideConfigured: 'Models with a ticket: {models}',
         turnStatePool: {
+          empty: 'Turn-state —',
           manualLabel: '{model} (manual)',
           summary: '{n} model(s) with a live turn-state',
           detail: '{model}: {shape} {health}, minted {minted}, expires {expires}',

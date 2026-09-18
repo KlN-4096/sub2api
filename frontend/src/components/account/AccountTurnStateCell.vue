@@ -2,8 +2,12 @@
   <div v-if="isCodexAccount" class="mt-1 space-y-1" data-testid="account-turn-state-cell">
     <!-- 没有生效的票也要占位：整块消失时，「没开接管」「开了但池空」「票全过期了」
          在页面上长得一模一样，运维只能靠猜。非 Codex 上游的账号根本没有这个头，
-         那才是真该整块消失的情况。 -->
-    <p v-if="!entries.length" class="text-sm text-gray-400 dark:text-gray-500">-</p>
+         那才是真该整块消失的情况。
+         占位必须带上「Turn-State」这几个字：它挤在额度列下方，一个裸的 - 谁也认不出
+         是什么，等于没显示。 -->
+    <p v-if="!entries.length" class="text-[10px] text-gray-400" data-testid="account-turn-state-empty">
+      {{ t('admin.accounts.openai.turnStatePool.empty') }}
+    </p>
     <UsageProgressBar
       v-for="entry in entries"
       :key="entry.model"
