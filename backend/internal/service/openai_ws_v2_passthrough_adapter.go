@@ -822,10 +822,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	usageMeta.captureRequestedReasoningEffort(originalFirstClientMessage, capturedSessionModel)
 	_, initialUpstreamModel := usageMeta.turnModels(initialRequestModel)
 	SetOpsUpstreamModel(c, initialUpstreamModel)
-	// 手填覆写必须排在这行之后：它要按 extra.openai_turn_state_models 判本次模型在不在
-	// 名单内，而本次模型只有在 usageMeta 定完首帧之后才知道。放在前面读到的是空串，
-	// 名单会走「识别不出模型就放行」的兜底，等于对 WS 直通完全不生效。
-	// turnState 直到下面构造上游请求时才被消费，挪到这里不影响其它逻辑。
+	// 手填覆写必须排在这行之后：覆写表是按模型存的，本次模型只有在 usageMeta 定完
+	// 首帧之后才知道。放在前面读到的是空串，取不到模型就不注入，等于对 WS 直通完全
+	// 不生效。turnState 直到下面构造上游请求时才被消费，挪到这里不影响其它逻辑。
 	if c != nil {
 		turnState = s.applyOpenAICodexTurnStateOverrideWSManualOnly(c, account, turnState)
 	}

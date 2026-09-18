@@ -1419,7 +1419,9 @@ func TestOpenAITurnStateOverrideAppliesToCodexUpstreams(t *testing.T) {
 		return &Account{
 			Platform: platform,
 			Type:     accType,
-			Extra:    map[string]any{openAITurnStateOverrideExtraKey: blob},
+			Extra: map[string]any{openAITurnStateOverrideExtraKey: map[string]any{
+				turnStateTestModel: blob,
+			}},
 		}
 	}
 
@@ -1430,7 +1432,7 @@ func TestOpenAITurnStateOverrideAppliesToCodexUpstreams(t *testing.T) {
 		{PlatformOpenAI, AccountTypeCPR},
 	} {
 		acc := withOverride(tc.platform, tc.accType)
-		require.Equal(t, blob, acc.OpenAICodexTurnStateOverride(), "%s/%s 应支持覆写", tc.platform, tc.accType)
+		require.Equal(t, blob, acc.OpenAICodexTurnStateOverride(turnStateTestModel), "%s/%s 应支持覆写", tc.platform, tc.accType)
 
 		h := http.Header{}
 		h.Set(openAICodexTurnStateHeader, "客户端自己回带的旧值")
@@ -1453,7 +1455,7 @@ func TestOpenAITurnStateOverrideAppliesToCodexUpstreams(t *testing.T) {
 		{PlatformAnthropic, AccountTypeBedrock},
 	} {
 		acc := withOverride(tc.platform, tc.accType)
-		require.Empty(t, acc.OpenAICodexTurnStateOverride(), "%s/%s 不该支持覆写", tc.platform, tc.accType)
+		require.Empty(t, acc.OpenAICodexTurnStateOverride(turnStateTestModel), "%s/%s 不该支持覆写", tc.platform, tc.accType)
 
 		h := http.Header{}
 		svc.applyOpenAICodexTurnStateOverrideHeader(newTurnStateTestCtx(), acc, h)
@@ -1468,34 +1470,64 @@ func TestOpenAITurnStateOverrideAppliesToCodexUpstreams(t *testing.T) {
 	svc.applyOpenAICodexTurnStateOverrideHeader(newTurnStateTestCtx(), plain, h)
 	require.Equal(t, "客户端自己回带的值", h.Get(openAICodexTurnStateHeader), "未配置时不得改写")
 	require.Equal(t, "原值", svc.applyOpenAICodexTurnStateOverrideWSManualOnly(newTurnStateTestCtx(), plain, "原值"))
-	require.Empty(t, (*Account)(nil).OpenAICodexTurnStateOverride(), "nil 账号不 panic")
+	require.Empty(t, (*Account)(nil).OpenAICodexTurnStateOverride(turnStateTestModel), "nil 账号不 panic")
 }
 
 // newTurnStateTestCtx 造一个最小 gin 上下文：覆写解析会往里写注入标记。
+// 必须带模型——覆写表按模型取票，读不到本次模型就一律不注入。
 func newTurnStateTestCtx() *gin.Context {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	SetOpsUpstreamModel(c, turnStateTestModel)
 	return c
 }
 
-// TestValidateOpenAITurnStateOverrideExtra 钉住写入校验：只放行 Fernet 信封形状。
+// TestValidateOpenAITurnStateOverrideExtra 钉住写入校验：覆写表是 {模型: blob}，
+// 每条 blob 只放行 Fernet 信封形状。
 func TestValidateOpenAITurnStateOverrideExtra(t *testing.T) {
 	// 真实捕获样本（pro3，292 字符）
 	const real = "gAAAAABqqrNHYSOlO_EUJI-hlduVBqJ8slR-floDb7J-ZYvvLXj7WV7dOZ_zk10RDMl_N4dRvG0UqxWR19XdSGbeHFUEAzwv7yQBADQrB1QhpOKkfcUPeSy2qsvZIvq__OHHoF2yCZfSTPq6YvkKahwLUxkeORhQZ9Ug86sMJwkrJXUefsa6fTpRqzZSN7SLphKU-6Ys6FV3GveSXjgk0UcCaKvfShFj4_EmGriyCb-JVoU0D8LJbjsClcivKgDNu1jfZfF-6q8VXHGF1Uck7vDVXdiNh1kRXw=="
 
-	extra := map[string]any{openAITurnStateOverrideExtraKey: real}
+	// 两端空白剔掉；空 blob = 清空这条票，丢弃但不报错。
+	extra := map[string]any{openAITurnStateOverrideExtraKey: map[string]any{
+		"  gpt-6-astra  ": "  " + real + "  ",
+		"blank-blob":      "   ",
+	}}
 	require.NoError(t, ValidateOpenAITurnStateOverrideExtra(extra))
-	require.Equal(t, real, extra[openAITurnStateOverrideExtraKey])
+	require.Equal(t, map[string]any{"gpt-6-astra": real}, extra[openAITurnStateOverrideExtraKey])
 
-	// 空白 = 未配置，直接从 extra 移除（否则空串会被当成"已配置"存进 DB）
-	blank := map[string]any{openAITurnStateOverrideExtraKey: "   "}
+	// 空模型名是畸形输入而不是「清空」，静默丢掉会让管理员看到「保存成功但未配置」。
+	require.Error(t, ValidateOpenAITurnStateOverrideExtra(
+		map[string]any{openAITurnStateOverrideExtraKey: map[string]any{"   ": real}}))
+
+	// 取值按 EqualFold 匹配，而 Go map 遍历顺序随机：留着大小写冲突的键，
+	// 注出去的是哪条每次调用都可能不同。当场拒掉。
+	require.Error(t, ValidateOpenAITurnStateOverrideExtra(
+		map[string]any{openAITurnStateOverrideExtraKey: map[string]any{"GPT-5": real, "gpt-5": real}}))
+
+	// 整表空了就把键删掉（否则空对象会被当成"已配置"存进 DB）
+	blank := map[string]any{openAITurnStateOverrideExtraKey: map[string]any{"m": "   "}}
 	require.NoError(t, ValidateOpenAITurnStateOverrideExtra(blank))
 	require.NotContains(t, blank, openAITurnStateOverrideExtraKey)
+
+	// 显式 null 等价于未配置，别在 extra 里留个 null
+	nulled := map[string]any{openAITurnStateOverrideExtraKey: nil}
+	require.NoError(t, ValidateOpenAITurnStateOverrideExtra(nulled))
+	require.NotContains(t, nulled, openAITurnStateOverrideExtraKey)
 
 	// 没这个键 = 不干预
 	require.NoError(t, ValidateOpenAITurnStateOverrideExtra(map[string]any{"other": 1}))
 	require.NoError(t, ValidateOpenAITurnStateOverrideExtra(nil))
 
+	for name, bad := range map[string]any{
+		"旧的单字符串形态": real,
+		"整体非对象":    123,
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Error(t, ValidateOpenAITurnStateOverrideExtra(
+				map[string]any{openAITurnStateOverrideExtraKey: bad}))
+		})
+	}
 	for name, bad := range map[string]any{
 		"非字符串":     123,
 		"不是base64": "这不是 base64!!",
@@ -1505,9 +1537,17 @@ func TestValidateOpenAITurnStateOverrideExtra(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.Error(t, ValidateOpenAITurnStateOverrideExtra(
-				map[string]any{openAITurnStateOverrideExtraKey: bad}))
+				map[string]any{openAITurnStateOverrideExtraKey: map[string]any{"gpt-6-astra": bad}}))
 		})
 	}
+
+	// 条目数上限
+	tooMany := map[string]any{}
+	for i := 0; i <= maxOpenAITurnStateOverrideModels; i++ {
+		tooMany[string(rune('a'+i))] = real
+	}
+	require.Error(t, ValidateOpenAITurnStateOverrideExtra(
+		map[string]any{openAITurnStateOverrideExtraKey: tooMany}))
 }
 
 // TestUsageCodexTurnStateRecording 锁定使用记录里两列的取值来源。

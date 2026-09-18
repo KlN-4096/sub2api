@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -195,7 +196,8 @@ func TestOpenAITurnStateAutoOnlyInjectsDegradedSessions(t *testing.T) {
 	override, _ = svc.resolveOpenAITurnStateOverride(turnStateAutoCtx("sess-B"), account)
 	require.Empty(t, override, "降智判定按 session 分域，不外溢")
 
-	// 没带 session-id 的请求也不注入（没有可判定的域）
+	// 没带 session-id 的请求走占位域，它自己还没被判降智，所以也不注入
+	//（占位域本身能被判定，见 TestOpenAITurnStateSessionlessClientIsCovered）
 	override, _ = svc.resolveOpenAITurnStateOverride(turnStateAutoCtx(""), account)
 	require.Empty(t, override)
 }
@@ -205,7 +207,7 @@ func TestOpenAITurnStateAutoBeatsManual(t *testing.T) {
 	svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
 	healthy := turnStateBlob(openAIHealthyTurnStateLen)
 	account := turnStateAutoAccount()
-	account.Extra[openAITurnStateOverrideExtraKey] = "手填的值"
+	account.Extra[openAITurnStateOverrideExtraKey] = map[string]any{turnStateTestModel: "手填的值"}
 	account.Extra[openAITurnStatePoolExtraKey] = []any{
 		map[string]any{"model": turnStateTestModel, "blob": healthy, "minted_at": time.Now().UTC().Format(time.RFC3339)},
 	}
@@ -245,17 +247,70 @@ func TestOpenAITurnStateAutoInjectedMintDoesNotResetSession(t *testing.T) {
 	c := turnStateAutoCtx("sess")
 	override, _ := svc.resolveOpenAITurnStateOverride(c, account)
 	require.Equal(t, healthy, override)
-	// 注入生效：上游改铸出另一条 292。它不入池——注入请求铸出的 blob 会把刚投进去
-	// 的候选挤出定深池，失效判定还没攒够就没了。
+	// 注入生效：上游改铸出另一条 292。它入池（见 TestOpenAITurnStateInjectedMintRefillsPool），
+	// 但不回写 session 判定——这两件事分开，本用例只钉后者。
 	fresher := turnStateBlob(openAIHealthyTurnStateLen-1) + "z"
 	require.Len(t, fresher, openAIHealthyTurnStateLen)
 	svc.observeOpenAITurnStateMint(c, account, fresher)
-	require.Len(t, readOpenAITurnStatePool(account), 1, "注入请求铸出的 blob 不入池")
 
 	// 该 session 仍被判定为降智：若拿注入后的结果回写判定，下一轮就不注入、
-	// 上游又铸回 312，两个状态来回跳。
-	require.Equal(t, healthy,
+	// 上游又铸回 312，两个状态来回跳。注入的换成了刚入池的新票（栈顶优先）。
+	require.Equal(t, fresher,
 		mustResolve(t, svc, turnStateAutoCtx("sess"), account), "注入成功不得清掉降智判定")
+}
+
+// TestOpenAITurnStateInjectedMintRefillsPool 复现「候选池饿死」。
+//
+// 一个 session 一旦被判降智，之后每一条请求都带注入，于是永远走不到「未注入」那一支。
+// 入池若也锁在那一支里，池子就只出不进：候选 1 小时到期后自动接管静默停摆，表现为
+// 「这个号一直降智，接管好像没工作」，且日志里一个字都没有。
+func TestOpenAITurnStateInjectedMintRefillsPool(t *testing.T) {
+	svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
+	healthy := turnStateBlob(openAIHealthyTurnStateLen)
+	account := turnStateAutoAccount()
+	account.Extra[openAITurnStatePoolExtraKey] = []any{
+		map[string]any{"model": turnStateTestModel, "blob": healthy, "minted_at": time.Now().UTC().Format(time.RFC3339)},
+	}
+	svc.observeOpenAITurnStateMint(turnStateAutoCtx("sess"), account,
+		turnStateBlob(openAIDegradedTurnStateLen))
+
+	c := turnStateAutoCtx("sess")
+	require.Equal(t, healthy, mustResolve(t, svc, c, account), "判定降智后应注入")
+
+	// 注入生效：上游改铸出另一条健康 292。它必须入池，这是降智账号唯一的补票来源。
+	fresher := turnStateBlob(openAIHealthyTurnStateLen-1) + "z"
+	require.Len(t, fresher, openAIHealthyTurnStateLen)
+	svc.observeOpenAITurnStateMint(c, account, fresher)
+
+	pool := readOpenAITurnStatePool(account)
+	require.Len(t, pool, 2, "注入请求铸出的健康票必须入池，否则池子只出不进")
+	require.Equal(t, fresher, pool[0].Blob, "新票压栈顶")
+}
+
+// TestOpenAITurnStateSessionlessClientIsCovered 钉住：客户端不发 session-id 时，
+// 判定退化成「账号 + 模型」粒度，而不是整条链路静默熄火。
+//
+// 熄火的形态很隐蔽：key 为空 → 既查不到判定、也记不下判定，于是自动接管对 curl 和
+// 不发该头的第三方客户端等于根本没开，还不报错不打日志。
+func TestOpenAITurnStateSessionlessClientIsCovered(t *testing.T) {
+	svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
+	healthy := turnStateBlob(openAIHealthyTurnStateLen)
+	account := turnStateAutoAccount()
+	account.Extra[openAITurnStatePoolExtraKey] = []any{
+		map[string]any{"model": turnStateTestModel, "blob": healthy, "minted_at": time.Now().UTC().Format(time.RFC3339)},
+	}
+
+	require.Empty(t, mustResolve(t, svc, turnStateAutoCtx(""), account), "还没判定降智，先不注入")
+
+	svc.observeOpenAITurnStateMint(turnStateAutoCtx(""), account,
+		turnStateBlob(openAIDegradedTurnStateLen))
+
+	require.Equal(t, healthy, mustResolve(t, svc, turnStateAutoCtx(""), account),
+		"无 session-id 的请求也要能被接管")
+	require.Empty(t, mustResolve(t, svc, turnStateAutoCtx("sess-real"), account),
+		"占位域不得外溢到真实 session")
+	require.Empty(t, mustResolve(t, svc, turnStateAutoCtxModel("", "other-model"), account),
+		"占位域仍按模型分域")
 }
 
 func mustResolve(t *testing.T, svc *OpenAIGatewayService, c *gin.Context, account *Account) string {
@@ -296,8 +351,10 @@ func TestOpenAITurnStateAutoDegradesThenDisables(t *testing.T) {
 	require.Equal(t, []bool{false}, repo.schedulable, "候选耗尽必须停调度")
 	require.Len(t, repo.errors, 1)
 	require.Contains(t, repo.errors[0], "疑似降智")
-	// 判据是密文块数，不是字符长度——原因里必须写清 10 块这个健康基线。
-	require.Contains(t, repo.errors[0], "10 块")
+	// 原因里必须写清 292 这个健康基线（运维实际在说的就是这个数），
+	// 并注明判定走的是密文块数、是疑似不是确证。
+	require.Contains(t, repo.errors[0], "292 字符")
+	require.Contains(t, repo.errors[0], "密文块数")
 	require.Contains(t, repo.errors[0], "疑似判据，不是确证")
 	require.False(t, account.Schedulable)
 
@@ -315,7 +372,7 @@ func TestOpenAITurnStateWSClearsInjectionMarkerAcrossAttempts(t *testing.T) {
 	// attempt 1：账号 A 手填覆写生效，标记写进上下文。
 	accountA := turnStateAutoAccount()
 	delete(accountA.Extra, openAITurnStateAutoExtraKey)
-	accountA.Extra[openAITurnStateOverrideExtraKey] = "manual-blob-a"
+	accountA.Extra[openAITurnStateOverrideExtraKey] = map[string]any{turnStateTestModel: "manual-blob-a"}
 	require.Equal(t, "manual-blob-a",
 		svc.applyOpenAICodexTurnStateOverrideWSManualOnly(c, accountA, ""))
 	require.Equal(t, turnStateSourceManual, OpenAITurnStateUsageSource(c))
@@ -390,127 +447,34 @@ func TestOpenAITurnStateManualOverrideExpires(t *testing.T) {
 	now := time.Now().UTC()
 	account := turnStateAutoAccount()
 	delete(account.Extra, openAITurnStateAutoExtraKey)
+	setOverride := func(blob string) {
+		account.Extra[openAITurnStateOverrideExtraKey] = map[string]any{turnStateTestModel: blob}
+	}
 
 	fresh := turnStateFernetBlob(now.Add(-5*time.Minute), openAIHealthyTurnStateBlocks)
-	account.Extra[openAITurnStateOverrideExtraKey] = fresh
-	require.Equal(t, fresh, account.OpenAICodexTurnStateOverride(), "未过期照常生效")
+	setOverride(fresh)
+	require.Equal(t, fresh, account.OpenAICodexTurnStateOverride(turnStateTestModel), "未过期照常生效")
 
 	expired := turnStateFernetBlob(now.Add(-2*time.Hour), openAIHealthyTurnStateBlocks)
-	account.Extra[openAITurnStateOverrideExtraKey] = expired
-	require.Empty(t, account.OpenAICodexTurnStateOverride(), "过期的手填值不得再注入")
+	setOverride(expired)
+	require.Empty(t, account.OpenAICodexTurnStateOverride(turnStateTestModel), "过期的手填值不得再注入")
 
 	// 有效期跟随账号配置。
 	account.Extra[openAITurnStateStaleMinExtraKey] = 180
-	require.Equal(t, expired, account.OpenAICodexTurnStateOverride(), "有效期应跟随配置")
+	require.Equal(t, expired, account.OpenAICodexTurnStateOverride(turnStateTestModel), "有效期应跟随配置")
 	delete(account.Extra, openAITurnStateStaleMinExtraKey)
 
 	// 解不出信封的值按不过期处理，别因为解码失败静默关掉功能。
-	account.Extra[openAITurnStateOverrideExtraKey] = turnStateBlob(openAIHealthyTurnStateLen)
-	require.NotEmpty(t, account.OpenAICodexTurnStateOverride())
+	setOverride(turnStateBlob(openAIHealthyTurnStateLen))
+	require.NotEmpty(t, account.OpenAICodexTurnStateOverride(turnStateTestModel))
 
 	// 两条出站路径都要挡住，不能只挡一条。
 	svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
-	account.Extra[openAITurnStateOverrideExtraKey] = expired
+	setOverride(expired)
 	require.Empty(t, mustResolve(t, svc, turnStateAutoCtx("s"), account), "HTTP 路径")
 	require.Equal(t, "echoed",
 		svc.applyOpenAICodexTurnStateOverrideWSManualOnly(turnStateAutoCtx("s"), account, "echoed"),
 		"WS 路径：过期就当没配，保留客户端回带值")
-}
-
-// TestOpenAITurnStateColdStartSeed 钉住冷启动引子：
-// 池子空时用引子换一条上游新铸的 292 入池，然后把引子消费掉，不再复用。
-func TestOpenAITurnStateColdStartSeed(t *testing.T) {
-	now := time.Now().UTC()
-	seed := turnStateFernetBlob(now.Add(-2*time.Minute), openAIHealthyTurnStateBlocks)
-
-	newAccount := func() *Account {
-		a := turnStateAutoAccount()
-		a.Extra[openAITurnStateSeedExtraKey] = seed
-		return a
-	}
-	degrade := func(svc *OpenAIGatewayService, a *Account) {
-		svc.observeOpenAITurnStateMint(turnStateAutoCtx("s"), a, turnStateBlob(openAIDegradedTurnStateLen))
-	}
-
-	t.Run("换回健康值就入池并消费引子", func(t *testing.T) {
-		repo := newTurnStateAutoRepo()
-		svc := &OpenAIGatewayService{accountRepo: repo}
-		account := newAccount()
-		degrade(svc, account)
-
-		c := turnStateAutoCtx("s")
-		override, source := svc.resolveOpenAITurnStateOverride(c, account)
-		require.Equal(t, seed, override, "池子空时必须拿引子顶上")
-		require.Equal(t, turnStateSourceSeed, source, "来源要与 auto 分开记")
-
-		minted := turnStateFernetBlob(now, openAIHealthyTurnStateBlocks)
-		svc.observeOpenAITurnStateMint(c, account, minted)
-
-		pool := readOpenAITurnStatePool(account)
-		require.Len(t, pool, 1, "引子换回来的健康值必须入池")
-		require.Equal(t, minted, pool[0].Blob)
-		require.Empty(t, account.openAITurnStateSeed(), "引子用完即消费")
-
-		// 之后走自己铸的票，不再复用引子。
-		next, source := svc.resolveOpenAITurnStateOverride(turnStateAutoCtx("s"), account)
-		require.Equal(t, minted, next)
-		require.Equal(t, turnStateSourceAuto, source)
-	})
-
-	t.Run("换回降级值就丢掉，别拿它继续烧请求", func(t *testing.T) {
-		svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
-		account := newAccount()
-		degrade(svc, account)
-
-		c := turnStateAutoCtx("s")
-		require.Equal(t, seed, mustResolve(t, svc, c, account))
-		svc.observeOpenAITurnStateMint(c, account, turnStateBlob(openAIDegradedTurnStateLen))
-
-		require.Empty(t, account.openAITurnStateSeed())
-		require.Empty(t, readOpenAITurnStatePool(account), "降级值不得入池")
-		require.Empty(t, mustResolve(t, svc, turnStateAutoCtx("s"), account))
-	})
-
-	t.Run("撞 400 也丢掉", func(t *testing.T) {
-		svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
-		account := newAccount()
-		degrade(svc, account)
-
-		c := turnStateAutoCtx("s")
-		require.Equal(t, seed, mustResolve(t, svc, c, account))
-		svc.noteOpenAITurnStateRejected(c, account)
-		require.Empty(t, account.openAITurnStateSeed())
-	})
-
-	t.Run("池里有可用候选时不动引子", func(t *testing.T) {
-		svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
-		account := newAccount()
-		healthy := turnStateFernetBlob(now, openAIHealthyTurnStateBlocks)
-		svc.observeOpenAITurnStateMint(turnStateAutoCtx("s"), account, healthy)
-		degrade(svc, account)
-
-		override, source := svc.resolveOpenAITurnStateOverride(turnStateAutoCtx("s"), account)
-		require.Equal(t, healthy, override, "有候选就用候选")
-		require.Equal(t, turnStateSourceAuto, source)
-		require.Equal(t, seed, account.openAITurnStateSeed(), "引子留着备用")
-	})
-
-	t.Run("过期引子不注入", func(t *testing.T) {
-		svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
-		account := turnStateAutoAccount()
-		account.Extra[openAITurnStateSeedExtraKey] = turnStateFernetBlob(now.Add(-2*time.Hour), openAIHealthyTurnStateBlocks)
-		degrade(svc, account)
-		require.Empty(t, mustResolve(t, svc, turnStateAutoCtx("s"), account))
-	})
-
-	t.Run("名单外的模型不动引子", func(t *testing.T) {
-		svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
-		account := newAccount()
-		account.Extra[openAITurnStateModelsExtraKey] = "gpt-6*"
-		degrade(svc, account)
-		require.Empty(t, mustResolve(t, svc, turnStateAutoCtx("s"), account))
-		require.Equal(t, seed, account.openAITurnStateSeed())
-	})
 }
 
 // TestOpenAITurnStateAutoIsModelScoped 钉住「turn-state 与模型强绑定」：
@@ -572,25 +536,59 @@ func TestOpenAITurnStatePoolDepthIsPerModel(t *testing.T) {
 	require.True(t, ok, "冷门模型的票不该被活跃模型挤掉")
 }
 
-// TestOpenAITurnStateModelAllowlist 钉住生效模型名单：逗号分隔、大小写不敏感、
-// 结尾 * 前缀匹配；留空或识别不出模型时放行。
-func TestOpenAITurnStateModelAllowlist(t *testing.T) {
-	a := turnStateAutoAccount()
-	require.True(t, a.openAITurnStateModelAllowed("anything"), "留空 = 不限模型")
+// TestOpenAITurnStateOverridesSurviveJSONRoundTrip 钉住读取走 JSON 往返而不是裸
+// 类型断言。extra 是 JSONB：同一个键在「刚从请求体解出来」和「从 DB 读回来」两条
+// 路径上的具体 Go 类型不保证相同，裸断言失败是静默的——覆写永不生效且没有线索。
+func TestOpenAITurnStateOverridesSurviveJSONRoundTrip(t *testing.T) {
+	const model, blob = turnStateTestModel, "gAAAAAB-luna"
+	account := turnStateAutoAccount()
+	delete(account.Extra, openAITurnStateAutoExtraKey)
 
-	a.Extra[openAITurnStateModelsExtraKey] = " GPT-5.6-Luna , gpt-6* "
-	require.True(t, a.openAITurnStateModelAllowed("gpt-5.6-luna"), "大小写不敏感")
-	require.True(t, a.openAITurnStateModelAllowed("gpt-6-astra"), "结尾 * 前缀匹配")
-	require.False(t, a.openAITurnStateModelAllowed("gpt-5.6-sol"), "名单外必须拦住")
-	require.True(t, a.openAITurnStateModelAllowed(""), "识别不出模型时放行，别静默失效")
+	for name, stored := range map[string]any{
+		"map[string]any":    map[string]any{model: blob},
+		"map[string]string": map[string]string{model: blob},
+		"json.RawMessage":   json.RawMessage(`{"` + model + `":"` + blob + `"}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			account.Extra[openAITurnStateOverrideExtraKey] = stored
+			require.Equal(t, blob, account.OpenAICodexTurnStateOverride(model))
+		})
+	}
 
-	// 名单拦住的模型连自动接管也不注入。
+	// 旧的单字符串形态没有模型归属，按未配置处理——不能静默注给所有模型。
+	account.Extra[openAITurnStateOverrideExtraKey] = blob
+	require.Empty(t, account.OpenAICodexTurnStateOverride(model))
+}
+
+// TestOpenAITurnStateManualOverrideIsPerModel 钉住手填覆写按模型取票。
+//
+// blob 是密文，系统无从得知它来自哪个模型，只能由管理员填的时候指定。取不到本次
+// 模型、或本次模型没配票时一律不注入——不能再有「不限模型」这种兜底：注给别的模型
+// 只会白撞一次 invalid_encrypted_content。
+func TestOpenAITurnStateManualOverrideIsPerModel(t *testing.T) {
+	const luna, astra = turnStateTestModel, "gpt-6-astra"
+	lunaBlob, astraBlob := turnStateBlob(openAIHealthyTurnStateLen), turnStateBlob(openAIHealthyTurnStateLen-1)
+	account := turnStateAutoAccount()
+	delete(account.Extra, openAITurnStateAutoExtraKey)
+	account.Extra[openAITurnStateOverrideExtraKey] = map[string]any{
+		"GPT-5.6-Luna": lunaBlob,
+		astra:          astraBlob,
+	}
+
+	require.Equal(t, lunaBlob, account.OpenAICodexTurnStateOverride(luna), "大小写不敏感")
+	require.Equal(t, astraBlob, account.OpenAICodexTurnStateOverride(astra), "各模型取各自的票")
+	require.Empty(t, account.OpenAICodexTurnStateOverride("gpt-5.6-sol"), "没配票的模型不得注入")
+	require.Empty(t, account.OpenAICodexTurnStateOverride(""), "取不到模型时不注入")
+
+	// HTTP 与 WS 两条出站路径读的是同一张表。
 	svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
-	healthy := turnStateBlob(openAIHealthyTurnStateLen)
-	svc.observeOpenAITurnStateMint(turnStateAutoCtxModel("s", "gpt-5.6-sol"), a, healthy)
-	svc.observeOpenAITurnStateMint(turnStateAutoCtxModel("s", "gpt-5.6-sol"), a,
-		turnStateBlob(openAIDegradedTurnStateLen))
-	require.Empty(t, mustResolve(t, svc, turnStateAutoCtxModel("s", "gpt-5.6-sol"), a))
+	require.Equal(t, lunaBlob, mustResolve(t, svc, turnStateAutoCtxModel("s", luna), account))
+	require.Empty(t, mustResolve(t, svc, turnStateAutoCtxModel("s", "gpt-5.6-sol"), account))
+	require.Equal(t, astraBlob,
+		svc.applyOpenAICodexTurnStateOverrideWSManualOnly(turnStateAutoCtxModel("s", astra), account, "echoed"))
+	require.Equal(t, "echoed",
+		svc.applyOpenAICodexTurnStateOverrideWSManualOnly(turnStateAutoCtxModel("s", "gpt-5.6-sol"), account, "echoed"),
+		"没配票就保留客户端回带值")
 }
 
 // TestOpenAITurnStateAutoPushesHealthyMintIntoPool 钉住入池：健康 blob 自动收集、去重、限深。
@@ -677,7 +675,7 @@ func TestOpenAITurnStateWSManualRecordsUsageSource(t *testing.T) {
 	svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
 	account := turnStateAutoAccount()
 	delete(account.Extra, openAITurnStateAutoExtraKey)
-	account.Extra[openAITurnStateOverrideExtraKey] = "手填的值"
+	account.Extra[openAITurnStateOverrideExtraKey] = map[string]any{turnStateTestModel: "手填的值"}
 
 	c := turnStateAutoCtx("sess")
 	require.Equal(t, "手填的值", svc.applyOpenAICodexTurnStateOverrideWSManualOnly(c, account, "客户端自带"))
@@ -699,7 +697,9 @@ func TestOpenAITurnStateInjectionMarkerClearedPerAttempt(t *testing.T) {
 	svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
 	first := &Account{
 		ID: 11, Platform: PlatformOpenAI, Type: AccountTypeCPR,
-		Extra: map[string]any{openAITurnStateOverrideExtraKey: "第一个账号的手填值"},
+		Extra: map[string]any{openAITurnStateOverrideExtraKey: map[string]any{
+			turnStateTestModel: "第一个账号的手填值",
+		}},
 	}
 	second := &Account{ID: 12, Platform: PlatformOpenAI, Type: AccountTypeCPR}
 
@@ -805,6 +805,36 @@ func TestOpenAITurnStateOutcomeReadsFreshPool(t *testing.T) {
 
 	require.Equal(t, []bool{false}, repo.schedulable,
 		"拿陈旧快照的话 other 的 Failed 位会被抹掉，永远判不出耗尽")
+}
+
+// TestOpenAITurnStateInjectionReadsFreshPool 钉住注入决策也读新鲜池。
+//
+// 请求手里的 *Account 来自调度器的 Redis 副本，而 openai_turn_state_pool 在
+// schedulerNeutralExtraKeys 里——池写入刻意不触发快照重建，副本最多陈旧一整个
+// full_rebuild_interval_seconds（默认 300s）。读快照的两个后果都不能忍：刚补进池的
+// 新票要等下一轮 rebuild 才注得出去；已判 Failed 的候选在副本里仍 alive，会被反复
+// 注入，而 record 侧从新鲜池里找不到它 → 耗尽判定和停号整段都走不到。
+func TestOpenAITurnStateInjectionReadsFreshPool(t *testing.T) {
+	repo := newTurnStateAutoRepo()
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	minted := time.Now().UTC().Format(time.RFC3339)
+	refilled := turnStateBlob(openAIHealthyTurnStateLen)
+
+	// 请求快照：陈旧的 Redis 副本，池子是空的
+	stale := turnStateAutoAccount()
+	stale.Extra[openAITurnStatePoolExtraKey] = []any{}
+	// DB 侧最新：别的请求刚补进来一条健康票
+	fresh := turnStateAutoAccount()
+	fresh.Extra[openAITurnStatePoolExtraKey] = []any{
+		map[string]any{"model": turnStateTestModel, "blob": refilled, "minted_at": minted},
+	}
+	repo.latest = fresh
+
+	svc.observeOpenAITurnStateMint(turnStateAutoCtx("sess"), stale,
+		turnStateBlob(openAIDegradedTurnStateLen))
+
+	require.Equal(t, refilled, mustResolve(t, svc, turnStateAutoCtx("sess"), stale),
+		"读陈旧快照的话新补的票要等一轮 rebuild 才注得出去")
 }
 
 // TestOpenAITurnStateObservationDedupedPerContext 钉住同一条 blob 不重复计账：

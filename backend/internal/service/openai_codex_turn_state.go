@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -270,9 +271,46 @@ const maxOpenAITurnStateOverrideLen = 4096
 // （对照 maxUsageUpstreamRequestIDLen）。实测 blob 为 292/312 字符。
 const maxUsageCodexTurnStateLen = 4096
 
-// OpenAICodexTurnStateOverride 返回账号配置的 turn-state 覆写值；未配置或账号类型
-// 不适用时返回空串。只对最终落到 ChatGPT Codex 后端的账号生效（oauth / setup-token /
-// cpr）——其余上游根本不认这个头，写进去是纯污染。
+// readOpenAITurnStateOverrides 读手填覆写表。解析失败按未配置处理——宁可不注入，
+// 也不要拿半个损坏的结构去改写出站头。
+//
+// 走 marshal/unmarshal 而不是裸类型断言，与 readOpenAITurnStatePool 同一套做法：
+// extra 是 JSONB，同一个键在「刚从请求体解出来」和「从 DB 读回来」两条路径上的
+// 具体 Go 类型不保证相同，裸断言失败是静默的——覆写永不生效且没有任何线索。
+func readOpenAITurnStateOverrides(a *Account) map[string]string {
+	if a == nil {
+		return nil
+	}
+	raw, ok := a.Extra[openAITurnStateOverrideExtraKey]
+	if !ok || raw == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var table map[string]string
+	if err := json.Unmarshal(encoded, &table); err != nil {
+		// 旧的单字符串形态会落到这里：它没有可用的模型归属，按未配置处理。
+		return nil
+	}
+	out := make(map[string]string, len(table))
+	for model, blob := range table {
+		if model = strings.TrimSpace(model); model != "" && strings.TrimSpace(blob) != "" {
+			out[model] = strings.TrimSpace(blob)
+		}
+	}
+	return out
+}
+
+// OpenAICodexTurnStateOverride 返回本次模型对应的手填覆写值；未配置、模型对不上、
+// 过期或账号类型不适用时返回空串。只对最终落到 ChatGPT Codex 后端的账号生效
+// （oauth / setup-token / cpr）——其余上游根本不认这个头，写进去是纯污染。
+//
+// 为什么按模型存：turn-state 绑死在铸它的那个模型上，换个模型那张票就不认了。blob
+// 本身是密文（信封里只有铸造时间戳），系统无从得知它来自哪个模型，只能由管理员在
+// 填的时候指定。取不到本次模型时不注入——这里没有「不限模型」这种配置了。
+//
 // 手填值与候选池同一条有效期：turn-state 自铸造起 1 小时可用，过期就不再注入。
 // 这道闸必须放在这个共享入口上——HTTP 与 WS 两条路径都从这里取值，放到调用点就会
 // 漏掉其中一条。过期后按「未配置」处理：不注入、不报错，等管理员换一条新的。
@@ -280,29 +318,25 @@ const maxUsageCodexTurnStateLen = 4096
 // 为什么非加不可：手填只在自动接管关闭时生效，而失效归因（noteOpenAITurnStateRejected）
 // 要求自动接管开着。所以一条过期的手填票会对每个请求注入、每次换回一个 400
 // invalid_encrypted_content，而且永远不会被任何机制发现。
-func (a *Account) OpenAICodexTurnStateOverride() string {
+func (a *Account) OpenAICodexTurnStateOverride(model string) string {
 	if a == nil || !a.TargetsChatGPTCodexUpstream() {
 		return ""
 	}
-	value := strings.TrimSpace(a.GetExtraString(openAITurnStateOverrideExtraKey))
-	if value == "" || !openAITurnStateBlobExpired(value, a.openAITurnStateStaleAfter(), time.Now()) {
-		return value
-	}
-	logOpenAITurnStateAuto("account=%d manual turn-state override expired, not injecting", a.ID)
-	return ""
-}
-
-// openAITurnStateSeed 返回冷启动引子；未配置、过期或账号类型不适用时返回空串。
-// 与手填覆写同一条有效期：引子也是一张票，过了 1 小时注进去只会白撞 400。
-func (a *Account) openAITurnStateSeed() string {
-	if a == nil || !a.TargetsChatGPTCodexUpstream() {
+	if model = strings.TrimSpace(model); model == "" {
 		return ""
 	}
-	value := strings.TrimSpace(a.GetExtraString(openAITurnStateSeedExtraKey))
+	value := ""
+	for configured, blob := range readOpenAITurnStateOverrides(a) {
+		// 大小写不敏感，与候选池的 alive() 保持同一套模型判据。
+		if strings.EqualFold(configured, model) {
+			value = blob
+			break
+		}
+	}
 	if value == "" || !openAITurnStateBlobExpired(value, a.openAITurnStateStaleAfter(), time.Now()) {
 		return value
 	}
-	logOpenAITurnStateAuto("account=%d turn-state seed expired, not injecting", a.ID)
+	logOpenAITurnStateAuto("account=%d model=%s manual turn-state override expired, not injecting", a.ID, model)
 	return ""
 }
 
@@ -315,47 +349,6 @@ func openAITurnStateBlobExpired(blob string, ttl time.Duration, now time.Time) b
 		return false
 	}
 	return !now.Before(env.MintedAt.Add(ttl))
-}
-
-// openAITurnStateModelsExtraKey 限定 turn-state 注入在哪些模型上生效。逗号分隔，
-// 大小写不敏感，结尾 * 做前缀匹配（如 gpt-5.6*）。留空 = 不限模型。
-//
-// 为什么需要：turn-state 与模型强绑定，换个模型那张票就不认了。名单让管理员能把
-// 手填的那条票钉死在它真正来自的模型上，而不是对该账号的所有请求一律注入。
-const openAITurnStateModelsExtraKey = "openai_turn_state_models"
-
-// openAITurnStateModelAllowed 判本次模型是否在名单内。
-//
-// 两处放行都是刻意的：名单留空 = 不限模型（保持既有行为，不静默改掉已有配置）；
-// 模型识别不出来时也放行——注入本来就是管理员的显式动作，因为拿不到模型名就静默
-// 失效，比偶尔多注一次更难排查。自动接管那条路径不受这个宽松影响：它在
-// pickOpenAITurnStateCandidate 里要求候选的模型必须与本次请求精确相等。
-func (a *Account) openAITurnStateModelAllowed(model string) bool {
-	if a == nil {
-		return false
-	}
-	raw := strings.TrimSpace(a.GetExtraString(openAITurnStateModelsExtraKey))
-	if raw == "" {
-		return true
-	}
-	model = strings.ToLower(strings.TrimSpace(model))
-	if model == "" {
-		return true
-	}
-	for _, entry := range strings.Split(raw, ",") {
-		entry = strings.ToLower(strings.TrimSpace(entry))
-		switch {
-		case entry == "":
-			continue
-		case strings.HasSuffix(entry, "*"):
-			if strings.HasPrefix(model, strings.TrimSuffix(entry, "*")) {
-				return true
-			}
-		case entry == model:
-			return true
-		}
-	}
-	return false
 }
 
 // applyOpenAICodexTurnStateOverrideWSManualOnly 是 WS 路径的值形态入口：只应用手填覆写。
@@ -379,8 +372,7 @@ func (s *OpenAIGatewayService) applyOpenAICodexTurnStateOverrideWSManualOnly(c *
 	if account == nil || account.IsOpenAITurnStateAutoEnabled() {
 		return current
 	}
-	if manual := account.OpenAICodexTurnStateOverride(); manual != "" &&
-		account.openAITurnStateModelAllowed(openAITurnStateRequestModel(c)) {
+	if manual := account.OpenAICodexTurnStateOverride(openAITurnStateRequestModel(c)); manual != "" {
 		// 记进上下文：帧填充据此判断「本次是不是覆写」，使用记录据此记 overridden/来源。
 		markOpenAITurnStateInjected(c, manual, turnStateSourceManual)
 		markOpenAITurnStateSent(c, account, manual)
@@ -405,15 +397,10 @@ func (s *OpenAIGatewayService) applyOpenAICodexTurnStateOverrideHeader(c *gin.Co
 	markOpenAITurnStateSent(c, account, h.Get(openAICodexTurnStateHeader))
 }
 
-// maxOpenAITurnStateModelsLen 是生效模型名单的长度上限。模型名再长也就几十字符，
-// 512 足够列十来个，同时挡住把整段配置误粘进来。
-const maxOpenAITurnStateModelsLen = 512
-
-// ValidateOpenAITurnStateAutoExtra 校验自动接管的两个配置键。
+// ValidateOpenAITurnStateAutoExtra 校验自动接管的配置键。
 //
 // 开关只能是 bool：写成字符串 "true" 时 getExtraBool 返回 false，开关静默失效——
-// UI 之外用 API 配置时最容易踩这个。名单只能是字符串，空白视为未配置并移除。
-// 候选池等运行态键由网关维护，不在这里校验。
+// UI 之外用 API 配置时最容易踩这个。候选池等运行态键由网关维护，不在这里校验。
 func ValidateOpenAITurnStateAutoExtra(extra map[string]any) error {
 	if extra == nil {
 		return nil
@@ -423,69 +410,88 @@ func ValidateOpenAITurnStateAutoExtra(extra map[string]any) error {
 			return fmt.Errorf("%s must be a boolean", openAITurnStateAutoExtraKey)
 		}
 	}
-	raw, hasModels := extra[openAITurnStateModelsExtraKey]
-	if !hasModels || raw == nil {
-		// 显式传 JSON null 与传空白等价，都按「未配置」清掉，别在 extra 里留个 null。
-		delete(extra, openAITurnStateModelsExtraKey)
-		return validateOpenAITurnStateBlobExtra(extra, openAITurnStateSeedExtraKey)
-	}
-	value, ok := raw.(string)
-	if !ok {
-		return fmt.Errorf("%s must be a string", openAITurnStateModelsExtraKey)
-	}
-	if value = strings.TrimSpace(value); value == "" {
-		delete(extra, openAITurnStateModelsExtraKey)
-		return validateOpenAITurnStateBlobExtra(extra, openAITurnStateSeedExtraKey)
-	}
-	if len(value) > maxOpenAITurnStateModelsLen {
-		return fmt.Errorf("%s exceeds %d characters", openAITurnStateModelsExtraKey, maxOpenAITurnStateModelsLen)
-	}
-	extra[openAITurnStateModelsExtraKey] = value
-	// 引子会被原样发给上游，粘错内容的代价与手填覆写一样，走同一套信封形状校验。
-	// 折在这里而不是单开一个导出函数：这个函数已经挂在全部 7 个写入点上了。
-	return validateOpenAITurnStateBlobExtra(extra, openAITurnStateSeedExtraKey)
+	return nil
 }
 
-// ValidateOpenAITurnStateOverrideExtra 校验并规范化 extra 里的 turn-state 覆写值。
-// 空白视为未配置并从 extra 中移除。非空时必须是 Fernet 信封形状——urlsafe base64、
-// 解出至少 57 字节（1 版本 + 8 时间戳 + 16 IV + 32 HMAC）、首字节 0x80。
-// 这道校验挡的是手滑粘错内容后把垃圾原样发给上游。
+// maxOpenAITurnStateOverrideModels 是手填覆写表的条目上限。Codex 侧同时在用的模型
+// 就那么几个，16 条足够，同时挡住把整张表当垃圾桶用。
+const maxOpenAITurnStateOverrideModels = 16
+
+// ValidateOpenAITurnStateOverrideExtra 校验并规范化 extra 里的 turn-state 覆写表。
+//
+// 形态是 {模型: blob}。空模型名、空 blob 一律剔除；整表空了就把键删掉。每条 blob
+// 必须是 Fernet 信封形状——urlsafe base64、解出至少 57 字节（1 版本 + 8 时间戳 +
+// 16 IV + 32 HMAC）、首字节 0x80。这道校验挡的是手滑粘错内容后把垃圾原样发给上游。
 func ValidateOpenAITurnStateOverrideExtra(extra map[string]any) error {
-	return validateOpenAITurnStateBlobExtra(extra, openAITurnStateOverrideExtraKey)
-}
-
-// validateOpenAITurnStateBlobExtra 是手填覆写与冷启动引子共用的形状校验。
-func validateOpenAITurnStateBlobExtra(extra map[string]any, key string) error {
 	if extra == nil {
 		return nil
 	}
-	raw, ok := extra[key]
-	if !ok {
+	raw, ok := extra[openAITurnStateOverrideExtraKey]
+	if !ok || raw == nil {
+		// 显式传 JSON null 与未配置等价，别在 extra 里留个 null。
+		delete(extra, openAITurnStateOverrideExtraKey)
 		return nil
 	}
-	value, ok := raw.(string)
+	table, ok := raw.(map[string]any)
 	if !ok {
-		return fmt.Errorf("%s must be a string", key)
+		return fmt.Errorf("%s must be an object keyed by model", openAITurnStateOverrideExtraKey)
 	}
-	value = strings.TrimSpace(value)
-	if value == "" {
-		delete(extra, key)
+	if len(table) > maxOpenAITurnStateOverrideModels {
+		return fmt.Errorf("%s exceeds %d models", openAITurnStateOverrideExtraKey, maxOpenAITurnStateOverrideModels)
+	}
+	cleaned := make(map[string]any, len(table))
+	// 取值按大小写不敏感匹配（OpenAICodexTurnStateOverride 用 EqualFold），而 Go map
+	// 的遍历顺序是随机的：留着 {"GPT-5": A, "gpt-5": B} 这种表，注出去的是哪条每次
+	// 调用都可能不同。与其让它随机，不如当场拒掉。
+	seen := make(map[string]string, len(table))
+	for model, v := range table {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			// 空模型名是畸形输入，不是「清空这条票」——后者由空 blob 表达。
+			// 静默丢掉会让管理员看到「保存成功但未配置」。
+			return fmt.Errorf("%s has an empty model name", openAITurnStateOverrideExtraKey)
+		}
+		if prev, dup := seen[strings.ToLower(model)]; dup {
+			return fmt.Errorf("%s has case-conflicting models %q and %q",
+				openAITurnStateOverrideExtraKey, prev, model)
+		}
+		seen[strings.ToLower(model)] = model
+		blob, ok := v.(string)
+		if !ok {
+			return fmt.Errorf("%s[%s] must be a string", openAITurnStateOverrideExtraKey, model)
+		}
+		// 空 blob = 删掉这个模型的票，是 UI 上「清空输入框」的正常语义，不报错。
+		if blob = strings.TrimSpace(blob); blob == "" {
+			continue
+		}
+		if err := validateOpenAITurnStateBlob(fmt.Sprintf("%s[%s]", openAITurnStateOverrideExtraKey, model), blob); err != nil {
+			return err
+		}
+		cleaned[model] = blob
+	}
+	if len(cleaned) == 0 {
+		delete(extra, openAITurnStateOverrideExtraKey)
 		return nil
 	}
+	extra[openAITurnStateOverrideExtraKey] = cleaned
+	return nil
+}
+
+// validateOpenAITurnStateBlob 校验单条 turn-state blob 的信封形状。
+func validateOpenAITurnStateBlob(label, value string) error {
 	if len(value) > maxOpenAITurnStateOverrideLen {
-		return fmt.Errorf("%s exceeds %d characters", key, maxOpenAITurnStateOverrideLen)
+		return fmt.Errorf("%s exceeds %d characters", label, maxOpenAITurnStateOverrideLen)
 	}
 	decoded, err := base64.URLEncoding.WithPadding(base64.StdPadding).DecodeString(value)
 	if err != nil {
 		decoded, err = base64.RawURLEncoding.DecodeString(value)
 	}
 	if err != nil {
-		return fmt.Errorf("%s must be urlsafe base64", key)
+		return fmt.Errorf("%s must be urlsafe base64", label)
 	}
 	if len(decoded) < 57 || decoded[0] != 0x80 {
-		return fmt.Errorf("%s does not look like a Codex turn-state blob", key)
+		return fmt.Errorf("%s does not look like a Codex turn-state blob", label)
 	}
-	extra[key] = value
 	return nil
 }
 

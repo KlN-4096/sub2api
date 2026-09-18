@@ -320,7 +320,8 @@ func TestOpenAITurnStateOverrideBeatsEchoGuard(t *testing.T) {
 	if parent.Extra == nil {
 		parent.Extra = map[string]any{}
 	}
-	parent.Extra[openAITurnStateOverrideExtraKey] = override
+	// 覆写表按模型存，键必须是 convTestBody 里那个模型，否则取不到票就不注入。
+	parent.Extra[openAITurnStateOverrideExtraKey] = map[string]any{"gpt-5.5": override}
 
 	cfg := &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}
 	up := &httpUpstreamRecorder{responses: []*http.Response{codexShadowUpstreamResponse(false, "")}}
