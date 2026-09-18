@@ -71,9 +71,23 @@ func cprTestDetailJSON(status, planType string, windows string) string {
 		`"id":"` + cprTestCPRAccount + `","email":"a@b.c","provider":"openai",` +
 		`"planType":"` + planType + `","planTypeDisplay":"Pro","status":"` + status + `",` +
 		`"errorReason":null,"enabled":true,` +
+		`"outboundProxyEndpoint":"` + cprTestOutboundProxyRaw + `",` +
 		`"quota":{"refreshedAtDisplay":"3 分钟前","limitReached":false,` +
 		`"rateLimitedUntil":null,"windows":[` + windows + `]}}}}`
 }
+
+// wire fixture 里刻意放一个**带凭据**的出站代理。
+//
+// 两件事一起钉住：
+//  1. JSON 字段名 outboundProxyEndpoint 拼错的话功能会静默什么都不做，而只测
+//     buildCPRCodexExtraUpdates 的用例照样全绿——解码那一层根本没被走到。
+//  2. 生产调用点（buildCPRAccountState 里那次 sanitizeCPROutboundProxy）真的在剥凭据。
+//     fixture 放干净值的话，把那次调用换成裸 TrimSpace 测试也全绿，这道防泄漏闸门等于
+//     没有测试。CPR 现在返回的确实是脱敏值，但那是上游的行为、不是我们的不变量。
+const (
+	cprTestOutboundProxyRaw  = "socks5h://cpruser:cprpass@198.51.100.7:1080"
+	cprTestOutboundProxyView = "socks5h://198.51.100.7:1080"
+)
 
 func cprTestWindow(role string, windowSeconds int, usedPercent float64, resetAtDisplay string) string {
 	return fmt.Sprintf(`{"key":"codex:%ds","group":"shortTerm","limitId":"codex",`+
@@ -213,6 +227,12 @@ func TestCPRQuotaAdapterMapsWindows(t *testing.T) {
 	require.Equal(t, "normal", state.Status)
 	require.True(t, state.Schedulable())
 	require.Equal(t, "pro", state.PlanType)
+	// 走完整解码路径，钉住 JSON 字段名 outboundProxyEndpoint，以及生产调用点上的脱敏。
+	// 只测 buildCPR* 的话，这个名字拼错会让功能静默失效而所有断言照样绿；fixture 放干净
+	// 值的话，把那次 sanitize 调用换成裸 TrimSpace 也照样绿。
+	require.Equal(t, cprTestOutboundProxyView, state.OutboundProxyEndpoint)
+	require.NotContains(t, state.OutboundProxyEndpoint, "cprpass")
+	require.NotContains(t, state.OutboundProxyEndpoint, "cpruser")
 	require.NotNil(t, state.RateLimit)
 
 	require.NotNil(t, state.RateLimit.PrimaryWindow)
@@ -242,7 +262,8 @@ func TestCPRExtraUpdatesMatchOAuthDisplayKeys(t *testing.T) {
 	require.NotEmpty(t, oauthShape)
 
 	cprShape := buildCPRCodexExtraUpdates(newCPRTestAccount(), &CPRAccountState{
-		Status: "normal", PlanType: "pro", RateLimit: rateLimit, FetchedAt: now,
+		Status: "normal", PlanType: "pro", RateLimit: rateLimit,
+		OutboundProxyEndpoint: "socks5h://198.51.100.7:1080", FetchedAt: now,
 	})
 
 	for key, want := range oauthShape {
@@ -252,12 +273,15 @@ func TestCPRExtraUpdatesMatchOAuthDisplayKeys(t *testing.T) {
 	require.Contains(t, cprShape, "codex_7d_used_percent")
 	require.Contains(t, cprShape, "codex_usage_updated_at")
 
-	// cpr_plan_type 是本条守卫的唯一例外：它不是展示键（前端不读），而是订阅优先
-	// 调度要用的档位，OAuth 那边存在 credentials.plan_type 里、不经本函数。
-	// 这里把它摘掉再比数量，而不是把期望值加一——否则守卫就形同虚设。
+	// 两个例外，都不是本条守卫要防的「无人消费的状态键」：
+	//   - cpr_plan_type：不是展示键（前端不读），是订阅优先调度要用的档位，
+	//     OAuth 那边存在 credentials.plan_type 里、不经本函数。
+	//   - cpr_outbound_proxy：cpr 独有的出口展示。OAuth 账号没有 CPR 这一层，
+	//     压根没有对应概念，所以它「多出来」是正当的。
+	// 摘掉再比数量，而不是把期望值加二——否则守卫就形同虚设。
 	displayShape := make(map[string]any, len(cprShape))
 	for key, value := range cprShape {
-		if key == CPRPlanTypeExtraKey {
+		if key == CPRPlanTypeExtraKey || key == CPROutboundProxyExtraKey {
 			continue
 		}
 		displayShape[key] = value
@@ -1573,4 +1597,85 @@ func TestUsageCodexTurnStateRecording(t *testing.T) {
 	require.Nil(t, usageCodexTurnStateSourcePtr(apikey, turnStateSourceAuto))
 	require.Nil(t, usageCodexTurnStateOverriddenPtr(nil, turnStateSourceManual))
 	require.Nil(t, usageCodexTurnStateSourcePtr(nil, turnStateSourceManual))
+}
+
+// TestCPRExtraUpdatesCarryOutboundProxy 钉住 CPR 侧出站代理写进展示键。
+//
+// cpr 账号真正的出口 IP 由 CPR 决定：sub2api 账号上绑的 proxy 只作用于
+// sub2api→CPR 那一跳，而那一跳是 127.0.0.1。不把 CPR 的出口显示出来，账号页就
+// 回答不了「这个号现在从哪出去」——排 turn-state / 降智问题的第一个问题。
+//
+// CPR 返回的 endpoint 已由它自己脱敏（不含 user:pass），所以可以原样存进 extra。
+func TestCPRExtraUpdatesCarryOutboundProxy(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	const endpoint = "socks5h://24.120.102.167:35444"
+
+	updates := buildCPRCodexExtraUpdates(newCPRTestAccount(), &CPRAccountState{
+		OutboundProxyEndpoint: endpoint, FetchedAt: now,
+	})
+	require.Equal(t, endpoint, updates[CPROutboundProxyExtraKey])
+
+	known := newCPRTestAccount()
+	if known.Extra == nil {
+		known.Extra = map[string]any{}
+	}
+	known.Extra[CPROutboundProxyExtraKey] = endpoint
+	require.NotContains(t,
+		buildCPRCodexExtraUpdates(known, &CPRAccountState{OutboundProxyEndpoint: endpoint, FetchedAt: now}),
+		CPROutboundProxyExtraKey, "没变就不写，否则每次 /usage 刷新都要写一次库")
+
+	require.NotContains(t,
+		buildCPRCodexExtraUpdates(known, &CPRAccountState{FetchedAt: now}),
+		CPROutboundProxyExtraKey, "空值不写：mergeAccountExtra 只写不删，写空串会把已知出口抹成未知")
+}
+
+// TestSanitizeCPROutboundProxy 钉住:存进 extra 之前一定把凭据剥掉。
+//
+// CPR 现在返回的是脱敏值,但那是上游的行为、不是我们能保证的不变量。CPR 换版本、
+// 换配置,或某个账号配的是带认证的 socks5,`socks5h://user:pass@host:port` 就会落进
+// accounts.extra、随账号列表接口下发、在管理页明文显示密码。本仓库对代理 URL 的硬
+// 约定(internal/pkg/proxyurl 包文档)本来就不允许这么处理。
+func TestSanitizeCPROutboundProxy(t *testing.T) {
+	require.Equal(t, "socks5h://host:1080", sanitizeCPROutboundProxy("acct-1", "socks5h://u:p@host:1080"),
+		"凭据必须剥掉")
+	require.Equal(t, "socks5h://host:1080", sanitizeCPROutboundProxy("acct-1", "socks5h://onlyuser@host:1080"),
+		"只有用户名也要剥")
+	require.Equal(t, "socks5h://host:1080", sanitizeCPROutboundProxy("acct-1", "  socks5h://host:1080  "))
+	// socks5 会被 proxyurl.Parse 升级成 socks5h(防 DNS 泄漏),这里跟着走同一套。
+	require.Equal(t, "socks5h://host:1080", sanitizeCPROutboundProxy("acct-1", "socks5://host:1080"))
+	require.Equal(t, "http://host:8080", sanitizeCPROutboundProxy("acct-1", "http://host:8080"))
+
+	// 凭据不只藏在 userinfo 里。没有 userinfo 就把原串放行的话，这几条会整串落进
+	// accounts.extra、随账号列表接口下发、在管理页明文显示。
+	require.Equal(t, "http://host:8080", sanitizeCPROutboundProxy("acct-1", "http://host:8080/?token=secret"),
+		"query 里的凭据也要剥")
+	require.Equal(t, "socks5h://host:1080", sanitizeCPROutboundProxy("acct-1", "socks5h://host:1080/u:p"),
+		"path 也不该带出去")
+	require.Equal(t, "http://host:8080", sanitizeCPROutboundProxy("acct-1", "http://host:8080#frag"))
+
+	require.Empty(t, sanitizeCPROutboundProxy("acct-1", ""))
+	require.Empty(t, sanitizeCPROutboundProxy("acct-1", "not a url"), "解不开就整个丢弃,不存半个")
+	require.Empty(t, sanitizeCPROutboundProxy("acct-1", "ftp://host:21"), "白名单外的协议不存")
+}
+
+// TestCPRAccountStateSanitizesOutboundProxy 钉住生产调用点：翻译 CPR 视图的那一步就
+// 已经把凭据剥了，落进 extra 的值永远是干净的。
+//
+// 刻意断言 buildCPRAccountState 而不是 buildCPRCodexExtraUpdates：后者的入参是
+// CPRAccountState，测试自己先 sanitize 一遍再喂进去就成了「我洗过的值传过去还是干净的」
+// ——把生产端唯一的脱敏调用点换成裸 TrimSpace，那种测试全绿。
+func TestCPRAccountStateSanitizesOutboundProxy(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	state := buildCPRAccountState(&cprAccountView{
+		ID:                    "acct-1",
+		Status:                CPRAccountStatusNormal,
+		OutboundProxyEndpoint: "socks5h://u:p@24.120.102.167:35444",
+	}, now)
+	require.NotNil(t, state)
+	require.Equal(t, "socks5h://24.120.102.167:35444", state.OutboundProxyEndpoint)
+
+	// 写入侧只是把已经干净的值原样带过去，一起过一遍确认没有再引入一条旁路。
+	updates := buildCPRCodexExtraUpdates(newCPRTestAccount(), state)
+	stored, _ := updates[CPROutboundProxyExtraKey].(string)
+	require.Equal(t, "socks5h://24.120.102.167:35444", stored)
 }
