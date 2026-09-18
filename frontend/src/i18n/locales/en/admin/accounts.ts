@@ -730,12 +730,13 @@ export default {
           hunterSummary: 'hunter {count}/{max} this hour · {next} · {last}',
           hunterNext: 'next {time}',
           hunterReady: 'ready',
-          hunterLast: 'last {result} @{proxy} {time}',
+          // A bare `@` is vue-i18n's linked-message prefix and throws in production builds; use {'@'}.
+          hunterLast: "last {result} {'@'}{proxy} {time}",
           hunterLastNone: 'no probe yet',
           hunterResultHit: '{chars}✓',
           hunterResultMiss: '{chars}',
           hunterResultError: 'error {status} {error}',
-          hunterDetail: '{time} {model} @{proxy}{exit}: {result}, headers in {latency}',
+          hunterDetail: "{time} {model} {'@'}{proxy}{exit}: {result}, headers in {latency}",
         },
         compactMode: 'Compact mode',
         compactModeDesc:

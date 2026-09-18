@@ -301,13 +301,6 @@
             >
               {{ turnStateBadgeText(row.turn_state) }}
             </span>
-            <span
-              v-if="row.turn_state_overridden"
-              class="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
-              :title="turnStateSourceTitle(row.turn_state_source)"
-            >
-              {{ turnStateSourceBadge(row.turn_state_source) }}
-            </span>
             <span class="truncate font-mono text-xs text-gray-500 dark:text-gray-400" :title="row.turn_state">
               {{ row.turn_state }}
             </span>
@@ -332,6 +325,16 @@
               :title="turnStateTitle(row.turn_state_sent)"
             >
               {{ turnStateBadgeText(row.turn_state_sent) }}
+            </span>
+            <!-- 覆写来源说的是「出站这张票从哪来」，所以贴在出站列。贴在铸出列时，
+                 「注入 292 后上游仍铸 312」这一行会显示成「312 手填」，读起来像手填的
+                 就是 312。 -->
+            <span
+              v-if="row.turn_state_overridden"
+              class="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+              :title="turnStateSourceTitle(row.turn_state_source)"
+            >
+              {{ turnStateSourceBadge(row.turn_state_source) }}
             </span>
             <span class="truncate font-mono text-xs text-gray-500 dark:text-gray-400" :title="row.turn_state_sent">
               {{ row.turn_state_sent }}

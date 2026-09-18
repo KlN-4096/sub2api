@@ -806,12 +806,14 @@ export default {
           hunterSummary: '猎手 本小时 {count}/{max} · {next} · {last}',
           hunterNext: '下次 {time}',
           hunterReady: '待命',
-          hunterLast: '上次 {result} @{proxy} {time}',
+          // `@` 是 vue-i18n 的链接消息前缀，裸写会在生产构建里抛 SyntaxError 并整块吞掉
+          // 账号列的 Turn-State 格子；字面量要用 {'@'}。
+          hunterLast: "上次 {result} {'@'}{proxy} {time}",
           hunterLastNone: '尚未探测',
           hunterResultHit: '{chars}✓',
           hunterResultMiss: '{chars}',
           hunterResultError: '出错 {status} {error}',
-          hunterDetail: '{time} {model} @{proxy}{exit}：{result}，响应头 {latency}',
+          hunterDetail: "{time} {model} {'@'}{proxy}{exit}：{result}，响应头 {latency}",
         },
         compactMode: 'Compact 模式',
         compactModeDesc:
