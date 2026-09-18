@@ -726,6 +726,10 @@ func (e *UpstreamFailoverError) ShouldReportAccountScheduleFailure() bool {
 	if e == nil {
 		return false
 	}
+	// 降智暂停是网关本地判定（缺 292 就换号），不是账号出错，不进调度器的错误率。
+	if e.Reason == OpenAITurnStateHoldReason {
+		return false
+	}
 	return !e.IsCredentialFailure() || e.Scope == GatewayFailureScopeAccount
 }
 

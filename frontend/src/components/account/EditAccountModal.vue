@@ -2520,6 +2520,198 @@
               {{ t('admin.accounts.openai.turnStateOverrideConfigured', { models: turnStateConfiguredModels.join(', ') }) }}
             </p>
           </div>
+          <!-- 292 猎手：只对直连 ChatGPT 的 oauth / setup-token 账号开放（cpr 的出口由
+               codex-proxy-rs 决定，换代理换不到出口）。依赖自动接管：票只入池不注入等于白猎。 -->
+          <div v-if="accountSupportsTurnStateHunter" class="space-y-2" data-testid="edit-openai-turn-state-hunter-section">
+            <div class="flex items-center justify-between gap-4">
+              <div class="min-w-0">
+                <label class="input-label mb-0">{{ t('admin.accounts.openai.turnStateHunter') }}</label>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.accounts.openai.turnStateHunterDesc') }}
+                </p>
+              </div>
+              <input
+                v-model="openAITurnStateHunter.enabled"
+                data-testid="edit-openai-turn-state-hunter"
+                type="checkbox"
+                :disabled="!openAITurnStateAuto"
+                class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:cursor-not-allowed disabled:opacity-60"
+              />
+            </div>
+            <p
+              v-if="!openAITurnStateAuto"
+              data-testid="edit-openai-turn-state-hunter-needs-auto"
+              class="text-xs text-amber-600 dark:text-amber-400"
+            >
+              {{ t('admin.accounts.openai.turnStateHunterNeedsAuto') }}
+            </p>
+            <div v-if="openAITurnStateHunter.enabled" class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterModels') }}</label>
+                <select
+                  v-model="openAITurnStateHunter.models"
+                  multiple
+                  size="4"
+                  data-testid="edit-openai-turn-state-hunter-models"
+                  class="input text-xs"
+                  :disabled="openAITurnStateHunter.auto_models"
+                  @focus="ensureTurnStateModelOptions"
+                >
+                  <option v-for="m in turnStateHunterModelOptions" :key="m" :value="m">{{ m }}</option>
+                </select>
+                <label class="mt-1 flex items-center gap-1.5 text-[11px] text-gray-600 dark:text-gray-300">
+                  <input
+                    v-model="openAITurnStateHunter.auto_models"
+                    type="checkbox"
+                    data-testid="edit-openai-turn-state-hunter-auto-models"
+                    class="h-3 w-3 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                  />
+                  <span>{{ t('admin.accounts.openai.turnStateHunterAutoModels') }}</span>
+                </label>
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterProxies') }}</label>
+                <select
+                  v-model="openAITurnStateHunter.proxy_ids"
+                  multiple
+                  size="4"
+                  data-testid="edit-openai-turn-state-hunter-proxies"
+                  class="input text-xs"
+                  @focus="ensureTurnStateHunterProxies"
+                >
+                  <option v-for="p in turnStateHunterProxyOptions" :key="p.id" :value="p.id">{{ p.label }}</option>
+                </select>
+                <!-- 已选代理逐个标「每次连接换出口」：猎手只自动识别 webshare 的 -rotate，别的供应商
+                     （B2Proxy 等）的轮换模式从用户名看不出来，猜成固定出口就会一轮只探一次、312 还冷却 7 天。 -->
+                <div v-if="turnStateHunterSelectedProxies.length" class="mt-1 space-y-0.5" data-testid="edit-openai-turn-state-hunter-rotating">
+                  <p class="text-[11px] text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.turnStateHunterRotating') }}</p>
+                  <label v-for="p in turnStateHunterSelectedProxies" :key="p.id" class="flex items-center gap-1.5 text-[11px] text-gray-600 dark:text-gray-300">
+                    <input
+                      v-model="openAITurnStateHunter.rotating_proxy_ids"
+                      type="checkbox"
+                      :value="p.id"
+                      :data-testid="`edit-openai-turn-state-hunter-rotating-${p.id}`"
+                      class="h-3 w-3 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                    />
+                    <span class="truncate">{{ p.label }}</span>
+                  </label>
+                </div>
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterMaxPerHour') }}</label>
+                <input v-model.number="openAITurnStateHunter.max_per_hour" type="number" min="1" max="600" placeholder="30" class="input text-xs" data-testid="edit-openai-turn-state-hunter-max" />
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterGap') }}</label>
+                <input v-model.number="openAITurnStateHunter.gap_seconds" type="number" min="1" max="600" placeholder="20" class="input text-xs" />
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterLead') }}</label>
+                <input v-model.number="openAITurnStateHunter.lead_minutes" type="number" min="1" max="55" placeholder="10" class="input text-xs" />
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterIdle') }}</label>
+                <input v-model.number="openAITurnStateHunter.idle_minutes" type="number" min="-1" max="1440" placeholder="60" class="input text-xs" />
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterUsageKey') }}</label>
+                <input
+                  v-model.number="openAITurnStateHunter.usage_api_key_id"
+                  type="number"
+                  min="1"
+                  step="1"
+                  class="input text-xs"
+                  data-testid="edit-openai-turn-state-hunter-usage-key"
+                  :title="t('admin.accounts.openai.turnStateHunterUsageKeyDesc')"
+                />
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterEffort') }}</label>
+                <select v-model="openAITurnStateHunter.reasoning_effort" class="input text-xs" data-testid="edit-openai-turn-state-hunter-effort">
+                  <option value="">{{ t('admin.accounts.openai.turnStateHunterEffortDefault') }}</option>
+                  <option v-for="e in turnStateHunterEfforts" :key="e" :value="e">{{ e }}</option>
+                </select>
+              </div>
+              <div class="flex items-center justify-between gap-4 sm:col-span-2">
+                <div class="min-w-0">
+                  <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.turnStateHunterHold') }}</label>
+                  <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    {{ t('admin.accounts.openai.turnStateHunterHoldDesc') }}
+                  </p>
+                </div>
+                <input
+                  v-model="openAITurnStateHunter.hold_when_degraded"
+                  data-testid="edit-openai-turn-state-hunter-hold"
+                  type="checkbox"
+                  class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
+              </div>
+            </div>
+          </div>
+          <!-- 降智恢复探测：独立于猎手的开关，走账号自己的出口，只标记不改配置。 -->
+          <div class="mt-3 rounded-lg border border-gray-200 p-3 dark:border-dark-700">
+            <div class="flex items-center justify-between gap-4">
+              <div class="min-w-0">
+                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.turnStateRecovery') }}</label>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.accounts.openai.turnStateRecoveryDesc') }}
+                </p>
+              </div>
+              <input
+                v-model="openAITurnStateRecovery.enabled"
+                data-testid="edit-openai-turn-state-recovery"
+                type="checkbox"
+                class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+              />
+            </div>
+            <div v-if="openAITurnStateRecovery.enabled" class="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div class="col-span-2">
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateRecoveryModel') }}</label>
+                <input
+                  v-model="openAITurnStateRecovery.model"
+                  type="text"
+                  :placeholder="t('admin.accounts.openai.turnStateRecoveryModelAuto')"
+                  class="input text-xs"
+                  data-testid="edit-openai-turn-state-recovery-model"
+                />
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateRecoveryStreak') }}</label>
+                <input v-model.number="openAITurnStateRecovery.streak_target" type="number" min="1" max="50" placeholder="5" class="input text-xs" />
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateRecoveryCooldown') }}</label>
+                <input v-model.number="openAITurnStateRecovery.cooldown_hours" type="number" min="1" max="168" placeholder="16" class="input text-xs" />
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateRecoveryMin') }}</label>
+                <input v-model.number="openAITurnStateRecovery.min_minutes" type="number" min="1" max="1440" placeholder="30" class="input text-xs" />
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateRecoveryMax') }}</label>
+                <input v-model.number="openAITurnStateRecovery.max_minutes" type="number" min="1" max="1440" placeholder="90" class="input text-xs" />
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterUsageKey') }}</label>
+                <input
+                  v-model.number="openAITurnStateRecovery.usage_api_key_id"
+                  type="number"
+                  min="1"
+                  step="1"
+                  class="input text-xs"
+                  data-testid="edit-openai-turn-state-recovery-usage-key"
+                  :title="t('admin.accounts.openai.turnStateHunterUsageKeyDesc')"
+                />
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterEffort') }}</label>
+                <select v-model="openAITurnStateRecovery.reasoning_effort" class="input text-xs" data-testid="edit-openai-turn-state-recovery-effort">
+                  <option value="">{{ t('admin.accounts.openai.turnStateHunterEffortDefault') }}</option>
+                  <option v-for="e in turnStateHunterEfforts" :key="e" :value="e">{{ e }}</option>
+                </select>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="flex items-center justify-between">
           <div>
@@ -3924,6 +4116,201 @@ const cprOutboundProxy = computed(() => readCPROutboundProxy(props.account))
 const openAITurnStateAuto = ref(false)
 const readOpenAITurnStateAuto = (extra: unknown): boolean =>
   (extra as Record<string, unknown> | undefined)?.openai_turn_state_auto === true
+
+// 292 猎手（extra.openai_turn_state_hunter）。数值留空 = 后端默认；idle_minutes 填 -1 = 不设空闲门槛。
+// 只对直连 ChatGPT 的 oauth / setup-token 账号：cpr 的出口由 codex-proxy-rs 决定。
+interface TurnStateHunterConfig {
+  enabled: boolean
+  models: string[]
+  proxy_ids: number[]
+  /** 按「每条新连接换出口」处理的代理（webshare -rotate 后端自动识别，不用勾）。 */
+  rotating_proxy_ids: number[]
+  max_per_hour: number | null
+  gap_seconds: number | null
+  lead_minutes: number | null
+  idle_minutes: number | null
+  // 没有 UI 字段，只经 API 写入；这里带上是为了改动区块里别的项时不把它丢掉。
+  retry_minutes: number | null
+  reasoning_effort: string
+  /** 要猎的模型拿不出可注入的 292 时把账号停调度、请求换号/503，猎到票自动放回。 */
+  hold_when_degraded: boolean
+  /** 按真实请求自动定要猎的模型；开着时手选的 models 忽略。 */
+  auto_models: boolean
+  /** 探测记账用的 API Key ID：每次 200 探测按标准用量路径落一行；空 = 不记。 */
+  usage_api_key_id: number | null
+}
+// 降智恢复探测（extra.openai_turn_state_recovery）：走账号**自己的出口**、间隔随机，连续
+// streak_target 次 292 判定恢复并打标记；连续同样多次失败进 cooldown_hours 冷却。只标记，不改配置。
+interface TurnStateRecoveryConfig {
+  enabled: boolean
+  /** 探哪个模型；留空 = 最近有真实流量的那个。 */
+  model: string
+  streak_target: number | null
+  min_minutes: number | null
+  max_minutes: number | null
+  cooldown_hours: number | null
+  reasoning_effort: string
+  /** 记账 API Key ID；留空回落猎手那把（猎手关着时它的输入框不渲染，所以这里要有自己的）。 */
+  usage_api_key_id: number | null
+}
+const emptyTurnStateRecovery = (): TurnStateRecoveryConfig => ({
+  enabled: false,
+  model: '',
+  streak_target: null,
+  min_minutes: null,
+  max_minutes: null,
+  cooldown_hours: null,
+  reasoning_effort: '',
+  usage_api_key_id: null
+})
+const readOpenAITurnStateRecovery = (extra: unknown): TurnStateRecoveryConfig => {
+  const cfg = emptyTurnStateRecovery()
+  const raw = (extra as Record<string, unknown> | undefined)?.openai_turn_state_recovery
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return cfg
+  const table = raw as Record<string, unknown>
+  cfg.enabled = table.enabled === true
+  cfg.model = typeof table.model === 'string' ? table.model : ''
+  const int = (key: string) => (typeof table[key] === 'number' ? (table[key] as number) : null)
+  cfg.streak_target = int('streak_target')
+  cfg.min_minutes = int('min_minutes')
+  cfg.max_minutes = int('max_minutes')
+  cfg.cooldown_hours = int('cooldown_hours')
+  cfg.usage_api_key_id = int('usage_api_key_id')
+  cfg.reasoning_effort = typeof table.reasoning_effort === 'string' ? table.reasoning_effort : ''
+  return cfg
+}
+// 全空（关着、什么都没填）返回 null = 删键，与猎手同一套。
+const normalizeTurnStateRecovery = (cfg: TurnStateRecoveryConfig): Record<string, unknown> | null => {
+  const out: Record<string, unknown> = { enabled: cfg.enabled }
+  const model = cfg.model.trim()
+  if (model) out.model = model
+  const numeric: Array<[string, number | null]> = [
+    ['streak_target', cfg.streak_target],
+    ['min_minutes', cfg.min_minutes],
+    ['max_minutes', cfg.max_minutes],
+    ['cooldown_hours', cfg.cooldown_hours],
+    ['usage_api_key_id', cfg.usage_api_key_id]
+  ]
+  for (const [key, value] of numeric) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) out[key] = value
+  }
+  if (cfg.reasoning_effort) out.reasoning_effort = cfg.reasoning_effort
+  return !cfg.enabled && Object.keys(out).length === 1 ? null : out
+}
+const serializeTurnStateRecovery = (cfg: TurnStateRecoveryConfig) => JSON.stringify(normalizeTurnStateRecovery(cfg))
+const openAITurnStateRecovery = ref<TurnStateRecoveryConfig>(emptyTurnStateRecovery())
+
+const turnStateHunterEfforts = ['minimal', 'low', 'medium', 'high', 'xhigh']
+const emptyTurnStateHunter = (): TurnStateHunterConfig => ({
+  enabled: false,
+  models: [],
+  proxy_ids: [],
+  rotating_proxy_ids: [],
+  max_per_hour: null,
+  gap_seconds: null,
+  lead_minutes: null,
+  idle_minutes: null,
+  retry_minutes: null,
+  reasoning_effort: '',
+  hold_when_degraded: false,
+  auto_models: false,
+  usage_api_key_id: null
+})
+const readOpenAITurnStateHunter = (extra: unknown): TurnStateHunterConfig => {
+  const cfg = emptyTurnStateHunter()
+  const raw = (extra as Record<string, unknown> | undefined)?.openai_turn_state_hunter
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return cfg
+  const table = raw as Record<string, unknown>
+  cfg.enabled = table.enabled === true
+  if (Array.isArray(table.models)) {
+    cfg.models = table.models.filter((m): m is string => typeof m === 'string' && !!m.trim()).map((m) => m.trim())
+  }
+  if (Array.isArray(table.proxy_ids)) {
+    cfg.proxy_ids = table.proxy_ids.filter((id): id is number => typeof id === 'number' && id > 0)
+  }
+  if (Array.isArray(table.rotating_proxy_ids)) {
+    cfg.rotating_proxy_ids = table.rotating_proxy_ids.filter((id): id is number => typeof id === 'number' && id > 0)
+  }
+  const int = (key: string) => (typeof table[key] === 'number' ? (table[key] as number) : null)
+  cfg.max_per_hour = int('max_per_hour')
+  cfg.gap_seconds = int('gap_seconds')
+  cfg.lead_minutes = int('lead_minutes')
+  cfg.idle_minutes = int('idle_minutes')
+  cfg.retry_minutes = int('retry_minutes')
+  cfg.usage_api_key_id = int('usage_api_key_id')
+  cfg.reasoning_effort = typeof table.reasoning_effort === 'string' ? table.reasoning_effort : ''
+  cfg.hold_when_degraded = table.hold_when_degraded === true
+  cfg.auto_models = table.auto_models === true
+  return cfg
+}
+// 归一成要写进 extra 的对象；全空（关着、没选、没填）返回 null = 删键。
+const normalizeTurnStateHunter = (cfg: TurnStateHunterConfig): Record<string, unknown> | null => {
+  const models = Array.from(new Set(cfg.models.map((m) => m.trim()).filter(Boolean)))
+  const proxyIds = Array.from(new Set(cfg.proxy_ids.filter((id) => Number.isInteger(id) && id > 0)))
+  const out: Record<string, unknown> = { enabled: cfg.enabled, models, proxy_ids: proxyIds }
+  // 只保留仍在探测列表里的：代理取消勾选后它的「轮换」标记没有意义，别留残余。
+  const rotating = cfg.rotating_proxy_ids.filter((id) => proxyIds.includes(id))
+  if (rotating.length) out.rotating_proxy_ids = rotating
+  const numeric: Array<[keyof TurnStateHunterConfig, number | null]> = [
+    ['max_per_hour', cfg.max_per_hour],
+    ['gap_seconds', cfg.gap_seconds],
+    ['lead_minutes', cfg.lead_minutes],
+    ['idle_minutes', cfg.idle_minutes],
+    ['retry_minutes', cfg.retry_minutes],
+    ['usage_api_key_id', cfg.usage_api_key_id]
+  ]
+  for (const [key, value] of numeric) {
+    if (typeof value === 'number' && Number.isFinite(value) && value !== 0) out[key] = value
+  }
+  if (cfg.reasoning_effort) out.reasoning_effort = cfg.reasoning_effort
+  if (cfg.hold_when_degraded) out.hold_when_degraded = true
+  if (cfg.auto_models) out.auto_models = true
+  const blank = !cfg.enabled && !models.length && !proxyIds.length && Object.keys(out).length === 3
+  return blank ? null : out
+}
+const serializeTurnStateHunter = (cfg: TurnStateHunterConfig) => JSON.stringify(normalizeTurnStateHunter(cfg))
+const openAITurnStateHunter = ref<TurnStateHunterConfig>(emptyTurnStateHunter())
+const accountSupportsTurnStateHunter = computed(
+  () => props.account?.platform === 'openai' && ['oauth', 'setup-token'].includes(props.account?.type || '')
+)
+const turnStateHunterModelOptions = computed(() =>
+  Array.from(new Set([...turnStateModelOptions.value, ...openAITurnStateHunter.value.models]))
+)
+// 代理列表懒加载：只在猎手区块展开/聚焦时拉一次。拉不到就只剩已选的 id 占位，别让已配的选择在界面上消失。
+const turnStateHunterProxies = ref<Proxy[]>([])
+const turnStateHunterProxiesLoaded = ref(false)
+const ensureTurnStateHunterProxies = async () => {
+  if (turnStateHunterProxiesLoaded.value) return
+  try {
+    turnStateHunterProxies.value = await adminAPI.proxies.getAll()
+    turnStateHunterProxiesLoaded.value = true
+  } catch {
+    turnStateHunterProxies.value = [] // 没拉到不算加载过：下次聚焦再试
+  }
+}
+const turnStateHunterProxyOptions = computed(() => {
+  const options = turnStateHunterProxies.value.map((p) => ({
+    id: p.id,
+    label: `${p.name} (${p.protocol}://${p.host}:${p.port})`
+  }))
+  for (const id of openAITurnStateHunter.value.proxy_ids) {
+    if (!options.some((o) => o.id === id)) options.push({ id, label: `#${id}` })
+  }
+  return options
+})
+const turnStateHunterSelectedProxies = computed(() =>
+  openAITurnStateHunter.value.proxy_ids.map(
+    (id) => turnStateHunterProxyOptions.value.find((o) => o.id === id) ?? { id, label: `#${id}` }
+  )
+)
+watch(
+  () => openAITurnStateHunter.value.enabled,
+  (enabled) => {
+    if (!enabled) return
+    ensureTurnStateModelOptions()
+    void ensureTurnStateHunterProxies()
+  }
+)
 const readUpstreamRequestIdHeader = (extra: unknown): string => {
   const value = (extra as Record<string, unknown> | undefined)?.upstream_request_id_header
   return typeof value === 'string' ? value : ''
@@ -4460,6 +4847,10 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	upstreamRequestIdHeader.value = readUpstreamRequestIdHeader(extra)
 	openAITurnStateOverrides.value = readOpenAITurnStateOverrides(extra)
 	openAITurnStateAuto.value = readOpenAITurnStateAuto(extra)
+	openAITurnStateHunter.value = readOpenAITurnStateHunter(extra)
+	openAITurnStateRecovery.value = readOpenAITurnStateRecovery(extra)
+	turnStateHunterProxiesLoaded.value = false
+	turnStateHunterProxies.value = []
 	turnStateSelectedModel.value = Object.keys(openAITurnStateOverrides.value).sort()[0] ?? ''
 	// 只重置懒加载闸，不在这里发请求：见 loadTurnStateModelOptions 的副作用说明。
 	turnStateModelsLoaded.value = false
@@ -5466,6 +5857,19 @@ const handleSubmit = async () => {
 		}
 	}
 
+	// 与后端 ValidateOpenAITurnStateHunterExtra 同口径：开着必须有模型和代理，且各有上限；
+	// 不拦的话用户吃到的是后端 400 的英文原文。
+	if (accountSupportsTurnStateHunter.value && openAITurnStateHunter.value.enabled) {
+		const hunter = normalizeTurnStateHunter(openAITurnStateHunter.value)
+		const models = (hunter?.models as string[] | undefined) ?? []
+		const proxies = (hunter?.proxy_ids as number[] | undefined) ?? []
+		const autoModels = hunter?.auto_models === true
+		if ((!models.length && !autoModels) || !proxies.length || models.length > 8 || proxies.length > 64) {
+			appStore.showError(t('admin.accounts.openai.turnStateHunterInvalid'))
+			return
+		}
+	}
+
   const updatePayload: Record<string, unknown> = { ...form }
   try {
     // 后端期望 proxy_id: 0 表示清除代理，而不是 null
@@ -6262,6 +6666,41 @@ const handleSubmit = async () => {
         newExtra.openai_turn_state_auto = true
       } else {
         delete newExtra.openai_turn_state_auto
+      }
+      updatePayload.extra = newExtra
+    }
+
+    // 猎手配置：同样只在改动时写回。运行态键 openai_turn_state_hunt 由猎手维护，这里不碰。
+    if (
+      accountSupportsTurnStateHunter.value &&
+      serializeTurnStateHunter(openAITurnStateHunter.value) !==
+        serializeTurnStateHunter(readOpenAITurnStateHunter(props.account.extra))
+    ) {
+      const currentExtra = (updatePayload.extra as Record<string, unknown>) || (props.account.extra as Record<string, unknown>) || {}
+      const newExtra: Record<string, unknown> = { ...currentExtra }
+      const nextHunter = normalizeTurnStateHunter(openAITurnStateHunter.value)
+      if (nextHunter) {
+        newExtra.openai_turn_state_hunter = nextHunter
+      } else {
+        delete newExtra.openai_turn_state_hunter
+      }
+      updatePayload.extra = newExtra
+    }
+
+    // 恢复探测配置：独立于猎手（猎手关着也能开），同样只在改动时写回。运行态键
+    // openai_turn_state_recovery_state 由探测维护，这里不碰。
+    if (
+      accountSupportsTurnStateHunter.value &&
+      serializeTurnStateRecovery(openAITurnStateRecovery.value) !==
+        serializeTurnStateRecovery(readOpenAITurnStateRecovery(props.account.extra))
+    ) {
+      const currentExtra = (updatePayload.extra as Record<string, unknown>) || (props.account.extra as Record<string, unknown>) || {}
+      const newExtra: Record<string, unknown> = { ...currentExtra }
+      const nextRecovery = normalizeTurnStateRecovery(openAITurnStateRecovery.value)
+      if (nextRecovery) {
+        newExtra.openai_turn_state_recovery = nextRecovery
+      } else {
+        delete newExtra.openai_turn_state_recovery
       }
       updatePayload.extra = newExtra
     }

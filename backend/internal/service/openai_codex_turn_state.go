@@ -388,6 +388,11 @@ func (s *OpenAIGatewayService) applyOpenAICodexTurnStateOverrideHeader(c *gin.Co
 	if h == nil {
 		return
 	}
+	// 真实流量水位（猎手的空闲门槛）记在出站这一刻：按响应头记的话，上游不铸 turn-state 的
+	// 成功请求就不算流量，缺票的模型会被空闲门槛挡住。探测自己不算。
+	if account != nil && account.TargetsChatGPTCodexUpstream() && !openAITurnStateProbeContext(c) {
+		s.noteOpenAITurnStateTraffic(account.ID, openAITurnStateRequestModel(c), time.Now())
+	}
 	// 每个 failover attempt 都重新判定：c 在整个重试循环里是同一个。
 	clearOpenAITurnStateInjected(c)
 	if override, _ := s.resolveOpenAITurnStateOverride(c, account); override != "" {

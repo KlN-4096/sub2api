@@ -118,11 +118,14 @@ const isRateLimited = computed(() => {
     return true
   }
   const modelLimits = (props.account?.extra as Record<string, unknown> | undefined)?.model_rate_limits as
-    | Record<string, { rate_limit_reset_at: string }>
+    | Record<string, { rate_limit_reset_at: string; reason?: string }>
     | undefined
   if (modelLimits) {
     const now = new Date()
-    return Object.values(modelLimits).some(info => new Date(info.rate_limit_reset_at) > now)
+    // 降智暂停（reason=turn_state_hold）不是限流：「恢复状态」清掉它也只是让下一条请求再停一次，别误导。
+    return Object.values(modelLimits).some(
+      info => info.reason !== 'turn_state_hold' && new Date(info.rate_limit_reset_at) > now
+    )
   }
   return false
 })

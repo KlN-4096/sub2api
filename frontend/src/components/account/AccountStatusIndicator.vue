@@ -110,6 +110,14 @@
           {{ formatScopeName(item.model) }}
           <span class="text-[10px] opacity-70">{{ formatCountdown(item.reset_at) }}</span>
         </span>
+        <!-- 降智暂停：该模型在本账号上停着，猎手寻票中（不报倒计时，到期有请求还会再停） -->
+        <span
+          v-else-if="item.kind === 'turn_state_hold'"
+          class="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+        >
+          <Icon name="exclamationTriangle" size="xs" :stroke-width="2" />
+          {{ t('admin.accounts.status.turnStateHoldShort') }} · {{ formatScopeName(item.model) }}
+        </span>
         <!-- 普通模型限流 -->
         <span
           v-else
@@ -124,11 +132,13 @@
           class="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 w-max max-w-[320px] -translate-x-1/2 whitespace-nowrap rounded bg-gray-900 px-3 py-2 text-center text-xs leading-relaxed text-white opacity-0 transition-opacity group-hover:opacity-100 dark:bg-gray-700"
         >
           {{
-            item.kind === 'credits_exhausted'
-              ? t('admin.accounts.status.creditsExhaustedUntil', { time: formatDateTimeToMinute(item.reset_at) })
-              : item.kind === 'credits_active'
-                ? t('admin.accounts.status.modelCreditOveragesUntil', { model: formatScopeName(item.model), time: formatDateTimeToMinute(item.reset_at) })
-                : t('admin.accounts.status.modelRateLimitedUntil', { model: formatScopeName(item.model), time: formatDateTimeToMinute(item.reset_at) })
+            item.kind === 'turn_state_hold'
+              ? t('admin.accounts.status.turnStateHold', { model: formatScopeName(item.model) })
+              : item.kind === 'credits_exhausted'
+                ? t('admin.accounts.status.creditsExhaustedUntil', { time: formatDateTimeToMinute(item.reset_at) })
+                : item.kind === 'credits_active'
+                  ? t('admin.accounts.status.modelCreditOveragesUntil', { model: formatScopeName(item.model), time: formatDateTimeToMinute(item.reset_at) })
+                  : t('admin.accounts.status.modelRateLimitedUntil', { model: formatScopeName(item.model), time: formatDateTimeToMinute(item.reset_at) })
           }}
           <div
             class="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-gray-900 dark:border-t-gray-700"
@@ -164,6 +174,8 @@ import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import type { Account } from '@/types'
 import { formatCountdown, formatDateTime, formatDateTimeToMinute, formatCountdownWithSuffix, formatTime } from '@/utils/format'
+import { TURN_STATE_HOLD_REASON } from '@/utils/turnState'
+import { useNowTicker } from '@/composables/useNowTicker'
 
 const { t } = useI18n()
 
@@ -175,25 +187,34 @@ const emit = defineEmits<{
   (e: 'show-temp-unsched', account: Account): void
 }>()
 
+// 会走的「现在」。本组件原先每处都是裸 new Date()：那不是响应式依赖，computed 算过一次
+// 就再也不重算（账号页自动刷新默认是关的），到期的徽标会一直挂着。同一行的猎手行按 30s
+// 一跳判同一条到期时间，这边冻结的话两处会各说各话——用户报过的那个「打架」。
+const sharedNow = useNowTicker()
+
 // Computed: is rate limited (429)
 const isRateLimited = computed(() => {
   if (!props.account.rate_limit_reset_at) return false
-  return new Date(props.account.rate_limit_reset_at) > new Date()
+  return new Date(props.account.rate_limit_reset_at).getTime() > sharedNow.value
 })
 
 type AccountModelStatusItem = {
-  kind: 'rate_limit' | 'credits_exhausted' | 'credits_active'
+  kind: 'rate_limit' | 'credits_exhausted' | 'credits_active' | 'turn_state_hold'
   model: string
   reset_at: string
 }
 
-// Computed: active model statuses (普通模型限流 + 积分耗尽 + 走积分中)
+// 降智暂停（openai_turn_state_hold.go）借 model_rate_limits 存，reason 标本功能：显示成
+// 「寻票中」而不是普通限流，也不报倒计时——到期只是内部翻一次标记，有请求还会再停。
+// reason 串与 AccountTurnStateCell 的猎手行共用一份（@/utils/turnState）。
+
+// Computed: active model statuses (普通模型限流 + 积分耗尽 + 走积分中 + 降智暂停)
 const activeModelStatuses = computed<AccountModelStatusItem[]>(() => {
   const extra = props.account.extra as Record<string, unknown> | undefined
   const modelLimits = extra?.model_rate_limits as
-    | Record<string, { rate_limited_at: string; rate_limit_reset_at: string }>
+    | Record<string, { rate_limited_at: string; rate_limit_reset_at: string; reason?: string }>
     | undefined
-  const now = new Date()
+  const now = new Date(sharedNow.value)
   const items: AccountModelStatusItem[] = []
 
   if (!modelLimits) return items
@@ -206,7 +227,9 @@ const activeModelStatuses = computed<AccountModelStatusItem[]>(() => {
   for (const [model, info] of Object.entries(modelLimits)) {
     if (new Date(info.rate_limit_reset_at) <= now) continue
 
-    if (model === 'AICredits') {
+    if (info.reason === TURN_STATE_HOLD_REASON) {
+      items.push({ kind: 'turn_state_hold', model, reset_at: info.rate_limit_reset_at })
+    } else if (model === 'AICredits') {
       // AICredits key → 积分已用尽
       items.push({ kind: 'credits_exhausted', model, reset_at: info.rate_limit_reset_at })
     } else if (allowOverages && !hasActiveAICredits) {
@@ -269,13 +292,13 @@ const formatScopeName = (scope: string): string => {
 // Computed: is overloaded (529)
 const isOverloaded = computed(() => {
   if (!props.account.overload_until) return false
-  return new Date(props.account.overload_until) > new Date()
+  return new Date(props.account.overload_until).getTime() > sharedNow.value
 })
 
 // Computed: is temp unschedulable
 const isTempUnschedulable = computed(() => {
   if (!props.account.temp_unschedulable_until) return false
-  return new Date(props.account.temp_unschedulable_until) > new Date()
+  return new Date(props.account.temp_unschedulable_until).getTime() > sharedNow.value
 })
 
 // Computed: has error status

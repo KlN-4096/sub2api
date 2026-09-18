@@ -681,6 +681,9 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	// 剥离后再出站（openai_codex_turn_state.go）。
 	s.guardOpenAICodexTurnStateEcho(c, account, req.Header)
 	s.applyOpenAICodexTurnStateOverrideHeader(c, account, req.Header)
+	if err := openAITurnStateHoldError(c); err != nil {
+		return nil, err
+	}
 
 	// 覆盖入站鉴权残留，并注入上游认证
 	req.Header.Del("authorization")

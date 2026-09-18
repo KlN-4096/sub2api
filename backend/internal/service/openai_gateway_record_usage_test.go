@@ -2974,6 +2974,26 @@ func TestRecordUsageKeepsCompactionSemanticFlagOrthogonalToTransport(t *testing.
 	require.Equal(t, RequestTypeStream, RequestTypeFromLegacy(logStub.lastLog.Stream, logStub.lastLog.OpenAIWSMode))
 }
 
+// 猎手探测通过 input.RequestType 标 probe；CyberBlocked 仍优先。
+func TestRecordUsageHonorsExplicitRequestType(t *testing.T) {
+	logStub := &openAIRecordUsageLogRepoStub{inserted: true}
+	svc := newOpenAIRecordUsageServiceForTest(logStub, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, &openAIUserGroupRateRepoStub{})
+	in := func(cyber bool) *OpenAIRecordUsageInput {
+		return &OpenAIRecordUsageInput{
+			CyberBlocked: cyber,
+			RequestType:  RequestTypeTurnStateProbe,
+			Result:       &OpenAIForwardResult{Model: "gpt-5", Stream: true, Duration: time.Second, Usage: OpenAIUsage{InputTokens: 100}},
+			APIKey:       &APIKey{ID: 2, Group: &Group{RateMultiplier: 1}},
+			User:         &User{ID: 1},
+			Account:      &Account{ID: 3},
+		}
+	}
+	require.NoError(t, svc.RecordUsage(context.Background(), in(false)))
+	require.Equal(t, RequestTypeTurnStateProbe, logStub.lastLog.RequestType)
+	require.NoError(t, svc.RecordUsage(context.Background(), in(true)))
+	require.Equal(t, RequestTypeCyberBlocked, logStub.lastLog.RequestType)
+}
+
 func TestRecordUsageMarksCyberRequestType(t *testing.T) {
 	logStub := &openAIRecordUsageLogRepoStub{inserted: true}
 	userStub := &openAIRecordUsageUserRepoStub{}

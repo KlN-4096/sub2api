@@ -262,10 +262,7 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	if req != nil && req.URL != nil {
 		targetHost = req.URL.Host
 	}
-	proxyInfo := "direct"
-	if proxyURL != "" {
-		proxyInfo = proxyURL
-	}
+	proxyInfo := proxyKeyForLog(proxyURL)
 	slog.Debug("tls_fingerprint_enabled", "account_id", accountID, "target", targetHost, "proxy", proxyInfo, "profile", profile.Name)
 
 	if err := s.validateRequestHost(req); err != nil {
@@ -609,7 +606,8 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 	}
 
 	// 创建带 TLS 指纹的 Transport
-	slog.Debug("tls_fingerprint_creating_new_client", "account_id", accountID, "cache_key", cacheKey, "proxy", proxyKey)
+	// cache_key 里拼着完整代理 URL（含账密），不进日志。
+	slog.Debug("tls_fingerprint_creating_new_client", "account_id", accountID, "proxy", proxyKeyForLog(proxyKey))
 	transport, err := buildUpstreamTransportWithTLSFingerprint(settings, parsedProxy, profile)
 	if err != nil {
 		s.mu.Unlock()
@@ -1181,7 +1179,7 @@ func (s *httpUpstreamService) recordOpenAIHTTP2Failure(profile service.HTTPUpstr
 	activated, until := state.recordFailure(time.Now(), settings.fallbackErrorThreshold, settings.fallbackWindow, settings.fallbackTTL)
 	if activated {
 		slog.Warn("openai_http2_proxy_fallback_activated",
-			"proxy", proxyKey,
+			"proxy", proxyKeyForLog(proxyKey),
 			"fallback_until", until.Format(time.RFC3339))
 	}
 }
@@ -1258,6 +1256,18 @@ func (s *openAIHTTP2FallbackState) recordFailure(now time.Time, threshold int, w
 	s.windowStart = time.Time{}
 	s.errorCount = 0
 	return true, s.fallbackUntil
+}
+
+// proxyKeyForLog 把代理 key / URL 脱成 scheme://host：key 里带着用户名密码，任何日志级别都不能落。
+func proxyKeyForLog(proxyKey string) string {
+	if proxyKey == "" || proxyKey == directProxyKey {
+		return "direct"
+	}
+	u, err := url.Parse(proxyKey)
+	if err != nil || u.Host == "" {
+		return "invalid"
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // normalizeProxyURL 标准化代理 URL

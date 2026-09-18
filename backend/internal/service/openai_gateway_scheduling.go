@@ -397,6 +397,11 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 	}
 	if !account.IsSchedulableForModelWithContext(ctx, requestedModel) {
 		if account.IsSchedulable() {
+			// 降智暂停借 model_rate_limits 存，但它不是限流：单独成一类，handler 据此回 503 + 说明。
+			// IsSchedulable 为真时，IsSchedulableForModelWithContext 的 false 只可能来自模型级限流。
+			if _, held := account.modelRateLimitStateForRequest(ctx, requestedModel, time.Now()); held {
+				return openAITurnStateHoldLimitReason
+			}
 			return "model_rate_limited"
 		}
 		return "not_schedulable"

@@ -8,7 +8,8 @@ vi.mock('vue-i18n', async () => {
   return {
     ...actual,
     useI18n: () => ({
-      t: (key: string) => key
+      // 带参数的键要把参数拼出来：只回显键名的话，「文案里有没有把模型名放进去」这种断言恒绿。
+      t: (key: string, params?: Record<string, unknown>) => (params ? `${key}:${JSON.stringify(params)}` : key)
     })
   }
 })
@@ -103,6 +104,34 @@ describe('AccountStatusIndicator', () => {
 
     expect(wrapper.find('.badge-warning').text()).toBe('admin.accounts.status.rateLimited')
     expect(wrapper.text()).toContain('admin.accounts.status.rateLimitedAutoResume')
+    expect(wrapper.text()).not.toContain('admin.accounts.status.tempUnschedulable')
+  })
+
+  // 降智暂停是模型级的（model_rate_limits + reason=turn_state_hold）：显示成「寻票中」而不是
+  // 普通模型限流，不报倒计时；账号本身不算临时不可调度。
+  it('降智暂停：按模型显示寻票中，不是普通限流也不是账号级暂停', () => {
+    const wrapper = mount(AccountStatusIndicator, {
+      props: {
+        account: makeAccount({
+          platform: 'openai',
+          extra: {
+            model_rate_limits: {
+              'gpt-6-astra': {
+                rate_limited_at: '2026-03-15T00:00:00Z',
+                rate_limit_reset_at: '2099-03-15T00:00:00Z',
+                reason: 'turn_state_hold'
+              }
+            }
+          }
+        })
+      },
+      global: { stubs: { Icon: true } }
+    })
+
+    expect(wrapper.text()).toContain('admin.accounts.status.turnStateHoldShort')
+    expect(wrapper.text()).toContain('gpt-6-astra')
+    expect(wrapper.text()).toContain('admin.accounts.status.turnStateHold:{"model":"gpt-6-astra"}')
+    expect(wrapper.text()).not.toContain('admin.accounts.status.modelRateLimitedUntil')
     expect(wrapper.text()).not.toContain('admin.accounts.status.tempUnschedulable')
   })
 
