@@ -118,10 +118,13 @@ func TestOpenAITurnStateHunterProbeUsageSkips(t *testing.T) {
 	})
 	t.Run("探测非 200", func(t *testing.T) {
 		h, capture, _ := newProbeUsageHarness(t, hunterConfig(map[string]any{"usage_api_key_id": float64(77)}))
-		limited, _ := hunterResp(http.StatusTooManyRequests, "", `{"error":{"message":"slow down"}}`)
-		h.up.queue = []*http.Response{limited}
+		// 429 与别的失败一视同仁地重试，队列要够 strike 次。
+		for range openAITurnStateHuntFailureStrikes {
+			limited, _ := hunterResp(http.StatusTooManyRequests, "", `{"error":{"message":"slow down"}}`)
+			h.up.queue = append(h.up.queue, limited)
+		}
 		h.run(t)
-		require.Len(t, h.up.requests, 1)
+		require.Len(t, h.up.requests, openAITurnStateHuntFailureStrikes)
 		require.Empty(t, capture.inputs, "失败请求与人工流量一样不进使用记录")
 	})
 }

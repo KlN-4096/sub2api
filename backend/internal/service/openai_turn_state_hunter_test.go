@@ -592,15 +592,18 @@ func TestOpenAITurnStateHunterInterleavesAccounts(t *testing.T) {
 // 退避 15 分钟、不入池。
 func TestOpenAITurnStateHunterNoTurnStateInResponse(t *testing.T) {
 	h := newHunterHarness(hunterTestAccount(hunterConfig(nil)), hunterWebshareProxy)
-	bare, _ := hunterResp(http.StatusOK, "", "")
-	h.up.queue = []*http.Response{bare}
+	// 失败会重试，队列要够 strike 次：少一条的话第二次拿到的是 harness 的「没有排队响应」。
+	for range openAITurnStateHuntFailureStrikes {
+		bare, _ := hunterResp(http.StatusOK, "", "")
+		h.up.queue = append(h.up.queue, bare)
+	}
 
 	h.run(t)
 
-	require.Len(t, h.up.requests, 1)
+	require.Len(t, h.up.requests, openAITurnStateHuntFailureStrikes, "拿不到票也算失败：同一出口连试 3 次")
 	st := h.state()
 	require.Equal(t, "no turn-state in response", st.LastError)
-	require.InDelta(t, 15, st.NextAt.Sub(time.Now()).Minutes(), 1)
+	require.InDelta(t, openAITurnStateHuntFailureBackoff.Minutes(), st.NextAt.Sub(time.Now()).Minutes(), 1)
 	require.Empty(t, readOpenAITurnStatePool(h.account))
 }
 
@@ -720,6 +723,46 @@ func TestOpenAITurnStateHunterSameExitProbedOnce(t *testing.T) {
 	require.Empty(t, h.state().LastError, "探测过就清掉冷却提示")
 }
 
+// TestOpenAITurnStateHunterHTTPErrorRetriesInsteadOfEndingRound 钉住现网那次事故：轮换端点
+// 摇到一个被边缘拒掉的出口回 403，上一分钟同一个代理还在出 292。旧行为是「401/403 = 凭据坏了」
+// 直接退避 6 小时、整轮结束，手里另外几条好代理连试都没试。新行为：换下一个代理接着猎。
+func TestOpenAITurnStateHunterHTTPErrorRetriesInsteadOfEndingRound(t *testing.T) {
+	now := time.Now().UTC()
+	h := newHunterHarness(hunterTestAccount(hunterConfig(map[string]any{
+		"proxy_ids": []any{float64(8), float64(20)}, "rotating_proxy_ids": []any{float64(8)}, "max_per_hour": 10,
+	})), hunterCoxProxy, hunterWebshareProxy)
+	denied, _ := hunterResp(http.StatusForbidden, "", "")
+	hit, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks), "")
+	h.up.queue = []*http.Response{denied, hit}
+
+	h.run(t)
+
+	require.Len(t, h.up.requests, 2, "403 只让这个代理记一次 strike，换下一个继续")
+	require.Equal(t, http.StatusForbidden, h.state().Last[1].Status)
+	require.True(t, h.state().Last[0].Healthy, "同一轮里就猎到了票")
+	require.Len(t, readOpenAITurnStatePool(h.account), 1)
+	require.False(t, time.Now().Add(5*time.Minute).Before(h.state().NextAt), "命中后不退避，更不是 6 小时")
+}
+
+// TestOpenAITurnStateHunterAllProxiesFailingBacksOffOneHour 钉住退避口径：每条代理都连续失败
+// 到出局才等一小时（不再有 6 小时那一档），中途有代理没出局就照旧走 retry_minutes。
+func TestOpenAITurnStateHunterAllProxiesFailingBacksOffOneHour(t *testing.T) {
+	h := newHunterHarness(hunterTestAccount(hunterConfig(map[string]any{
+		"proxy_ids": []any{float64(8), float64(20)}, "rotating_proxy_ids": []any{float64(8)}, "max_per_hour": 100,
+	})), hunterCoxProxy, hunterWebshareProxy)
+	for range openAITurnStateHuntFailureStrikes * 2 {
+		denied, _ := hunterResp(http.StatusForbidden, "", "")
+		h.up.queue = append(h.up.queue, denied)
+	}
+
+	h.run(t)
+
+	require.Len(t, h.up.requests, openAITurnStateHuntFailureStrikes*2, "两条代理各连试 3 次")
+	require.InDelta(t, openAITurnStateHuntFailureBackoff.Minutes(), h.state().NextAt.Sub(time.Now()).Minutes(), 1)
+	require.Empty(t, h.repo.errors, "探测的失败不给账号记错误")
+	require.Empty(t, h.repo.schedulable, "探测的失败不停号")
+}
+
 // TestOpenAITurnStateHuntExitCoolingDownOnlyAfter312 钉住 7 天冷却只罚铸出 312 的出口：
 // 铸出 292 的出口不冷却（能拿到 292 的出口下一次大概率还能拿到），没到上游的失败尝试
 // 连记录都不写（noteExit 跳过带 Error 的尝试），不会误判成 312。
@@ -832,16 +875,16 @@ func TestOpenAITurnStateHunterCapRaisedResumesImmediately(t *testing.T) {
 	require.True(t, st.CapWait, "再次撞上限")
 	require.Equal(t, st.HourStart.Add(time.Hour), st.NextAt)
 
-	// 出错等待：上限调高也不解除。（唯一的出口连不上：一轮重试一次就放弃，4 + 2 = 6）
+	// 出错等待：上限调高也不解除。（唯一的出口连不上：同一代理连续 3 次才出局，4 + 3 = 7）
 	h.account.Extra[openAITurnStateHunterExtraKey] = hunterConfig(map[string]any{"max_per_hour": 10})
 	h.up.err = errors.New("dial tcp: proxy refused")
 	h.run(t)
-	require.Len(t, h.up.requests, 4+openAITurnStateHuntTransportStrikes)
+	require.Len(t, h.up.requests, 4+openAITurnStateHuntFailureStrikes)
 	st = h.state()
 	require.False(t, st.CapWait)
 	h.account.Extra[openAITurnStateHunterExtraKey] = hunterConfig(map[string]any{"max_per_hour": 100})
 	h.run(t)
-	require.Len(t, h.up.requests, 4+openAITurnStateHuntTransportStrikes, "等待期内上限再高也不探")
+	require.Len(t, h.up.requests, 4+openAITurnStateHuntFailureStrikes, "等待期内上限再高也不探")
 }
 
 // TestOpenAITurnStateHunterCapWaitSurvivesGatePersist 钉住：等窗期间被「票未到期」挡住时
@@ -884,22 +927,24 @@ func TestOpenAITurnStateHunterCapWaitSurvivesGatePersist(t *testing.T) {
 // 401 不 SetError、不停号；退避 6 小时；错误信息进运行态。
 func TestOpenAITurnStateHunterBackoffWithoutTouchingAccount(t *testing.T) {
 	h := newHunterHarness(hunterTestAccount(hunterConfig(nil)), hunterWebshareProxy)
-	denied, _ := hunterResp(http.StatusUnauthorized, "", `{"error":{"message":"token expired"}}`)
-	h.up.queue = []*http.Response{denied}
+	for range openAITurnStateHuntFailureStrikes {
+		denied, _ := hunterResp(http.StatusUnauthorized, "", `{"error":{"message":"token expired"}}`)
+		h.up.queue = append(h.up.queue, denied)
+	}
 
 	h.run(t)
 
-	require.Len(t, h.up.requests, 1)
+	require.Len(t, h.up.requests, openAITurnStateHuntFailureStrikes, "401 不再特判：与别的失败一样连试 3 次")
 	st := h.state()
 	require.Equal(t, http.StatusUnauthorized, st.Last[0].Status)
 	require.Contains(t, st.LastError, "token expired")
-	require.InDelta(t, 6*60, st.NextAt.Sub(time.Now()).Minutes(), 1)
+	require.InDelta(t, openAITurnStateHuntFailureBackoff.Minutes(), st.NextAt.Sub(time.Now()).Minutes(), 1)
 	require.Empty(t, h.repo.errors, "探测的 401 不能给账号记错误")
 	require.Empty(t, h.repo.schedulable, "探测的失败不能停号")
 	require.Empty(t, readOpenAITurnStatePool(h.account))
 
 	h.run(t)
-	require.Len(t, h.up.requests, 1, "退避期内不探测")
+	require.Len(t, h.up.requests, openAITurnStateHuntFailureStrikes, "退避期内不探测")
 }
 
 // TestOpenAITurnStateHunterTransportErrorBacksOff 钉住传输层错误（hunt 代理坏了）：唯一的出口
@@ -911,13 +956,13 @@ func TestOpenAITurnStateHunterTransportErrorBacksOff(t *testing.T) {
 
 	h.run(t)
 
-	require.Len(t, h.up.requests, openAITurnStateHuntTransportStrikes, "同一出口隔一个 gap 重试一次，连续两次才放弃")
-	require.Len(t, h.sleeps, 1, "重试前守探测间隔")
+	require.Len(t, h.up.requests, openAITurnStateHuntFailureStrikes, "同一出口隔一个 gap 重试，连续 3 次才放弃")
+	require.Len(t, h.sleeps, openAITurnStateHuntFailureStrikes-1, "每次重试前都守探测间隔")
 	st := h.state()
 	require.Equal(t, 0, st.Last[0].Status)
 	require.Contains(t, st.LastError, "proxy refused")
 	require.Zero(t, st.HourCount, "连代理都没连上不算上游花费：死代理不能白吃小时额度")
-	require.InDelta(t, defaultOpenAITurnStateHuntRetryMinutes, st.NextAt.Sub(time.Now()).Minutes(), 1)
+	require.InDelta(t, openAITurnStateHuntFailureBackoff.Minutes(), st.NextAt.Sub(time.Now()).Minutes(), 1)
 	require.Empty(t, h.repo.errors)
 	require.Empty(t, h.repo.schedulable)
 }
@@ -1088,30 +1133,32 @@ func TestOpenAITurnStateHunterTransportErrorSkipsToNextProxy(t *testing.T) {
 	require.True(t, many.state().Last[0].Healthy)
 	require.Equal(t, 1, many.state().HourCount, "只有真到上游的那一次计额度")
 
-	// 坏的轮换端点连续两次传输错误就本轮不再用：别的端点成功不「洗白」它的连续计数。
+	// 坏的轮换端点连续 3 次失败才本轮不再用：别的端点成功不「洗白」它的连续计数。
 	rot := newHunterHarness(hunterTestAccount(hunterConfig(map[string]any{
 		"proxy_ids": []any{float64(8), float64(20)}, "rotating_proxy_ids": []any{float64(8)}, "max_per_hour": 10,
 	})), hunterCoxProxy, hunterWebshareProxy)
 	miss1, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks+1), "")
 	miss2, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks+1), "")
 	hit3, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks), "")
-	rot.up.queue = []*http.Response{nil, miss1, nil, miss2, hit3}
+	miss3, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks+1), "")
+	rot.up.queue = []*http.Response{nil, miss1, nil, miss2, nil, miss3, hit3}
 	rot.up.errOnNil = errors.New("dial tcp: proxy refused")
 	rot.run(t)
-	require.Len(t, rot.up.requests, 5)
-	require.Contains(t, rot.up.proxyURLs[0], hunterCoxProxy.Host)
-	require.Contains(t, rot.up.proxyURLs[1], hunterWebshareProxy.Host)
-	require.Contains(t, rot.up.proxyURLs[2], hunterCoxProxy.Host, "游标转回来再试一次")
-	for _, u := range rot.up.proxyURLs[3:] {
-		require.Contains(t, u, hunterWebshareProxy.Host, "连续两次连不上的轮换端点本轮不再用")
+	require.Len(t, rot.up.requests, 7)
+	for _, i := range []int{0, 2, 4} {
+		require.Contains(t, rot.up.proxyURLs[i], hunterCoxProxy.Host, "轮换端点连试 3 次才出局（别的端点成功不洗白它的连续计数）")
 	}
+	for _, u := range rot.up.proxyURLs[5:] {
+		require.Contains(t, u, hunterWebshareProxy.Host, "连续 3 次连不上的轮换端点本轮不再用")
+	}
+	require.True(t, rot.state().Last[0].Healthy, "出局一条不影响另一条继续猎到票")
 
-	// 全都不通：重试一次后按 retry 等下一轮（不是 15 分钟的出错退避），别一直撞到小时封顶。
+	// 全都不通：代理全部 strike 出局后退避一小时，别一直撞到小时封顶。
 	dead := newHunterHarness(hunterTestAccount(hunterConfig(nil)), hunterWebshareProxy)
 	dead.up.err = errors.New("dial tcp: proxy refused")
 	dead.run(t)
-	require.Len(t, dead.up.requests, openAITurnStateHuntTransportStrikes)
-	require.InDelta(t, defaultOpenAITurnStateHuntRetryMinutes, dead.state().NextAt.Sub(time.Now()).Minutes(), 1)
+	require.Len(t, dead.up.requests, openAITurnStateHuntFailureStrikes)
+	require.InDelta(t, openAITurnStateHuntFailureBackoff.Minutes(), dead.state().NextAt.Sub(time.Now()).Minutes(), 1)
 
 	// URL 都拼不出来的代理不是瞬时故障：根本不进轮次，别的代理照常。
 	badProxy := hunterCoxProxy
@@ -1132,7 +1179,7 @@ func TestOpenAITurnStateHunterTransportErrorSkipsToNextProxy(t *testing.T) {
 	require.Empty(t, broken.up.requests, "构造阶段就失败，请求根本没发出")
 	require.Len(t, broken.state().Last, 1, "只记一次，不按出口重试")
 	require.Contains(t, broken.state().LastError, "build probe")
-	require.InDelta(t, 15, broken.state().NextAt.Sub(time.Now()).Minutes(), 1)
+	require.InDelta(t, defaultOpenAITurnStateHuntRetryMinutes, broken.state().NextAt.Sub(time.Now()).Minutes(), 1)
 }
 
 // TestOpenAITurnStateInjectsEverySessionWhenHunterEnabled 钉住注入策略：开了猎手，池里

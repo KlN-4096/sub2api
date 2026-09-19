@@ -68,7 +68,12 @@ const (
 	openAITurnStateHuntExitEchoLimit = 15 * time.Second
 	// 同一代理连续几次传输错误才算本轮用不了：http2: client connection lost 这类偶发错误
 	// 隔一个 gap 重试一次就好，不该让唯一的出口白等一轮 retry_minutes（2026-09-19 用户反馈）。
-	openAITurnStateHuntTransportStrikes = 2
+	// openAITurnStateHuntFailureStrikes 同一代理连续失败多少次才算本轮用不了。所有失败一视同仁
+	// （传输层错误、401/403、429、5xx）：轮换端点每次连接换一个出口，摇到被 Cloudflare 拒的 IP
+	// 就是 403，跟凭据、跟账号都没关系——上一分钟同一个代理还在出 292（2026-09-19 现网）。
+	openAITurnStateHuntFailureStrikes = 3
+	// openAITurnStateHuntFailureBackoff 一轮里每个代理都连续失败到出局后等多久。
+	openAITurnStateHuntFailureBackoff = time.Hour
 
 	openAITurnStateHunterMaxModels      = 8
 	openAITurnStateHunterMaxProxies     = 64
@@ -265,9 +270,12 @@ type openAITurnStateHuntAttempt struct {
 	// Exit 是探测前解析到的出口 IP，只有固定出口有；轮换端点由供应商按连接选出口，为空。
 	Exit  string `json:"exit,omitempty"`
 	Error string `json:"error,omitempty"`
-	// transport 标记错误发生在代理/传输层（请求已发出但没拿到响应）：这是出口的问题，
-	// 换下一个出口继续；构造探测失败（拿不到 token 之类）是账号的问题，不算。不落库。
+	// transport 标记错误发生在代理/传输层（请求已发出但没拿到响应）：请求多半没到上游，
+	// 不计小时额度。不落库。
 	transport bool
+	// preflight 标记请求**根本没发出**（构造探测时就拿不到 token 之类）。这是账号配置的
+	// 问题，换出口、重试都改变不了结果，所以它是唯一不走重试的失败。不落库。
+	preflight bool
 }
 
 // openAITurnStateHuntExit 记一个出口 IP 最近一次探测的结果，冷却判定的依据。
@@ -615,12 +623,15 @@ type openAITurnStateHuntSession struct {
 	st      openAITurnStateHuntState
 	proxies []Proxy
 	pending []string
-	// used 本轮不再用的代理：固定出口探过一次、或连续传输错误够数。strikes 记每个代理
-	// 连续传输错误的次数，中间成功过就清零。
-	used    map[int64]bool
-	strikes map[int64]int
-	probed  int
-	readyAt time.Time
+	// used 本轮不再用的代理：固定出口探过一次、或连续失败够数。strikes 记每个代理连续失败
+	// 的次数（任何失败都算：传输层、401/403、429、5xx），中间成功过就清零。
+	// struckOut 记有多少条代理是被 strike 打出局的——它等于代理总数时说明这一轮谁都没法用，
+	// 退避一小时而不是 retry_minutes（正常探完一轮没命中不算，那个照旧走 retry）。
+	used      map[int64]bool
+	strikes   map[int64]int
+	struckOut int
+	probed    int
+	readyAt   time.Time
 }
 
 // openHunt 算一个账号这轮要不要猎、猎哪些模型；不猎返回 nil（并按需留痕）。
@@ -847,15 +858,27 @@ func (s *OpenAITurnStateHunterService) huntStep(ctx context.Context, sess *openA
 			"account_id", account.ID, "model", model, "proxy_id", proxy.ID, "proxy", proxy.Name, "exit", exit,
 			"status", attempt.Status, "chars", attempt.Chars, "healthy", attempt.Healthy, "error", attempt.Error,
 			"latency_ms", attempt.LatencyMs, "hour_count", st.HourCount)
-		if attempt.transport {
-			// 传输层错误（连不上代理 / 连接被重置）请求多半没到上游，不计额度；隔一个 gap 再试，
-			// 同一代理连续 openAITurnStateHuntTransportStrikes 次才算本轮用不了。整轮由代理条数
-			// 有界：都坏了就走 retry 等下一轮——一个坏代理既不能把整轮掐掉，也不能反复烧额度。
+		if attempt.preflight {
+			// 请求没发出去：不是出口的问题，换代理重试只会把同一条错误抄 N 遍。
+			st.NextAt = s.now().Add(cfg.retry())
+			s.persist(ctx, account, *st)
+			return true
+		}
+		if attempt.transport || attempt.Status != http.StatusOK || attempt.Error != "" {
+			// 所有失败一视同仁地重试，不看状态码：一条响应不该终结整轮。原先 401/403 被当成
+			// 「凭据坏了，猎手修不了」直接退避 6 小时，但轮换端点每次连接换一个出口，摇到被
+			// 边缘拒掉的 IP 就是 403——上一分钟同一个代理还在出 292，于是一个一次性的坏 IP
+			// 让整个账号停 6 小时，手里另外三条好代理连试都没试（2026-09-19 现网 + 用户决定）。
+			//
+			// 同一代理连续 openAITurnStateHuntFailureStrikes 次才算本轮用不了；整轮由代理条数
+			// 有界，全部出局才退避——一个坏代理既不能把整轮掐掉，也不能反复烧额度。
+			// 失败不改账号状态：走的是 hunt 代理，故障算到账号头上会误停真实流量。
 			sess.strikes[proxy.ID]++
-			if sess.strikes[proxy.ID] >= openAITurnStateHuntTransportStrikes {
+			if sess.strikes[proxy.ID] >= openAITurnStateHuntFailureStrikes {
 				sess.used[proxy.ID] = true
+				sess.struckOut++
 			} else {
-				delete(sess.used, proxy.ID) // 固定出口选中即标用过；没到上游的这次不算，放回去重试
+				delete(sess.used, proxy.ID) // 固定出口选中即标用过；这次不算，放回去重试
 			}
 			s.persist(ctx, account, *st)
 			// 预算里等不到重试（gap 配得大 / 撞在预算末尾）也当这轮到此为止：strike 是轮次内的计数，
@@ -864,15 +887,9 @@ func (s *OpenAITurnStateHunterService) huntStep(ctx context.Context, sess *openA
 			if len(sess.used) < len(sess.proxies) && !s.now().Add(cfg.gap()*3/2).After(deadline) {
 				return !s.huntSessionCurrent(ctx, sess)
 			}
-			break // 都连不上了 / 等不到重试：按 retry 等下一轮，别再白睡一个 gap
+			break // 代理都出局了 / 等不到重试：走下面的退避
 		}
 		sess.strikes[proxy.ID] = 0
-		if attempt.Status != http.StatusOK || attempt.Error != "" {
-			// 出错只退避，不改账号状态：走的是 hunt 代理，故障算到账号头上会误停真实流量。
-			st.NextAt = s.now().Add(openAITurnStateHuntBackoff(attempt.Status))
-			s.persist(ctx, account, *st)
-			return true
-		}
 		if attempt.Healthy {
 			sess.pending = sess.pending[1:]
 		} else {
@@ -898,6 +915,13 @@ func (s *OpenAITurnStateHunterService) huntStep(ctx context.Context, sess *openA
 		// 固定出口全在冷却：不留痕迹的话页面只会显示上一次的结果和「待命」，几小时不动没人看得懂。
 		st.LastError = "all hunt exits cooling"
 		st.UpdatedAt = s.now()
+	}
+	// 每条代理都连续失败到出局：这一轮谁都没法用，等一小时再来，别用 retry_minutes 反复空转。
+	// 没出局的情况（正常探完一轮没命中、出口全在冷却）照旧走 retry。
+	if sess.struckOut > 0 && sess.struckOut >= len(sess.proxies) {
+		st.NextAt = s.now().Add(openAITurnStateHuntFailureBackoff)
+		s.persist(ctx, account, *st)
+		return true
 	}
 	st.NextAt = s.now().Add(cfg.retry())
 	s.persist(ctx, account, *st)
@@ -1011,17 +1035,6 @@ func openAITurnStateHuntJitter(base time.Duration) time.Duration {
 	return base/2 + time.Duration(rand.Int64N(int64(base)))
 }
 
-func openAITurnStateHuntBackoff(status int) time.Duration {
-	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return 6 * time.Hour // 凭据问题，猎手自己修不了；真实流量会触发刷新/停号
-	case http.StatusTooManyRequests:
-		return time.Hour
-	default:
-		return 15 * time.Minute
-	}
-}
-
 // probe 发一条探测：新会话、不带 turn-state、经 hunt 代理出站，头到手即断。
 func (s *OpenAITurnStateHunterService) probe(ctx context.Context, account *Account, model string, cfg openAITurnStateHunterConfig, proxy Proxy) openAITurnStateHuntAttempt {
 	attempt := openAITurnStateHuntAttempt{At: s.now(), Model: model, ProxyID: proxy.ID, Proxy: proxy.Name}
@@ -1056,6 +1069,7 @@ func (s *OpenAITurnStateHunterService) doProbe(ctx context.Context, account, egr
 	c, req, err := s.gateway.buildOpenAITurnStateProbe(probeCtx, egress, model, cfg.ReasoningEffort)
 	if err != nil {
 		attempt.Error = "build probe: " + sanitizeUpstreamErrorMessage(err.Error())
+		attempt.preflight = true
 		return
 	}
 	req.Close = closeConn
