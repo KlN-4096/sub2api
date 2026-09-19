@@ -2090,7 +2090,13 @@ func (s *RateLimitService) samplePassiveUsageFromHeaders(ctx context.Context, ac
 
 // ClearRateLimit 清除账号的限流状态
 func (s *RateLimitService) ClearRateLimit(ctx context.Context, accountID int64) error {
-	if err := s.clearRateLimitFields(ctx, accountID); err != nil {
+	if err := s.accountRepo.ClearRateLimit(ctx, accountID); err != nil {
+		return err
+	}
+	if err := s.accountRepo.ClearAntigravityQuotaScopes(ctx, accountID); err != nil {
+		return err
+	}
+	if err := s.accountRepo.ClearModelRateLimits(ctx, accountID); err != nil {
 		return err
 	}
 	// 清除限流时一并清理临时不可调度状态，避免周限/窗口重置后仍被本地临时状态阻断。
@@ -2137,13 +2143,7 @@ func (s *RateLimitService) RecoverAccountState(ctx context.Context, accountID in
 	}
 
 	if hasRecoverableRuntimeState(account) && !options.CredentialsOnly {
-		// 降智暂停不是这里能恢复的状态：探针/配额重置成功说明凭据和额度没问题，票还是没有。
-		// 只清限流那几列，temp_unschedulable 留给猎手放回。
-		if openAITurnStateHeldModel(account, time.Now()) != "" {
-			if err := s.clearRateLimitFields(ctx, accountID); err != nil {
-				return nil, err
-			}
-		} else if err := s.ClearRateLimit(ctx, accountID); err != nil {
+		if err := s.ClearRateLimit(ctx, accountID); err != nil {
 			return nil, err
 		}
 		result.ClearedRateLimit = true
@@ -2164,32 +2164,6 @@ func (s *RateLimitService) RecoverAccountState(ctx context.Context, accountID in
 // credentialsOnly 为真（凭据探针）时只清 error。
 func (s *RateLimitService) RecoverAccountAfterSuccessfulTest(ctx context.Context, accountID int64, credentialsOnly bool) (*SuccessfulTestRecoveryResult, error) {
 	return s.RecoverAccountState(ctx, accountID, AccountRecoveryOptions{CredentialsOnly: credentialsOnly})
-}
-
-// ReleaseTempUnschedulable 只清临时停调度（DB + Redis 副本 + 运行态阻断），不动模型级限流：
-// 给自动放回的路径用（降智暂停猎到票）。人工「恢复调度」仍走 ClearTempUnschedulable。
-// clearRateLimitFields 只清限流三组列（全局限流、antigravity 配额域、模型级限流），不碰临时停调度。
-func (s *RateLimitService) clearRateLimitFields(ctx context.Context, accountID int64) error {
-	if err := s.accountRepo.ClearRateLimit(ctx, accountID); err != nil {
-		return err
-	}
-	if err := s.accountRepo.ClearAntigravityQuotaScopes(ctx, accountID); err != nil {
-		return err
-	}
-	return s.accountRepo.ClearModelRateLimits(ctx, accountID)
-}
-
-func (s *RateLimitService) ReleaseTempUnschedulable(ctx context.Context, accountID int64) error {
-	if err := s.accountRepo.ClearTempUnschedulable(ctx, accountID); err != nil {
-		return err
-	}
-	if s.tempUnschedCache != nil {
-		if err := s.tempUnschedCache.DeleteTempUnsched(ctx, accountID); err != nil {
-			slog.Warn("temp_unsched_cache_delete_failed", "account_id", accountID, "error", err)
-		}
-	}
-	s.notifyAccountSchedulingBlockCleared(accountID)
-	return nil
 }
 
 func (s *RateLimitService) ClearTempUnschedulable(ctx context.Context, accountID int64) error {
@@ -2219,8 +2193,25 @@ func hasRecoverableRuntimeState(account *Account) bool {
 	if len(account.Extra) == 0 {
 		return false
 	}
-	return hasNonEmptyMapValue(account.Extra, "model_rate_limits") ||
+	return hasActiveModelRateLimit(account) ||
 		hasNonEmptyMapValue(account.Extra, "antigravity_quota_scopes")
+}
+
+// hasActiveModelRateLimit 只认未到期的模型级限流：降智暂停（openai_turn_state_hold.go）放回或到期后
+// 条目会留在 map 里（仓储没有按 scope 删除），不能让曾被停过的账号每次定时测试成功都误判成
+// 「有状态要恢复」而白清一次、白打一行日志。解析不出 map 的形态按原来的非空判定。
+func hasActiveModelRateLimit(account *Account) bool {
+	limits, ok := account.Extra[modelRateLimitsKey].(map[string]any)
+	if !ok {
+		return hasNonEmptyMapValue(account.Extra, modelRateLimitsKey)
+	}
+	now := time.Now()
+	for scope := range limits {
+		if resetAt := account.modelRateLimitResetAt(scope); resetAt != nil && now.Before(*resetAt) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasNonEmptyMapValue(extra map[string]any, key string) bool {

@@ -422,7 +422,8 @@ export default {
         overloadedUntil: '负载过重，重置时间：{time}',
         viewTempUnschedDetails: '查看临时不可调度详情',
         tempUnschedulableUntil: '预计 {time} 恢复',
-        turnStateHold: '降智暂停 · 猎手为 {model} 寻票中'
+        turnStateHold: '降智暂停 · {model} 在本账号上停着，猎手寻票中；猎到即恢复，到期后有请求会再停',
+        turnStateHoldShort: '降智暂停'
       },
       tempUnschedulable: {
         title: '临时不可调度',
@@ -803,7 +804,7 @@ export default {
           '填了就把每次 200 探测按标准用量路径记到这把 key 下（类型「猎手探测」，正常计费扣额度、刷新最近使用）；输入 token 为本地估算（含 base prompt），输出恒 0。建议用一把专用 key：它的额度/限流会被探测消耗，订阅型分组要有有效订阅才记。',
         turnStateHunterHold: '降智时暂停调度',
         turnStateHunterHoldDesc:
-          '要猎的模型拿不出可注入的 292 时，把账号临时停调度并让该请求换号（没有别的号就报 503），猎到新票自动放回；撞了小时上限就等下一窗接着猎，猎不到就一直暂停。',
+          '要猎的模型拿不出可注入的 292 时，把该模型在本账号上暂停一个空闲窗口（idle_minutes）并让该请求换号（没有别的号就报 503）；到期后下一条请求还缺票就再暂停，猎到新票立即恢复。其它模型不受影响；没人再请求的模型到期后自然结束。',
         turnStatePool: {
           empty: 'Turn-State -',
           starved: 'Turn-State 无票·裸奔中',
@@ -817,6 +818,7 @@ export default {
           hunterSummary: '猎手 本小时 {count}/{max} · {next} · {last}',
           hunterNext: '下次 {time}',
           hunterReady: '待命',
+          hunterProbing: '探测中',
           hunterGateIdle: '无流量·暂停',
           hunterGateFresh: '票未到期',
           hunterNeedsAuto: '猎手 未生效：需先开自动接管',

@@ -110,6 +110,14 @@
           {{ formatScopeName(item.model) }}
           <span class="text-[10px] opacity-70">{{ formatCountdown(item.reset_at) }}</span>
         </span>
+        <!-- 降智暂停：该模型在本账号上停着，猎手寻票中（不报倒计时，到期有请求还会再停） -->
+        <span
+          v-else-if="item.kind === 'turn_state_hold'"
+          class="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+        >
+          <Icon name="exclamationTriangle" size="xs" :stroke-width="2" />
+          {{ t('admin.accounts.status.turnStateHoldShort') }} · {{ formatScopeName(item.model) }}
+        </span>
         <!-- 普通模型限流 -->
         <span
           v-else
@@ -124,11 +132,13 @@
           class="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 w-max max-w-[320px] -translate-x-1/2 whitespace-nowrap rounded bg-gray-900 px-3 py-2 text-center text-xs leading-relaxed text-white opacity-0 transition-opacity group-hover:opacity-100 dark:bg-gray-700"
         >
           {{
-            item.kind === 'credits_exhausted'
-              ? t('admin.accounts.status.creditsExhaustedUntil', { time: formatDateTimeToMinute(item.reset_at) })
-              : item.kind === 'credits_active'
-                ? t('admin.accounts.status.modelCreditOveragesUntil', { model: formatScopeName(item.model), time: formatDateTimeToMinute(item.reset_at) })
-                : t('admin.accounts.status.modelRateLimitedUntil', { model: formatScopeName(item.model), time: formatDateTimeToMinute(item.reset_at) })
+            item.kind === 'turn_state_hold'
+              ? t('admin.accounts.status.turnStateHold', { model: formatScopeName(item.model) })
+              : item.kind === 'credits_exhausted'
+                ? t('admin.accounts.status.creditsExhaustedUntil', { time: formatDateTimeToMinute(item.reset_at) })
+                : item.kind === 'credits_active'
+                  ? t('admin.accounts.status.modelCreditOveragesUntil', { model: formatScopeName(item.model), time: formatDateTimeToMinute(item.reset_at) })
+                  : t('admin.accounts.status.modelRateLimitedUntil', { model: formatScopeName(item.model), time: formatDateTimeToMinute(item.reset_at) })
           }}
           <div
             class="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-gray-900 dark:border-t-gray-700"
@@ -182,16 +192,20 @@ const isRateLimited = computed(() => {
 })
 
 type AccountModelStatusItem = {
-  kind: 'rate_limit' | 'credits_exhausted' | 'credits_active'
+  kind: 'rate_limit' | 'credits_exhausted' | 'credits_active' | 'turn_state_hold'
   model: string
   reset_at: string
 }
 
-// Computed: active model statuses (普通模型限流 + 积分耗尽 + 走积分中)
+// 降智暂停（openai_turn_state_hold.go）借 model_rate_limits 存，reason 标本功能：显示成
+// 「寻票中」而不是普通限流，也不报倒计时——到期只是内部翻一次标记，有请求还会再停。
+const TURN_STATE_HOLD_REASON = 'turn_state_hold'
+
+// Computed: active model statuses (普通模型限流 + 积分耗尽 + 走积分中 + 降智暂停)
 const activeModelStatuses = computed<AccountModelStatusItem[]>(() => {
   const extra = props.account.extra as Record<string, unknown> | undefined
   const modelLimits = extra?.model_rate_limits as
-    | Record<string, { rate_limited_at: string; rate_limit_reset_at: string }>
+    | Record<string, { rate_limited_at: string; rate_limit_reset_at: string; reason?: string }>
     | undefined
   const now = new Date()
   const items: AccountModelStatusItem[] = []
@@ -206,7 +220,9 @@ const activeModelStatuses = computed<AccountModelStatusItem[]>(() => {
   for (const [model, info] of Object.entries(modelLimits)) {
     if (new Date(info.rate_limit_reset_at) <= now) continue
 
-    if (model === 'AICredits') {
+    if (info.reason === TURN_STATE_HOLD_REASON) {
+      items.push({ kind: 'turn_state_hold', model, reset_at: info.rate_limit_reset_at })
+    } else if (model === 'AICredits') {
       // AICredits key → 积分已用尽
       items.push({ kind: 'credits_exhausted', model, reset_at: info.rate_limit_reset_at })
     } else if (allowOverages && !hasActiveAICredits) {
@@ -307,18 +323,8 @@ const overloadCountdown = computed(() => {
   return formatCountdownWithSuffix(props.account.overload_until)
 })
 
-// 降智暂停（openai_turn_state_hold.go）的 until 只是猎手续期用的保底，不是恢复时刻：
-// 猎到票就放回，猎不到就一直停。写「预计 明天 恢复」等于误导，换成说明原因。
-const TURN_STATE_HOLD_REASON_PREFIX = 'turn_state_hold:'
-
 const tempUnschedRecoveryText = computed(() => {
   if (!isTempUnschedulable.value || !props.account.temp_unschedulable_until) return ''
-  const reason = props.account.temp_unschedulable_reason ?? ''
-  if (reason.startsWith(TURN_STATE_HOLD_REASON_PREFIX)) {
-    return t('admin.accounts.status.turnStateHold', {
-      model: reason.slice(TURN_STATE_HOLD_REASON_PREFIX.length)
-    })
-  }
   return t('admin.accounts.status.tempUnschedulableUntil', {
     time: formatDateTime(props.account.temp_unschedulable_until)
   })

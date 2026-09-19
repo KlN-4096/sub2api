@@ -1782,6 +1782,11 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	if s != nil && s.service != nil && s.service.isOpenAIAccountRequestRuntimeBlocked(account, req.RequestedModel) {
 		return false, "runtime_blocked"
 	}
+	// 模型级限流（spark 429、降智暂停）也要在主过滤就排掉：否则停着的账号挤占 TopK 名额，
+	// 到 fresh/DB 复核才被拒，候选多于 TopK 时健康账号轮不到——与下面 quota auto-pause 同一个坑。
+	if req.RequestedModel != "" && account.isModelRateLimitedWithContext(ctx, req.RequestedModel) {
+		return false, "model_rate_limited"
+	}
 	if s != nil && s.service != nil && s.service.isOpenAIProxyStreamQuarantined(ctx, account) {
 		return false, "proxy_stream_quarantined"
 	}

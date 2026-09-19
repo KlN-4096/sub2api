@@ -3813,3 +3813,16 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SubscriptionPriorityWai
 	require.Equal(t, int64(38011), selection.WaitPlan.AccountID)
 	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
 }
+
+// TestOpenAIAccountScheduler_SkipsAccountModelRateLimitedForRequestedModel 钉住评审 S3：模型级限流
+// （spark 429、降智暂停）要在主过滤循环就把账号排掉，否则停着的账号会挤占 TopK 名额，到 fresh/DB
+// 复核才被拒，候选多于 TopK 时健康账号轮不到。
+func TestOpenAIAccountScheduler_SkipsAccountModelRateLimitedForRequestedModel(t *testing.T) {
+	now := time.Now()
+	account := &Account{ID: 21634, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true}
+	setAccountModelRateLimitSnapshot(account, "gpt-5.5", now.Add(time.Hour), "turn_state_hold", now)
+	scheduler := &defaultOpenAIAccountScheduler{service: &OpenAIGatewayService{}}
+
+	require.False(t, scheduler.isAccountRequestCompatible(context.Background(), account, OpenAIAccountScheduleRequest{RequestedModel: "gpt-5.5"}))
+	require.True(t, scheduler.isAccountRequestCompatible(context.Background(), account, OpenAIAccountScheduleRequest{RequestedModel: "gpt-5.6-sol"}))
+}

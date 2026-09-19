@@ -39,23 +39,22 @@ type turnStateAutoRepo struct {
 	clears int
 }
 
-func (r *turnStateAutoRepo) SetTempUnschedulable(_ context.Context, _ int64, until time.Time, reason string) error {
+// SetModelRateLimit 模拟降智暂停的落库：未来的 reset 记一次 hold（scope），过去的记一次 clear
+// （放回就是写成已到期），并同步 DB 侧账号的 model_rate_limits。
+func (r *turnStateAutoRepo) SetModelRateLimit(_ context.Context, _ int64, scope string, resetAt time.Time, reason ...string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.holds = append(r.holds, reason)
-	if r.latest != nil && (r.latest.TempUnschedulableUntil == nil || r.latest.TempUnschedulableUntil.Before(until)) {
-		u := until
-		r.latest.TempUnschedulableUntil, r.latest.TempUnschedulableReason = &u, reason
+	why := ""
+	if len(reason) > 0 {
+		why = reason[0]
 	}
-	return nil
-}
-
-func (r *turnStateAutoRepo) ClearTempUnschedulable(_ context.Context, _ int64) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.clears++
+	if resetAt.After(time.Now()) {
+		r.holds = append(r.holds, scope)
+	} else {
+		r.clears++
+	}
 	if r.latest != nil {
-		r.latest.TempUnschedulableUntil, r.latest.TempUnschedulableReason = nil, ""
+		setAccountModelRateLimitSnapshot(r.latest, scope, resetAt, why, time.Now())
 	}
 	return nil
 }

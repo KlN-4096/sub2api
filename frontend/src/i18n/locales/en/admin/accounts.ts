@@ -218,7 +218,8 @@ export default {
         overloadedUntil: 'Overloaded until {time}',
         viewTempUnschedDetails: 'View temp unschedulable details',
         tempUnschedulableUntil: 'Resumes {time}',
-        turnStateHold: 'Paused while degraded · hunting a ticket for {model}'
+        turnStateHold: 'Degraded pause · {model} is paused on this account while the hunter looks for a ticket; resumes on a hit, re-pauses on the next request after expiry',
+        turnStateHoldShort: 'Degraded pause'
       },
       columns: {
         name: 'Name',
@@ -727,7 +728,7 @@ export default {
           'When set, every 200 probe is recorded under this key through the standard usage path (type "Hunter probe", billed normally, bumps last-used); input tokens are estimated locally (base prompt included), output is always 0. Use a dedicated key: probes consume its quota/rate limits, and subscription groups need an active subscription.',
         turnStateHunterHold: 'Pause scheduling while degraded',
         turnStateHunterHoldDesc:
-          'When a hunted model has no injectable 292, temporarily remove the account from scheduling and fail the request over (503 if no other account); it comes back automatically once a new ticket is pooled. If the hourly cap is hit the hunt resumes in the next window; the pause lasts until a ticket is found.',
+          'When a hunted model has no injectable 292, pause that model on this account for one idle window (idle_minutes) and fail the request over (503 if no other account); after expiry the next request re-pauses it if still no ticket, and a new ticket resumes it immediately. Other models are unaffected; a model nobody requests anymore simply expires.',
         turnStatePool: {
           empty: 'Turn-state —',
           starved: 'Turn-state: no ticket, passing through',
@@ -741,6 +742,7 @@ export default {
           hunterSummary: 'hunter {count}/{max} this hour · {next} · {last}',
           hunterNext: 'next {time}',
           hunterReady: 'ready',
+          hunterProbing: 'probing',
           hunterGateIdle: 'paused: no traffic',
           hunterGateFresh: 'ticket still fresh',
           hunterNeedsAuto: 'hunter inactive: enable automatic takeover first',

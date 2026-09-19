@@ -352,6 +352,26 @@ describe('AccountTurnStateCell', () => {
     expect(render(account([], { openai_turn_state_hunter: { enabled: false } })).find('[data-testid="account-turn-state-hunter"]').exists()).toBe(false)
   })
 
+  // 没在等窗也没被门槛挡、最近一次是 312：这轮还在猎，显示「探测中」而不是「待命」（2026-09-19
+  // 反馈：多账号排队时页面写着待命，看不出它其实在等轮次）。命中后 NextAt 留在过去才是「待命」。
+  it('最近一次未命中且没有下次/门槛时显示探测中', () => {
+    const hunt = (healthy: boolean) => ({
+      openai_turn_state_hunter: { enabled: true },
+      openai_turn_state_hunt: {
+        next_at: isoAgo(1),
+        hour_start: isoAgo(60),
+        hour_count: 4,
+        last: [{ at: isoAgo(30), model: 'gpt-6-astra', proxy: 'webshare', status: 200, chars: healthy ? 292 : 312, healthy }]
+      }
+    })
+    const probing = render(account([], hunt(false))).get('[data-testid="account-turn-state-hunter"]')
+    expect(probing.text()).toContain('hunterProbing')
+    expect(probing.text()).not.toContain('hunterReady')
+    const done = render(account([], hunt(true))).get('[data-testid="account-turn-state-hunter"]')
+    expect(done.text()).toContain('hunterReady')
+    expect(done.text()).not.toContain('hunterProbing')
+  })
+
   // 后端被门槛挡住时会记原因（gate）：「无流量暂停」和「票未到期」都不能显示成「待命」。
   it.each([
     ['idle', 'hunterGateIdle'],

@@ -250,3 +250,13 @@ func TestMigration244AllowsProbeUsageRequestType(t *testing.T) {
 	require.Contains(t, sql, "ADD CONSTRAINT usage_logs_request_type_check")
 	require.Contains(t, sql, "CHECK (request_type >= 0 AND request_type <= 6)")
 }
+
+// 降智暂停改成模型级后，klno.13 写下的账号级停调度没有代码会放回：升级要一次性清掉。
+func TestMigration245ClearsAccountLevelTurnStateHold(t *testing.T) {
+	content, err := FS.ReadFile("245_clear_account_level_turn_state_hold.sql")
+	require.NoError(t, err)
+	sql := string(content)
+	require.Contains(t, sql, "UPDATE accounts")
+	require.Contains(t, sql, "temp_unschedulable_until = NULL")
+	require.Contains(t, sql, "temp_unschedulable_reason LIKE 'turn_state_hold:%'")
+}

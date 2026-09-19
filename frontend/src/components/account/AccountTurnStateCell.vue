@@ -519,13 +519,18 @@ const hunterLine = computed(() => {
   const hourStart = parseTime(st.hour_start)
   const count = hourStart && hourStart.getTime() + 3_600_000 > now ? st.hour_count ?? 0 : 0
   const nextAt = parseTime(st.next_at)
+  const latest = huntAttempts.value[0]
   // 没在等窗时说清楚为什么没在猎：「待命」盖不住「票还新鲜」和「无流量暂停」的区别。
   const gateKey = st.gate === 'idle' ? 'hunterGateIdle' : st.gate === 'fresh' ? 'hunterGateFresh' : 'hunterReady'
+  // 没在等窗、没被门槛挡、最近一次又没命中：这轮还在猎（或下个 tick 接着猎）。多账号交错后
+  // 排队最多一个 gap，「排队中」和「探测中」不再区分（2026-09-19 反馈：排队时页面写着待命）。
+  const probing = !st.gate && !!latest && !latest.healthy
   const next =
     nextAt && nextAt.getTime() > now
       ? t('admin.accounts.openai.turnStatePool.hunterNext', { time: formatTime(nextAt) })
-      : t(`admin.accounts.openai.turnStatePool.${gateKey}`)
-  const latest = huntAttempts.value[0]
+      : probing
+        ? t('admin.accounts.openai.turnStatePool.hunterProbing')
+        : t(`admin.accounts.openai.turnStatePool.${gateKey}`)
   const last = latest
     ? t('admin.accounts.openai.turnStatePool.hunterLast', {
         result: hunterAttemptResult(latest),

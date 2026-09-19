@@ -107,22 +107,32 @@ describe('AccountStatusIndicator', () => {
     expect(wrapper.text()).not.toContain('admin.accounts.status.tempUnschedulable')
   })
 
-  // 降智暂停的 until 只是猎手续期的保底，不是恢复时刻：说原因，不报「预计 X 恢复」。
-  it('降智暂停：显示寻票中而不是预计恢复时间', () => {
+  // 降智暂停是模型级的（model_rate_limits + reason=turn_state_hold）：显示成「寻票中」而不是
+  // 普通模型限流，不报倒计时；账号本身不算临时不可调度。
+  it('降智暂停：按模型显示寻票中，不是普通限流也不是账号级暂停', () => {
     const wrapper = mount(AccountStatusIndicator, {
       props: {
         account: makeAccount({
           platform: 'openai',
-          temp_unschedulable_until: '2099-07-11T12:30:00Z',
-          temp_unschedulable_reason: 'turn_state_hold:gpt-6-astra'
+          extra: {
+            model_rate_limits: {
+              'gpt-6-astra': {
+                rate_limited_at: '2026-03-15T00:00:00Z',
+                rate_limit_reset_at: '2099-03-15T00:00:00Z',
+                reason: 'turn_state_hold'
+              }
+            }
+          }
         })
       },
       global: { stubs: { Icon: true } }
     })
 
-    expect(wrapper.find('.badge-warning').text()).toBe('admin.accounts.status.tempUnschedulable')
+    expect(wrapper.text()).toContain('admin.accounts.status.turnStateHoldShort')
+    expect(wrapper.text()).toContain('gpt-6-astra')
     expect(wrapper.text()).toContain('admin.accounts.status.turnStateHold:{"model":"gpt-6-astra"}')
-    expect(wrapper.text()).not.toContain('admin.accounts.status.tempUnschedulableUntil')
+    expect(wrapper.text()).not.toContain('admin.accounts.status.modelRateLimitedUntil')
+    expect(wrapper.text()).not.toContain('admin.accounts.status.tempUnschedulable')
   })
 
   it('模型限流 + overages 启用 + 无 AICredits key → 显示 ⚡ (credits_active)', () => {

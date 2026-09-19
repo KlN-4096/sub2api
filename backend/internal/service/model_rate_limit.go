@@ -86,6 +86,11 @@ func (a *Account) modelRateLimitKeysForRequest(ctx context.Context, requestedMod
 		if openAIImageGenerationRateLimitApplies(ctx, requestedModel, modelKey) && modelKey != openAIImageGenerationRateLimitKey {
 			keys = append(keys, openAIImageGenerationRateLimitKey)
 		}
+		// 写入侧（spark 429、降智暂停）用的是规范化后的上游模型名（大小写、openai/ 前缀、别名都
+		// 折叠过）；请求侧只按映射不归一的话，别名写法会绕过限流。与 runtime-block 同一个规范键。
+		if canonical := strings.TrimSpace(canonicalOpenAIAccountSchedulingModel(a, requestedModel)); canonical != "" && canonical != modelKey {
+			keys = append(keys, canonical)
+		}
 	case PlatformAnthropic:
 		if isAnthropicFableModel(modelKey) && modelKey != anthropicFableRateLimitKey {
 			keys = append(keys, anthropicFableRateLimitKey)

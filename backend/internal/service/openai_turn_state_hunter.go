@@ -66,6 +66,9 @@ const (
 	openAITurnStateHuntExitCooldown  = 7 * 24 * time.Hour
 	openAITurnStateHuntExitsKeep     = 128
 	openAITurnStateHuntExitEchoLimit = 15 * time.Second
+	// 同一代理连续几次传输错误才算本轮用不了：http2: client connection lost 这类偶发错误
+	// 隔一个 gap 重试一次就好，不该让唯一的出口白等一轮 retry_minutes（2026-09-19 用户反馈）。
+	openAITurnStateHuntTransportStrikes = 2
 
 	openAITurnStateHunterMaxModels      = 8
 	openAITurnStateHunterMaxProxies     = 64
@@ -117,8 +120,8 @@ type openAITurnStateHunterConfig struct {
 	// ReasoningEffort 探测请求的思考强度，与真实请求形态对齐；头到手即断，上游收到
 	// RST_STREAM 后停止生成，输出 token 只剩断流前那一瞬。
 	ReasoningEffort string `json:"reasoning_effort"`
-	// HoldWhenDegraded 要猎的模型拿不出可注入的 292 时把账号停调度、本次请求换号/503，
-	// 猎到票再放回（openai_turn_state_hold.go）。
+	// HoldWhenDegraded 要猎的模型拿不出可注入的 292 时把**该模型**在本账号上停一个空闲窗口、
+	// 本次请求换号/503，猎到票立即放回，到期后由下一条请求再拉起（openai_turn_state_hold.go）。
 	HoldWhenDegraded bool `json:"hold_when_degraded,omitempty"`
 	// UsageAPIKeyID >0 时每次 200 探测按标准用量路径落一行、挂在这把 key 下计费
 	//（request_type=probe；输入 token 本地估算，输出 0）。0 = 不记。
@@ -225,13 +228,20 @@ func (s *OpenAIGatewayService) openAITurnStateHuntedModel(a *Account, model stri
 	}
 	model = strings.TrimSpace(model)
 	if cfg.AutoModels {
-		// 真实请求到哪个模型就猎哪个——但得够格（见 openAITurnStateAutoHuntable）。已被停调度的
-		// 模型继续算在管：重启后铸造记忆清零，不能因此把暂停放回、让真实请求裸奔一次。
-		// 画图排除在兜底之前：手选模式下停了 gpt-image-2 再切自动，不能靠兜底把它猎下去。
+		// 真实请求到哪个模型就猎哪个——但得够格（见 openAITurnStateAutoHuntable）。曾被本功能停过
+		// 的模型（model_rate_limits 里留着本功能的条目，到期与否都算）也算在管：暂停只停一个空闲
+		// 窗口，重启 / 另一实例的铸造记忆是空的，不这么算就会在到期后放一条请求裸奔（第一轮评审 S1）。
+		// 条目被清限流（人工恢复状态、额度自动重置、账号测试成功都走 ClearModelRateLimits 整键删）才
+		// 失效：那之后再叠一次重启，该模型会裸奔一条请求（下一次铸造就重新记住），有界，不另存一份
+		// 记忆。画图排除在兜底之前：手选模式下停了 gpt-image-2 再切自动，
+		// 不能靠兜底把它猎下去。
 		if openAITurnStateImageModel(model) {
 			return false
 		}
-		return s.openAITurnStateAutoHuntable(a, model) || strings.EqualFold(openAITurnStateHeldModel(a, time.Now()), model)
+		if _, everHeld := openAITurnStateHoldResetAt(a, model); everHeld {
+			return true
+		}
+		return s.openAITurnStateAutoHuntable(a, model)
 	}
 	for _, m := range cfg.Models {
 		if strings.EqualFold(strings.TrimSpace(m), model) {
@@ -426,10 +436,6 @@ type OpenAITurnStateHunterService struct {
 	now   func() time.Time
 	sleep func(ctx context.Context, d time.Duration) error
 
-	// cursor 是下个 tick 从哪个账号开始：一轮预算被前面的账号吃光时，后面的不能永远轮不到。
-	// 只在 runOnce 里读写，而 runOnce 串行跑（ticker 循环一次一个）。
-	cursor int
-
 	ctx    context.Context
 	cancel context.CancelFunc
 	start  sync.Once
@@ -564,16 +570,11 @@ func (s *OpenAITurnStateHunterService) runOnce(ctx context.Context) {
 		slog.Warn("openai_turn_state_hunt_list_failed", "error", err)
 		return
 	}
-	n := len(accounts)
-	start := 0
-	if n > 0 {
-		start = s.cursor % n
-	}
-	for k := 0; k < n; k++ {
-		i := (start + k) % n
+	var sessions []*openAITurnStateHuntSession
+	for i := range accounts {
+		// 这一段只做门槛判定（每个账号几条 SELECT），账号再多也吃不掉 15 分钟预算，所以不需要
+		// 「下个 tick 从没轮到的账号开始」的游标；探测本身在下面交错跑。
 		if ctx.Err() != nil || s.now().After(deadline) {
-			// 预算在这个账号之前用完：下个 tick 从它开始，别每次都从头数。
-			s.cursor = i
 			return
 		}
 		account := &accounts[i]
@@ -590,22 +591,42 @@ func (s *OpenAITurnStateHunterService) runOnce(ctx context.Context) {
 		if account.Status != StatusActive || !account.IsOpenAITurnStateHunterEnabled() || !account.IsOpenAITurnStateAutoEnabled() {
 			continue
 		}
-		s.huntAccount(ctx, account, deadline)
+		if sess := s.openHunt(ctx, account); sess != nil {
+			sessions = append(sessions, sess)
+		}
 	}
-	s.cursor = 0
+	s.huntSessions(ctx, sessions, deadline)
 }
 
-// huntAccount 对一个账号跑一轮：先算哪些模型缺票，再在这些模型间轮流探测。
-func (s *OpenAITurnStateHunterService) huntAccount(ctx context.Context, account *Account, deadline time.Time) {
+// openAITurnStateHuntSession 是一轮里一个缺票账号的进度。多账号交错探测：每次挑 readyAt
+// 最早的账号探一次，每个账号各守各的 gap_seconds。曾经是按账号串行、一个账号探到命中/出错/
+// 预算耗尽才轮到下一个：排在前面的账号一直 312 就把 15 分钟预算吃光，后面的账号开了窗也只
+// 能在预算末尾抢到一次探测，票在排队里过期（2026-09-19 用户反馈）。
+type openAITurnStateHuntSession struct {
+	account *Account
+	cfg     openAITurnStateHunterConfig
+	st      openAITurnStateHuntState
+	proxies []Proxy
+	pending []string
+	// used 本轮不再用的代理：固定出口探过一次、或连续传输错误够数。strikes 记每个代理
+	// 连续传输错误的次数，中间成功过就清零。
+	used    map[int64]bool
+	strikes map[int64]int
+	probed  int
+	readyAt time.Time
+}
+
+// openHunt 算一个账号这轮要不要猎、猎哪些模型；不猎返回 nil（并按需留痕）。
+func (s *OpenAITurnStateHunterService) openHunt(ctx context.Context, account *Account) *openAITurnStateHuntSession {
 	cfg, _ := readOpenAITurnStateHunterConfig(account)
 	now := s.now()
 	st := readOpenAITurnStateHuntState(account)
 	if st.waiting(cfg, now) {
-		return
+		return nil
 	}
 	st.rollHour(now)
 	if st.HourCount >= cfg.MaxPerHour {
-		return
+		return nil
 	}
 	wanted, gate := s.modelsNeedingTicket(ctx, account, cfg, now)
 	if len(wanted) == 0 {
@@ -615,10 +636,10 @@ func (s *OpenAITurnStateHunterService) huntAccount(ctx context.Context, account 
 			st.Gate = gate
 			s.persist(ctx, account, st)
 		}
-		return
+		return nil
 	}
 	// 真的开猎才算「不再等窗」，只有再次撞上限才重新标。门槛痕迹也在这里清掉并落库，
-	// 否则预算没轮到这个账号时页面还写着上一次的「票未到期」。
+	// 否则页面还写着上一次的「票未到期」。
 	st.CapWait = false
 	if st.Gate != "" {
 		st.Gate = ""
@@ -631,11 +652,44 @@ func (s *OpenAITurnStateHunterService) huntAccount(ctx context.Context, account 
 		st.UpdatedAt = now
 		s.persist(ctx, account, st)
 		slog.Warn("openai_turn_state_hunt_no_proxy", "account_id", account.ID, "proxy_ids", cfg.ProxyIDs)
-		return
+		return nil
 	}
-	s.huntModels(ctx, account, cfg, &st, proxies, wanted, deadline)
-	// 命中即放回，不等下个 tick。
-	s.syncHold(ctx, account, s.now())
+	return &openAITurnStateHuntSession{
+		account: account, cfg: cfg, st: st, proxies: proxies, pending: wanted,
+		used: make(map[int64]bool, len(proxies)), strikes: make(map[int64]int, len(proxies)), readyAt: now,
+	}
+}
+
+// huntSessions 在缺票的账号间交错探测直到都结束或预算用完。预算用完就收手，下个 tick 重新
+// 拿锁接着猎（NextAt 不动）。
+func (s *OpenAITurnStateHunterService) huntSessions(ctx context.Context, sessions []*openAITurnStateHuntSession, deadline time.Time) {
+	for len(sessions) > 0 {
+		if ctx.Err() != nil || s.now().After(deadline) {
+			return
+		}
+		next := 0
+		for i, sess := range sessions {
+			if sess.readyAt.Before(sessions[next].readyAt) {
+				next = i
+			}
+		}
+		sess := sessions[next]
+		// 睡眠也在预算内：预算 + 一次探测超时 < 锁 TTL 这条不变量靠这里守住，
+		// 否则 gap_seconds 一调大，锁就会在轮次中过期、另一实例并发探测同一账号。
+		if sess.readyAt.After(deadline) {
+			return
+		}
+		if wait := sess.readyAt.Sub(s.now()); wait > 0 {
+			if err := s.sleep(ctx, wait); err != nil {
+				return
+			}
+		}
+		if s.huntStep(ctx, sess, deadline) {
+			sessions = append(sessions[:next], sessions[next+1:]...)
+			continue
+		}
+		sess.readyAt = s.now().Add(openAITurnStateHuntJitter(sess.cfg.gap()))
+	}
 }
 
 // modelsNeedingTicket 返回「有真实流量且票要到期」的模型。
@@ -650,7 +704,7 @@ func (s *OpenAITurnStateHunterService) modelsNeedingTicket(ctx context.Context, 
 	active := make([]string, 0, len(cfg.Models))
 	// 被降智暂停停着的模型不受空闲门槛约束：账号已经出了轮转，不会再有真实流量来刷水位，
 	// 按门槛停猎就是死锁——暂停本身就是需求信号，猎到票才放得回去。
-	held := openAITurnStateHeldModel(account, now)
+	held := openAITurnStateHeldModels(account, now)
 	models := cfg.Models
 	if cfg.AutoModels {
 		// 自动模式：空闲窗口内有真实流量的模型就是要猎的模型（窗口关掉就是进程内见过的全部）。
@@ -659,8 +713,10 @@ func (s *OpenAITurnStateHunterService) modelsNeedingTicket(ctx context.Context, 
 			since = now.Add(-time.Duration(cfg.IdleMinutes) * time.Minute)
 		}
 		models = s.gateway.openAITurnStateTrafficModels(account, since)
-		if held != "" && !containsFold(models, held) {
-			models = append(models, held)
+		for _, h := range held {
+			if !containsFold(models, h) {
+				models = append(models, h)
+			}
 		}
 	}
 	for _, model := range models {
@@ -668,7 +724,7 @@ func (s *OpenAITurnStateHunterService) modelsNeedingTicket(ctx context.Context, 
 		if model == "" {
 			continue
 		}
-		if cfg.IdleMinutes > 0 && !strings.EqualFold(model, held) && !s.gateway.openAITurnStateTrafficSince(account.ID, model, now.Add(-time.Duration(cfg.IdleMinutes)*time.Minute)) {
+		if cfg.IdleMinutes > 0 && !containsFold(held, model) && !s.gateway.openAITurnStateTrafficSince(account.ID, model, now.Add(-time.Duration(cfg.IdleMinutes)*time.Minute)) {
 			continue
 		}
 		active = append(active, model)
@@ -727,7 +783,12 @@ func (s *OpenAITurnStateHunterService) loadHuntProxies(ctx context.Context, ids 
 		byID[p.ID] = p
 	}
 	out := make([]Proxy, 0, len(ids))
+	seen := make(map[int64]bool, len(ids))
 	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
 		p, ok := byID[id]
 		if !ok || !p.IsActive() || p.IsExpired(now) {
 			slog.Warn("openai_turn_state_hunt_proxy_skipped", "proxy_id", id, "found", ok)
@@ -743,16 +804,14 @@ func (s *OpenAITurnStateHunterService) loadHuntProxies(ctx context.Context, ids 
 	return out
 }
 
-// huntModels 在缺票的模型间轮流摇骰子：每次探测换下一个模型，命中的模型出列，直到全部
-// 命中、额度用尽、预算用完或出错。轮流而不是逐个，是为了多模型时不让第一个模型吃光
-// 整小时的额度。
-func (s *OpenAITurnStateHunterService) huntModels(ctx context.Context, account *Account, cfg openAITurnStateHunterConfig, st *openAITurnStateHuntState, proxies []Proxy, pending []string, deadline time.Time) {
-	// 固定出口按整轮记「用过」，不分模型：同一个 IP 铸出 312 之后再试它就是白付一次额度。
-	used := make(map[int64]bool, len(proxies))
-	probed := 0
-	for len(pending) > 0 {
+// huntStep 给一个账号探一次（出口在冷却就换下一个再探）。缺票的模型轮流摇骰子：每次探测换
+// 下一个模型，命中的出列——轮流而不是逐个，是为了多模型时不让第一个模型吃光整小时的额度。
+// 返回 true 表示这个账号本轮结束：全部命中、出错退避、撞上限、或代理都用过了。
+func (s *OpenAITurnStateHunterService) huntStep(ctx context.Context, sess *openAITurnStateHuntSession, deadline time.Time) bool {
+	account, cfg, st := sess.account, sess.cfg, &sess.st
+	for {
 		if ctx.Err() != nil || s.now().After(deadline) {
-			return // 下个 tick 重新拿锁接着猎，NextAt 不动
+			return false // 下个 tick 重新拿锁接着猎，NextAt 不动
 		}
 		// 上限是按小时窗算的：一轮可能跨过小时边界，每次探测前都要滚一次窗。
 		st.rollHour(s.now())
@@ -760,9 +819,10 @@ func (s *OpenAITurnStateHunterService) huntModels(ctx context.Context, account *
 			st.NextAt = st.HourStart.Add(time.Hour)
 			st.CapWait = true
 			s.persist(ctx, account, *st)
-			return
+			return true
 		}
-		proxy, ok := nextOpenAITurnStateHuntProxy(cfg, proxies, st, used)
+		// 固定出口按整轮记「用过」，不分模型：同一个 IP 铸出 312 之后再试它就是白付一次额度。
+		proxy, ok := nextOpenAITurnStateHuntProxy(cfg, sess.proxies, st, sess.used)
 		if !ok {
 			break // 固定出口都用过一遍、又没有轮换端点：这一轮到此为止
 		}
@@ -771,55 +831,96 @@ func (s *OpenAITurnStateHunterService) huntModels(ctx context.Context, account *
 			slog.Debug("openai_turn_state_hunt_exit_cooling", "account_id", account.ID, "proxy_id", proxy.ID, "exit", exit)
 			continue // 不算额度、不睡：换下一个出口
 		}
-		model := pending[0]
+		model := sess.pending[0]
 		attempt := s.probe(ctx, account, model, cfg, proxy)
 		attempt.Exit = exit
-		probed++
+		sess.probed++
 		st.push(attempt)
 		slog.Info("openai_turn_state_hunt_attempt",
 			"account_id", account.ID, "model", model, "proxy_id", proxy.ID, "proxy", proxy.Name, "exit", exit,
 			"status", attempt.Status, "chars", attempt.Chars, "healthy", attempt.Healthy, "error", attempt.Error,
 			"latency_ms", attempt.LatencyMs, "hour_count", st.HourCount)
 		if attempt.transport {
-			// 传输层错误（连不上代理 / 连接被重置）是这条出口的问题：本轮不再用它，换下一个；
-			// 请求多半没到上游，不守探测间隔（也就不会睡过预算）。整轮由代理条数有界：都坏了就
-			// 走 retry 等下一轮——一个坏代理既不能把整轮掐掉，也不能反复烧额度（2026-09-19 反馈）。
-			used[proxy.ID] = true
+			// 传输层错误（连不上代理 / 连接被重置）请求多半没到上游，不计额度；隔一个 gap 再试，
+			// 同一代理连续 openAITurnStateHuntTransportStrikes 次才算本轮用不了。整轮由代理条数
+			// 有界：都坏了就走 retry 等下一轮——一个坏代理既不能把整轮掐掉，也不能反复烧额度。
+			sess.strikes[proxy.ID]++
+			if sess.strikes[proxy.ID] >= openAITurnStateHuntTransportStrikes {
+				sess.used[proxy.ID] = true
+			} else {
+				delete(sess.used, proxy.ID) // 固定出口选中即标用过；没到上游的这次不算，放回去重试
+			}
 			s.persist(ctx, account, *st)
-			continue
+			// 预算里等不到重试（gap 配得大 / 撞在预算末尾）也当这轮到此为止：strike 是轮次内的计数，
+			// 不这么做的话下个 tick 又从 strike 1 数起，死代理会每 60 秒被拨一次而 retry_minutes 永不生效
+			//（第二轮评审 1）。最坏一次 jitter 是 1.5 倍 gap。
+			if len(sess.used) < len(sess.proxies) && !s.now().Add(cfg.gap()*3/2).After(deadline) {
+				return !s.huntSessionCurrent(ctx, sess)
+			}
+			break // 都连不上了 / 等不到重试：按 retry 等下一轮，别再白睡一个 gap
 		}
+		sess.strikes[proxy.ID] = 0
 		if attempt.Status != http.StatusOK || attempt.Error != "" {
 			// 出错只退避，不改账号状态：走的是 hunt 代理，故障算到账号头上会误停真实流量。
 			st.NextAt = s.now().Add(openAITurnStateHuntBackoff(attempt.Status))
 			s.persist(ctx, account, *st)
-			return
+			return true
 		}
 		if attempt.Healthy {
-			pending = pending[1:]
+			sess.pending = sess.pending[1:]
 		} else {
-			pending = append(pending[1:], model)
+			sess.pending = append(sess.pending[1:], model)
 		}
 		s.persist(ctx, account, *st)
-		if len(pending) == 0 {
-			return // 全部命中：不退避，票到期前 lead_minutes 再开窗
+		if attempt.Healthy {
+			// 命中即放回，不等整轮结束（多账号交错时整轮可能还有十几分钟）。手里的账号是 tick 开头的
+			// 快照，轮次中真实请求新写的暂停不在里面：重读再算（第二轮评审 B1）。
+			if latest, err := s.accountRepo.GetByID(ctx, account.ID); err == nil && latest != nil {
+				s.syncHold(ctx, latest, s.now())
+			} else {
+				slog.Warn("openai_turn_state_hold_release_skipped", "account_id", account.ID, "error", err)
+			}
 		}
-		// 睡眠也在预算内：预算 + 一次探测超时 < 锁 TTL 这条不变量靠这里守住，
-		// 否则 gap_seconds 一调大，锁就会在轮次中过期、另一实例并发探测同一账号。
-		wait := openAITurnStateHuntJitter(cfg.gap())
-		if s.now().Add(wait).After(deadline) {
-			return
+		if len(sess.pending) == 0 {
+			return true // 全部命中：不退避，票到期前 lead_minutes 再开窗
 		}
-		if err := s.sleep(ctx, wait); err != nil {
-			return
-		}
+		// 探完再看配置有没有变（探测前看会白睡一个 gap 才发现）：变了就结束本轮。
+		return !s.huntSessionCurrent(ctx, sess)
 	}
-	if probed == 0 {
+	if sess.probed == 0 {
 		// 固定出口全在冷却：不留痕迹的话页面只会显示上一次的结果和「待命」，几小时不动没人看得懂。
 		st.LastError = "all hunt exits cooling"
 		st.UpdatedAt = s.now()
 	}
 	st.NextAt = s.now().Add(cfg.retry())
 	s.persist(ctx, account, *st)
+	return true
+}
+
+// huntSessionCurrent 每次没命中的探测之后重读账号：管理员改了猎手配置（填记账 key、换代理、改间隔）
+// 或关了猎手/接管，不该等这轮跑完（最长 15 分钟）才生效（2026-09-19 用户反馈：填了记账 key 十几
+// 分钟不见用量行）。变了就结束本轮（返回 false），下个 tick 按新配置从头开轮。读不到账号按手里的
+// 继续，一次 DB 抖动不该掐掉轮次。配置比较走 JSON 字符串：两边都是 JSONB 读出来的 map，键序稳定。
+func (s *OpenAITurnStateHunterService) huntSessionCurrent(ctx context.Context, sess *openAITurnStateHuntSession) bool {
+	latest, err := s.accountRepo.GetByID(ctx, sess.account.ID)
+	if err != nil || latest == nil {
+		return true
+	}
+	if latest.Status != StatusActive || !latest.IsOpenAITurnStateHunterEnabled() || !latest.IsOpenAITurnStateAutoEnabled() {
+		return false
+	}
+	return openAITurnStateHunterConfigJSON(latest) == openAITurnStateHunterConfigJSON(sess.account)
+}
+
+func openAITurnStateHunterConfigJSON(a *Account) string {
+	if a == nil || a.Extra == nil {
+		return ""
+	}
+	raw, err := json.Marshal(a.Extra[openAITurnStateHunterExtraKey])
+	if err != nil {
+		return ""
+	}
+	return string(raw)
 }
 
 // resolveHuntExit 解析固定出口的 IP 并判冷却。轮换端点由供应商按连接选出口，解析不了
