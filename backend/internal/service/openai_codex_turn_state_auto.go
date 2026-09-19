@@ -505,6 +505,15 @@ func (s *OpenAIGatewayService) observeOpenAITurnStateMint(c *gin.Context, accoun
 		// 同一道闸：只有自然铸造才证明「这个模型会铸票」，猎手自动定模型据此筛。
 		s.noteOpenAITurnStateMinted(account.ID, openAITurnStateRequestModel(c))
 		s.noteOpenAITurnStateObservation(c, account, minted, healthy)
+		// 又铸 312：之前判定的「降智已恢复」不作数了，清掉标记从头攒（只在挂着标记时写库）。
+		// 两道闸缺一不可（第一轮评审 B1）：
+		//   - 探测上下文不算：猎手走的是**别的出口**，它那里 312 说明不了账号自己的出口降不降智；
+		//     恢复探测自己的失败由 probeRecovery 记（否则一次失败探测把连胜清成 0 两次）。
+		//   - 出站带了票的请求不算：这个入口是「响应里有这个头就调」，而带票请求 92% 是上游把同一条
+		//     原样回带——拿回声当证据的话，降智账号每条真实请求都会把连胜清零，永远攒不满。
+		if !healthy && !openAITurnStateProbeContext(c) && OpenAITurnStateUsageSent(c) == "" {
+			s.resetOpenAITurnStateRecovery(turnStateOpCtx(c), account)
+		}
 	}
 
 	if !account.IsOpenAITurnStateAutoEnabled() {

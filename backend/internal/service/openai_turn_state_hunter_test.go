@@ -498,7 +498,7 @@ func TestOpenAITurnStateHunterCycleBudget(t *testing.T) {
 
 // TestOpenAITurnStateHunterRestartsRoundOnConfigChange 钉住「改配置立刻生效」：轮次中管理员改了猎手
 // 配置 → 本轮当场结束（NextAt 不动），下个 tick 按新配置从头开轮；关掉猎手 → 下个 tick 不再探
-//（2026-09-19 用户反馈：填了记账 key 十几分钟不见用量行——配置是轮次开头读一次的）。
+// （2026-09-19 用户反馈：填了记账 key 十几分钟不见用量行——配置是轮次开头读一次的）。
 func TestOpenAITurnStateHunterRestartsRoundOnConfigChange(t *testing.T) {
 	now := time.Now().UTC()
 	// onFirstWrite 在第一次落库（= 第一次探测之后）时模拟管理员保存：改 DB 侧账号，轮次手里的是旧快照。
@@ -718,6 +718,30 @@ func TestOpenAITurnStateHunterSameExitProbedOnce(t *testing.T) {
 	h.run(t)
 	require.Len(t, h.up.requests, 2)
 	require.Empty(t, h.state().LastError, "探测过就清掉冷却提示")
+}
+
+// TestOpenAITurnStateHuntExitCoolingDownOnlyAfter312 钉住 7 天冷却只罚铸出 312 的出口：
+// 铸出 292 的出口不冷却（能拿到 292 的出口下一次大概率还能拿到），没到上游的失败尝试
+// 连记录都不写（noteExit 跳过带 Error 的尝试），不会误判成 312。
+func TestOpenAITurnStateHuntExitCoolingDownOnlyAfter312(t *testing.T) {
+	now := time.Now().UTC()
+	st := &openAITurnStateHuntState{}
+
+	st.noteExit(openAITurnStateHuntAttempt{Exit: "1.1.1.1", ProxyID: 8, At: now.Add(-time.Hour), Healthy: false})
+	st.noteExit(openAITurnStateHuntAttempt{Exit: "2.2.2.2", ProxyID: 9, At: now.Add(-time.Hour), Healthy: true})
+	st.noteExit(openAITurnStateHuntAttempt{Exit: "3.3.3.3", ProxyID: 10, At: now.Add(-time.Hour), Error: "dial tcp: timeout"})
+
+	require.True(t, st.exitCoolingDown("1.1.1.1", now), "312 的出口冷却")
+	require.False(t, st.exitCoolingDown("2.2.2.2", now), "292 的出口不冷却")
+	require.False(t, st.exitCoolingDown("3.3.3.3", now), "没到上游的尝试不记录，也就谈不上冷却")
+
+	// 同一出口先 312 后 292：最新一条说了算，立刻解冻。
+	st.noteExit(openAITurnStateHuntAttempt{Exit: "1.1.1.1", ProxyID: 8, At: now, Healthy: true})
+	require.False(t, st.exitCoolingDown("1.1.1.1", now))
+
+	// 312 满 7 天后自然解冻。
+	st.noteExit(openAITurnStateHuntAttempt{Exit: "4.4.4.4", ProxyID: 11, At: now.Add(-openAITurnStateHuntExitCooldown - time.Minute), Healthy: false})
+	require.False(t, st.exitCoolingDown("4.4.4.4", now))
 }
 
 // TestOpenAITurnStateHunterExitEchoFailureStillProbes 钉住回声失败不挡探测：退化成按代理 ID

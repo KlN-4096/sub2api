@@ -78,6 +78,9 @@ var schedulerNeutralExtraKeys = map[string]struct{}{
 	// turn-state 猎手的运行态（下次窗口 / 本小时次数 / 最近 10 次），每次探测写一次，
 	// 纯展示不参与调度。配置键 openai_turn_state_hunter 由管理员写，不在此列。
 	"openai_turn_state_hunt": {},
+	// 降智恢复探测的运行态（连胜 / 下次窗口 / 已恢复时刻），每次探测写一次，纯展示不参与调度。
+	// 配置键 openai_turn_state_recovery 由管理员写，不在此列。
+	"openai_turn_state_recovery_state": {},
 }
 
 const postgresParameterBatchSize = 50000

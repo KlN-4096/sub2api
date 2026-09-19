@@ -1301,6 +1301,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			if len(failedAccountIDs) == 0 {
 				if err != nil {
 					cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel)
+					// 与 /responses、/chat/completions 同构：Claude 协议桥也要能说清「全池被降智
+					// 暂停」，少这一行的话这条入口只剩笼统的 Service temporarily unavailable。
+					cls = classifySelectionFailureError(err, cls)
 					if !cls.ModelNotFound {
 						markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 					}

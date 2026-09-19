@@ -389,6 +389,58 @@ describe('AccountTurnStateCell', () => {
     expect(line.classes()).not.toContain('text-amber-600')
   })
 
+  // 被停的模型走的是空闲门槛的后门（停着就说明刚有人请求过），gate 又是上一个 tick 的快照：
+  // 「刚发完请求被停」那几十秒里这行写着「无流量·暂停」，和状态列的降智暂停直接打架。
+  it('gate=idle 但有活着的降智暂停：写暂停补票，不写无流量', () => {
+    const held = (resetAt: string) => ({
+      openai_turn_state_hunter: { enabled: true },
+      openai_turn_state_hunt: { next_at: isoAgo(1), hour_start: isoAgo(60), hour_count: 0, last: [], gate: 'idle' },
+      model_rate_limits: { 'gpt-6-astra': { rate_limit_reset_at: resetAt, reason: 'turn_state_hold' } }
+    })
+    const line = render(account([], held(isoAgo(-600)))).get('[data-testid="account-turn-state-hunter"]')
+    expect(line.text()).toContain('hunterGateHeld')
+    expect(line.text()).not.toContain('hunterGateIdle')
+
+    // 过期的条目不算：放回后这行要回到「无流量·暂停」。
+    const expired = render(account([], held(isoAgo(600)))).get('[data-testid="account-turn-state-hunter"]')
+    expect(expired.text()).toContain('hunterGateIdle')
+    expect(expired.text()).not.toContain('hunterGateHeld')
+  })
+
+  // 暂停到期这一行要自己翻回去。没有这条的话，把 useNowTicker 换成不带定时器的 ref
+  // 也照样绿——「页面挂着不刷新会不会冻结」正是这次改动要修的东西。
+  it('降智暂停到期后猎手行自己翻回无流量', async () => {
+    vi.useFakeTimers()
+    try {
+      const w = render(
+        account([], {
+          openai_turn_state_hunter: { enabled: true },
+          openai_turn_state_hunt: { next_at: isoAgo(1), hour_start: isoAgo(60), hour_count: 0, last: [], gate: 'idle' },
+          model_rate_limits: {
+            'gpt-6-astra': { rate_limit_reset_at: new Date(Date.now() + 40_000).toISOString(), reason: 'turn_state_hold' }
+          }
+        })
+      )
+      expect(w.get('[data-testid="account-turn-state-hunter"]').text()).toContain('hunterGateHeld')
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(w.get('[data-testid="account-turn-state-hunter"]').text()).toContain('hunterGateIdle')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // 别的原因写的 model_rate_limits（真限流、管理员操作）不能借降智暂停的壳。
+  it('gate=idle 且限流不是降智暂停写的：仍写无流量', () => {
+    const w = render(
+      account([], {
+        openai_turn_state_hunter: { enabled: true },
+        openai_turn_state_hunt: { next_at: isoAgo(1), hour_start: isoAgo(60), hour_count: 0, last: [], gate: 'idle' },
+        model_rate_limits: { 'gpt-6-astra': { rate_limit_reset_at: isoAgo(-600) } }
+      })
+    )
+    expect(w.get('[data-testid="account-turn-state-hunter"]').text()).toContain('hunterGateIdle')
+  })
+
   // 后端要猎手开关与自动接管同时开着才跑：接管关着时不能写「待命」，那是在说一个永远
   // 不会发生的事。
   it('猎手开着、自动接管关着：标成未生效并用告警色', () => {
@@ -411,5 +463,101 @@ describe('AccountTurnStateCell', () => {
     const bar = w.get('.bar')
     expect(bar.text()).toBe('50')
     expect(bar.attributes('data-resets')).toBe(new Date((nowSec - 300 + 600) * 1000).toISOString())
+  })
+  // 降智恢复探测：独立于猎手的一行。连胜进度 / 冷却 / 已恢复三态，关着时整行不渲染。
+  describe('降智恢复探测行', () => {
+    const isoIn = (sec: number) => new Date((nowSec + sec) * 1000).toISOString()
+
+    it('攒连胜时显示进度与下次窗口', () => {
+      const w = render(
+        account([], {
+          openai_turn_state_recovery: { enabled: true },
+          openai_turn_state_recovery_state: {
+            streak: 3,
+            next_at: isoIn(1800),
+            last: [{ at: isoAgo(60), model: 'gpt-6-astra', proxy: 'cox', status: 200, chars: 292, healthy: true }]
+          }
+        })
+      )
+      const line = w.get('[data-testid="account-turn-state-recovery"]')
+      expect(line.text()).toContain('recoverySummary')
+      expect(line.text()).toContain('"streak":3')
+      expect(line.text()).toContain('"target":5')
+      expect(line.text()).toContain('hunterNext')
+      expect(line.classes()).not.toContain('text-emerald-600')
+      expect(line.attributes('title')).toContain('hunterResultHit')
+    })
+
+    it('冷却中显示冷却到点，而不是下次窗口', () => {
+      const w = render(
+        account([], {
+          openai_turn_state_recovery: { enabled: true, streak_target: 3 },
+          openai_turn_state_recovery_state: { streak: 0, fail_streak: 0, cooling_until: isoIn(3600), next_at: isoIn(3600) }
+        })
+      )
+      const line = w.get('[data-testid="account-turn-state-recovery"]')
+      expect(line.text()).toContain('recoveryCooling')
+      expect(line.text()).toContain('"target":3')
+      expect(line.text()).not.toContain('hunterNext')
+    })
+
+    it('判定恢复后显示已恢复并用绿色，不再说下次窗口', () => {
+      const w = render(
+        account([], {
+          openai_turn_state_recovery: { enabled: true },
+          openai_turn_state_recovery_state: { streak: 5, recovered_at: isoAgo(120), next_at: isoIn(1800) }
+        })
+      )
+      const line = w.get('[data-testid="account-turn-state-recovery"]')
+      expect(line.text()).toContain('recoveryDone')
+      expect(line.text()).not.toContain('recoverySummary')
+      expect(line.classes()).toContain('text-emerald-600')
+    })
+
+    // 后端曾把零值时间落成 "0001-01-01T00:00:00Z"（omitempty 对 struct 不生效），而 JS 的 Date
+    // 认这个字符串——老账号行里还留着这种值，不挡就会从第一次探测起一直写着「已恢复」。
+    it('零值时间不算已恢复，也不算冷却', () => {
+      const w = render(
+        account([], {
+          openai_turn_state_recovery: { enabled: true },
+          openai_turn_state_recovery_state: {
+            streak: 1,
+            next_at: isoIn(1800),
+            recovered_at: '0001-01-01T00:00:00Z',
+            cooling_until: '0001-01-01T00:00:00Z'
+          }
+        })
+      )
+      const line = w.get('[data-testid="account-turn-state-recovery"]')
+      expect(line.text()).toContain('recoverySummary')
+      expect(line.text()).not.toContain('recoveryDone')
+      expect(line.text()).not.toContain('recoveryCooling')
+      expect(line.classes()).not.toContain('text-emerald-600')
+    })
+
+    // 「开着但探不了」（模型名配错、没流量也没观测过）要看得见：一行中性的 0/5 会被无视。
+    it('探不出模型时显示错误并用告警色', () => {
+      const w = render(
+        account([], {
+          openai_turn_state_recovery: { enabled: true },
+          openai_turn_state_recovery_state: { streak: 0, next_at: isoIn(1800), last_error: 'no model to probe' }
+        })
+      )
+      const line = w.get('[data-testid="account-turn-state-recovery"]')
+      expect(line.text()).toContain('hunterResultError')
+      expect(line.text()).toContain('no model to probe')
+      expect(line.classes()).toContain('text-amber-600')
+    })
+
+    it('没开恢复探测就不渲染这一行', () => {
+      expect(
+        render(account([], { openai_turn_state_recovery_state: { streak: 2 } }))
+          .find('[data-testid="account-turn-state-recovery"]').exists()
+      ).toBe(false)
+      expect(
+        render(account([], { openai_turn_state_recovery: { enabled: false } }))
+          .find('[data-testid="account-turn-state-recovery"]').exists()
+      ).toBe(false)
+    })
   })
 })

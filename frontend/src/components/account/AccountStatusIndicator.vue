@@ -174,6 +174,8 @@ import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import type { Account } from '@/types'
 import { formatCountdown, formatDateTime, formatDateTimeToMinute, formatCountdownWithSuffix, formatTime } from '@/utils/format'
+import { TURN_STATE_HOLD_REASON } from '@/utils/turnState'
+import { useNowTicker } from '@/composables/useNowTicker'
 
 const { t } = useI18n()
 
@@ -185,10 +187,15 @@ const emit = defineEmits<{
   (e: 'show-temp-unsched', account: Account): void
 }>()
 
+// 会走的「现在」。本组件原先每处都是裸 new Date()：那不是响应式依赖，computed 算过一次
+// 就再也不重算（账号页自动刷新默认是关的），到期的徽标会一直挂着。同一行的猎手行按 30s
+// 一跳判同一条到期时间，这边冻结的话两处会各说各话——用户报过的那个「打架」。
+const sharedNow = useNowTicker()
+
 // Computed: is rate limited (429)
 const isRateLimited = computed(() => {
   if (!props.account.rate_limit_reset_at) return false
-  return new Date(props.account.rate_limit_reset_at) > new Date()
+  return new Date(props.account.rate_limit_reset_at).getTime() > sharedNow.value
 })
 
 type AccountModelStatusItem = {
@@ -199,7 +206,7 @@ type AccountModelStatusItem = {
 
 // 降智暂停（openai_turn_state_hold.go）借 model_rate_limits 存，reason 标本功能：显示成
 // 「寻票中」而不是普通限流，也不报倒计时——到期只是内部翻一次标记，有请求还会再停。
-const TURN_STATE_HOLD_REASON = 'turn_state_hold'
+// reason 串与 AccountTurnStateCell 的猎手行共用一份（@/utils/turnState）。
 
 // Computed: active model statuses (普通模型限流 + 积分耗尽 + 走积分中 + 降智暂停)
 const activeModelStatuses = computed<AccountModelStatusItem[]>(() => {
@@ -207,7 +214,7 @@ const activeModelStatuses = computed<AccountModelStatusItem[]>(() => {
   const modelLimits = extra?.model_rate_limits as
     | Record<string, { rate_limited_at: string; rate_limit_reset_at: string; reason?: string }>
     | undefined
-  const now = new Date()
+  const now = new Date(sharedNow.value)
   const items: AccountModelStatusItem[] = []
 
   if (!modelLimits) return items
@@ -284,13 +291,13 @@ const formatScopeName = (scope: string): string => {
 // Computed: is overloaded (529)
 const isOverloaded = computed(() => {
   if (!props.account.overload_until) return false
-  return new Date(props.account.overload_until) > new Date()
+  return new Date(props.account.overload_until).getTime() > sharedNow.value
 })
 
 // Computed: is temp unschedulable
 const isTempUnschedulable = computed(() => {
   if (!props.account.temp_unschedulable_until) return false
-  return new Date(props.account.temp_unschedulable_until) > new Date()
+  return new Date(props.account.temp_unschedulable_until).getTime() > sharedNow.value
 })
 
 // Computed: has error status

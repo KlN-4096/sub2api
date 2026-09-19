@@ -423,7 +423,7 @@ export default {
         viewTempUnschedDetails: '查看临时不可调度详情',
         tempUnschedulableUntil: '预计 {time} 恢复',
         turnStateHold: '降智暂停 · {model} 在本账号上停着，猎手寻票中；猎到即恢复，到期后有请求会再停',
-        turnStateHoldShort: '降智暂停'
+        turnStateHoldShort: '降智'
       },
       tempUnschedulable: {
         title: '临时不可调度',
@@ -805,6 +805,15 @@ export default {
         turnStateHunterHold: '降智时暂停调度',
         turnStateHunterHoldDesc:
           '要猎的模型拿不出可注入的 292 时，把该模型在本账号上暂停一个空闲窗口（idle_minutes）并让该请求换号（没有别的号就报 503）；到期后下一条请求还缺票就再暂停，猎到新票立即恢复。其它模型不受影响；没人再请求的模型到期后自然结束。',
+        turnStateRecovery: '降智恢复探测',
+        turnStateRecoveryDesc:
+          '用账号自己的出口每隔一段不固定的时间探一次，连续若干次铸出 292 就判定降智已恢复并打上标记；连续同样多次失败则进入冷却。独立于猎手（猎手关着也能开），只标记与记日志，不会自动改任何配置。判定后停止探测，真实流量再铸出 312 就清掉标记重新攒。',
+        turnStateRecoveryModel: '探测模型',
+        turnStateRecoveryModelAuto: '留空 = 最近有流量的模型',
+        turnStateRecoveryStreak: '连胜阈值',
+        turnStateRecoveryCooldown: '失败冷却（小时）',
+        turnStateRecoveryMin: '间隔下限（分钟）',
+        turnStateRecoveryMax: '间隔上限（分钟）',
         turnStatePool: {
           empty: 'Turn-State -',
           starved: 'Turn-State 无票·裸奔中',
@@ -819,7 +828,11 @@ export default {
           hunterNext: '下次 {time}',
           hunterReady: '待命',
           hunterProbing: '探测中',
+          recoverySummary: '恢复探测 {streak}/{target} · {next}',
+          recoveryCooling: '冷却至 {time}',
+          recoveryDone: '降智已恢复 · {time}',
           hunterGateIdle: '无流量·暂停',
+          hunterGateHeld: '降智暂停·补票中',
           hunterGateFresh: '票未到期',
           hunterNeedsAuto: '猎手 未生效：需先开自动接管',
           // `@` 是 vue-i18n 的链接消息前缀，裸写会在生产构建里抛 SyntaxError 并整块吞掉

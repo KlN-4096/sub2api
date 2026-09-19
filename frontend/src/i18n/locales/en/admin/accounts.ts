@@ -219,7 +219,7 @@ export default {
         viewTempUnschedDetails: 'View temp unschedulable details',
         tempUnschedulableUntil: 'Resumes {time}',
         turnStateHold: 'Degraded pause · {model} is paused on this account while the hunter looks for a ticket; resumes on a hit, re-pauses on the next request after expiry',
-        turnStateHoldShort: 'Degraded pause'
+        turnStateHoldShort: 'Degraded'
       },
       columns: {
         name: 'Name',
@@ -729,6 +729,15 @@ export default {
         turnStateHunterHold: 'Pause scheduling while degraded',
         turnStateHunterHoldDesc:
           'When a hunted model has no injectable 292, pause that model on this account for one idle window (idle_minutes) and fail the request over (503 if no other account); after expiry the next request re-pauses it if still no ticket, and a new ticket resumes it immediately. Other models are unaffected; a model nobody requests anymore simply expires.',
+        turnStateRecovery: 'Degradation recovery probe',
+        turnStateRecoveryDesc:
+          "Probes through the account's own exit at randomized intervals; a streak of healthy 292 mints marks the account as recovered, while the same number of consecutive failures starts a cooldown. Independent of the hunter (works with the hunter off), it only records a marker and a log line and never changes any setting. Probing stops once marked, and a natural 312 from real traffic clears the marker.",
+        turnStateRecoveryModel: 'Probe model',
+        turnStateRecoveryModelAuto: 'blank = latest model with traffic',
+        turnStateRecoveryStreak: 'Streak target',
+        turnStateRecoveryCooldown: 'Failure cooldown (hours)',
+        turnStateRecoveryMin: 'Min interval (minutes)',
+        turnStateRecoveryMax: 'Max interval (minutes)',
         turnStatePool: {
           empty: 'Turn-state —',
           starved: 'Turn-state: no ticket, passing through',
@@ -743,7 +752,11 @@ export default {
           hunterNext: 'next {time}',
           hunterReady: 'ready',
           hunterProbing: 'probing',
+          recoverySummary: 'recovery {streak}/{target} · {next}',
+          recoveryCooling: 'cooling until {time}',
+          recoveryDone: 'recovered · {time}',
           hunterGateIdle: 'paused: no traffic',
+          hunterGateHeld: 'degraded pause: hunting a ticket',
           hunterGateFresh: 'ticket still fresh',
           hunterNeedsAuto: 'hunter inactive: enable automatic takeover first',
           // A bare `@` is vue-i18n's linked-message prefix and throws in production builds; use {'@'}.

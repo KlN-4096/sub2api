@@ -38,12 +38,28 @@ func (a *Account) getRateLimitRemainingForKey(key string) time.Duration {
 }
 
 func (a *Account) isModelRateLimitedWithContext(ctx context.Context, requestedModel string) bool {
+	limited, _ := a.modelRateLimitStateForRequest(ctx, requestedModel, time.Now())
+	return limited
+}
+
+// modelRateLimitStateForRequest 一次答完两个问题：本次请求的模型有没有被模型级限流挡住，
+// 以及挡住它的是不是降智暂停（借 model_rate_limits 存，但不是限流——调度过滤点据此分成
+// 两个 reason，handler 才能回 503 + 说清原因而不是 429「所有账号都在限流」）。
+//
+// 合在一起算而不是问两遍：modelRateLimitKeysForRequest 会走 GetMappedModel +
+// canonicalOpenAIAccountSchedulingModel 整条链，问两遍就重算两遍；而且两次各取一次
+// time.Now() 的话，条目恰好在两次采样之间过期时两个答案会互相矛盾。
+func (a *Account) modelRateLimitStateForRequest(ctx context.Context, requestedModel string, now time.Time) (limited bool, turnStateHold bool) {
 	for _, key := range a.modelRateLimitKeysForRequest(ctx, requestedModel) {
-		if a.isRateLimitActiveForKey(key) {
-			return true
+		if !a.isRateLimitActiveForKey(key) {
+			continue
+		}
+		limited = true
+		if openAITurnStateModelHeld(a, key, now) {
+			return true, true
 		}
 	}
-	return false
+	return limited, false
 }
 
 // GetModelRateLimitRemainingTime 获取模型限流剩余时间

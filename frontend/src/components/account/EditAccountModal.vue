@@ -2563,6 +2563,70 @@
               </div>
             </div>
           </div>
+          <!-- 降智恢复探测：独立于猎手的开关，走账号自己的出口，只标记不改配置。 -->
+          <div class="mt-3 rounded-lg border border-gray-200 p-3 dark:border-dark-700">
+            <div class="flex items-center justify-between gap-4">
+              <div class="min-w-0">
+                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.turnStateRecovery') }}</label>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.accounts.openai.turnStateRecoveryDesc') }}
+                </p>
+              </div>
+              <input
+                v-model="openAITurnStateRecovery.enabled"
+                data-testid="edit-openai-turn-state-recovery"
+                type="checkbox"
+                class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+              />
+            </div>
+            <div v-if="openAITurnStateRecovery.enabled" class="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div class="col-span-2">
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateRecoveryModel') }}</label>
+                <input
+                  v-model="openAITurnStateRecovery.model"
+                  type="text"
+                  :placeholder="t('admin.accounts.openai.turnStateRecoveryModelAuto')"
+                  class="input text-xs"
+                  data-testid="edit-openai-turn-state-recovery-model"
+                />
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateRecoveryStreak') }}</label>
+                <input v-model.number="openAITurnStateRecovery.streak_target" type="number" min="1" max="50" placeholder="5" class="input text-xs" />
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateRecoveryCooldown') }}</label>
+                <input v-model.number="openAITurnStateRecovery.cooldown_hours" type="number" min="1" max="168" placeholder="16" class="input text-xs" />
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateRecoveryMin') }}</label>
+                <input v-model.number="openAITurnStateRecovery.min_minutes" type="number" min="1" max="1440" placeholder="30" class="input text-xs" />
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateRecoveryMax') }}</label>
+                <input v-model.number="openAITurnStateRecovery.max_minutes" type="number" min="1" max="1440" placeholder="90" class="input text-xs" />
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterUsageKey') }}</label>
+                <input
+                  v-model.number="openAITurnStateRecovery.usage_api_key_id"
+                  type="number"
+                  min="1"
+                  step="1"
+                  class="input text-xs"
+                  data-testid="edit-openai-turn-state-recovery-usage-key"
+                  :title="t('admin.accounts.openai.turnStateHunterUsageKeyDesc')"
+                />
+              </div>
+              <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterEffort') }}</label>
+                <select v-model="openAITurnStateRecovery.reasoning_effort" class="input text-xs" data-testid="edit-openai-turn-state-recovery-effort">
+                  <option value="">{{ t('admin.accounts.openai.turnStateHunterEffortDefault') }}</option>
+                  <option v-for="e in turnStateHunterEfforts" :key="e" :value="e">{{ e }}</option>
+                </select>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="flex items-center justify-between">
           <div>
@@ -3905,6 +3969,67 @@ interface TurnStateHunterConfig {
   /** 探测记账用的 API Key ID：每次 200 探测按标准用量路径落一行；空 = 不记。 */
   usage_api_key_id: number | null
 }
+// 降智恢复探测（extra.openai_turn_state_recovery）：走账号**自己的出口**、间隔随机，连续
+// streak_target 次 292 判定恢复并打标记；连续同样多次失败进 cooldown_hours 冷却。只标记，不改配置。
+interface TurnStateRecoveryConfig {
+  enabled: boolean
+  /** 探哪个模型；留空 = 最近有真实流量的那个。 */
+  model: string
+  streak_target: number | null
+  min_minutes: number | null
+  max_minutes: number | null
+  cooldown_hours: number | null
+  reasoning_effort: string
+  /** 记账 API Key ID；留空回落猎手那把（猎手关着时它的输入框不渲染，所以这里要有自己的）。 */
+  usage_api_key_id: number | null
+}
+const emptyTurnStateRecovery = (): TurnStateRecoveryConfig => ({
+  enabled: false,
+  model: '',
+  streak_target: null,
+  min_minutes: null,
+  max_minutes: null,
+  cooldown_hours: null,
+  reasoning_effort: '',
+  usage_api_key_id: null
+})
+const readOpenAITurnStateRecovery = (extra: unknown): TurnStateRecoveryConfig => {
+  const cfg = emptyTurnStateRecovery()
+  const raw = (extra as Record<string, unknown> | undefined)?.openai_turn_state_recovery
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return cfg
+  const table = raw as Record<string, unknown>
+  cfg.enabled = table.enabled === true
+  cfg.model = typeof table.model === 'string' ? table.model : ''
+  const int = (key: string) => (typeof table[key] === 'number' ? (table[key] as number) : null)
+  cfg.streak_target = int('streak_target')
+  cfg.min_minutes = int('min_minutes')
+  cfg.max_minutes = int('max_minutes')
+  cfg.cooldown_hours = int('cooldown_hours')
+  cfg.usage_api_key_id = int('usage_api_key_id')
+  cfg.reasoning_effort = typeof table.reasoning_effort === 'string' ? table.reasoning_effort : ''
+  return cfg
+}
+// 全空（关着、什么都没填）返回 null = 删键，与猎手同一套。
+const normalizeTurnStateRecovery = (cfg: TurnStateRecoveryConfig): Record<string, unknown> | null => {
+  const out: Record<string, unknown> = { enabled: cfg.enabled }
+  const model = cfg.model.trim()
+  if (model) out.model = model
+  const numeric: Array<[string, number | null]> = [
+    ['streak_target', cfg.streak_target],
+    ['min_minutes', cfg.min_minutes],
+    ['max_minutes', cfg.max_minutes],
+    ['cooldown_hours', cfg.cooldown_hours],
+    ['usage_api_key_id', cfg.usage_api_key_id]
+  ]
+  for (const [key, value] of numeric) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) out[key] = value
+  }
+  if (cfg.reasoning_effort) out.reasoning_effort = cfg.reasoning_effort
+  return !cfg.enabled && Object.keys(out).length === 1 ? null : out
+}
+const serializeTurnStateRecovery = (cfg: TurnStateRecoveryConfig) => JSON.stringify(normalizeTurnStateRecovery(cfg))
+const openAITurnStateRecovery = ref<TurnStateRecoveryConfig>(emptyTurnStateRecovery())
+
 const turnStateHunterEfforts = ['minimal', 'low', 'medium', 'high', 'xhigh']
 const emptyTurnStateHunter = (): TurnStateHunterConfig => ({
   enabled: false,
@@ -4553,6 +4678,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	openAITurnStateOverrides.value = readOpenAITurnStateOverrides(extra)
 	openAITurnStateAuto.value = readOpenAITurnStateAuto(extra)
 	openAITurnStateHunter.value = readOpenAITurnStateHunter(extra)
+	openAITurnStateRecovery.value = readOpenAITurnStateRecovery(extra)
 	turnStateHunterProxiesLoaded.value = false
 	turnStateHunterProxies.value = []
 	turnStateSelectedModel.value = Object.keys(openAITurnStateOverrides.value).sort()[0] ?? ''
@@ -6387,6 +6513,24 @@ const handleSubmit = async () => {
         newExtra.openai_turn_state_hunter = nextHunter
       } else {
         delete newExtra.openai_turn_state_hunter
+      }
+      updatePayload.extra = newExtra
+    }
+
+    // 恢复探测配置：独立于猎手（猎手关着也能开），同样只在改动时写回。运行态键
+    // openai_turn_state_recovery_state 由探测维护，这里不碰。
+    if (
+      accountSupportsTurnStateHunter.value &&
+      serializeTurnStateRecovery(openAITurnStateRecovery.value) !==
+        serializeTurnStateRecovery(readOpenAITurnStateRecovery(props.account.extra))
+    ) {
+      const currentExtra = (updatePayload.extra as Record<string, unknown>) || (props.account.extra as Record<string, unknown>) || {}
+      const newExtra: Record<string, unknown> = { ...currentExtra }
+      const nextRecovery = normalizeTurnStateRecovery(openAITurnStateRecovery.value)
+      if (nextRecovery) {
+        newExtra.openai_turn_state_recovery = nextRecovery
+      } else {
+        delete newExtra.openai_turn_state_recovery
       }
       updatePayload.extra = newExtra
     }

@@ -92,6 +92,22 @@
     >
       {{ hunterLine }}
     </p>
+    <!-- 降智恢复探测：连胜进度 / 下次窗口 / 冷却；判定恢复后显示绿色的「已恢复」。 -->
+    <p
+      v-if="recoveryLine"
+      class="text-[10px]"
+      :class="
+        recovered
+          ? 'text-emerald-600 dark:text-emerald-400'
+          : recoveryErrored
+            ? 'text-amber-600 dark:text-amber-400'
+            : 'text-gray-500 dark:text-gray-400'
+      "
+      :title="recoveryTitle"
+      data-testid="account-turn-state-recovery"
+    >
+      {{ recoveryLine }}
+    </p>
   </div>
 </template>
 
@@ -109,47 +125,27 @@
  *    **只有未降智的进展示**：一条 312 永远注不出去，摆在票旁边只会被读成票，而
  *    「这个号在铸 312」用量表每行都写着。降智那条仍参与 starved 判定，见下。
  */
-import { computed, onUnmounted, ref } from 'vue'
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import UsageProgressBar from './UsageProgressBar.vue'
+import { useNowTicker } from '@/composables/useNowTicker'
 import type { Account } from '@/types'
 import {
   decodeTurnState,
   isTurnStateHealthy,
   targetsCodexUpstream,
   TURN_STATE_DEFAULT_TTL_MINUTES,
+  TURN_STATE_HOLD_REASON,
   TURN_STATE_SHAPES
 } from '@/utils/turnState'
 import { formatDateTime, formatTime } from '@/utils/format'
 
-/**
- * 模块级共享时钟。倒计时必须真的走，否则页面一挂就是一张冻结的快照：过期的票不消失、
- * 进度条永远停在打开时的比例（账号页的自动刷新默认是关的，props 不会自己变）。
- * 共享而不是每个实例一只表——账号列表一行一个实例，几十只定时器没必要。
- * 30s 粒度：UsageProgressBar 自己那只表是 60s，比它快一档就不会出现「条子还是绿的、
- * 右边已经写着待刷新」这种自相矛盾。
- */
-const sharedNow = ref(Date.now())
-let clockUsers = 0
-let clockTimer: ReturnType<typeof setInterval> | null = null
-
-const acquireClock = () => {
-  if (++clockUsers === 1) {
-    clockTimer = setInterval(() => (sharedNow.value = Date.now()), 30_000)
-  }
-}
-const releaseClock = () => {
-  if (--clockUsers === 0 && clockTimer) {
-    clearInterval(clockTimer)
-    clockTimer = null
-  }
-}
-
 const props = defineProps<{ account: Account }>()
 const { t } = useI18n()
 
-acquireClock()
-onUnmounted(releaseClock)
+// 与 AccountStatusIndicator 用同一个 ticker：那边原来是裸 new Date()，不会重算，
+// 暂停到期后两处会各说各话（见 useNowTicker 的注释）。
+const sharedNow = useNowTicker()
 
 interface PoolCandidate {
   blob?: string
@@ -509,6 +505,22 @@ const hunterAttemptResult = (a: HuntAttempt) => {
   )
 }
 
+/**
+ * 有模型正因降智被停着。后端给被停的模型开了空闲门槛的后门（停着就说明刚有人请求过），
+ * 而 gate 是上一个 tick 的快照，于是「刚发完请求被停」那几十秒里这行会写着「无流量 · 暂停」，
+ * 和状态列的「降智暂停」直接打架（2026-09-19 用户反馈）。读同一份 model_rate_limits 覆盖它。
+ */
+const heldByTurnState = computed(() => {
+  const limits = extra.value['model_rate_limits']
+  if (!limits || typeof limits !== 'object') return false
+  return Object.values(limits as Record<string, unknown>).some((raw) => {
+    const entry = raw as { reason?: unknown; rate_limit_reset_at?: unknown } | null
+    if (!entry || typeof entry !== 'object' || entry.reason !== TURN_STATE_HOLD_REASON) return false
+    const resetAt = parseTime(entry.rate_limit_reset_at)
+    return !!resetAt && resetAt.getTime() > sharedNow.value
+  })
+})
+
 const hunterLine = computed(() => {
   const max = hunterMaxPerHour.value
   if (max === null) return ''
@@ -521,7 +533,14 @@ const hunterLine = computed(() => {
   const nextAt = parseTime(st.next_at)
   const latest = huntAttempts.value[0]
   // 没在等窗时说清楚为什么没在猎：「待命」盖不住「票还新鲜」和「无流量暂停」的区别。
-  const gateKey = st.gate === 'idle' ? 'hunterGateIdle' : st.gate === 'fresh' ? 'hunterGateFresh' : 'hunterReady'
+  const gateKey =
+    st.gate === 'idle'
+      ? heldByTurnState.value
+        ? 'hunterGateHeld'
+        : 'hunterGateIdle'
+      : st.gate === 'fresh'
+        ? 'hunterGateFresh'
+        : 'hunterReady'
   // 没在等窗、没被门槛挡、最近一次又没命中：这轮还在猎（或下个 tick 接着猎）。多账号交错后
   // 排队最多一个 gap，「排队中」和「探测中」不再区分（2026-09-19 反馈：排队时页面写着待命）。
   const probing = !st.gate && !!latest && !latest.healthy
@@ -558,6 +577,98 @@ const hunterTitle = computed(() =>
     )
     .join('\n')
 )
+
+/**
+ * 降智恢复探测（extra.openai_turn_state_recovery / _state）：走账号自己的出口、间隔随机，
+ * 连续若干次 292 判定恢复。判定后后端停止探测，所以这行改说「已恢复」而不是下次窗口。
+ */
+interface RecoveryState {
+  streak?: number
+  fail_streak?: number
+  next_at?: string
+  recovered_at?: string
+  cooling_until?: string
+  last?: HuntAttempt[]
+  last_error?: string
+}
+const RECOVERY_DEFAULT_STREAK = 5
+
+const recoveryStreakTarget = computed<number | null>(() => {
+  const raw = extra.value['openai_turn_state_recovery']
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const cfg = raw as { enabled?: unknown; streak_target?: unknown }
+  if (cfg.enabled !== true) return null
+  return typeof cfg.streak_target === 'number' && cfg.streak_target > 0 ? cfg.streak_target : RECOVERY_DEFAULT_STREAK
+})
+
+const recoveryState = computed<RecoveryState>(() => {
+  const raw = extra.value['openai_turn_state_recovery_state']
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  return raw as RecoveryState
+})
+
+// 零值时间要当成「没有」：后端现在用 omitzero 不再落 "0001-01-01T00:00:00Z"，但老账号行里
+// 可能还留着，而 JS 的 Date 认这个字符串——不挡的话那些行会一直写着「已恢复」。
+const parsePresentTime = (raw: unknown): Date | null => {
+  const d = parseTime(raw)
+  return d && d.getTime() > 0 ? d : null
+}
+
+const recovered = computed(() => !!parsePresentTime(recoveryState.value.recovered_at))
+
+const recoveryLine = computed(() => {
+  const target = recoveryStreakTarget.value
+  if (target === null) return ''
+  const st = recoveryState.value
+  const recoveredAt = parsePresentTime(st.recovered_at)
+  if (recoveredAt) {
+    return t('admin.accounts.openai.turnStatePool.recoveryDone', { time: formatTime(recoveredAt) })
+  }
+  const now = sharedNow.value
+  const cooling = parsePresentTime(st.cooling_until)
+  const nextAt = parsePresentTime(st.next_at)
+  let next: string
+  if (cooling && cooling.getTime() > now) {
+    next = t('admin.accounts.openai.turnStatePool.recoveryCooling', { time: formatTime(cooling) })
+  } else if (nextAt && nextAt.getTime() > now) {
+    next = t('admin.accounts.openai.turnStatePool.hunterNext', { time: formatTime(nextAt) })
+  } else {
+    next = t('admin.accounts.openai.turnStatePool.hunterProbing')
+  }
+  // 「开着但探不了」（模型名配错、账号没流量也没观测过）要看得见，否则这行永远是中性的
+  // 「恢复探测 0/5 · 下次 12:34」，原因只在 tooltip 里（第一轮评审 S6）。
+  if (st.last_error && !st.last?.length) {
+    next = t('admin.accounts.openai.turnStatePool.hunterResultError', { status: '-', error: st.last_error })
+  }
+  return t('admin.accounts.openai.turnStatePool.recoverySummary', {
+    streak: st.streak ?? 0,
+    target,
+    next
+  })
+})
+
+// 与猎手行同一套：探不出来时用告警色，别让一行中性文字长期挂着。
+const recoveryErrored = computed(() => {
+  const st = recoveryState.value
+  return !recovered.value && (!!st.last?.[0]?.error || (!!st.last_error && !st.last?.length))
+})
+
+const recoveryTitle = computed(() => {
+  const attempts = Array.isArray(recoveryState.value.last) ? recoveryState.value.last : []
+  if (!attempts.length) return recoveryState.value.last_error ?? ''
+  return attempts
+    .map((a) =>
+      t('admin.accounts.openai.turnStatePool.hunterDetail', {
+        time: formatDateTime(parseTime(a.at) ?? new Date(NaN)),
+        model: a.model || '-',
+        proxy: a.proxy || '-',
+        exit: a.exit ? ` (${a.exit})` : '',
+        result: hunterAttemptResult(a),
+        latency: typeof a.latency_ms === 'number' ? `${(a.latency_ms / 1000).toFixed(1)}s` : '-'
+      })
+    )
+    .join('\n')
+})
 
 const detailTitle = computed(() =>
   entries.value

@@ -28,7 +28,7 @@ import (
 // 一次重启，该模型会裸奔一条请求（下一次铸造就重新记住），有界，不另存一份。
 const (
 	// openAITurnStateHoldLimitReason 是 model_rate_limits 条目的 reason，猎手据此认出自己停的。
-	openAITurnStateHoldLimitReason = "turn_state_hold"
+	openAITurnStateHoldLimitReason = OpenAITurnStateHoldSelectionReason
 	// openAITurnStateHoldDefaultTTL 空闲门槛关掉（idle_minutes<=0）时的暂停时长。
 	openAITurnStateHoldDefaultTTL = time.Hour
 	// ctxKeyTurnStateHold 记本次请求因缺票被拦下的模型；出站构造完请求头后据此换号。
@@ -37,6 +37,11 @@ const (
 
 // OpenAITurnStateHoldReason 是换号错误的原因码，handler 据此给客户端回 503 与说明。
 const OpenAITurnStateHoldReason = GatewayFailureReason("openai_turn_state_hold")
+
+// OpenAITurnStateHoldSelectionReason 是调度过滤点给降智暂停记的 reason，会出现在空池错误的
+// summary 里（"pool=1, filtered: turn_state_hold=1"）。导出是为了让 handler 的正则由它拼出来：
+// 那边靠字符串认这个计数，两边各抄一份的话，改名时两侧测试都绿而生产静默掉回 429。
+const OpenAITurnStateHoldSelectionReason = "turn_state_hold"
 
 // openAITurnStateHoldEnabled 报告该模型缺票时要不要停调度：猎手开着、管这个模型、开了暂停。
 func (s *OpenAIGatewayService) openAITurnStateHoldEnabled(a *Account, model string) bool {

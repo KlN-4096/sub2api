@@ -571,15 +571,22 @@ func (s *OpenAITurnStateHunterService) runOnce(ctx context.Context) {
 		return
 	}
 	var sessions []*openAITurnStateHuntSession
+	// 恢复探测每个 tick 最多做一个账号：它会真的发一条请求（最长 60 秒），而这一段的预算是留给
+	// 猎手的。间隔 30–90 分钟、tick 一分钟一次，几十个账号也轮得过来（第一轮评审 S4）。
+	recoveryDone := false
 	for i := range accounts {
-		// 这一段只做门槛判定（每个账号几条 SELECT），账号再多也吃不掉 15 分钟预算，所以不需要
-		// 「下个 tick 从没轮到的账号开始」的游标；探测本身在下面交错跑。
+		// 除上面那一条之外，这一段只做门槛判定（每个账号几条 SELECT），账号再多也吃不掉 15 分钟
+		// 预算，所以不需要「下个 tick 从没轮到的账号开始」的游标；探测本身在下面交错跑。
 		if ctx.Err() != nil || s.now().After(deadline) {
 			return
 		}
 		account := &accounts[i]
 		// 停调度的维护放在开关判定之前：猎手/接管关掉之后被本功能停着的账号也要放回。
 		s.syncHold(ctx, account, s.now())
+		// 恢复探测是独立开关（猎手关着也跑），间隔 30–90 分钟，绝大多数 tick 在这里直接返回。
+		if !recoveryDone && s.probeRecovery(ctx, account, deadline) {
+			recoveryDone = true
+		}
 		// 猎手依赖自动接管：票只入池不注入等于白猎。ListByPlatform 本身只返回 active，
 		// 这里的状态检查是双保险。
 		//
@@ -1033,19 +1040,25 @@ func (s *OpenAITurnStateHunterService) probe(ctx context.Context, account *Accou
 	egress := *account
 	egress.ProxyID = &hunt.ID
 	egress.Proxy = &hunt
-
-	probeCtx, cancel := context.WithTimeout(ctx, openAITurnStateHuntProbeTimeout)
-	defer cancel()
-	c, req, err := s.gateway.buildOpenAITurnStateProbe(probeCtx, &egress, model, cfg.ReasoningEffort)
-	if err != nil {
-		attempt.Error = "build probe: " + sanitizeUpstreamErrorMessage(err.Error())
-		return attempt
-	}
 	// 每次探测一条新代理连接：webshare 的 -rotate 按连接换出口，而缓存的客户端会复用
-	// HTTP/2 隧道，不关连接就一直从同一个出口发。req.Close 让 http2 把这条连接标成
+	// HTTP/2 隧道，不关连接就一直从同一个出口发。closeConn 让 http2 把这条连接标成
 	// doNotReuse（用完即关、下一条重新 CONNECT），HTTP/1.1 则响应后直接关；H2 上不会多发
 	// 任何头。固定出口也这么做，探测不留长连接。
-	req.Close = true
+	s.doProbe(ctx, account, &egress, proxyURL, true, model, cfg, &attempt)
+	return attempt
+}
+
+// doProbe 是两种探测共用的发送与判定：猎手换出口探（probe），恢复探测走账号自己的出口
+// （probeOwnExit）。egress 是已设好出口的账号副本，account 是入池/记账用的原账号。
+func (s *OpenAITurnStateHunterService) doProbe(ctx context.Context, account, egress *Account, proxyURL string, closeConn bool, model string, cfg openAITurnStateHunterConfig, attempt *openAITurnStateHuntAttempt) {
+	probeCtx, cancel := context.WithTimeout(ctx, openAITurnStateHuntProbeTimeout)
+	defer cancel()
+	c, req, err := s.gateway.buildOpenAITurnStateProbe(probeCtx, egress, model, cfg.ReasoningEffort)
+	if err != nil {
+		attempt.Error = "build probe: " + sanitizeUpstreamErrorMessage(err.Error())
+		return
+	}
+	req.Close = closeConn
 	started := time.Now()
 	// 直接走 httpUpstream，不经 doOpenAIUpstream 的插件路径：插件协议不携带 req.Close，
 	// 插件进程自己池化连接，一装上就会静默地从同一条隧道反复探测，换不了出口。
@@ -1054,7 +1067,7 @@ func (s *OpenAITurnStateHunterService) probe(ctx context.Context, account *Accou
 	if err != nil {
 		attempt.Error = sanitizeUpstreamErrorMessage(err.Error())
 		attempt.transport = true
-		return attempt
+		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 	attempt.Status = resp.StatusCode
@@ -1064,7 +1077,7 @@ func (s *OpenAITurnStateHunterService) probe(ctx context.Context, account *Accou
 		if attempt.Error == "" {
 			attempt.Error = http.StatusText(resp.StatusCode)
 		}
-		return attempt
+		return
 	}
 	// 头到手即断：不读 SSE。提前关体让 HTTP/2 发 RST_STREAM（req.Close 的连接随之关掉），
 	// 上游立刻停止生成——必须排在下面的入池读写库**之前**，数据库慢的时候不能让上游多
@@ -1073,18 +1086,17 @@ func (s *OpenAITurnStateHunterService) probe(ctx context.Context, account *Accou
 	// 200 就是一次计费请求，不管铸没铸出 turn-state。排在入池之后：记账是一串读写库
 	//（GetByID、倍率、扣费事务、用量行），DB 慢的时候不能让猎到的票晚入池；用 probeCtx 给它
 	// 同一个 60 秒上限，别吃掉整轮预算。
-	defer s.recordProbeUsage(probeCtx, account, cfg, c, req, resp.Header, &attempt)
+	defer s.recordProbeUsage(probeCtx, account, cfg, c, req, resp.Header, attempt)
 	blob := extractOpenAICodexTurnState(resp.Header)
 	if blob == "" {
 		attempt.Error = "no turn-state in response"
-		return attempt
+		return
 	}
 	attempt.Chars = len(blob)
 	attempt.Healthy = openAITurnStateHealthy(blob)
 	// 与真实响应同一个入口：记铸造者、写形态观测、健康则入池。传原账号而不是出口副本，
 	// 池子按账号 ID 读写，两者本来相同，这里只是不让副本流出去。
 	s.gateway.relayOpenAICodexTurnState(c, account, resp.Header)
-	return attempt
 }
 
 // recordProbeUsage 把一次 200 探测按标准用量路径落一行，挂在配置的 API Key 下走正常计费
@@ -1274,6 +1286,28 @@ func (s *OpenAIGatewayService) openAITurnStateTrafficModels(a *Account, since ti
 	return out
 }
 
+// openAITurnStateLatestTrafficModel 取窗口内最近一次真实流量的模型（同一套资格筛：画图与
+// 从不铸票的模型排除）。恢复探测据此在没填模型时决定探哪个。
+func (s *OpenAIGatewayService) openAITurnStateLatestTrafficModel(a *Account, since time.Time) string {
+	if s == nil || a == nil {
+		return ""
+	}
+	prefix := openAITurnStateTrafficKey(a.ID, "")
+	var best openAITurnStateTrafficMark
+	s.openaiTurnStateTraffic.Range(func(key, value any) bool {
+		k, _ := key.(string)
+		mark, ok := value.(openAITurnStateTrafficMark)
+		if !ok || !strings.HasPrefix(k, prefix) || (!since.IsZero() && !mark.at.After(since)) || !s.openAITurnStateAutoHuntable(a, mark.model) {
+			return true
+		}
+		if best.model == "" || mark.at.After(best.at) {
+			best = mark
+		}
+		return true
+	})
+	return best.model
+}
+
 func containsFold(list []string, want string) bool {
 	for _, item := range list {
 		if strings.EqualFold(strings.TrimSpace(item), want) {
@@ -1454,6 +1488,9 @@ var openAITurnStateHuntReasoningEfforts = map[string]struct{}{
 func ValidateOpenAITurnStateHunterExtra(extra map[string]any) error {
 	if extra == nil {
 		return nil
+	}
+	if err := validateOpenAITurnStateRecoveryExtra(extra); err != nil {
+		return err
 	}
 	raw, ok := extra[openAITurnStateHunterExtraKey]
 	if !ok {
