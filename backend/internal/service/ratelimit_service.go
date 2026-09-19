@@ -2082,13 +2082,7 @@ func (s *RateLimitService) samplePassiveUsageFromHeaders(ctx context.Context, ac
 
 // ClearRateLimit 清除账号的限流状态
 func (s *RateLimitService) ClearRateLimit(ctx context.Context, accountID int64) error {
-	if err := s.accountRepo.ClearRateLimit(ctx, accountID); err != nil {
-		return err
-	}
-	if err := s.accountRepo.ClearAntigravityQuotaScopes(ctx, accountID); err != nil {
-		return err
-	}
-	if err := s.accountRepo.ClearModelRateLimits(ctx, accountID); err != nil {
+	if err := s.clearRateLimitFields(ctx, accountID); err != nil {
 		return err
 	}
 	// 清除限流时一并清理临时不可调度状态，避免周限/窗口重置后仍被本地临时状态阻断。
@@ -2135,7 +2129,13 @@ func (s *RateLimitService) RecoverAccountState(ctx context.Context, accountID in
 	}
 
 	if hasRecoverableRuntimeState(account) && !options.CredentialsOnly {
-		if err := s.ClearRateLimit(ctx, accountID); err != nil {
+		// 降智暂停不是这里能恢复的状态：探针/配额重置成功说明凭据和额度没问题，票还是没有。
+		// 只清限流那几列，temp_unschedulable 留给猎手放回。
+		if openAITurnStateHeldModel(account, time.Now()) != "" {
+			if err := s.clearRateLimitFields(ctx, accountID); err != nil {
+				return nil, err
+			}
+		} else if err := s.ClearRateLimit(ctx, accountID); err != nil {
 			return nil, err
 		}
 		result.ClearedRateLimit = true
@@ -2156,6 +2156,32 @@ func (s *RateLimitService) RecoverAccountState(ctx context.Context, accountID in
 // credentialsOnly 为真（凭据探针）时只清 error。
 func (s *RateLimitService) RecoverAccountAfterSuccessfulTest(ctx context.Context, accountID int64, credentialsOnly bool) (*SuccessfulTestRecoveryResult, error) {
 	return s.RecoverAccountState(ctx, accountID, AccountRecoveryOptions{CredentialsOnly: credentialsOnly})
+}
+
+// ReleaseTempUnschedulable 只清临时停调度（DB + Redis 副本 + 运行态阻断），不动模型级限流：
+// 给自动放回的路径用（降智暂停猎到票）。人工「恢复调度」仍走 ClearTempUnschedulable。
+// clearRateLimitFields 只清限流三组列（全局限流、antigravity 配额域、模型级限流），不碰临时停调度。
+func (s *RateLimitService) clearRateLimitFields(ctx context.Context, accountID int64) error {
+	if err := s.accountRepo.ClearRateLimit(ctx, accountID); err != nil {
+		return err
+	}
+	if err := s.accountRepo.ClearAntigravityQuotaScopes(ctx, accountID); err != nil {
+		return err
+	}
+	return s.accountRepo.ClearModelRateLimits(ctx, accountID)
+}
+
+func (s *RateLimitService) ReleaseTempUnschedulable(ctx context.Context, accountID int64) error {
+	if err := s.accountRepo.ClearTempUnschedulable(ctx, accountID); err != nil {
+		return err
+	}
+	if s.tempUnschedCache != nil {
+		if err := s.tempUnschedCache.DeleteTempUnsched(ctx, accountID); err != nil {
+			slog.Warn("temp_unsched_cache_delete_failed", "account_id", accountID, "error", err)
+		}
+	}
+	s.notifyAccountSchedulingBlockCleared(accountID)
+	return nil
 }
 
 func (s *RateLimitService) ClearTempUnschedulable(ctx context.Context, accountID int64) error {

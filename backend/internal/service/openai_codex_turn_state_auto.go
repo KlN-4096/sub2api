@@ -342,7 +342,7 @@ func (s *OpenAIGatewayService) resolveOpenAITurnStateOverride(c *gin.Context, ac
 	// 有票就直接注，新会话第一回合也不裸奔。猎手不管的模型仍走「先判定再注入」。
 	key := openAITurnStateSessionKey(c, account, openAITurnStateRequestSessionID(c))
 	degraded := s.sessionNeedsTurnStateInjection(key)
-	if !degraded && !account.openAITurnStateHuntedModel(model) {
+	if !degraded && !s.openAITurnStateHuntedModel(account, model) {
 		return "", ""
 	}
 	// 必须读新鲜池，不能读请求手里的 account 快照。
@@ -367,6 +367,7 @@ func (s *OpenAIGatewayService) resolveOpenAITurnStateOverride(c *gin.Context, ac
 			logOpenAITurnStateAuto("account=%d model=%s degraded but no usable candidate (pool=%d)",
 				account.ID, model, len(pool))
 		}
+		s.holdOpenAITurnStateIfUnfilled(c, account, model)
 		return "", ""
 	}
 	markOpenAITurnStateInjected(c, candidate.Blob, source)
@@ -407,6 +408,7 @@ func clearOpenAITurnStateInjected(c *gin.Context) {
 	if c != nil {
 		c.Set(ctxKeyTurnStateInjected, "")
 		c.Set(ctxKeyTurnStateSource, "")
+		c.Set(ctxKeyTurnStateHold, "")
 	}
 }
 
@@ -500,6 +502,8 @@ func (s *OpenAIGatewayService) observeOpenAITurnStateMint(c *gin.Context, accoun
 	// 只记形态、不记 blob：blob 是上游令牌，无条件存进每个账号的 extra 就等于让它随
 	// 账号列表接口下发、进每一份 DB dump。形态（块数/字符数）足够回答上面那个问题。
 	if injected == "" {
+		// 同一道闸：只有自然铸造才证明「这个模型会铸票」，猎手自动定模型据此筛。
+		s.noteOpenAITurnStateMinted(account.ID, openAITurnStateRequestModel(c))
 		s.noteOpenAITurnStateObservation(c, account, minted, healthy)
 	}
 

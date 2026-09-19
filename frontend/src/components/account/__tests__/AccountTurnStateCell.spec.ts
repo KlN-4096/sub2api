@@ -170,19 +170,39 @@ describe('AccountTurnStateCell', () => {
     ])
   })
 
-  it('接管开着：候选池是生效行，形态观测是并列的「最近铸出」行，且不计进生效数', () => {
-    const w = render(
-      account([cand('m', 60)], { openai_turn_state_observed: obs('m', 30, 12) })
-    )
-    // 同一个模型两行并存：生效的那条不带标记，观测那条标「最近铸出」。共用一个 seen
-    // 去重的话，运维正盯着的那个模型恰好只剩一行，观测值被吃掉。
-    expect(rows(w)).toEqual(['|m', 'admin.accounts.openai.turnStatePool.observedTag|m'])
-    // team 基线的 332 也算健康，照样展示。
-    expect(w.findAll('.bar')[1].attributes('data-color')).toBe('purple')
-    // summary 只能报真的会被注入的条数，否则「3 行」会被读成「3 个模型在注入」。
-    expect(w.get('[data-testid="account-turn-state-summary"]').text()).toBe(
+  it('接管开着：模型已有生效票就不再摆它的「最近铸出」行，别的模型的观测照常并列', () => {
+    // 池里的票全是这个号自己铸的，生效行本身就证明了「最近铸出 292」；再列一行只是同一张票
+    // 重复出现（2026-09-19 用户截图两行 292 / 68% / 40m 一模一样）。
+    const same = render(account([cand('m', 60)], { openai_turn_state_observed: obs('m', 30, 12) }))
+    expect(rows(same)).toEqual(['|m'])
+    // summary 只能报真的会被注入的条数。
+    expect(same.get('[data-testid="account-turn-state-summary"]').text()).toBe(
       'admin.accounts.openai.turnStatePool.summary:{"n":1}'
     )
+
+    // 观测的是另一个模型：那个模型没有生效票，观测行才有信息量。team 基线的 332 也算健康。
+    const other = render(account([cand('m', 60)], { openai_turn_state_observed: obs('n', 30, 12) }))
+    expect(rows(other)).toEqual(['|m', 'admin.accounts.openai.turnStatePool.observedTag|n'])
+    expect(other.findAll('.bar')[1].attributes('data-color')).toBe('purple')
+  })
+
+  it('接管开着、生效票过期：观测行回来，说明「票没了但这个号铸的是 292」', () => {
+    const w = render(account([cand('m', 7200)], { openai_turn_state_observed: obs('m', 7200) }))
+    expect(rows(w)).toEqual(['admin.accounts.openai.turnStatePool.observedTag|m'])
+  })
+
+  it('手填模式：同一模型的手填票与「最近铸出」并列', () => {
+    const w = render(
+      account([], {
+        openai_turn_state_auto: false,
+        openai_turn_state_override: { m: turnStateFixture(nowSec - 60, 10) },
+        openai_turn_state_observed: obs('m', 30)
+      })
+    )
+    expect(rows(w)).toEqual([
+      'admin.accounts.openai.turnStatePool.manualTag|m',
+      'admin.accounts.openai.turnStatePool.observedTag|m'
+    ])
   })
 
   it('接管开着、池空但有观测行：仍要报「裸奔」', () => {

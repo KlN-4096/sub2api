@@ -35,7 +35,8 @@ vi.mock('@/api/admin', () => ({
     proxies: {
       // 292 猎手的代理多选走这个接口，懒加载。
       getAll: vi.fn().mockResolvedValue([
-        { id: 20, name: 'webshare', protocol: 'socks5', host: 'p.webshare.io', port: 1080 }
+        { id: 20, name: 'webshare', protocol: 'socks5', host: 'p.webshare.io', port: 1080 },
+        { id: 21, name: 'b2proxy', protocol: 'http', host: 'gw.b2proxy.example', port: 8000 }
       ])
     },
     settings: {
@@ -1976,6 +1977,123 @@ describe('EditAccountModal 292 猎手', () => {
       proxy_ids: [20],
       max_per_hour: 40,
       retry_minutes: 30
+    })
+    wrapper.unmount()
+  })
+
+  // 降智暂停是猎手区块里的一个开关：勾上写 hold_when_degraded: true；没勾不写键（后端零值同义）。
+  it('勾选降智暂停写入 hold_when_degraded，改别的项时不丢', async () => {
+    const wrapper = mountModal(
+      buildCodexAccount({
+        openai_turn_state_auto: true,
+        openai_turn_state_hunter: { enabled: true, models: ['gpt-6-astra'], proxy_ids: [20] }
+      })
+    )
+    await flushPromises()
+    await wrapper.get('[data-testid="edit-openai-turn-state-hunter-hold"]').setValue(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_turn_state_hunter).toEqual({
+      enabled: true,
+      models: ['gpt-6-astra'],
+      proxy_ids: [20],
+      hold_when_degraded: true
+    })
+    wrapper.unmount()
+
+    const kept = mountModal(
+      buildCodexAccount({
+        openai_turn_state_auto: true,
+        openai_turn_state_hunter: { enabled: true, models: ['gpt-6-astra'], proxy_ids: [20], hold_when_degraded: true }
+      })
+    )
+    await flushPromises()
+    expect((kept.get('[data-testid="edit-openai-turn-state-hunter-hold"]').element as HTMLInputElement).checked).toBe(true)
+    await kept.get('[data-testid="edit-openai-turn-state-hunter-max"]').setValue('40')
+    await kept.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[1]?.[1]?.extra?.openai_turn_state_hunter).toEqual({
+      enabled: true,
+      models: ['gpt-6-astra'],
+      proxy_ids: [20],
+      max_per_hour: 40,
+      hold_when_degraded: true
+    })
+    kept.unmount()
+  })
+
+  // 轮换标记按已选代理逐个勾；取消勾选代理后它的标记不留残余。
+  it('轮换代理勾选写入 rotating_proxy_ids，且只保留仍在探测列表里的', async () => {
+    const wrapper = mountModal(
+      buildCodexAccount({
+        openai_turn_state_auto: true,
+        openai_turn_state_hunter: { enabled: true, models: ['gpt-6-astra'], proxy_ids: [20, 21], rotating_proxy_ids: [21] }
+      })
+    )
+    await flushPromises()
+    expect((wrapper.get('[data-testid="edit-openai-turn-state-hunter-rotating-21"]').element as HTMLInputElement).checked).toBe(true)
+    await wrapper.get('[data-testid="edit-openai-turn-state-hunter-rotating-20"]').setValue(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_turn_state_hunter).toEqual({
+      enabled: true,
+      models: ['gpt-6-astra'],
+      proxy_ids: [20, 21],
+      rotating_proxy_ids: [21, 20]
+    })
+    wrapper.unmount()
+
+    const pruned = mountModal(
+      buildCodexAccount({
+        openai_turn_state_auto: true,
+        openai_turn_state_hunter: { enabled: true, models: ['gpt-6-astra'], proxy_ids: [20, 21], rotating_proxy_ids: [21] }
+      })
+    )
+    await flushPromises()
+    await pruned.get('[data-testid="edit-openai-turn-state-hunter-proxies"]').setValue(['20'])
+    await pruned.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[1]?.[1]?.extra?.openai_turn_state_hunter).toEqual({
+      enabled: true,
+      models: ['gpt-6-astra'],
+      proxy_ids: [20]
+    })
+    pruned.unmount()
+  })
+
+  // 自动定模型：勾上后手选列表置灰、可以为空也能提交，写 auto_models: true。
+  it('按真实请求自动定模型：不选模型也能提交', async () => {
+    const wrapper = mountModal(buildCodexAccount({ openai_turn_state_auto: true }))
+    await wrapper.get('[data-testid="edit-openai-turn-state-hunter"]').setValue(true)
+    await flushPromises()
+    await wrapper.get('[data-testid="edit-openai-turn-state-hunter-auto-models"]').setValue(true)
+    await wrapper.get('[data-testid="edit-openai-turn-state-hunter-proxies"]').setValue(['20'])
+    expect((wrapper.get('[data-testid="edit-openai-turn-state-hunter-models"]').element as HTMLSelectElement).disabled).toBe(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_turn_state_hunter).toEqual({
+      enabled: true,
+      models: [],
+      proxy_ids: [20],
+      auto_models: true
+    })
+    wrapper.unmount()
+  })
+
+  // 记账 key 是数字字段：填了写 usage_api_key_id，清空就不写键（后端 0 同义于不记）。
+  it('记账 API Key ID 往返', async () => {
+    const wrapper = mountModal(
+      buildCodexAccount({
+        openai_turn_state_auto: true,
+        openai_turn_state_hunter: { enabled: true, models: ['gpt-6-astra'], proxy_ids: [20], usage_api_key_id: 7 }
+      })
+    )
+    await flushPromises()
+    const field = wrapper.get('[data-testid="edit-openai-turn-state-hunter-usage-key"]')
+    expect((field.element as HTMLInputElement).value).toBe('7')
+    await field.setValue('12')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_turn_state_hunter).toEqual({
+      enabled: true,
+      models: ['gpt-6-astra'],
+      proxy_ids: [20],
+      usage_api_key_id: 12
     })
     wrapper.unmount()
   })

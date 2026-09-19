@@ -421,7 +421,8 @@ export default {
         creditsExhaustedUntil: 'AI Credits 已用尽，预计 {time} 恢复',
         overloadedUntil: '负载过重，重置时间：{time}',
         viewTempUnschedDetails: '查看临时不可调度详情',
-        tempUnschedulableUntil: '预计 {time} 恢复'
+        tempUnschedulableUntil: '预计 {time} 恢复',
+        turnStateHold: '降智暂停 · 猎手为 {model} 寻票中'
       },
       tempUnschedulable: {
         title: '临时不可调度',
@@ -786,15 +787,23 @@ export default {
         turnStateHunterDesc:
           '票到期前开窗，经勾选的代理逐个开新会话探测，摇到 292 即入池交给自动接管注入；探测响应头到手即断，主要成本是每次探测的输入 token（含该模型的 base prompt）。开着猎手时池里有票就对所有会话注入。每小时有上限；空闲门槛内没有真实请求的模型不猎。每次探测都新建一条代理连接，webshare 的 -rotate 端点因此每次换出口；其余代理按固定出口处理：探测前先解析出口 IP，同一出口只探一次，铸出 312 的出口 7 天内不再探。',
         turnStateHunterNeedsAuto: '需要先开启自动接管，否则猎手不会运行',
-        turnStateHunterInvalid: '猎手开着时必须选择模型（最多 8 个）和代理（最多 64 个）',
+        turnStateHunterInvalid: '猎手开着时必须选择模型（最多 8 个，或勾「按真实请求自动」）和代理（最多 64 个）',
+        turnStateHunterAutoModels: '按真实请求自动定模型（空闲窗口内有真实请求、且上游给它铸过 turn-state 的模型都猎；画图模型不参与；勾上后上面手选的忽略）',
         turnStateHunterEffortDefault: '默认（high）',
         turnStateHunterModels: '要猎的模型',
         turnStateHunterProxies: '探测用代理',
+        turnStateHunterRotating: '勾选每次连接都换出口的代理（webshare 的 -rotate 会自动识别）；没勾的按固定出口：一轮只探一次，铸出 312 的出口冷却 7 天',
         turnStateHunterMaxPerHour: '每小时上限',
         turnStateHunterGap: '探测间隔（秒）',
         turnStateHunterLead: '到期前开窗（分钟）',
         turnStateHunterIdle: '空闲门槛（分钟，-1 关闭）',
         turnStateHunterEffort: '探测思考强度',
+        turnStateHunterUsageKey: '记账 API Key ID（留空不记）',
+        turnStateHunterUsageKeyDesc:
+          '填了就把每次 200 探测按标准用量路径记到这把 key 下（类型「猎手探测」，正常计费扣额度、刷新最近使用）；输入 token 为本地估算（含 base prompt），输出恒 0。建议用一把专用 key：它的额度/限流会被探测消耗，订阅型分组要有有效订阅才记。',
+        turnStateHunterHold: '降智时暂停调度',
+        turnStateHunterHoldDesc:
+          '要猎的模型拿不出可注入的 292 时，把账号临时停调度并让该请求换号（没有别的号就报 503），猎到新票自动放回；撞了小时上限就等下一窗接着猎，猎不到就一直暂停。',
         turnStatePool: {
           empty: 'Turn-State -',
           starved: 'Turn-State 无票·裸奔中',

@@ -401,6 +401,7 @@ export default {
     compactionOnly: '仅原生压缩',
     cyber: '安全策略',
     live: 'Live',
+    probe: '猎手探测',
     unknown: '未知',
     in: '输入',
     out: '输出',

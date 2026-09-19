@@ -58,6 +58,8 @@ type hunterUpstream struct {
 	bodies    [][]byte
 	queue     []*http.Response
 	err       error
+	// errOnNil 是队列里 nil 条目要返回的错误：用来在一条队列里混排「传输错误 → 正常响应」。
+	errOnNil error
 }
 
 func (u *hunterUpstream) Do(req *http.Request, proxyURL string, _ int64, _ int) (*http.Response, error) {
@@ -77,6 +79,9 @@ func (u *hunterUpstream) Do(req *http.Request, proxyURL string, _ int64, _ int) 
 	}
 	resp := u.queue[0]
 	u.queue = u.queue[1:]
+	if resp == nil {
+		return nil, u.errOnNil
+	}
 	return resp, nil
 }
 
@@ -723,7 +728,7 @@ func TestOpenAITurnStateHunterCapRaisedResumesImmediately(t *testing.T) {
 	require.True(t, st.CapWait, "再次撞上限")
 	require.Equal(t, st.HourStart.Add(time.Hour), st.NextAt)
 
-	// 出错退避：上限调高也不解除。
+	// 出错等待：上限调高也不解除。（唯一的出口连不上：一轮只试一次，4 + 1 = 5）
 	h.account.Extra[openAITurnStateHunterExtraKey] = hunterConfig(map[string]any{"max_per_hour": 10})
 	h.up.err = errors.New("dial tcp: proxy refused")
 	h.run(t)
@@ -732,7 +737,7 @@ func TestOpenAITurnStateHunterCapRaisedResumesImmediately(t *testing.T) {
 	require.False(t, st.CapWait)
 	h.account.Extra[openAITurnStateHunterExtraKey] = hunterConfig(map[string]any{"max_per_hour": 100})
 	h.run(t)
-	require.Len(t, h.up.requests, 5, "退避期内上限再高也不探")
+	require.Len(t, h.up.requests, 5, "等待期内上限再高也不探")
 }
 
 // TestOpenAITurnStateHunterCapWaitSurvivesGatePersist 钉住：等窗期间被「票未到期」挡住时
@@ -793,8 +798,9 @@ func TestOpenAITurnStateHunterBackoffWithoutTouchingAccount(t *testing.T) {
 	require.Len(t, h.up.requests, 1, "退避期内不探测")
 }
 
-// TestOpenAITurnStateHunterTransportErrorBacksOff 钉住传输层错误（hunt 代理坏了）：
-// 退避 15 分钟，账号不受影响。
+// TestOpenAITurnStateHunterTransportErrorBacksOff 钉住传输层错误（hunt 代理坏了）：唯一的出口
+// 一轮只试一次，然后按 retry 等下一轮（不是 15 分钟的出错退避，也不会一直撞到小时封顶），
+// 账号不受影响。
 func TestOpenAITurnStateHunterTransportErrorBacksOff(t *testing.T) {
 	h := newHunterHarness(hunterTestAccount(hunterConfig(nil)), hunterWebshareProxy)
 	h.up.err = errors.New("dial tcp: proxy refused")
@@ -805,7 +811,8 @@ func TestOpenAITurnStateHunterTransportErrorBacksOff(t *testing.T) {
 	st := h.state()
 	require.Equal(t, 0, st.Last[0].Status)
 	require.Contains(t, st.LastError, "proxy refused")
-	require.InDelta(t, 15, st.NextAt.Sub(time.Now()).Minutes(), 1)
+	require.Zero(t, st.HourCount, "连代理都没连上不算上游花费：死代理不能白吃小时额度")
+	require.InDelta(t, defaultOpenAITurnStateHuntRetryMinutes, st.NextAt.Sub(time.Now()).Minutes(), 1)
 	require.Empty(t, h.repo.errors)
 	require.Empty(t, h.repo.schedulable)
 }
@@ -850,24 +857,128 @@ func TestOpenAITurnStateHunterGates(t *testing.T) {
 	})
 }
 
-// TestOpenAITurnStateHuntProxyRotating 钉住轮换端点的判定：只认 webshare 主机上以 -rotate
-// 结尾的用户名；{user}-{country}-{N} 是固定出口；别的供应商即使叫 -rotate 也按固定出口。
+// TestOpenAITurnStateHuntProxyRotating 钉住轮换端点的判定：webshare 主机上以 -rotate 结尾的
+// 用户名自动识别；{user}-{country}-{N} 是固定出口；别的供应商即使叫 -rotate 也按固定出口——
+// 除非显式勾进 rotating_proxy_ids（B2Proxy 这类轮换/粘性从用户名看不出来）。
 func TestOpenAITurnStateHuntProxyRotating(t *testing.T) {
-	require.True(t, openAITurnStateHuntProxyRotating(hunterWebshareProxy))
+	var none openAITurnStateHunterConfig
+	require.True(t, openAITurnStateHuntProxyRotating(none, hunterWebshareProxy))
 	plain := hunterWebshareProxy
 	plain.Username = "user-rotate"
-	require.True(t, openAITurnStateHuntProxyRotating(plain), "不带国家段的 -rotate 也是轮换端点")
+	require.True(t, openAITurnStateHuntProxyRotating(none, plain), "不带国家段的 -rotate 也是轮换端点")
 	upper := hunterWebshareProxy
 	upper.Username = "user-US-ROTATE"
-	require.True(t, openAITurnStateHuntProxyRotating(upper))
+	require.True(t, openAITurnStateHuntProxyRotating(none, upper))
 
 	fixed := hunterWebshareProxy
 	fixed.Username = "user-US-1"
-	require.False(t, openAITurnStateHuntProxyRotating(fixed), "{user}-{country}-{N} 两次连接同一 IP")
-	require.False(t, openAITurnStateHuntProxyRotating(hunterCoxProxy))
+	require.False(t, openAITurnStateHuntProxyRotating(none, fixed), "{user}-{country}-{N} 两次连接同一 IP")
+	require.False(t, openAITurnStateHuntProxyRotating(none, hunterCoxProxy))
 	other := hunterCoxProxy
 	other.Username = "someone-rotate"
-	require.False(t, openAITurnStateHuntProxyRotating(other))
+	require.False(t, openAITurnStateHuntProxyRotating(none, other))
+
+	explicit := openAITurnStateHunterConfig{RotatingProxyIDs: []int64{hunterCoxProxy.ID}}
+	require.True(t, openAITurnStateHuntProxyRotating(explicit, hunterCoxProxy), "显式勾了就按轮换")
+	require.False(t, openAITurnStateHuntProxyRotating(explicit, hunterCox2Proxy))
+}
+
+// TestOpenAITurnStateHunterExplicitRotatingProxyReused 钉住 2026-09-19 反馈：B2Proxy 这类轮换
+// 代理被当成固定出口后「一轮只探一次 → 等 10 分钟 → 312 冷却 7 天」。勾进 rotating_proxy_ids
+// 后一轮内反复用、不回声、312 不按 IP 冷却。
+func TestOpenAITurnStateHunterExplicitRotatingProxyReused(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := hunterConfig(map[string]any{"proxy_ids": []any{float64(8)}, "rotating_proxy_ids": []any{float64(8)}})
+	h := newHunterHarness(hunterTestAccount(cfg), hunterCoxProxy)
+	for range 2 {
+		resp, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks+1), "")
+		h.up.queue = append(h.up.queue, resp)
+	}
+	hit, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks), "")
+	h.up.queue = append(h.up.queue, hit)
+
+	h.run(t)
+
+	require.Len(t, h.up.requests, 3, "同一条轮换代理一轮内反复探，直到命中")
+	require.Zero(t, h.prober.calls, "轮换端点不回声")
+	require.Empty(t, h.state().Exits, "轮换端点不记出口冷却")
+	require.Equal(t, 1, len(readOpenAITurnStatePool(h.account)))
+}
+
+// TestOpenAITurnStateHunterTransportErrorSkipsToNextProxy 钉住 2026-09-19 反馈：一条代理连不上
+// 不能把整轮掐掉——本轮不再用它，换下一条继续，坏几条都一样；出错的尝试不记出口冷却。
+func TestOpenAITurnStateHunterTransportErrorSkipsToNextProxy(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := hunterConfig(map[string]any{"proxy_ids": []any{float64(8), float64(9)}})
+	h := newHunterHarness(hunterTestAccount(cfg), hunterCoxProxy, hunterCox2Proxy)
+	h.up.queue = []*http.Response{nil} // 第一条：传输错误
+	hit, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks), "")
+	h.up.queue = append(h.up.queue, hit)
+	h.up.errOnNil = errors.New("read tcp: connection reset by peer")
+
+	h.run(t)
+
+	require.Len(t, h.up.requests, 2, "cox-a 连不上就换 cox-b")
+	require.True(t, h.state().Last[0].Healthy)
+	require.Equal(t, 1, len(readOpenAITurnStatePool(h.account)))
+	require.False(t, time.Now().Add(5*time.Minute).Before(h.state().NextAt), "命中后不退避")
+	require.Len(t, h.state().Exits, 1, "只记成功探测的出口")
+	st := h.state()
+	require.Equal(t, "", st.lastExitOf(8), "连接被重置不是 312，cox-a 的出口不能进 7 天冷却")
+
+	// 坏几条都一样：三条里前两条连不上，第三条照样轮到。
+	many := newHunterHarness(hunterTestAccount(hunterConfig(map[string]any{"proxy_ids": []any{float64(8), float64(9), float64(20)}})), hunterCoxProxy, hunterCox2Proxy, hunterWebshareProxy)
+	hit2, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks), "")
+	many.up.queue = []*http.Response{nil, nil, hit2}
+	many.up.errOnNil = errors.New("dial tcp: i/o timeout")
+	many.run(t)
+	require.Len(t, many.up.requests, 3)
+	require.True(t, many.state().Last[0].Healthy)
+	require.Equal(t, 1, many.state().HourCount, "只有真到上游的那一次计额度")
+
+	// 坏的轮换端点也只试一次：不能和好端点交替、每次成功把它「洗白」再撞一次。
+	rot := newHunterHarness(hunterTestAccount(hunterConfig(map[string]any{
+		"proxy_ids": []any{float64(8), float64(20)}, "rotating_proxy_ids": []any{float64(8)}, "max_per_hour": 10,
+	})), hunterCoxProxy, hunterWebshareProxy)
+	miss1, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks+1), "")
+	miss2, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks+1), "")
+	hit3, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks), "")
+	rot.up.queue = []*http.Response{nil, miss1, miss2, hit3}
+	rot.up.errOnNil = errors.New("dial tcp: proxy refused")
+	rot.run(t)
+	require.Len(t, rot.up.requests, 4)
+	require.Contains(t, rot.up.proxyURLs[0], hunterCoxProxy.Host)
+	for _, u := range rot.up.proxyURLs[1:] {
+		require.Contains(t, u, hunterWebshareProxy.Host, "坏掉的轮换端点本轮不再用")
+	}
+
+	// 全都不通：按 retry 等下一轮（不是 15 分钟的出错退避），别一直撞到小时封顶。
+	dead := newHunterHarness(hunterTestAccount(hunterConfig(nil)), hunterWebshareProxy)
+	dead.up.err = errors.New("dial tcp: proxy refused")
+	dead.run(t)
+	require.Len(t, dead.up.requests, 1)
+	require.InDelta(t, defaultOpenAITurnStateHuntRetryMinutes, dead.state().NextAt.Sub(time.Now()).Minutes(), 1)
+
+	// URL 都拼不出来的代理不是瞬时故障：根本不进轮次，别的代理照常。
+	badProxy := hunterCoxProxy
+	badProxy.Protocol = "ftp"
+	unusable := newHunterHarness(hunterTestAccount(hunterConfig(map[string]any{"proxy_ids": []any{float64(8), float64(9)}})), badProxy, hunterCox2Proxy)
+	hit4, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks), "")
+	unusable.up.queue = []*http.Response{hit4}
+	unusable.run(t)
+	require.Len(t, unusable.up.requests, 1)
+	require.Contains(t, unusable.up.proxyURLs[0], hunterCox2Proxy.Host)
+	require.True(t, unusable.state().Last[0].Healthy)
+	require.Empty(t, unusable.state().LastError)
+
+	// 构造探测失败（拿不到 token）是账号的问题，不是出口的问题：不换出口重试，直接退避。
+	broken := newHunterHarness(hunterTestAccount(hunterConfig(map[string]any{"proxy_ids": []any{float64(8), float64(9)}})), hunterCoxProxy, hunterCox2Proxy)
+	broken.account.Credentials = map[string]any{"chatgpt_account_id": "offline-account"} // 没有 access_token
+	broken.run(t)
+	require.Empty(t, broken.up.requests, "构造阶段就失败，请求根本没发出")
+	require.Len(t, broken.state().Last, 1, "只记一次，不按出口重试")
+	require.Contains(t, broken.state().LastError, "build probe")
+	require.InDelta(t, 15, broken.state().NextAt.Sub(time.Now()).Minutes(), 1)
 }
 
 // TestOpenAITurnStateInjectsEverySessionWhenHunterEnabled 钉住注入策略：开了猎手，池里
@@ -916,6 +1027,13 @@ func TestValidateOpenAITurnStateHunterExtra(t *testing.T) {
 	require.Error(t, ValidateOpenAITurnStateHunterExtra(map[string]any{openAITurnStateHunterExtraKey: hunterConfig(map[string]any{"max_per_hour": 601})}))
 	require.Error(t, ValidateOpenAITurnStateHunterExtra(map[string]any{openAITurnStateHunterExtraKey: hunterConfig(map[string]any{"lead_minutes": 60})}), "开窗不能早于票的寿命")
 	require.Error(t, ValidateOpenAITurnStateHunterExtra(map[string]any{openAITurnStateHunterExtraKey: hunterConfig(map[string]any{"reasoning_effort": "max"})}))
+	require.Error(t, ValidateOpenAITurnStateHunterExtra(map[string]any{openAITurnStateHunterExtraKey: hunterConfig(map[string]any{"hold_when_degraded": "yes"})}), "暂停开关只能是 bool")
+	require.Error(t, ValidateOpenAITurnStateHunterExtra(map[string]any{openAITurnStateHunterExtraKey: hunterConfig(map[string]any{"usage_api_key_id": -1})}), "记账 key 不能是负数")
+	require.Error(t, ValidateOpenAITurnStateHunterExtra(map[string]any{openAITurnStateHunterExtraKey: hunterConfig(map[string]any{"usage_api_key_id": "7"})}), "记账 key 必须是数字")
+	require.NoError(t, ValidateOpenAITurnStateHunterExtra(map[string]any{openAITurnStateHunterExtraKey: hunterConfig(map[string]any{"usage_api_key_id": float64(7)})}))
+	require.NoError(t, ValidateOpenAITurnStateHunterExtra(map[string]any{openAITurnStateHunterExtraKey: hunterConfig(map[string]any{"hold_when_degraded": true})}))
+	require.Error(t, ValidateOpenAITurnStateHunterExtra(map[string]any{openAITurnStateHunterExtraKey: hunterConfig(map[string]any{"auto_models": 1})}), "自动定模型只能是 bool")
+	require.NoError(t, ValidateOpenAITurnStateHunterExtra(map[string]any{openAITurnStateHunterExtraKey: hunterConfig(map[string]any{"auto_models": true, "models": []any{}})}), "自动定模型时手选可以为空")
 	require.Error(t, ValidateOpenAITurnStateHunterExtra(map[string]any{
 		openAITurnStateHunterExtraKey: hunterConfig(map[string]any{"lead_minutes": 30}), openAITurnStateStaleMinExtraKey: 30,
 	}), "开窗提前量必须小于票的寿命")
@@ -952,4 +1070,63 @@ func TestValidateOpenAITurnStateHunterExtra(t *testing.T) {
 	require.Equal(t, openAITurnStateHunterMaxGapSeconds, cfg.GapSeconds)
 	require.Equal(t, defaultOpenAITurnStateHuntReasoningEffort, cfg.ReasoningEffort)
 	require.Len(t, cfg.Models, openAITurnStateHunterMaxModels)
+}
+
+// TestOpenAITurnStateHunterAutoModelsFollowTraffic 钉住「按真实请求自动定模型」：手选列表忽略，
+// 空闲窗口内有真实流量的模型都猎；注入点对任何模型都按「猎手在补票」处理。
+func TestOpenAITurnStateHunterAutoModelsFollowTraffic(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := hunterConfig(map[string]any{"auto_models": true, "models": []any{"gpt-6-manual"}, "idle_minutes": 60})
+	h := newHunterHarness(hunterTestAccount(cfg), hunterWebshareProxy)
+	require.False(t, h.gw.openAITurnStateHuntedModel(h.account, "gpt-6-anything"), "自动模式：上游没给它铸过票的模型不算在管")
+
+	h.run(t)
+	require.Empty(t, h.up.requests, "还没有真实流量：没有模型可猎")
+	require.Equal(t, openAITurnStateHuntGateIdle, h.state().Gate)
+
+	// 铸造记忆走真实响应的观测入口（未注入的响应才算）。
+	h.gw.observeOpenAITurnStateMint(turnStateAutoCtxModel("s-luna", "gpt-5.6-Luna"), h.account, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks+1))
+	h.gw.observeOpenAITurnStateMint(turnStateAutoCtxModel("s-astra", hunterTestModel), h.account, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks+1))
+	h.gw.observeOpenAITurnStateMint(turnStateAutoCtxModel("s-img", "gpt-image-2"), h.account, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks+1))
+	require.True(t, h.gw.openAITurnStateHuntedModel(h.account, "gpt-5.6-Luna"))
+	require.False(t, h.gw.openAITurnStateHuntedModel(h.account, "gpt-image-2"), "画图模型不参与，铸过 312 也不算")
+	require.False(t, h.gw.openAITurnStateHuntedModel(h.account, "codex-auto-review"), "从不铸票的模型不算")
+
+	h.gw.noteOpenAITurnStateTraffic(h.account.ID, "gpt-5.6-Luna", now.Add(-5*time.Minute))
+	h.gw.noteOpenAITurnStateTraffic(h.account.ID, hunterTestModel, now.Add(-2*time.Hour)) // 超出空闲窗口
+	h.gw.noteOpenAITurnStateTraffic(h.account.ID, "gpt-image-2", now.Add(-5*time.Minute))
+	h.gw.noteOpenAITurnStateTraffic(h.account.ID, "codex-auto-review", now.Add(-5*time.Minute))
+	resp, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks), "")
+	h.up.queue = append(h.up.queue, resp)
+	h.run(t)
+	require.Len(t, h.up.requests, 1)
+	require.Equal(t, "gpt-5.6-Luna", h.state().Last[0].Model, "探测用水位里记的原样模型名，手选的 gpt-6-manual 忽略")
+	require.Equal(t, []string{"gpt-5.6-Luna"}, h.gw.openAITurnStateTrafficModels(h.account, now.Add(-time.Hour)))
+	require.Equal(t, []string{"gpt-5.6-Luna", hunterTestModel}, h.gw.openAITurnStateTrafficModels(h.account, time.Time{}), "since 零值 = 进程内见过的全部够格模型，按名排序")
+
+	// 已被停调度的模型即使铸造记忆清零（重启）也算在管：不能因此把暂停放回。
+	held := newHunterHarness(hunterTestAccount(holdHunterConfig(map[string]any{"auto_models": true})), hunterWebshareProxy)
+	markHeld(held.account, now.Add(20*time.Hour))
+	require.True(t, held.gw.openAITurnStateHuntedModel(held.account, hunterTestModel))
+	require.True(t, held.gw.openAITurnStateHoldEnabled(held.account, hunterTestModel))
+	require.False(t, held.gw.openAITurnStateHuntedModel(held.account, "gpt-5.6-Luna"))
+
+	// 画图模型排在兜底之前：手选模式下停了 gpt-image-2 再切自动，不能靠兜底继续猎它。
+	imgHeld := newHunterHarness(hunterTestAccount(holdHunterConfig(map[string]any{"auto_models": true})), hunterWebshareProxy)
+	until := now.Add(20 * time.Hour)
+	imgHeld.account.TempUnschedulableUntil, imgHeld.account.TempUnschedulableReason = &until, openAITurnStateHoldReasonPrefix+"gpt-image-2"
+	require.False(t, imgHeld.gw.openAITurnStateHuntedModel(imgHeld.account, "gpt-image-2"))
+	imgHeld.run(t)
+	require.Empty(t, imgHeld.up.requests, "不拿文本探测体去打画图模型")
+	require.Equal(t, 1, imgHeld.repo.clears, "hold 已不再成立：放回")
+
+	// 重启后铸造记忆为空：池里有它的票就是铸过的证据，立刻够格（否则有票也不注入、也不猎）。
+	pooled := newHunterHarness(hunterTestAccount(hunterConfig(map[string]any{"auto_models": true})), hunterWebshareProxy)
+	require.False(t, pooled.gw.openAITurnStateHuntedModel(pooled.account, hunterTestModel))
+	pooled.account.Extra[openAITurnStatePoolExtraKey] = []any{map[string]any{
+		"blob": turnStateFernetBlob(now.Add(-2*time.Hour), openAIHealthyTurnStateBlocks), "model": hunterTestModel,
+		"minted_at": now.Add(-2 * time.Hour).Format(time.RFC3339),
+	}}
+	require.True(t, pooled.gw.openAITurnStateHuntedModel(pooled.account, hunterTestModel), "过期的票也算证据")
+	require.False(t, pooled.gw.openAITurnStateHuntedModel(pooled.account, "gpt-5.6-Luna"))
 }

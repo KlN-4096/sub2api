@@ -217,7 +217,8 @@ export default {
         creditsExhaustedUntil: 'AI Credits exhausted, expected recovery at {time}',
         overloadedUntil: 'Overloaded until {time}',
         viewTempUnschedDetails: 'View temp unschedulable details',
-        tempUnschedulableUntil: 'Resumes {time}'
+        tempUnschedulableUntil: 'Resumes {time}',
+        turnStateHold: 'Paused while degraded · hunting a ticket for {model}'
       },
       columns: {
         name: 'Name',
@@ -710,15 +711,23 @@ export default {
         turnStateHunterDesc:
           'Shortly before the live ticket expires, open fresh sessions through the selected proxies until a 292 is minted, then pool it for automatic takeover. Probes hang up as soon as the response headers arrive; the main cost is the input tokens of each probe (including the model base prompt). While the hunter is on, every session gets the pooled ticket. Hourly cap applies; models without real traffic inside the idle window are not hunted. Every probe opens a new proxy connection, so webshare -rotate endpoints change exit per probe; other proxies are treated as fixed exits: the exit IP is resolved before probing, each exit is probed once, and an exit that minted 312 is left alone for 7 days.',
         turnStateHunterNeedsAuto: 'Enable automatic takeover first, otherwise the hunter does not run',
-        turnStateHunterInvalid: 'With the hunter enabled, pick 1–8 models and 1–64 proxies',
+        turnStateHunterInvalid: 'With the hunter enabled, pick 1–8 models (or tick auto) and 1–64 proxies',
+        turnStateHunterAutoModels: 'Pick models from real traffic automatically (every model with real requests inside the idle window that upstream has minted a turn-state for is hunted; image models are excluded; manual picks above are ignored)',
         turnStateHunterEffortDefault: 'default (high)',
         turnStateHunterModels: 'Models to hunt',
         turnStateHunterProxies: 'Probe proxies',
+        turnStateHunterRotating: 'Tick proxies that change exit on every connection (webshare -rotate is detected automatically); unticked ones are fixed exits: probed once per round, an exit that minted 312 cools down for 7 days',
         turnStateHunterMaxPerHour: 'Max probes per hour',
         turnStateHunterGap: 'Gap between probes (s)',
         turnStateHunterLead: 'Open window before expiry (min)',
         turnStateHunterIdle: 'Idle threshold (min, -1 = off)',
         turnStateHunterEffort: 'Probe reasoning effort',
+        turnStateHunterUsageKey: 'Usage API key ID (blank = no usage log)',
+        turnStateHunterUsageKeyDesc:
+          'When set, every 200 probe is recorded under this key through the standard usage path (type "Hunter probe", billed normally, bumps last-used); input tokens are estimated locally (base prompt included), output is always 0. Use a dedicated key: probes consume its quota/rate limits, and subscription groups need an active subscription.',
+        turnStateHunterHold: 'Pause scheduling while degraded',
+        turnStateHunterHoldDesc:
+          'When a hunted model has no injectable 292, temporarily remove the account from scheduling and fail the request over (503 if no other account); it comes back automatically once a new ticket is pooled. If the hourly cap is hit the hunt resumes in the next window; the pause lasts until a ticket is found.',
         turnStatePool: {
           empty: 'Turn-state —',
           starved: 'Turn-state: no ticket, passing through',
