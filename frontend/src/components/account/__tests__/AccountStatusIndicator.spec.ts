@@ -8,7 +8,8 @@ vi.mock('vue-i18n', async () => {
   return {
     ...actual,
     useI18n: () => ({
-      t: (key: string) => key
+      // 带参数的键要把参数拼出来：只回显键名的话，「文案里有没有把模型名放进去」这种断言恒绿。
+      t: (key: string, params?: Record<string, unknown>) => (params ? `${key}:${JSON.stringify(params)}` : key)
     })
   }
 })
@@ -104,6 +105,24 @@ describe('AccountStatusIndicator', () => {
     expect(wrapper.find('.badge-warning').text()).toBe('admin.accounts.status.rateLimited')
     expect(wrapper.text()).toContain('admin.accounts.status.rateLimitedAutoResume')
     expect(wrapper.text()).not.toContain('admin.accounts.status.tempUnschedulable')
+  })
+
+  // 降智暂停的 until 只是猎手续期的保底，不是恢复时刻：说原因，不报「预计 X 恢复」。
+  it('降智暂停：显示寻票中而不是预计恢复时间', () => {
+    const wrapper = mount(AccountStatusIndicator, {
+      props: {
+        account: makeAccount({
+          platform: 'openai',
+          temp_unschedulable_until: '2099-07-11T12:30:00Z',
+          temp_unschedulable_reason: 'turn_state_hold:gpt-6-astra'
+        })
+      },
+      global: { stubs: { Icon: true } }
+    })
+
+    expect(wrapper.find('.badge-warning').text()).toBe('admin.accounts.status.tempUnschedulable')
+    expect(wrapper.text()).toContain('admin.accounts.status.turnStateHold:{"model":"gpt-6-astra"}')
+    expect(wrapper.text()).not.toContain('admin.accounts.status.tempUnschedulableUntil')
   })
 
   it('模型限流 + overages 启用 + 无 AICredits key → 显示 ⚡ (credits_active)', () => {

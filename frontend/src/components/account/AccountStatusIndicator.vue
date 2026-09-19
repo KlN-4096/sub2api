@@ -307,8 +307,18 @@ const overloadCountdown = computed(() => {
   return formatCountdownWithSuffix(props.account.overload_until)
 })
 
+// 降智暂停（openai_turn_state_hold.go）的 until 只是猎手续期用的保底，不是恢复时刻：
+// 猎到票就放回，猎不到就一直停。写「预计 明天 恢复」等于误导，换成说明原因。
+const TURN_STATE_HOLD_REASON_PREFIX = 'turn_state_hold:'
+
 const tempUnschedRecoveryText = computed(() => {
   if (!isTempUnschedulable.value || !props.account.temp_unschedulable_until) return ''
+  const reason = props.account.temp_unschedulable_reason ?? ''
+  if (reason.startsWith(TURN_STATE_HOLD_REASON_PREFIX)) {
+    return t('admin.accounts.status.turnStateHold', {
+      model: reason.slice(TURN_STATE_HOLD_REASON_PREFIX.length)
+    })
+  }
   return t('admin.accounts.status.tempUnschedulableUntil', {
     time: formatDateTime(props.account.temp_unschedulable_until)
   })

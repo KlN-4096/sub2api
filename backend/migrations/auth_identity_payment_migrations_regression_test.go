@@ -240,3 +240,13 @@ func TestMigration173AllowsCyberBlockedUsageRequestType(t *testing.T) {
 	require.Contains(t, sql, "ADD CONSTRAINT usage_logs_request_type_check")
 	require.Contains(t, sql, "CHECK (request_type IN (0, 1, 2, 3, 4)) NOT VALID")
 }
+
+// 猎手探测记账写 request_type=6：约束不放开的话钱扣了、用量行却写不进去。
+func TestMigration244AllowsProbeUsageRequestType(t *testing.T) {
+	content, err := FS.ReadFile("244_allow_probe_usage_request_type.sql")
+	require.NoError(t, err)
+	sql := string(content)
+	require.Contains(t, sql, "DROP CONSTRAINT IF EXISTS usage_logs_request_type_check")
+	require.Contains(t, sql, "ADD CONSTRAINT usage_logs_request_type_check")
+	require.Contains(t, sql, "CHECK (request_type >= 0 AND request_type <= 6)")
+}

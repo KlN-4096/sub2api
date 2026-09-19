@@ -34,6 +34,30 @@ type turnStateAutoRepo struct {
 	// loadProxies / loadAccountGroups 共 3 条 SELECT），而它在响应首字节之前、
 	// 持着账号锁——所以「接管关着的账号一次都不该读」是条要守的不变量。
 	getByIDCalls int
+	// holds / clears 记降智暂停的停调度与放回；stub 同时按生产语义改 latest（until 只能往后推）。
+	holds  []string
+	clears int
+}
+
+func (r *turnStateAutoRepo) SetTempUnschedulable(_ context.Context, _ int64, until time.Time, reason string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.holds = append(r.holds, reason)
+	if r.latest != nil && (r.latest.TempUnschedulableUntil == nil || r.latest.TempUnschedulableUntil.Before(until)) {
+		u := until
+		r.latest.TempUnschedulableUntil, r.latest.TempUnschedulableReason = &u, reason
+	}
+	return nil
+}
+
+func (r *turnStateAutoRepo) ClearTempUnschedulable(_ context.Context, _ int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.clears++
+	if r.latest != nil {
+		r.latest.TempUnschedulableUntil, r.latest.TempUnschedulableReason = nil, ""
+	}
+	return nil
 }
 
 func (r *turnStateAutoRepo) GetByID(_ context.Context, _ int64) (*Account, error) {

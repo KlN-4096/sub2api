@@ -21,7 +21,7 @@
     <!-- key 必须带上 active：同一个模型现在可能同时有「手填」和「最近铸出」两行，
          只用 model 会撞 key，Vue 会告警并错误复用节点。 -->
     <div
-      v-for="entry in entries"
+      v-for="entry in visibleEntries"
       :key="`${entry.model}-${entry.active}`"
       class="flex items-center gap-1"
       data-testid="account-turn-state-row"
@@ -386,6 +386,22 @@ const entries = computed<PoolEntry[]>(() => {
  * 数是 0。那正是这个组件早先犯过的错：歧义换成了错误断言。
  */
 const activeCount = computed(() => entries.value.filter((e) => e.active).length)
+
+/**
+ * 真正渲染成行的条目。接管开着时，某模型已经有生效票，就不再摆它的「最近铸出」行：池里
+ * 的票全是这个号自己铸的（探测或真实流量），生效行本身就证明了「最近铸出 292」，再列一行
+ * 只是同一张票重复出现（2026-09-19 用户截图：两行 292 / 68% / 40m 一模一样）。观测行只在
+ * 池里拿不出该模型的票时才有信息量：「票已过期，但这个号铸的是 292」。手填模式照旧并列：
+ * 手填票与自然铸造是两回事，观测行在说「可能不需要手填了」。
+ *
+ * 只收敛渲染，不动 entries：tooltip（detailTitle）仍列全部条目，观测行的铸造时刻在那里
+ * 还能看到——生效票是注入下重铸的、观测是最后一次自然铸造，两个时刻本来就可能不同。
+ */
+const visibleEntries = computed<PoolEntry[]>(() => {
+  if (isManualMode.value) return entries.value
+  const activeModels = new Set(entries.value.filter((e) => e.active).map((e) => e.model))
+  return entries.value.filter((e) => e.active || !activeModels.has(e.model))
+})
 
 /**
  * 自动接管开着、却一条可用票都拿不出来 = 注入停摆：客户端回带什么就原样发什么，

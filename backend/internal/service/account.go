@@ -221,7 +221,8 @@ func (a *Account) IsCredentialUsableForShadow() bool {
 	if a.AutoPauseOnExpired && a.ExpiresAt != nil && !now.Before(*a.ExpiresAt) {
 		return false
 	}
-	if a.TempUnschedulableUntil != nil && now.Before(*a.TempUnschedulableUntil) {
+	// 降智暂停（turn_state_hold:）是模型级缺票，不是凭据坏死，不连坐影子。
+	if a.TempUnschedulableUntil != nil && now.Before(*a.TempUnschedulableUntil) && openAITurnStateHeldModel(a, now) == "" {
 		return false
 	}
 	return true

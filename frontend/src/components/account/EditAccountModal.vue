@@ -2469,10 +2469,20 @@
                   size="4"
                   data-testid="edit-openai-turn-state-hunter-models"
                   class="input text-xs"
+                  :disabled="openAITurnStateHunter.auto_models"
                   @focus="ensureTurnStateModelOptions"
                 >
                   <option v-for="m in turnStateHunterModelOptions" :key="m" :value="m">{{ m }}</option>
                 </select>
+                <label class="mt-1 flex items-center gap-1.5 text-[11px] text-gray-600 dark:text-gray-300">
+                  <input
+                    v-model="openAITurnStateHunter.auto_models"
+                    type="checkbox"
+                    data-testid="edit-openai-turn-state-hunter-auto-models"
+                    class="h-3 w-3 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                  />
+                  <span>{{ t('admin.accounts.openai.turnStateHunterAutoModels') }}</span>
+                </label>
               </div>
               <div>
                 <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterProxies') }}</label>
@@ -2486,6 +2496,21 @@
                 >
                   <option v-for="p in turnStateHunterProxyOptions" :key="p.id" :value="p.id">{{ p.label }}</option>
                 </select>
+                <!-- 已选代理逐个标「每次连接换出口」：猎手只自动识别 webshare 的 -rotate，别的供应商
+                     （B2Proxy 等）的轮换模式从用户名看不出来，猜成固定出口就会一轮只探一次、312 还冷却 7 天。 -->
+                <div v-if="turnStateHunterSelectedProxies.length" class="mt-1 space-y-0.5" data-testid="edit-openai-turn-state-hunter-rotating">
+                  <p class="text-[11px] text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.turnStateHunterRotating') }}</p>
+                  <label v-for="p in turnStateHunterSelectedProxies" :key="p.id" class="flex items-center gap-1.5 text-[11px] text-gray-600 dark:text-gray-300">
+                    <input
+                      v-model="openAITurnStateHunter.rotating_proxy_ids"
+                      type="checkbox"
+                      :value="p.id"
+                      :data-testid="`edit-openai-turn-state-hunter-rotating-${p.id}`"
+                      class="h-3 w-3 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                    />
+                    <span class="truncate">{{ p.label }}</span>
+                  </label>
+                </div>
               </div>
               <div>
                 <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterMaxPerHour') }}</label>
@@ -2504,11 +2529,37 @@
                 <input v-model.number="openAITurnStateHunter.idle_minutes" type="number" min="-1" max="1440" placeholder="60" class="input text-xs" />
               </div>
               <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterUsageKey') }}</label>
+                <input
+                  v-model.number="openAITurnStateHunter.usage_api_key_id"
+                  type="number"
+                  min="1"
+                  step="1"
+                  class="input text-xs"
+                  data-testid="edit-openai-turn-state-hunter-usage-key"
+                  :title="t('admin.accounts.openai.turnStateHunterUsageKeyDesc')"
+                />
+              </div>
+              <div>
                 <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterEffort') }}</label>
                 <select v-model="openAITurnStateHunter.reasoning_effort" class="input text-xs" data-testid="edit-openai-turn-state-hunter-effort">
                   <option value="">{{ t('admin.accounts.openai.turnStateHunterEffortDefault') }}</option>
                   <option v-for="e in turnStateHunterEfforts" :key="e" :value="e">{{ e }}</option>
                 </select>
+              </div>
+              <div class="flex items-center justify-between gap-4 sm:col-span-2">
+                <div class="min-w-0">
+                  <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.turnStateHunterHold') }}</label>
+                  <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    {{ t('admin.accounts.openai.turnStateHunterHoldDesc') }}
+                  </p>
+                </div>
+                <input
+                  v-model="openAITurnStateHunter.hold_when_degraded"
+                  data-testid="edit-openai-turn-state-hunter-hold"
+                  type="checkbox"
+                  class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
               </div>
             </div>
           </div>
@@ -3838,6 +3889,8 @@ interface TurnStateHunterConfig {
   enabled: boolean
   models: string[]
   proxy_ids: number[]
+  /** 按「每条新连接换出口」处理的代理（webshare -rotate 后端自动识别，不用勾）。 */
+  rotating_proxy_ids: number[]
   max_per_hour: number | null
   gap_seconds: number | null
   lead_minutes: number | null
@@ -3845,18 +3898,28 @@ interface TurnStateHunterConfig {
   // 没有 UI 字段，只经 API 写入；这里带上是为了改动区块里别的项时不把它丢掉。
   retry_minutes: number | null
   reasoning_effort: string
+  /** 要猎的模型拿不出可注入的 292 时把账号停调度、请求换号/503，猎到票自动放回。 */
+  hold_when_degraded: boolean
+  /** 按真实请求自动定要猎的模型；开着时手选的 models 忽略。 */
+  auto_models: boolean
+  /** 探测记账用的 API Key ID：每次 200 探测按标准用量路径落一行；空 = 不记。 */
+  usage_api_key_id: number | null
 }
 const turnStateHunterEfforts = ['minimal', 'low', 'medium', 'high', 'xhigh']
 const emptyTurnStateHunter = (): TurnStateHunterConfig => ({
   enabled: false,
   models: [],
   proxy_ids: [],
+  rotating_proxy_ids: [],
   max_per_hour: null,
   gap_seconds: null,
   lead_minutes: null,
   idle_minutes: null,
   retry_minutes: null,
-  reasoning_effort: ''
+  reasoning_effort: '',
+  hold_when_degraded: false,
+  auto_models: false,
+  usage_api_key_id: null
 })
 const readOpenAITurnStateHunter = (extra: unknown): TurnStateHunterConfig => {
   const cfg = emptyTurnStateHunter()
@@ -3870,13 +3933,19 @@ const readOpenAITurnStateHunter = (extra: unknown): TurnStateHunterConfig => {
   if (Array.isArray(table.proxy_ids)) {
     cfg.proxy_ids = table.proxy_ids.filter((id): id is number => typeof id === 'number' && id > 0)
   }
+  if (Array.isArray(table.rotating_proxy_ids)) {
+    cfg.rotating_proxy_ids = table.rotating_proxy_ids.filter((id): id is number => typeof id === 'number' && id > 0)
+  }
   const int = (key: string) => (typeof table[key] === 'number' ? (table[key] as number) : null)
   cfg.max_per_hour = int('max_per_hour')
   cfg.gap_seconds = int('gap_seconds')
   cfg.lead_minutes = int('lead_minutes')
   cfg.idle_minutes = int('idle_minutes')
   cfg.retry_minutes = int('retry_minutes')
+  cfg.usage_api_key_id = int('usage_api_key_id')
   cfg.reasoning_effort = typeof table.reasoning_effort === 'string' ? table.reasoning_effort : ''
+  cfg.hold_when_degraded = table.hold_when_degraded === true
+  cfg.auto_models = table.auto_models === true
   return cfg
 }
 // 归一成要写进 extra 的对象；全空（关着、没选、没填）返回 null = 删键。
@@ -3884,17 +3953,23 @@ const normalizeTurnStateHunter = (cfg: TurnStateHunterConfig): Record<string, un
   const models = Array.from(new Set(cfg.models.map((m) => m.trim()).filter(Boolean)))
   const proxyIds = Array.from(new Set(cfg.proxy_ids.filter((id) => Number.isInteger(id) && id > 0)))
   const out: Record<string, unknown> = { enabled: cfg.enabled, models, proxy_ids: proxyIds }
+  // 只保留仍在探测列表里的：代理取消勾选后它的「轮换」标记没有意义，别留残余。
+  const rotating = cfg.rotating_proxy_ids.filter((id) => proxyIds.includes(id))
+  if (rotating.length) out.rotating_proxy_ids = rotating
   const numeric: Array<[keyof TurnStateHunterConfig, number | null]> = [
     ['max_per_hour', cfg.max_per_hour],
     ['gap_seconds', cfg.gap_seconds],
     ['lead_minutes', cfg.lead_minutes],
     ['idle_minutes', cfg.idle_minutes],
-    ['retry_minutes', cfg.retry_minutes]
+    ['retry_minutes', cfg.retry_minutes],
+    ['usage_api_key_id', cfg.usage_api_key_id]
   ]
   for (const [key, value] of numeric) {
     if (typeof value === 'number' && Number.isFinite(value) && value !== 0) out[key] = value
   }
   if (cfg.reasoning_effort) out.reasoning_effort = cfg.reasoning_effort
+  if (cfg.hold_when_degraded) out.hold_when_degraded = true
+  if (cfg.auto_models) out.auto_models = true
   const blank = !cfg.enabled && !models.length && !proxyIds.length && Object.keys(out).length === 3
   return blank ? null : out
 }
@@ -3928,6 +4003,11 @@ const turnStateHunterProxyOptions = computed(() => {
   }
   return options
 })
+const turnStateHunterSelectedProxies = computed(() =>
+  openAITurnStateHunter.value.proxy_ids.map(
+    (id) => turnStateHunterProxyOptions.value.find((o) => o.id === id) ?? { id, label: `#${id}` }
+  )
+)
 watch(
   () => openAITurnStateHunter.value.enabled,
   (enabled) => {
@@ -5487,7 +5567,8 @@ const handleSubmit = async () => {
 		const hunter = normalizeTurnStateHunter(openAITurnStateHunter.value)
 		const models = (hunter?.models as string[] | undefined) ?? []
 		const proxies = (hunter?.proxy_ids as number[] | undefined) ?? []
-		if (!models.length || !proxies.length || models.length > 8 || proxies.length > 64) {
+		const autoModels = hunter?.auto_models === true
+		if ((!models.length && !autoModels) || !proxies.length || models.length > 8 || proxies.length > 64) {
 			appStore.showError(t('admin.accounts.openai.turnStateHunterInvalid'))
 			return
 		}
