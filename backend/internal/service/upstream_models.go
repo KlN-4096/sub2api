@@ -1048,6 +1048,10 @@ func buildOpenAIAPIKeyModelsRequest(ctx context.Context, account *Account, valid
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
+	// 不设 User-Agent 的话 net/http 会填 Go-http-client/1.1 出站。这条对 cpr 打的是本机
+	// 网关、对 api_key 打的是 Platform 面，危害都有限，但「让 Go 的默认值代表本服务」
+	// 不该是任何一条出站路径的形态（2026-09-20 审计）。账号级覆写仍可改写它。
+	req.Header.Set("User-Agent", resolveCodexOutboundIdentity(account.GetOpenAIUserAgent()).userAgent)
 	// 账号级请求头覆写：模型列表探测与真实转发保持一致的最终头
 	account.ApplyHeaderOverrides(req.Header)
 	return req, nil
