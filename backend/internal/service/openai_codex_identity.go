@@ -217,26 +217,33 @@ func enforceCodexIdentityHeaders(h http.Header) {
 // 强制统一被 gateway.disable_codex_identity_enforcement 关闭时，退回「按最终 User-Agent 配对
 // originator + version 门槛校正」的收口语义，供上游策略变动时回滚。
 //
-// 仅对携带 originator 的请求生效：compat 桥接等非 ChatGPT 内部接口路径会显式删除 originator，
-// 不应被补回。需要从缺失身份头恢复的调用方应先调用 ensureCodexIdentityHeaders。
+// originator 缺失只代表「不要补回 originator」，不代表放过 User-Agent：compat 桥接等路径会
+// 显式删除 originator，但客户端自报的 UA 同样不该出站。早返回曾让这条路漏成一个洞——
+// /v1/messages 入口随后会 ensure+enforce 把身份整套恢复，而 /v1/responses 直连命中桥标记时
+// 没有这一步，客户端的 claude-cli / OpenAI-Python / curl UA 就原样到了 ChatGPT 上游
+// （2026-09-20 排查）。需要连 originator 一起恢复的调用方先调 ensureCodexIdentityHeaders。
 // 必须在所有 User-Agent 改写之后调用。
 func enforceCodexIdentityHeadersWithUA(h http.Header, overrideUA string) {
-	if h == nil || h.Get("originator") == "" {
+	if h == nil {
 		return
 	}
+	keepOriginatorAbsent := strings.TrimSpace(h.Get("originator")) == ""
 	if !codexIdentityEnforcement.Load() {
-		pairCodexIdentityHeaders(h)
+		pairCodexIdentityHeaders(h, keepOriginatorAbsent)
 		return
 	}
 	identity := resolveCodexOutboundIdentity(overrideUA)
 	h.Set("user-agent", identity.userAgent)
-	h.Set("originator", identity.originator)
 	h.Set("version", identity.version)
+	if !keepOriginatorAbsent {
+		h.Set("originator", identity.originator)
+	}
 }
 
 // pairCodexIdentityHeaders 是关闭强制统一后的兜底收口：保留客户端真实身份，
 // 仅保证 originator 与最终 User-Agent 首段配套、version 不低于上游门槛（issue #3901）。
-func pairCodexIdentityHeaders(h http.Header) {
+// keepOriginatorAbsent 时只收口 UA / version，不把 originator 补回去（见上面的说明）。
+func pairCodexIdentityHeaders(h http.Header, keepOriginatorAbsent bool) {
 	originator, pairedUA, ok := openai.PairCodexClientIdentity(h.Get("user-agent"))
 	if !ok {
 		identity := resolveCodexOutboundIdentity("")
@@ -244,7 +251,9 @@ func pairCodexIdentityHeaders(h http.Header) {
 		h.Set("version", identity.version)
 	}
 	h.Set("user-agent", pairedUA)
-	h.Set("originator", originator)
+	if !keepOriginatorAbsent {
+		h.Set("originator", originator)
+	}
 	if v := strings.TrimSpace(h.Get("version")); v != "" && CompareVersions(v, codexUpstreamMinVersion) < 0 {
 		h.Set("version", resolveCodexOutboundIdentity("").version)
 	}
