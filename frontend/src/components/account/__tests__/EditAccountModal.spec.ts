@@ -848,6 +848,33 @@ describe('EditAccountModal', () => {
     )
   })
 
+  it('toggles the API-key-only raw relay switch in extra', async () => {
+    const account = buildAccount()
+    account.type = 'apikey'
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    await wrapper.get('[data-testid="edit-openai-raw-relay-toggle"]').trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_raw_relay).toBe(true)
+
+    account.extra = { openai_raw_relay: true }
+    updateAccountMock.mockReset()
+    updateAccountMock.mockResolvedValue(account)
+    const enabled = mountModal(account)
+    // 关闭后删键，不写 false
+    await enabled.get('[data-testid="edit-openai-raw-relay-toggle"]').trigger('click')
+    await enabled.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_raw_relay')
+
+    const oauth = buildAccount()
+    oauth.type = 'oauth'
+    expect(mountModal(oauth).find('[data-testid="edit-openai-raw-relay-toggle"]').exists()).toBe(false)
+  })
+
   it('writes the upstream request id header into extra only when it changes', async () => {
     const account = buildAccount()
     account.extra = { openai_compact_mode: 'force_on' }

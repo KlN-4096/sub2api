@@ -32,6 +32,10 @@ const (
 type PrereadBody struct {
 	body   []byte
 	reader *bytes.Reader
+	// wire 是本包首读时记下的线上原文（解压前），wireEncoding 是它的 Content-Encoding。
+	// 原样中继靠它按原字节出站；请求体被改成别的内容后就不再可得（见 NewPrereadBodyFrom）。
+	wire         []byte
+	wireEncoding string
 }
 
 // NewPrereadBody 包装一段已读取的请求体。
@@ -56,6 +60,23 @@ func (p *PrereadBody) Bytes() []byte {
 		return nil
 	}
 	return p.body
+}
+
+// Wire 返回请求在线上的原始字节与 Content-Encoding；ok=false 表示原文已不可得。
+func (p *PrereadBody) Wire() (wire []byte, encoding string, ok bool) {
+	if p == nil || p.wire == nil {
+		return nil, "", false
+	}
+	return p.wire, p.wireEncoding, true
+}
+
+// NewPrereadBodyFrom 回填请求体；内容与 prev 相同时沿用 prev 记下的线上原文。
+func NewPrereadBodyFrom(prev io.Reader, body []byte) *PrereadBody {
+	next := NewPrereadBody(body)
+	if p, ok := prev.(*PrereadBody); ok && p.wire != nil && bytes.Equal(p.body, body) {
+		next.wire, next.wireEncoding = p.wire, p.wireEncoding
+	}
+	return next
 }
 
 // ReadRequestBodyWithPrealloc reads request body with preallocated buffer based
@@ -88,8 +109,10 @@ func ReadRequestBodyWithPrealloc(req *http.Request) ([]byte, error) {
 		return nil, err
 	}
 
+	// 读完即回填成 PrereadBody：后续读取零拷贝拿到解码后的内容，同时留住线上原文。
 	enc := strings.ToLower(strings.TrimSpace(req.Header.Get("Content-Encoding")))
 	if enc == "" || enc == "identity" {
+		req.Body = &PrereadBody{body: raw, reader: bytes.NewReader(raw), wire: raw}
 		return raw, nil
 	}
 
@@ -101,6 +124,7 @@ func ReadRequestBodyWithPrealloc(req *http.Request) ([]byte, error) {
 	req.Header.Del("Content-Encoding")
 	req.Header.Del("Content-Length")
 	req.ContentLength = int64(len(decoded))
+	req.Body = &PrereadBody{body: decoded, reader: bytes.NewReader(decoded), wire: raw, wireEncoding: enc}
 
 	return decoded, nil
 }

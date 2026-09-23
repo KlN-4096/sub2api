@@ -625,6 +625,9 @@ export default {
         oauthPassthrough: 'Auto passthrough (auth only)',
         oauthPassthroughDesc:
           'When enabled, this OpenAI account uses automatic passthrough: the gateway forwards request/response as-is and only swaps auth, while keeping billing/concurrency/audit and necessary safety filtering.',
+        rawRelay: 'Raw relay (klno)',
+        rawRelayDesc:
+          'When enabled, only auth is swapped: the request goes out with its original bytes (including compression) and all headers, and the upstream status/headers/body come back unchanged. Group policies may still adjust reasoning effort, channel model mapping and Fast. Fails over only when the upstream is entirely unavailable. Meant for accounts whose next hop is another sub2api; account-level model mapping and custom headers do not apply.',
         flattenNamespaces: 'Flatten Codex namespace tools (compatibility)',
         flattenNamespacesDesc:
           'Disabled by default: Codex namespace tool declarations are forwarded as-is on /responses, which is what the ChatGPT Codex backend expects. Enable only when this OAuth account is routed to a relay that rejects namespace tools — flattening renames them to namespace__tool, which breaks models that address collaboration tools as functions.<namespace>.<tool>. Compaction requests always flatten regardless of this switch.',
