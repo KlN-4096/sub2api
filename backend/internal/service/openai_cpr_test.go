@@ -1468,11 +1468,10 @@ func TestOpenAITurnStateOverrideAppliesToCodexUpstreams(t *testing.T) {
 		}
 	}
 
-	// 适用：三种都会落到 ChatGPT Codex 后端
+	// 适用：本地持有 token 的两种 Codex 账号
 	for _, tc := range []struct{ platform, accType string }{
 		{PlatformOpenAI, AccountTypeOAuth},
 		{PlatformOpenAI, AccountTypeSetupToken},
-		{PlatformOpenAI, AccountTypeCPR},
 	} {
 		acc := withOverride(tc.platform, tc.accType)
 		require.Equal(t, blob, acc.OpenAICodexTurnStateOverride(turnStateTestModel), "%s/%s 应支持覆写", tc.platform, tc.accType)
@@ -1491,8 +1490,10 @@ func TestOpenAITurnStateOverrideAppliesToCodexUpstreams(t *testing.T) {
 			svc.applyOpenAICodexTurnStateOverrideWSManualOnly(newTurnStateTestCtx(), acc, ""), "值形态（WS 路径）同样生效")
 	}
 
-	// 不适用：上游不是 Codex 后端的账号，一个字节都不能碰
+	// 不适用：上游不是 Codex 后端的账号，一个字节都不能碰；cpr 走原样中继，turn-state
+	// 由客户端与 CPR 自己往返（2026-09-23 起不再替换）
 	for _, tc := range []struct{ platform, accType string }{
+		{PlatformOpenAI, AccountTypeCPR},
 		{PlatformOpenAI, AccountTypeAPIKey},
 		{PlatformAnthropic, AccountTypeOAuth},
 		{PlatformAnthropic, AccountTypeBedrock},
@@ -1507,7 +1508,7 @@ func TestOpenAITurnStateOverrideAppliesToCodexUpstreams(t *testing.T) {
 	}
 
 	// 未配置 = 功能不存在，出站行为与改动前逐字节一致
-	plain := &Account{Platform: PlatformOpenAI, Type: AccountTypeCPR}
+	plain := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	h := http.Header{}
 	h.Set(openAICodexTurnStateHeader, "客户端自己回带的值")
 	svc.applyOpenAICodexTurnStateOverrideHeader(newTurnStateTestCtx(), plain, h)

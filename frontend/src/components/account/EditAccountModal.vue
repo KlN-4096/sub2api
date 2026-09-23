@@ -3598,9 +3598,10 @@ const accountHasOpenAIExtraSettings = computed(() => hasOpenAIExtraSettings(prop
 // 与后端 Account.TargetsChatGPTCodexUpstream() 严格对齐：只有最终落到 ChatGPT Codex
 // 后端的账号才认 turn-state 覆写。apikey 走的是别的上游，后端会忽略，露出输入框
 // 等于让管理员配一个静默失效的值。
+// cpr 走原样中继，turn-state 由客户端与 CPR 自己往返，不提供替换设置（2026-09-23）
 const accountSupportsTurnStateOverride = computed(() =>
   props.account?.platform === 'openai' &&
-  ['oauth', 'setup-token', 'cpr'].includes(props.account?.type || '')
+  ['oauth', 'setup-token'].includes(props.account?.type || '')
 )
 
 const isSparkShadow = computed(() => props.account?.parent_account_id != null)

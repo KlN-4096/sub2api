@@ -146,9 +146,10 @@ func openAITurnStatePoolLock(accountID int64) *sync.Mutex {
 }
 
 // IsOpenAITurnStateAutoEnabled 报告账号是否开启了自动接管。
-// 与手填覆写同一条适用范围：只有最终落到 ChatGPT Codex 后端的账号才认这个头。
+// 与手填覆写同一条适用范围：只有 oauth / setup-token；cpr 不替换 turn-state（见
+// OpenAICodexTurnStateOverride）。观测与「出站」记录仍按 TargetsChatGPTCodexUpstream。
 func (a *Account) IsOpenAITurnStateAutoEnabled() bool {
-	if a == nil || !a.TargetsChatGPTCodexUpstream() {
+	if a == nil || !a.IsOpenAIOAuthLike() {
 		return false
 	}
 	return a.getExtraBool(openAITurnStateAutoExtraKey)

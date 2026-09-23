@@ -1922,9 +1922,11 @@ describe('EditAccountModal 292 猎手', () => {
     wrapper.unmount()
   })
 
-  it('cpr 账号不显示猎手：出口由 codex-proxy-rs 决定', () => {
+  it('cpr 账号不显示 turn-state 替换设置：原样中继，只观测不替换', () => {
     const wrapper = mountModal({ ...buildCodexAccount({ openai_turn_state_auto: true }), type: 'cpr' })
     expect(wrapper.find('[data-testid="edit-openai-turn-state-hunter-section"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="edit-openai-turn-state-auto"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="edit-openai-turn-state-deprecated"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
