@@ -254,6 +254,8 @@ func (s *OpenAIGatewayService) sweepOpenAICodexTurnStateOrigins() {
 	})
 }
 
+// 已废弃（2026-09-23）：手填覆写同样依赖「注入 292 能换回正常服务」，已失效，后续版本移除。
+//
 // openAITurnStateOverrideExtraKey 是账号级 turn-state 覆写开关。空值=功能不存在，
 // 出站行为与改动前逐字节一致。
 //
@@ -502,6 +504,7 @@ func validateOpenAITurnStateBlob(label, value string) error {
 
 // usageCodexTurnStatePtr 从上游响应头取本次新铸的 turn-state，写进使用记录。
 // 与 usageUpstreamRequestIDPtr 同型：取不到返回 nil（列保持 NULL）。
+// 保留：用量表「Turn-State」入站列的数据源，292 功能（手填覆写等）移除时不删。
 func usageCodexTurnStatePtr(h http.Header) *string {
 	return truncateUsageTurnState(extractOpenAICodexTurnState(h))
 }

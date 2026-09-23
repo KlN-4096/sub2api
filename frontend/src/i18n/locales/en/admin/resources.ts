@@ -529,6 +529,7 @@ export default {
       turnStateSent: 'Turn-state sent',
       turnStateHint: '{chars} chars (ciphertext {blocks} blocks); under PKCS#7 the plaintext falls in {min}–{max} bytes. Baseline is 292 chars (332 on team accounts). Block count only brackets the plaintext to a 16-byte window, so this is a suspicion, not proof. Minted {minted}',
       turnStateUndecodable: 'Not a parsable Fernet envelope; falling back to char length {n}',
+      turnStateUnknownShape: 'Yellow: not a known shape (healthy 292/332, degraded 312/356), so degradation cannot be judged.',
       requestIdCopied: 'Request ID copied',
       upstreamRequestIdCopied: 'Upstream ID copied',
       allModels: 'All Models',

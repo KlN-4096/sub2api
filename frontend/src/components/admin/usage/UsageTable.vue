@@ -593,7 +593,7 @@
 </template>
 
 <script setup lang="ts">
-import { decodeTurnState, isTurnStateHealthy } from '@/utils/turnState'
+import { decodeTurnState, TURN_STATE_BADGE_CLASS, turnStateVerdict } from '@/utils/turnState'
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
@@ -753,9 +753,12 @@ const copyUpstreamRequestId = (upstreamRequestId: string) =>
 const copyTurnState = (turnState: string) =>
   copyIdentifier(turnState, t('admin.usage.turnStateCopied'))
 
+// Turn-State 入站 / 出站两列在 292 功能移除后仍保留作参考（用户 2026-09-23 要求），删猎手 /
+// 自动接管 / 手填覆写时别连带删掉。覆写来源徽标（手填 / 自动）及其筛选项可以随功能一起删。
+//
 // 徽章直接显示字符长度：292 / 312 是运维实际在说的那两个数，比「10 块 / 11 块」直观，
 // 而且一一对应（每块 16 字节 → 差一块正好差 20 个 base64 字符），不损失信息。
-// 健康判定仍走密文块数（isTurnStateHealthy），那才是真判据。
+// 健康判定仍走密文块数（turnStateVerdict），那才是真判据。
 const turnStateBadgeText = (blob: string) => String(blob.length)
 
 // 覆写来源徽标：后端存的是 manual/auto/auto_stale 枚举，直接渲染就是一串英文。
@@ -774,21 +777,21 @@ const turnStateSourceTitle = (source?: string | null) =>
     ? t(`admin.usage.turnStateSourceLong.${source}`)
     : t('admin.usage.turnStateOverridden')
 
-const turnStateBadgeClass = (blob: string) =>
-  isTurnStateHealthy(blob)
-    ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
-    : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+const turnStateBadgeClass = (blob: string) => TURN_STATE_BADGE_CLASS[turnStateVerdict(blob)]
 
 const turnStateTitle = (blob: string) => {
   const env = decodeTurnState(blob)
-  if (!env) return t('admin.usage.turnStateUndecodable', { n: blob.length })
-  return t('admin.usage.turnStateHint', {
-    blocks: env.blocks,
-    chars: blob.length,
-    min: env.blocks * 16 - 16,
-    max: env.blocks * 16 - 1,
-    minted: formatDateTime(env.mintedAt),
-  })
+  const title = env
+    ? t('admin.usage.turnStateHint', {
+        blocks: env.blocks,
+        chars: blob.length,
+        min: env.blocks * 16 - 16,
+        max: env.blocks * 16 - 1,
+        minted: formatDateTime(env.mintedAt),
+      })
+    : t('admin.usage.turnStateUndecodable', { n: blob.length })
+  // 黄色徽标要能自己说明为什么是黄的。
+  return turnStateVerdict(blob) === 'unknown' ? `${t('admin.usage.turnStateUnknownShape')}\n${title}` : title
 }
 
 // Tooltip state - cost

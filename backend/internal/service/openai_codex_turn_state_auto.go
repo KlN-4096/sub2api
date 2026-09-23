@@ -14,6 +14,13 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 )
 
+// 已废弃（2026-09-23）：自动接管 / 候选池 / 注入建立在「注入 292 能换回正常服务」上，2026-09-21
+// 起失效，后续版本移除。**移除时保留**（都是读数）：形态观测（openai_turn_state_observed），以及
+// 用量表 Turn-State 入站 / 出站两列的落库——出站值 ctxKeyTurnStateSent / markOpenAITurnStateSent /
+// OpenAITurnStateUsageSent，入站值见 openai_codex_turn_state.go 的 usageCodexTurnStatePtr。用户
+// 2026-09-23 要求这两列之后仍留作参考。覆写来源（OpenAITurnStateUsageSource、turn_state_source /
+// turn_state_overridden 的记录与页面徽标）不在保留之列，随功能一起删。
+//
 // 自动接管 turn-state：检测到某个 session 落在 312（降智）后，把该账号最近一条
 // 有效的 292 注入该 session 的后续请求；票一直用到自铸造起 1 小时自然过期。
 //
@@ -413,6 +420,7 @@ func clearOpenAITurnStateInjected(c *gin.Context) {
 }
 
 // markOpenAITurnStateSent 记下本次出站实际带的 turn-state（空值不记，保持 NULL）。
+// 保留：用量表「Turn-State 出站」列的数据源，292 功能移除时不删（见文件头）。
 func markOpenAITurnStateSent(c *gin.Context, account *Account, sent string) {
 	if c == nil || account == nil || !account.TargetsChatGPTCodexUpstream() {
 		return

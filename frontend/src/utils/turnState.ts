@@ -22,10 +22,30 @@ export const TURN_STATE_SHAPES = [
   { blocks: 12, chars: 332 } // team
 ] as const
 
+/**
+ * 已知的降智形态（各自基线上多一块）。只有前端有这张表：它只管配色——红色必须是「认得出的
+ * 降智」，两张表都对不上的形态判不了，标黄。2026-09-23 起 pro2 铸出 780 字符 / 33 块，就是这种。
+ */
+export const TURN_STATE_DEGRADED_SHAPES = [
+  { blocks: 11, chars: 312 }, // individual
+  { blocks: 13, chars: 356 } // team
+] as const
+
+export type TurnStateVerdict = 'healthy' | 'degraded' | 'unknown'
+
+/** 形态徽标配色，用量表与账号页共用：绿 = 正常，红 = 降智，黄 = 表外形态、判不了。 */
+export const TURN_STATE_BADGE_CLASS: Record<TurnStateVerdict, string> = {
+  healthy: 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300',
+  degraded: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
+  unknown: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300'
+}
+
 /** 票自铸造起 1 小时有效（对家实时池六张卡的「到期」都精确等于 Fernet 戳 + 1h）。 */
 export const TURN_STATE_DEFAULT_TTL_MINUTES = 60
 
 /**
+ * 已废弃（2026-09-23）：降智暂停随 292 猎手一起废弃，后续版本移除。
+ *
  * 降智暂停（后端 openai_turn_state_hold.go）借 model_rate_limits 存，reason 标本功能。
  * 状态列徽标和猎手行都要按它判，两边必须是同一个串——各抄一份就会在漂移时悄悄错位。
  */
@@ -62,14 +82,25 @@ export const decodeTurnState = (blob?: string | null): TurnStateEnvelope | null 
   }
 }
 
+export const turnStateVerdictByBlocks = (blocks: number): TurnStateVerdict =>
+  TURN_STATE_SHAPES.some((shape) => shape.blocks === blocks)
+    ? 'healthy'
+    : TURN_STATE_DEGRADED_SHAPES.some((shape) => shape.blocks === blocks)
+      ? 'degraded'
+      : 'unknown'
+
 /** 解不出信封时退回字符长度（老判据），别把解不开的当健康。 */
-export const isTurnStateHealthy = (blob: string): boolean => {
+export const turnStateVerdict = (blob: string): TurnStateVerdict => {
   const env = decodeTurnState(blob)
-  if (env) return TURN_STATE_SHAPES.some((shape) => shape.blocks === env.blocks)
+  if (env) return turnStateVerdictByBlocks(env.blocks)
   // trim 与后端 openAITurnStateHealthy 的兜底口径对齐：调用方不保证传进来的值已 trim
   // （UsageTable 就直接传 row.turn_state），差一个空格就会被判成非正常形态。
-  return TURN_STATE_SHAPES.some((shape) => shape.chars === blob.trim().length)
+  const chars = blob.trim().length
+  if (TURN_STATE_SHAPES.some((shape) => shape.chars === chars)) return 'healthy'
+  return TURN_STATE_DEGRADED_SHAPES.some((shape) => shape.chars === chars) ? 'degraded' : 'unknown'
 }
+
+export const isTurnStateHealthy = (blob: string): boolean => turnStateVerdict(blob) === 'healthy'
 
 /**
  * cprOutboundProxy 读 cpr 账号在 CPR 侧绑的出站代理（extra.cpr_outbound_proxy）。

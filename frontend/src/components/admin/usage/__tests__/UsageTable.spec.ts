@@ -715,6 +715,18 @@ describe('admin UsageTable request ID column', () => {
     expect(badge!.attributes('title')).toContain('turnStateHint')
   })
 
+  it('表外形态（780 / 33 块）标黄，不冒充降智的红', async () => {
+    const blob = turnStateFixture(1789651097, 33)
+    expect(blob).toHaveLength(780)
+
+    const wrapper = mountTurnState({ turn_state: blob })
+    const badge = wrapper.findAll('span').find((n) => n.text() === '780')
+    expect(badge).toBeTruthy()
+    expect(badge!.classes()).toContain('bg-yellow-100')
+    expect(badge!.classes().some((c) => c.includes('red') || c.includes('green'))).toBe(false)
+    expect(badge!.attributes('title')).toContain('turnStateUnknownShape')
+  })
+
   it('解不出信封时退回字符长度（老判据）', async () => {
     const wrapper = mountTurnState({ turn_state: 'g'.repeat(292) })
     const badge = wrapper.findAll('span').find((n) => n.text() === '292')

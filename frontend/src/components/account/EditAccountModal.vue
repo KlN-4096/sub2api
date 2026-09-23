@@ -2458,6 +2458,14 @@
         class="border-t border-gray-200 pt-4 dark:border-dark-600 space-y-4"
       >
         <div v-if="accountSupportsTurnStateOverride" class="space-y-3">
+          <!-- 已废弃（2026-09-23）：整块都建立在「注入 292 能换回正常服务」上，2026-09-21 起失效。
+               只标记、不改行为，后续版本整块移除。 -->
+          <p
+            data-testid="edit-openai-turn-state-deprecated"
+            class="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+          >
+            {{ t('admin.accounts.openai.turnStateDeprecated') }}
+          </p>
           <div class="flex items-center justify-between gap-4">
             <div class="min-w-0">
               <label class="input-label mb-0">{{ t('admin.accounts.openai.turnStateAuto') }}</label>

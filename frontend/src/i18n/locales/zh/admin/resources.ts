@@ -526,6 +526,7 @@ export default {
       turnStateSent: 'Turn-State 出站',
       turnStateHint: '{chars} 字符（密文 {blocks} 块）；PKCS#7 下明文落在 {min}–{max} 字节。基线 292 字符（team 号 332）= 不降智。块数只能把明文框进 16 字节的窗口，所以这是疑似判据，不是确证。铸于 {minted}',
       turnStateUndecodable: '不是可解析的 Fernet 信封，退回字符长度 {n} 判断',
+      turnStateUnknownShape: '黄色：不在已知形态表里（正常 292/332、降智 312/356），判断不了是否降智。',
       requestIdCopied: '请求ID已复制',
       upstreamRequestIdCopied: '上游ID已复制',
       allModels: '全部模型',
