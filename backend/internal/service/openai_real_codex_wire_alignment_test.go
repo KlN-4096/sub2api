@@ -206,6 +206,21 @@ func TestCodexSideRequestsAcceptMatchesRealClient(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, tc.want, headers["accept"], "额度面（wham）enabled=%v", tc.enabled)
 	}
+	// 影子行：device 模式看被转发行，实验开关看凭证行（与推理面同一口径）。
+	for _, tc := range []struct {
+		forwarded, credential map[string]any
+		want                  string
+	}{
+		{map[string]any{codexFingerprintModeExtraKey: "device"}, map[string]any{codexFingerprintConvergenceExtraKey: true}, "*/*"},
+		{map[string]any{codexFingerprintConvergenceExtraKey: true}, map[string]any{codexFingerprintModeExtraKey: "device"}, ""},
+	} {
+		headers, _, err := (&OpenAIQuotaService{}).buildCodexQuotaHeaders(&openAIQuotaCall{
+			forwardedRow: newTestOAuthAccount(9201, tc.forwarded), account: newTestOAuthAccount(9202, tc.credential),
+			accessToken: "t", chatGPTAccountID: "a",
+		})
+		require.NoError(t, err)
+		require.Equal(t, tc.want, headers["accept"], "影子行 forwarded=%v credential=%v", tc.forwarded, tc.credential)
+	}
 
 	body := []byte(`{"id":"session","model":"gpt-5.5","input":[]}`)
 	for _, tc := range []struct {
