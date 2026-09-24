@@ -3,30 +3,28 @@
     <!-- Admin: Full version badge with dropdown -->
     <template v-if="isAdmin">
       <div class="flex flex-wrap items-center gap-1">
-        <!-- klno: 上游版本只监测，点开是上游发布页，没有升级入口 -->
+        <!-- klno: 上游版本只监测：有新版时沿用原来的琥珀色脉冲提示，点开是上游发布页，没有升级入口 -->
         <a
-          v-if="upstreamVersion"
+          v-if="upstreamBaseVersion"
           data-testid="version-upstream"
-          :href="upstreamVersion.html_url || UPSTREAM_RELEASES_URL"
+          :href="upstreamVersion?.html_url || UPSTREAM_RELEASES_URL"
           target="_blank"
           rel="noopener noreferrer"
-          class="flex items-center gap-1 rounded-lg px-2 py-1 text-xs transition-colors"
+          class="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs transition-colors"
           :class="[
-            upstreamVersion.has_update
-              ? 'bg-sky-100 text-sky-700 hover:bg-sky-200 dark:bg-sky-900/30 dark:text-sky-400 dark:hover:bg-sky-900/50'
+            upstreamHasUpdate
+              ? 'bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:hover:bg-amber-900/50'
               : 'bg-gray-100 text-gray-500 hover:bg-gray-200 dark:bg-dark-800 dark:text-dark-400 dark:hover:bg-dark-700'
           ]"
-          :title="
-            upstreamVersion.has_update
-              ? t('version.upstreamUpdateAvailable', { version: upstreamVersion.latest_version })
-              : t('version.upstreamUpToDate')
-          "
+          :title="upstreamTitle"
         >
-          <span>{{ t('version.upstreamLabel') }} v{{ upstreamVersion.current_version }}</span>
-          <span
-            v-if="upstreamVersion.has_update"
-            class="inline-flex h-2 w-2 rounded-full bg-sky-500"
-          ></span>
+          <span>v{{ upstreamBaseVersion }}</span>
+          <span v-if="upstreamHasUpdate" class="relative flex h-2 w-2">
+            <span
+              class="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75"
+            ></span>
+            <span class="relative inline-flex h-2 w-2 rounded-full bg-amber-500"></span>
+          </span>
         </a>
         <button
           data-testid="version-fork"
@@ -37,11 +35,9 @@
               ? 'bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:hover:bg-amber-900/50'
               : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-800 dark:text-dark-400 dark:hover:bg-dark-700'
           ]"
-          :title="hasUpdate ? t('version.updateAvailable') : t('version.upToDate')"
+          :title="forkTitle"
         >
-          <span v-if="currentVersion" class="font-medium"
-            >{{ t('version.forkLabel') }} v{{ currentVersion }}</span
-          >
+          <span v-if="currentVersion" class="font-medium">{{ forkBadgeText }}</span>
           <span
             v-else
             class="h-3 w-12 animate-pulse rounded bg-gray-200 font-medium dark:bg-dark-600"
@@ -709,6 +705,24 @@ const hasUpdate = computed(() => appStore.hasUpdate)
 const releaseInfo = computed(() => appStore.releaseInfo)
 const buildType = computed(() => appStore.buildType)
 const upstreamVersion = computed(() => appStore.upstreamVersion)
+
+// klno: 左上角拆成两处：上游只显示所基于的 X.Y.Z，二开只显示 klno 序号；标签与完整版本放进提示。
+// 上游版本从当前版本推出来，不等更新检查返回；检查结果只决定有没有新版提示。
+const upstreamBaseVersion = computed(() => currentVersion.value.replace(/-klno\.\d+$/, ''))
+const upstreamHasUpdate = computed(() => upstreamVersion.value?.has_update === true)
+const upstreamTitle = computed(() => {
+  const state = upstreamHasUpdate.value
+    ? t('version.upstreamUpdateAvailable', { version: upstreamVersion.value?.latest_version ?? '' })
+    : t('version.upstreamUpToDate')
+  return `${t('version.upstreamLabel')} v${upstreamBaseVersion.value}：${state}`
+})
+const forkBadgeText = computed(
+  () => currentVersion.value.match(/-(klno\.\d+)$/)?.[1] ?? `v${currentVersion.value}`
+)
+const forkTitle = computed(
+  () =>
+    `${t('version.forkLabel')} v${currentVersion.value}：${hasUpdate.value ? t('version.updateAvailable') : t('version.upToDate')}`
+)
 
 // Update process states (local to this component)
 const updating = ref(false)

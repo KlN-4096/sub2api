@@ -39,11 +39,12 @@ vi.mock('@/composables/useClipboard', () => ({
 describe('VersionBadge', () => {
   beforeEach(() => {
     authStore.isAdmin = true
+    appStore.currentVersion = '0.2.7-klno.4'
     appStore.hasUpdate = false
     appStore.upstreamVersion = null
   })
 
-  it('shows the upstream version as a link only, next to the fork version', () => {
+  it('shows upstream X.Y.Z and the fork klno sequence; an upstream release lights the original amber ping', () => {
     appStore.upstreamVersion = {
       current_version: '0.2.7',
       latest_version: '0.2.8',
@@ -57,18 +58,32 @@ describe('VersionBadge', () => {
     expect(upstream.attributes('href')).toBe(
       'https://github.com/Wei-Shaw/sub2api/releases/tag/v0.2.8'
     )
-    expect(upstream.text()).toContain('version.upstreamLabel v0.2.7')
-    expect(upstream.attributes('title')).toBe('version.upstreamUpdateAvailable:0.2.8')
+    expect(upstream.text()).toBe('v0.2.7')
+    expect(upstream.attributes('title')).toBe(
+      'version.upstreamLabel v0.2.7：version.upstreamUpdateAvailable:0.2.8'
+    )
+    expect(upstream.find('.animate-ping').exists()).toBe(true)
 
     const fork = wrapper.get('[data-testid="version-fork"]')
-    expect(fork.text()).toContain('version.forkLabel v0.2.7-klno.4')
+    expect(fork.text()).toBe('klno.4')
+    expect(fork.attributes('title')).toBe('version.forkLabel v0.2.7-klno.4：version.upToDate')
   })
 
-  it('hides the upstream badge until the check has returned', () => {
+  it('derives the upstream version before the update check returns', () => {
     const wrapper = mount(VersionBadge, { global: { stubs: { Icon: true } } })
 
-    expect(wrapper.find('[data-testid="version-upstream"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="version-fork"]').exists()).toBe(true)
+    const upstream = wrapper.get('[data-testid="version-upstream"]')
+    expect(upstream.text()).toBe('v0.2.7')
+    expect(upstream.attributes('href')).toBe('https://github.com/Wei-Shaw/sub2api/releases')
+    expect(upstream.find('.animate-ping').exists()).toBe(false)
+  })
+
+  it('shows the full version on builds without a klno suffix', () => {
+    appStore.currentVersion = '0.2.8'
+    const wrapper = mount(VersionBadge, { global: { stubs: { Icon: true } } })
+
+    expect(wrapper.get('[data-testid="version-fork"]').text()).toBe('v0.2.8')
+    expect(wrapper.get('[data-testid="version-upstream"]').text()).toBe('v0.2.8')
   })
 
   it('manual rollback commands point at the fork, not upstream', async () => {
