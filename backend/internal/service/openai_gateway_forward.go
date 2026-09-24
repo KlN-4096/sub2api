@@ -1461,6 +1461,10 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 		return nil, fmt.Errorf("filter compact access programs: %w", err)
 	}
 
+	// codex 0.156 的两处体内形态：guardian 计费标记、turn-metadata 的 model 跟随出站体。
+	body = applyCodexGuardianCreditsRequested(c, account, wireTargetURL, body)
+	body = alignCodexTurnMetadataExecutionBody(c, account, wireTargetURL, body)
+
 	// 顶层键序：只重排，不改任何值（下面的时区改写与压缩仍会动体）。
 	body = applyCodexBodyFieldOrder(c, account, wireTargetURL, body)
 
@@ -1609,6 +1613,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	applyOpenAICodexBetaFeatures(c, account, req.Header)
 	setOpenAICodexRoutingHintFromBody(req.Header, account, body)
 	applyCodexDeviceWireProfile(c, account, req.Header, false)
+	alignCodexTurnMetadataExecutionHeader(c, account, wireTargetURL, req.Header, body)
 	logOpenAIRoutingDiagnosticsFromBody(ctx, account, "http", req.Header, body, "not_applicable")
 
 	if err := applyMappedGPT55LiteCompatibility(req, account, body); err != nil {
