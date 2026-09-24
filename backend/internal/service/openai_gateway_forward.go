@@ -396,9 +396,19 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			upstreamModel = compactModel
 		}
 	}
+	// 真实 Codex Lite 不发 instructions，基础提示在 input 的 developer 消息里，补一份就和真客户端分家。
+	// 只对双开账号（线协议投影）；出站会摘掉 Lite 头的（OAuth 落到 gpt-5.5，见
+	// applyMappedGPT55LiteCompatibility；image-only 模型会被改写成主模型）和 compact（真客户端形状未核实）照旧补。
+	deviceWireProfile := codexDeviceWireProfileEnabled(c, account)
+	realCodexLite := deviceWireProfile &&
+		isOpenAIResponsesLiteHeader(c.GetHeader(responsesLiteHeader)) &&
+		gjson.GetBytes(body, "input.0.type").String() == "additional_tools" &&
+		(!account.IsOpenAIOAuthLike() || upstreamModel != "gpt-5.5") &&
+		!isOpenAIImageGenerationModel(upstreamModel) &&
+		!isCompactRequest
 	instructions := gjson.GetBytes(body, "instructions")
 	instructionsEmpty := !instructions.Exists() || instructions.Type != gjson.String || strings.TrimSpace(instructions.String()) == ""
-	if instructionsEmpty && account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses {
+	if instructionsEmpty && account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses && !realCodexLite {
 		markPatchSet("instructions", defaultCodexSynthInstructions(upstreamModel))
 	}
 	if billingModel != requestedModel {
@@ -533,6 +543,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			codexResult = applyCodexOAuthTransformWithOptions(decoded, codexOAuthTransformOptions{
 				IsCodexCLI:                          isCodexCLI,
 				IsCompact:                           isCompactRequest,
+				SkipDefaultInstructions:             realCodexLite,
 				OmitPromotedSystemMessagesFromInput: omitPromotedSystemMessages,
 			})
 		}
