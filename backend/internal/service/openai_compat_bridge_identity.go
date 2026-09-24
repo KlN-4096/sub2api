@@ -23,9 +23,11 @@ import (
 // PCK = session_id，core/src/client.rs:504-516），然后交给与 /responses 完全相同的账号隔离 →
 // 指纹收敛 → 线协议投影管线派生出站。桥自己不再单独写任何会话头。
 //
-// 合成的 turn-metadata 只带身份、轮次字段与取自出站体的 model / reasoning_effort；真客户端还带 sandbox /
+// 合成的 turn-metadata 只带身份、轮次字段与取自请求体的 model / reasoning_effort；真客户端还带 sandbox /
 // sandbox_mode / thread_source / auto_review_enabled / node_repl_* / workspaces / analytics_enabled 等
-// 环境与配置事实，桥没有对应的真实来源，不编造（用户决定：sandbox / thread_source / turn_trigger / extra 不做）。
+// 环境与配置事实，桥没有对应的真实来源，不编造（用户决定：sandbox / thread_source / turn_trigger / extra 不做；
+// 这里的 extra 指产品 / app-server 自定义元数据——model / reasoning_effort 在 Rust 里虽也落在 extra 映射，
+// 但不是编造，取自请求体）。
 type openAICompatBridgeSession struct {
 	SessionID       string
 	ContextWindowID string
@@ -47,9 +49,10 @@ type openAICompatBridgeTurnMetadata struct {
 	TurnStartedAtUnixMs int64  `json:"turn_started_at_unix_ms"`
 	// codex 0.156 起 ExecutionMetadata 写进 extra（BTreeMap，flatten 在声明字段之后按键名排序）：本轮 model
 	// 与选中的 reasoning effort（rust-v0.156.1 session/session.rs:667、turn_metadata.rs:76-94）。取自桥的
-	// 出站体，不是编造：桥体里的 effort 就是它选的档位（Anthropic output_config.effort 映射，max→xhigh、
-	// 其余原样），没有真客户端 ultra / persistent 那种解析，所以与 metadata 同值。之后网关再改体里的
-	// model，发送边界会同步（codexTurnMetadataExecutionValues）。
+	// 注入时的出站体，不是编造：桥体里的 effort 就是它选的档位（Anthropic output_config.effort 映射，
+	// max→xhigh、其余原样），没有真客户端 ultra / persistent 那种解析。注入之后分组推理强度策略还可能改体里
+	// 的 effort（openai_gateway_messages.go），metadata 保留注入时的档位，与直连 /responses 同一口径（effort
+	// 不在发送边界同步）；体里的 model 被改则发送边界会同步（codexTurnMetadataExecutionValues）。
 	Model           string `json:"model,omitempty"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }

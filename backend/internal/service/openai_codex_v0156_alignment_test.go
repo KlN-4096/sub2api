@@ -12,7 +12,8 @@ import (
 
 // codex rust-v0.156.1 对齐（相对 e763730 的差异审计，确定项）：
 //   - client_metadata.guardian_credits_requested（core/src/client.rs:1122-1155 set_guardian_metadata）
-//   - turn-metadata 的 model / reasoning_effort 与出站体同源（session/session.rs:667 ExecutionMetadata::apply_to）
+//   - turn-metadata 的 model 与出站体同源（session/session.rs:667 ExecutionMetadata::apply_to）；reasoning_effort
+//     写的是选中的档位，刻意不跟（见 codexTurnMetadataExecutionValues）
 
 func requireCodexGuardianCreditsRequested(t *testing.T, payload []byte, want bool) {
 	t.Helper()
@@ -246,4 +247,8 @@ func TestAlignCodexTurnMetadataJSON(t *testing.T) {
 	h.Set(openAIWSTurnMetadataHeader, `{"model":"client-model"}`)
 	alignCodexTurnMetadataFields(h, values)
 	require.Equal(t, `{"model":"gpt-5.4"}`, h.Get(openAIWSTurnMetadataHeader))
+
+	// 内嵌值不是字符串（真客户端恒发字符串）：不当 JSON 对齐，也不改成字符串。
+	object := []byte(`{"model":"gpt-5.4","client_metadata":{"x-codex-turn-metadata":{"model":"client-model"}}}`)
+	require.Equal(t, string(object), string(alignCodexEmbeddedTurnMetadata(object, values)))
 }

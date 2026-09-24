@@ -302,6 +302,7 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchResponsesWebSearchRequest(c
 	// 这条兜底打的是 /responses：双开账号的头也要按线协议投影收口，否则同一账号出现
 	// 「双开的体 + 非双开的头」两种形态（体已按双开压缩，见 compressCodexRequestBody）。
 	applyCodexDeviceWireProfile(c, account, req.Header, false)
+	alignCodexTurnMetadataExecutionHeader(c, account, chatgptCodexURL, req.Header, body)
 	return req, nil
 }
 
