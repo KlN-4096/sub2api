@@ -401,8 +401,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// 只对双开账号上的官方客户端，且渠道与账号都没改写模型（真客户端只为自己请求的模型选 Lite；
 	// 映射后的上游是否接受无 instructions 的 Lite 体离线无法核实；handler 在渠道映射前把原模型记在
 	// ctxkey.Model）。以下照旧补：出站会摘掉 Lite 头的（OAuth 落到 gpt-5.5，见
-	// applyMappedGPT55LiteCompatibility；image-only 模型会被改写成主模型）；
-	// compact 与原生 v2 压缩回合——失败后换兜底模型重试，兜底默认 gpt-5.5，重试体就成了非 Lite。
+	// applyMappedGPT55LiteCompatibility；image-only 模型会被改写成主模型）；/responses/compact。
+	// 原生 v2 压缩回合与普通 Lite 轮次同形，首发不补（会话形态不切换、前缀缓存不断）；它失败后换
+	// 兜底模型重试（兜底默认 gpt-5.5，出站摘 Lite 头），重试体用 liteFallbackInstructions 补回。
 	deviceWireProfile := codexDeviceWireProfileEnabled(c, account)
 	clientModel, _ := c.Request.Context().Value(ctxkey.Model).(string)
 	realCodexLite := isCodexCLI && deviceWireProfile &&
@@ -412,11 +413,16 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		upstreamModel == requestedModel &&
 		(!account.IsOpenAIOAuthLike() || upstreamModel != "gpt-5.5") &&
 		!isOpenAIImageGenerationModel(upstreamModel) &&
-		!isExplicitOpenAICompactRequest(c, body)
+		!isCompactRequest
 	instructions := gjson.GetBytes(body, "instructions")
 	instructionsEmpty := !instructions.Exists() || instructions.Type != gjson.String || strings.TrimSpace(instructions.String()) == ""
-	if instructionsEmpty && account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses && !realCodexLite {
-		markPatchSet("instructions", defaultCodexSynthInstructions(upstreamModel))
+	liteFallbackInstructions := ""
+	if instructionsEmpty && account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses {
+		if realCodexLite {
+			liteFallbackInstructions = defaultCodexSynthInstructions(upstreamModel)
+		} else {
+			markPatchSet("instructions", defaultCodexSynthInstructions(upstreamModel))
+		}
 	}
 	if billingModel != requestedModel {
 		logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Model mapping applied: %s -> %s (account: %s, isCodexCLI: %v)", requestedModel, billingModel, account.Name, isCodexCLI)
@@ -1167,6 +1173,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 				c, account, requestedModel, body, resp.StatusCode, upstreamMsg, respBody, compactModelFallbackRetried,
 			); retry {
+				if retryBody, err = withCompactFallbackInstructions(retryBody, liteFallbackInstructions); err != nil {
+					return nil, fmt.Errorf("set compact fallback instructions: %w", err)
+				}
 				s.appendOpenAICompactFallbackRetryOps(c, account, resp, respBody, upstreamMsg, false)
 				fromModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
 				body = retryBody
@@ -1245,6 +1254,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 						c, account, requestedModel, body, http.StatusBadRequest, signal.message, signal.payload, compactModelFallbackRetried,
 					); retry {
+						if retryBody, err = withCompactFallbackInstructions(retryBody, liteFallbackInstructions); err != nil {
+							return nil, fmt.Errorf("set compact fallback instructions: %w", err)
+						}
 						s.appendOpenAICompactFallbackRetryOps(c, account, resp, signal.payload, signal.message, false)
 						body = retryBody
 						requestView = newOpenAIRequestView(body)
@@ -1292,6 +1304,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 						c, account, requestedModel, body, http.StatusBadRequest, signal.message, signal.payload, compactModelFallbackRetried,
 					); retry {
+						if retryBody, err = withCompactFallbackInstructions(retryBody, liteFallbackInstructions); err != nil {
+							return nil, fmt.Errorf("set compact fallback instructions: %w", err)
+						}
 						s.appendOpenAICompactFallbackRetryOps(c, account, resp, signal.payload, signal.message, false)
 						body = retryBody
 						requestView = newOpenAIRequestView(body)

@@ -11,6 +11,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type openAICompactFallbackSignal struct {
@@ -259,6 +260,20 @@ func (s *OpenAIGatewayService) prepareOpenAICompactFallbackRetry(
 		return currentBody, "", false
 	}
 	return retryBody, fallbackModel, true
+}
+
+// withCompactFallbackInstructions 给兜底重试体补回首发省掉的 instructions（text 为空表示首发没省）：
+// 真实 Lite 的原生 v2 压缩回合首发不带，兜底换模型后可能被摘 Lite 头，非 Lite 体必须带。
+func withCompactFallbackInstructions(body []byte, text string) ([]byte, error) {
+	if text == "" || strings.TrimSpace(gjson.GetBytes(body, "instructions").String()) != "" {
+		return body, nil
+	}
+	// sjson.SetBytes 遇到带换行的字符串会改走 encoding/json（转义 < > &），真客户端不转义。
+	raw, err := marshalOpenAIUpstreamJSON(text)
+	if err != nil {
+		return nil, err
+	}
+	return sjson.SetRawBytes(body, "instructions", raw)
 }
 
 func (s *OpenAIGatewayService) applyOpenAIPassthroughCompactFallbackFromSignal(

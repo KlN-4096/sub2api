@@ -45,6 +45,7 @@ func TestForwardRealCodexLiteOmitsInstructions(t *testing.T) {
 		clientModel         string // handler 在渠道映射之前记下的客户端原始模型
 		lite                bool
 		compact             bool
+		compactionTrigger   bool // 原生 v2 压缩回合：普通 /responses + 末尾 compaction_trigger
 		thirdParty          bool
 		dropAdditionalTools bool
 		noWireProfile       bool
@@ -59,6 +60,7 @@ func TestForwardRealCodexLiteOmitsInstructions(t *testing.T) {
 		{name: "lite mapped to another model", lite: true, mapping: map[string]any{"gpt-6-astra": "gpt-5.4"}, wantInstructions: true},
 		{name: "lite channel mapped", clientModel: "gpt-6-sol", lite: true, wantInstructions: true},
 		{name: "lite compact", lite: true, compact: true, wantInstructions: true},
+		{name: "lite native v2 compaction", lite: true, compactionTrigger: true},
 		{name: "lite third party", lite: true, thirdParty: true, wantInstructions: true},
 		{name: "lite without additional_tools first", lite: true, dropAdditionalTools: true, wantInstructions: true},
 		{name: "lite without wire profile", lite: true, noWireProfile: true, wantInstructions: true},
@@ -77,12 +79,20 @@ func TestForwardRealCodexLiteOmitsInstructions(t *testing.T) {
 				require.NoError(t, err)
 				basePromptPath = "input.0.content.0.text"
 			}
+			if tc.compactionTrigger {
+				var err error
+				body, err = sjson.SetRawBytes(body, "input.-1", []byte(`{"type":"compaction_trigger"}`))
+				require.NoError(t, err)
+			}
 			c := newConvTestContext(t, body)
 			if tc.lite {
 				c.Request.Header.Set(responsesLiteHeader, "true")
 			}
 			if tc.compact {
 				c.Request.URL.Path = "/v1/responses/compact"
+			}
+			if tc.compactionTrigger {
+				MarkOpenAINativeCompactionV2(c)
 			}
 			if tc.thirdParty {
 				c.Request.Header.Set("User-Agent", "OpenAI/Python 1.99.0")
@@ -108,26 +118,77 @@ func TestForwardRealCodexLiteOmitsInstructions(t *testing.T) {
 	}
 }
 
-// 原生 v2 压缩回合（普通 /responses + compaction_trigger，形状与普通 Lite 轮次相同）上游报
-// 上下文超限时会换兜底模型重试；兜底落到 gpt-5.5 时出站摘掉 Lite 头，重试体必须仍带 instructions。
+// 原生 v2 压缩回合（普通 /responses + compaction_trigger）与普通 Lite 轮次同形：首发照真客户端不带
+// instructions（整个会话形态不切换、前缀缓存不断）。上游报上下文超限时换兜底模型重试，兜底落到
+// gpt-5.5 时出站摘掉 Lite 头，重试体必须补回 instructions。三条兜底分支（HTTP 4xx、非流式与流式
+// 的 SSE 失败终态）各走一遍。
 func TestForwardRealCodexLiteCompactionFallbackKeepsInstructions(t *testing.T) {
-	body, err := sjson.SetRawBytes(realCodexLiteRequestBody(t, "gpt-6-astra"), "input.-1", []byte(`{"type":"compaction_trigger"}`))
+	sseFailed := "event: response.failed\n" +
+		`data: {"type":"response.failed","response":{"status":"failed","error":{"code":"context_length_exceeded","message":"context window exceeded"}}}` + "\n\n"
+	for _, tc := range []struct {
+		name        string
+		stream      bool
+		status      int
+		contentType string
+		payload     string
+	}{
+		{name: "http 400", status: http.StatusBadRequest, contentType: "application/json",
+			payload: `{"error":{"code":"context_length_exceeded","message":"context window exceeded"}}`},
+		{name: "sse failure non-stream", status: http.StatusOK, contentType: "text/event-stream", payload: sseFailed},
+		{name: "sse failure stream", stream: true, status: http.StatusOK, contentType: "text/event-stream", payload: sseFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := sjson.SetRawBytes(realCodexLiteRequestBody(t, "gpt-6-astra"), "input.-1", []byte(`{"type":"compaction_trigger"}`))
+			require.NoError(t, err)
+			body, err = sjson.SetBytes(body, "stream", tc.stream)
+			require.NoError(t, err)
+			c := newConvTestContext(t, body)
+			c.Request.Header.Set(responsesLiteHeader, "true")
+			MarkOpenAINativeCompactionV2(c)
+			svc, up := wireProfileTestService()
+			svc.cfg.Gateway.OpenAICompactModel = "gpt-5.5"
+			up.responses = []*http.Response{{
+				StatusCode: tc.status,
+				Header:     http.Header{"Content-Type": []string{tc.contentType}},
+				Body:       io.NopCloser(strings.NewReader(tc.payload)),
+			}}
+			_, _ = svc.Forward(context.Background(), c, wireProfileTestAccount(true), body)
+			require.Len(t, up.bodies, 2)
+			require.False(t, gjson.GetBytes(up.bodies[0], "instructions").Exists(), string(up.bodies[0]))
+			require.Equal(t, "true", up.requests[0].Header.Get(responsesLiteHeader))
+			require.Equal(t, "gpt-5.5", gjson.GetBytes(up.bodies[1], "model").String())
+			require.Empty(t, up.requests[1].Header.Get(responsesLiteHeader))
+			retryInstructions := gjson.GetBytes(up.bodies[1], "instructions")
+			require.Equal(t, defaultCodexSynthInstructions("gpt-6-astra"), retryInstructions.String(),
+				"补回的是首发模型那份，不是兜底模型的")
+			require.Contains(t, retryInstructions.Raw, "<")
+			wantRaw, err := marshalOpenAIUpstreamJSON(defaultCodexSynthInstructions("gpt-6-astra"))
+			require.NoError(t, err)
+			require.Equal(t, string(wantRaw), retryInstructions.Raw, "注入值按原字节写入，不做 HTML 转义（真客户端 serde_json 不转义）")
+		})
+	}
+}
+
+// 只补缺失的：首发体里已有的 instructions（例如 role:system 提升上来的）不能被默认文本盖掉。
+func TestWithCompactFallbackInstructions(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.5","input":[]}`)
+	out, err := withCompactFallbackInstructions(body, "")
 	require.NoError(t, err)
-	c := newConvTestContext(t, body)
-	c.Request.Header.Set(responsesLiteHeader, "true")
-	MarkOpenAINativeCompactionV2(c)
-	svc, up := wireProfileTestService()
-	svc.cfg.Gateway.OpenAICompactModel = "gpt-5.5"
-	up.responses = []*http.Response{{
-		StatusCode: http.StatusBadRequest,
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"context_length_exceeded","message":"context window exceeded"}}`)),
-	}}
-	_, _ = svc.Forward(context.Background(), c, wireProfileTestAccount(true), body)
-	require.Len(t, up.bodies, 2)
-	require.Equal(t, "gpt-5.5", gjson.GetBytes(up.bodies[1], "model").String())
-	require.Empty(t, up.requests[1].Header.Get(responsesLiteHeader))
-	require.True(t, gjson.GetBytes(up.bodies[1], "instructions").Exists(), string(up.bodies[1]))
+	require.Equal(t, string(body), string(out))
+
+	out, err = withCompactFallbackInstructions(body, "BASE")
+	require.NoError(t, err)
+	require.Equal(t, "BASE", gjson.GetBytes(out, "instructions").String())
+
+	// 带换行时 sjson.SetBytes 会改走 encoding/json（转义 HTML），必须照原字节写入。
+	out, err = withCompactFallbackInstructions(body, "a<b>\n&c")
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"instructions":"a<b>\n&c"`)
+
+	kept := []byte(`{"model":"gpt-5.5","instructions":"CLIENT SYSTEM","input":[]}`)
+	out, err = withCompactFallbackInstructions(kept, "BASE")
+	require.NoError(t, err)
+	require.Equal(t, string(kept), string(out))
 }
 
 // 真实 Codex 的非 /responses 请求都不显式设 Accept，出站的是 reqwest 默认的 */*
