@@ -138,31 +138,37 @@ func TestNormalizeOpenAIResponsesReasoningMode(t *testing.T) {
 	}
 }
 
-func TestNormalizeOpenAIResponsesReasoningMode_AstraPreservesBody(t *testing.T) {
-	// GPT-6 Astra 保留官方 reasoning.mode 与 reasoning.effort 各自原样：
-	// 不删 mode、缺失 effort 也不补 max。非 Astra 的旧兼容行为不受影响。
+func TestNormalizeOpenAIResponsesReasoningMode_AstraAlignsWithCodex(t *testing.T) {
+	// 真实 Codex 对任何模型都不发 reasoning.mode：Astra 同样删 mode，pro 且缺 effort 时补 max。
 	tests := []struct {
-		name string
-		body string
+		name       string
+		body       string
+		wantEffort string
 	}{
-		{name: "pro + max preserved", body: `{"model":"gpt-6-astra","reasoning":{"mode":"pro","effort":"max"}}`},
-		{name: "standard + max preserved", body: `{"model":"gpt-6-astra","reasoning":{"mode":"standard","effort":"max"}}`},
-		{name: "missing mode + max preserved", body: `{"model":"gpt-6-astra","reasoning":{"effort":"max"}}`},
-		{name: "pro + explicit high preserved", body: `{"model":"gpt-6-astra","reasoning":{"mode":"pro","effort":"high"}}`},
-		{name: "pro without effort does not inject max", body: `{"model":"gpt-6-astra","reasoning":{"mode":"pro"}}`},
+		{name: "pro + max", body: `{"model":"gpt-6-astra","reasoning":{"mode":"pro","effort":"max"}}`, wantEffort: "max"},
+		{name: "standard + max", body: `{"model":"gpt-6-astra","reasoning":{"mode":"standard","effort":"max"}}`, wantEffort: "max"},
+		{name: "pro + explicit high", body: `{"model":"gpt-6-astra","reasoning":{"mode":"pro","effort":"high"}}`, wantEffort: "high"},
+		{name: "pro without effort maps to max", body: `{"model":"gpt-6-astra","reasoning":{"mode":"pro"}}`, wantEffort: "max"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			normalized, changed, err := normalizeOpenAIResponsesReasoningMode([]byte(tt.body), "")
 			require.NoError(t, err)
-			require.False(t, changed)
-			require.JSONEq(t, tt.body, string(normalized))
+			require.True(t, changed)
+			require.False(t, gjson.GetBytes(normalized, "reasoning.mode").Exists())
+			require.Equal(t, tt.wantEffort, gjson.GetBytes(normalized, "reasoning.effort").String())
 		})
 	}
+
+	body := `{"model":"gpt-6-astra","reasoning":{"effort":"max"}}`
+	normalized, changed, err := normalizeOpenAIResponsesReasoningMode([]byte(body), "")
+	require.NoError(t, err)
+	require.False(t, changed)
+	require.JSONEq(t, body, string(normalized))
 }
 
 func TestNormalizeOpenAIResponsesReasoningMode_NonAstraKeepsLegacyBehavior(t *testing.T) {
-	// 确保 guard 只放过 Astra，非 Astra model 字段不影响既有 strip/pro->max 语义。
+	// model 字段不影响既有 strip/pro->max 语义。
 	tests := []struct {
 		name       string
 		body       string
@@ -182,21 +188,21 @@ func TestNormalizeOpenAIResponsesReasoningMode_NonAstraKeepsLegacyBehavior(t *te
 	}
 }
 
-func TestNormalizeOpenAIPassthroughOAuthBody_AstraPreservesReasoningMode(t *testing.T) {
+func TestNormalizeOpenAIPassthroughOAuthBody_AstraDropsReasoningMode(t *testing.T) {
 	body := []byte(`{"model":"gpt-6-astra","reasoning":{"mode":"pro","effort":"max"}}`)
 
 	normalized, _, err := normalizeOpenAIPassthroughOAuthBody(body, false)
 	require.NoError(t, err)
-	require.Equal(t, "pro", gjson.GetBytes(normalized, "reasoning.mode").String())
+	require.False(t, gjson.GetBytes(normalized, "reasoning.mode").Exists())
 	require.Equal(t, "max", gjson.GetBytes(normalized, "reasoning.effort").String())
 }
 
-func TestNormalizeOpenAIResponsesWebSocketCompatibilityBody_AstraPreservesReasoningMode(t *testing.T) {
+func TestNormalizeOpenAIResponsesWebSocketCompatibilityBody_AstraDropsReasoningMode(t *testing.T) {
 	body := []byte(`{"type":"response.create","model":"gpt-6-astra","reasoning":{"mode":"pro","effort":"max"}}`)
 	for _, accountType := range []string{AccountTypeOAuth, AccountTypeSetupToken} {
 		normalized, _, err := normalizeOpenAIResponsesWebSocketCompatibilityBody(body, &Account{Platform: PlatformOpenAI, Type: accountType}, false)
 		require.NoError(t, err)
-		require.Equal(t, "pro", gjson.GetBytes(normalized, "reasoning.mode").String())
+		require.False(t, gjson.GetBytes(normalized, "reasoning.mode").Exists())
 		require.Equal(t, "max", gjson.GetBytes(normalized, "reasoning.effort").String())
 	}
 }
