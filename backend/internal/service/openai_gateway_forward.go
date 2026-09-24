@@ -544,6 +544,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				IsCodexCLI:                          isCodexCLI,
 				IsCompact:                           isCompactRequest,
 				SkipDefaultInstructions:             realCodexLite,
+				PreserveUpstreamCallIDs:             isCodexCLI && deviceWireProfile,
 				OmitPromotedSystemMessagesFromInput: omitPromotedSystemMessages,
 			})
 		}
