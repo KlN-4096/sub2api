@@ -592,6 +592,8 @@ func buildCodexCommonHeaders(accessToken, chatGPTAccountID string, fedRAMP bool)
 		// User-Agent 构造函数（codex-rs backend-client/src/client.rs 的
 		// BackendClient::from_auth → get_codex_user_agent）。
 		"user-agent": CodexCanonicalUserAgent(),
+		// BackendClient 不设 Accept，出站是 reqwest 默认的 */*。
+		"accept": "*/*",
 	}
 	if fedRAMP {
 		headers["x-openai-fedramp"] = "true"

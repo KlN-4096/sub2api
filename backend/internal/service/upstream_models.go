@@ -1109,7 +1109,12 @@ func (s *AccountTestService) buildOpenAIOAuthUpstreamModelsRequest(ctx context.C
 	}
 
 	identity := resolveCodexOutboundIdentity(credentialAccount.GetOpenAIUserAgent())
-	req.Header.Set("Accept", "application/json")
+	// 双开与 /models 转发同形（*/*，见 buildCodexModelsManifestRequest），其余维持既有。
+	if codexDeviceWireProfileEnabledFor(account, credentialAccount) {
+		req.Header.Set("Accept", "*/*")
+	} else {
+		req.Header.Set("Accept", "application/json")
+	}
 	req.Header.Set("Originator", identity.originator)
 	req.Header.Set("User-Agent", identity.userAgent)
 	req.Header.Set("Version", identity.version)

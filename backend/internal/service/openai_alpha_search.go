@@ -406,7 +406,12 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchRequest(ctx context.Context
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	// 真客户端的 search 不设 Accept（reqwest 默认 */*）；双开照此，其余维持既有。
+	if codexDeviceWireProfileEnabled(c, account) {
+		req.Header.Set("Accept", "*/*")
+	} else {
+		req.Header.Set("Accept", "application/json")
+	}
 
 	// 口径与全仓一致用 UsesOpenAICodexProtocol（含 setup-token）。原先这里是孤例的
 	// `Type == AccountTypeOAuth`，而 openAIAlphaSearchURL 对 setup-token 返回的同样是

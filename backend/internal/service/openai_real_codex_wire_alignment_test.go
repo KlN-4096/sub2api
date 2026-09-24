@@ -75,6 +75,29 @@ func TestForwardRealCodexLiteOmitsInstructions(t *testing.T) {
 	}
 }
 
+// 真实 Codex 的非 /responses 请求都不显式设 Accept，出站的是 reqwest 默认的 */*
+// （backend-client 的 headers() 只放 UA/鉴权/账号/FedRAMP；search 与 models 同理）。
+func TestCodexSideRequestsAcceptMatchesRealClient(t *testing.T) {
+	require.Equal(t, "*/*", buildCodexCommonHeaders("t", "a", false)["accept"], "额度面（wham）")
+
+	body := []byte(`{"id":"session","model":"gpt-5.5","input":[]}`)
+	for _, tc := range []struct {
+		enabled bool
+		want    string
+	}{{true, "*/*"}, {false, "application/json"}} {
+		c := newConvTestContext(t, body)
+		c.Request.URL.Path = "/v1/alpha/search"
+		svc, _ := wireProfileTestService()
+		req, err := svc.buildOpenAIAlphaSearchRequest(context.Background(), c, wireProfileTestAccount(tc.enabled), body, "offline-token")
+		require.NoError(t, err)
+		require.Equal(t, tc.want, req.Header.Get("Accept"), "alpha/search enabled=%v", tc.enabled)
+
+		req, err = (&AccountTestService{}).buildOpenAIOAuthUpstreamModelsRequest(context.Background(), wireProfileTestAccount(tc.enabled))
+		require.NoError(t, err)
+		require.Equal(t, tc.want, req.Header.Get("Accept"), "管理端模型同步 enabled=%v", tc.enabled)
+	}
+}
+
 // 真实 Codex 原样回放上游签发的 call_*；第三方客户端与旧网关污染的其它前缀照旧归一成 fc_/ctc_。
 func TestForwardCodexCLIPreservesUpstreamCallIDs(t *testing.T) {
 	body, err := json.Marshal(map[string]any{
