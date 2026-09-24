@@ -132,8 +132,19 @@ func TestForwardRealCodexLiteCompactionFallbackKeepsInstructions(t *testing.T) {
 
 // 真实 Codex 的非 /responses 请求都不显式设 Accept，出站的是 reqwest 默认的 */*
 // （backend-client 的 headers() 只放 UA/鉴权/账号/FedRAMP；search 与 models 同理）。
+// 与其它对齐项一样只对双开账号，未双开的额度面字节不变（原先不带 Accept）。
 func TestCodexSideRequestsAcceptMatchesRealClient(t *testing.T) {
-	require.Equal(t, "*/*", buildCodexCommonHeaders("t", "a", false)["accept"], "额度面（wham）")
+	for _, tc := range []struct {
+		enabled bool
+		want    string
+	}{{true, "*/*"}, {false, ""}} {
+		account := wireProfileTestAccount(tc.enabled)
+		headers, _, err := (&OpenAIQuotaService{}).buildCodexQuotaHeaders(&openAIQuotaCall{
+			account: account, forwardedRow: account, accessToken: "t", chatGPTAccountID: "a",
+		})
+		require.NoError(t, err)
+		require.Equal(t, tc.want, headers["accept"], "额度面（wham）enabled=%v", tc.enabled)
+	}
 
 	body := []byte(`{"id":"session","model":"gpt-5.5","input":[]}`)
 	for _, tc := range []struct {

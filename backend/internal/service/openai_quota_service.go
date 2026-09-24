@@ -550,6 +550,10 @@ func (s *OpenAIQuotaService) loadQuotaCallSnapshot(ctx context.Context, accountI
 func (s *OpenAIQuotaService) buildCodexQuotaHeaders(call *openAIQuotaCall) (map[string]string, string, error) {
 	headers := buildCodexCommonHeaders(call.accessToken, call.chatGPTAccountID, call.fedRAMP)
 	account, forwardedRow := call.account, call.forwardedRow
+	if codexDeviceWireProfileEnabledFor(forwardedRow, account) {
+		// BackendClient 不设 Accept，出站是 reqwest 默认的 */*；未双开维持原来不带。
+		headers["accept"] = "*/*"
+	}
 	// 额度面与推理面自报同一个客户端。必须过 resolveCodexOutboundIdentity：推理面的 UA
 	// 版本段会被重建成生效版本，这里直接写账号原值的话，同一账号在 /responses 报生效版本、
 	// 在 /wham/usage 报管理员填的历史版本，两面反而对不上。
@@ -592,8 +596,6 @@ func buildCodexCommonHeaders(accessToken, chatGPTAccountID string, fedRAMP bool)
 		// User-Agent 构造函数（codex-rs backend-client/src/client.rs 的
 		// BackendClient::from_auth → get_codex_user_agent）。
 		"user-agent": CodexCanonicalUserAgent(),
-		// BackendClient 不设 Accept，出站是 reqwest 默认的 */*。
-		"accept": "*/*",
 	}
 	if fedRAMP {
 		headers["x-openai-fedramp"] = "true"
