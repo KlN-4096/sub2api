@@ -3,10 +3,15 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // realCodexLiteRequestBody 按真实 Codex 0.155+ 的 Lite 形状造请求：不发 instructions，
@@ -35,28 +40,56 @@ func realCodexLiteRequestBody(t *testing.T, model string) []byte {
 
 func TestForwardRealCodexLiteOmitsInstructions(t *testing.T) {
 	cases := []struct {
-		name             string
-		lite             bool
-		compact          bool
-		noWireProfile    bool
-		mapping          map[string]any
-		wantInstructions bool
+		name                string
+		model               string
+		clientModel         string // handler 在渠道映射之前记下的客户端原始模型
+		lite                bool
+		compact             bool
+		thirdParty          bool
+		dropAdditionalTools bool
+		noWireProfile       bool
+		mapping             map[string]any
+		wantInstructions    bool
 	}{
 		{name: "real lite", lite: true},
+		{name: "real lite with client model recorded", clientModel: "gpt-6-astra", lite: true},
 		{name: "no lite header", wantInstructions: true},
+		{name: "lite gpt-5.5 requested directly", model: "gpt-5.5", lite: true, wantInstructions: true},
 		{name: "lite mapped to gpt-5.5", lite: true, mapping: map[string]any{"gpt-6-astra": "gpt-5.5"}, wantInstructions: true},
+		{name: "lite mapped to another model", lite: true, mapping: map[string]any{"gpt-6-astra": "gpt-5.4"}, wantInstructions: true},
+		{name: "lite channel mapped", clientModel: "gpt-6-sol", lite: true, wantInstructions: true},
 		{name: "lite compact", lite: true, compact: true, wantInstructions: true},
+		{name: "lite third party", lite: true, thirdParty: true, wantInstructions: true},
+		{name: "lite without additional_tools first", lite: true, dropAdditionalTools: true, wantInstructions: true},
 		{name: "lite without wire profile", lite: true, noWireProfile: true, wantInstructions: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			body := realCodexLiteRequestBody(t, "gpt-6-astra")
+			model := tc.model
+			if model == "" {
+				model = "gpt-6-astra"
+			}
+			body := realCodexLiteRequestBody(t, model)
+			basePromptPath := "input.1.content.0.text"
+			if tc.dropAdditionalTools {
+				var err error
+				body, err = sjson.DeleteBytes(body, "input.0")
+				require.NoError(t, err)
+				basePromptPath = "input.0.content.0.text"
+			}
 			c := newConvTestContext(t, body)
 			if tc.lite {
 				c.Request.Header.Set(responsesLiteHeader, "true")
 			}
 			if tc.compact {
 				c.Request.URL.Path = "/v1/responses/compact"
+			}
+			if tc.thirdParty {
+				c.Request.Header.Set("User-Agent", "OpenAI/Python 1.99.0")
+				c.Request.Header.Del("originator")
+			}
+			if tc.clientModel != "" {
+				c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), ctxkey.Model, tc.clientModel))
 			}
 			account := wireProfileTestAccount(!tc.noWireProfile)
 			if tc.mapping != nil {
@@ -67,12 +100,34 @@ func TestForwardRealCodexLiteOmitsInstructions(t *testing.T) {
 			require.NotNil(t, up.lastReq)
 			out := up.lastBody
 			require.Equal(t, tc.wantInstructions, gjson.GetBytes(out, "instructions").Exists(), string(out))
-			require.Equal(t, "OFFLINE BASE PROMPT", gjson.GetBytes(out, "input.1.content.0.text").String())
+			require.Equal(t, "OFFLINE BASE PROMPT", gjson.GetBytes(out, basePromptPath).String())
 			if !tc.wantInstructions {
 				require.Equal(t, "true", up.lastReq.Header.Get(responsesLiteHeader))
 			}
 		})
 	}
+}
+
+// 原生 v2 压缩回合（普通 /responses + compaction_trigger，形状与普通 Lite 轮次相同）上游报
+// 上下文超限时会换兜底模型重试；兜底落到 gpt-5.5 时出站摘掉 Lite 头，重试体必须仍带 instructions。
+func TestForwardRealCodexLiteCompactionFallbackKeepsInstructions(t *testing.T) {
+	body, err := sjson.SetRawBytes(realCodexLiteRequestBody(t, "gpt-6-astra"), "input.-1", []byte(`{"type":"compaction_trigger"}`))
+	require.NoError(t, err)
+	c := newConvTestContext(t, body)
+	c.Request.Header.Set(responsesLiteHeader, "true")
+	MarkOpenAINativeCompactionV2(c)
+	svc, up := wireProfileTestService()
+	svc.cfg.Gateway.OpenAICompactModel = "gpt-5.5"
+	up.responses = []*http.Response{{
+		StatusCode: http.StatusBadRequest,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"context_length_exceeded","message":"context window exceeded"}}`)),
+	}}
+	_, _ = svc.Forward(context.Background(), c, wireProfileTestAccount(true), body)
+	require.Len(t, up.bodies, 2)
+	require.Equal(t, "gpt-5.5", gjson.GetBytes(up.bodies[1], "model").String())
+	require.Empty(t, up.requests[1].Header.Get(responsesLiteHeader))
+	require.True(t, gjson.GetBytes(up.bodies[1], "instructions").Exists(), string(up.bodies[1]))
 }
 
 // 真实 Codex 的非 /responses 请求都不显式设 Accept，出站的是 reqwest 默认的 */*
