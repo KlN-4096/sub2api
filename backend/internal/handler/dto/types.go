@@ -699,6 +699,9 @@ type AdminUsageLog struct {
 	TurnStateSource *string `json:"turn_state_source,omitempty"`
 	// TurnStateSent 是本次出站实际带的 turn-state（回带或注入）。
 	TurnStateSent *string `json:"turn_state_sent,omitempty"`
+	// SafetyBufferingEnabled / SafetyBufferingFasterModel 是上游响应头 x-codex-safety-buffering-* 的读数。
+	SafetyBufferingEnabled     *bool   `json:"safety_buffering_enabled,omitempty"`
+	SafetyBufferingFasterModel *string `json:"safety_buffering_faster_model,omitempty"`
 	// BillingTier 计费层级标签（per_request/image 模式）
 	BillingTier *string `json:"billing_tier,omitempty"`
 

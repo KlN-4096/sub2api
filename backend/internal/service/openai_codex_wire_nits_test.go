@@ -13,18 +13,6 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// headerValuesFold 忽略 casing 收集同名头：覆写按 wire casing 直接写 map，
-// 未知头名原样保持小写（resolveWireCasing），http.Header.Get 按 canonical key 查会漏掉。
-func headerValuesFold(h http.Header, name string) []string {
-	var out []string
-	for key, values := range h {
-		if strings.EqualFold(key, name) {
-			out = append(out, values...)
-		}
-	}
-	return out
-}
-
 // 账号级请求头覆写不得伪造 content-encoding：双开的体是网关压出来的 zstd，
 // 静态覆写必然与实际字节不符。OpenAI 平台只有 api_key 账号能开覆写，用它构造。
 func TestHeaderOverrideCannotForgeContentEncoding(t *testing.T) {
