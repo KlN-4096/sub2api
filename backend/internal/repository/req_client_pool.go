@@ -3,17 +3,15 @@ package repository
 import (
 	"fmt"
 	"net/http"
-	"net/http/cookiejar"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/chatgptcookies"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
 
 	"github.com/imroc/req/v3"
-	"golang.org/x/net/publicsuffix"
 )
 
 // reqClientOptions 定义 req 客户端的构建参数
@@ -116,64 +114,26 @@ func buildReqClientKey(opts reqClientOptions) string {
 	return key
 }
 
-// chatgptCloudflareCookieJar 照真实 Codex（http-client/src/chatgpt_cloudflare_cookies.rs 与
-// chatgpt_hosts.rs）：只在 https 的 ChatGPT 主机上存取 Cloudflare 类 cookie，其余一律不存不发。
-type chatgptCloudflareCookieJar struct{ inner *cookiejar.Jar }
-
+// newChatGPTCloudflareCookieJar 照真实 Codex：只在 https 的 ChatGPT 主机上存取 Cloudflare 类与
+// __oailb 路由 cookie，其余一律不存不发。过滤逻辑与推理面共用（internal/pkg/chatgptcookies）。
 func newChatGPTCloudflareCookieJar() http.CookieJar {
-	inner, _ := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
-	return &chatgptCloudflareCookieJar{inner: inner}
-}
-
-func (j *chatgptCloudflareCookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
-	if !isChatGPTCookieURL(u) {
-		return
-	}
-	var kept []*http.Cookie
-	for _, cookie := range cookies {
-		if isCloudflareCookieName(cookie.Name) {
-			kept = append(kept, cookie)
-		}
-	}
-	j.inner.SetCookies(u, kept)
-}
-
-func (j *chatgptCloudflareCookieJar) Cookies(u *url.URL) []*http.Cookie {
-	if !isChatGPTCookieURL(u) {
-		return nil
-	}
-	return j.inner.Cookies(u)
-}
-
-func isChatGPTCookieURL(u *url.URL) bool {
-	if u == nil || u.Scheme != "https" {
-		return false
-	}
-	switch host := strings.ToLower(u.Hostname()); host {
-	case "chatgpt.com", "chat.openai.com", "chatgpt-staging.com":
-		return true
-	default:
-		return strings.HasSuffix(host, ".chatgpt.com") || strings.HasSuffix(host, ".chatgpt-staging.com")
-	}
-}
-
-func isCloudflareCookieName(name string) bool {
-	switch name {
-	case "__cf_bm", "__cflb", "__cfruid", "__cfseq", "__cfwaitingroom", "__oailb", "_cfuvid", "cf_clearance", "cf_ob_info", "cf_use_ob":
-		return true
-	default:
-		return strings.HasPrefix(name, "cf_chl_")
-	}
+	return chatgptcookies.NewJar()
 }
 
 // CreatePrivacyReqClient creates an HTTP client for OpenAI privacy settings API
 // This is exported for use by OpenAIPrivacyService
-// Uses Chrome TLS fingerprint impersonation to bypass Cloudflare checks
+// Uses Firefox TLS fingerprint impersonation to bypass Cloudflare checks.
+//
+// Cookie 罐与额度面同一套白名单：req 默认的内存罐会把 accounts/check、subscriptions、
+// 隐私设置这些 backend-api 响应里的全部 cookie 都存下并在同代理的账号间互带；只留
+// Cloudflare 类 cookie 即可维持 Cloudflare 放行（cf_clearance / __cf_bm 都在白名单里），
+// 其它登录态 cookie 对 Bearer 鉴权的调用本就没有用处。
 func CreatePrivacyReqClient(proxyURL string) (*req.Client, error) {
 	return getSharedReqClient(reqClientOptions{
 		ProxyURL:    proxyURL,
 		Timeout:     30 * time.Second,
 		Impersonate: true, // Enable browser TLS fingerprint impersonation (Firefox, see getSharedReqClient)
+		Cookies:     reqCookiesChatGPTCloudflare,
 	})
 }
 

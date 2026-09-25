@@ -484,14 +484,16 @@ type OpenAIGatewayService struct {
 	liveAttestation       liveattestation.Provider
 	liveAttestationCipher SecretEncryptor
 
-	openaiWSPoolOnce               sync.Once
-	openaiWSStateStoreOnce         sync.Once
-	openaiSchedulerOnce            sync.Once
-	openaiProxyStreamCircuitOnce   sync.Once
-	openaiWSPassthroughDialerOnce  sync.Once
-	openaiModelTransientOnce       sync.Once
-	agentIdentityTaskMu            sync.Mutex
-	openaiWSPool                   *openAIWSConnPool
+	openaiWSPoolOnce              sync.Once
+	openaiWSStateStoreOnce        sync.Once
+	openaiSchedulerOnce           sync.Once
+	openaiProxyStreamCircuitOnce  sync.Once
+	openaiWSPassthroughDialerOnce sync.Once
+	openaiModelTransientOnce      sync.Once
+	agentIdentityTaskMu           sync.Mutex
+	openaiWSPool                  *openAIWSConnPool
+	// codexCookies：推理面按账号隔离的 ChatGPT cookie 罐（openai_codex_cookies.go），HTTP 与 WS 握手共用。
+	codexCookies                   openAICodexCookieStore
 	openaiWSStateStore             OpenAIWSStateStore
 	openaiScheduler                OpenAIAccountScheduler
 	openaiWSPassthroughDialer      openAIWSClientDialer
