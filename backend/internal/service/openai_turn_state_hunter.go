@@ -62,7 +62,11 @@ const (
 	openAITurnStateHunterInterval      = 60 * time.Second
 	openAITurnStateHuntProbeTimeout    = 60 * time.Second
 	openAITurnStateHuntErrorPeekBytes  = 1024
-	openAITurnStateHuntLastKeep        = 10
+	// openAITurnStateHuntProbeText 是猎手探测的用户消息：头到手即断，内容只要能触发一次生成。
+	openAITurnStateHuntProbeText = "hi"
+	// openAITurnStateProbeBillTimeout 是探测记账（读 key、扣费事务、用量行）自己的上限，与探测预算分开。
+	openAITurnStateProbeBillTimeout = 30 * time.Second
+	openAITurnStateHuntLastKeep     = 10
 	// 同一个出口 IP 铸出 312 之后 7 天内不再探（用户 2026-09-18 定的口径）：铸什么由
 	// 「账号权重 × 出口」定，出口权重不会几小时就变，再试同一个出口就是白付额度。
 	// 只对固定出口有意义，轮换端点选不了出口。
@@ -268,11 +272,14 @@ type openAITurnStateHuntAttempt struct {
 	Status  int       `json:"status"`
 	Chars   int       `json:"chars"`
 	Healthy bool      `json:"healthy"`
-	// LatencyMs 是响应头到手的耗时（实测 0.5–2.3s）：探测在这一刻就断，后面不再计时。
+	// LatencyMs 是响应头到手的耗时（实测 0.5–2.3s）：猎手探测在这一刻就断，后面不再计时。
+	// 恢复探测要读完回答，它的 LatencyMs 是到读完为止。
 	LatencyMs int64 `json:"latency_ms"`
 	// Exit 是探测前解析到的出口 IP，只有固定出口有；轮换端点由供应商按连接选出口，为空。
-	Exit  string `json:"exit,omitempty"`
-	Error string `json:"error,omitempty"`
+	Exit string `json:"exit,omitempty"`
+	// Answer 是恢复探测读到的模型回答（糖果题，期望 "21"）；猎手探测头到手即断，没有。
+	Answer string `json:"answer,omitempty"`
+	Error  string `json:"error,omitempty"`
 	// transport 标记错误发生在代理/传输层（请求已发出但没拿到响应）：请求多半没到上游，
 	// 不计小时额度。不落库。
 	transport bool
@@ -582,7 +589,7 @@ func (s *OpenAITurnStateHunterService) runOnce(ctx context.Context) {
 		return
 	}
 	var sessions []*openAITurnStateHuntSession
-	// 恢复探测每个 tick 最多做一个账号：它会真的发一条请求（最长 60 秒），而这一段的预算是留给
+	// 恢复探测每个 tick 最多做一个账号：它会真的发一条请求并读完回答（最长 3 分钟），而这一段的预算是留给
 	// 猎手的。间隔 30–90 分钟、tick 一分钟一次，几十个账号也轮得过来（第一轮评审 S4）。
 	recoveryDone := false
 	for i := range accounts {
@@ -1060,16 +1067,22 @@ func (s *OpenAITurnStateHunterService) probe(ctx context.Context, account *Accou
 	// HTTP/2 隧道，不关连接就一直从同一个出口发。closeConn 让 http2 把这条连接标成
 	// doNotReuse（用完即关、下一条重新 CONNECT），HTTP/1.1 则响应后直接关；H2 上不会多发
 	// 任何头。固定出口也这么做，探测不留长连接。
-	s.doProbe(ctx, account, &egress, proxyURL, true, model, cfg, &attempt)
+	s.doProbe(ctx, account, &egress, proxyURL, true, model, cfg, openAITurnStateHuntProbeText, false, &attempt)
 	return attempt
 }
 
 // doProbe 是两种探测共用的发送与判定：猎手换出口探（probe），恢复探测走账号自己的出口
-// （probeOwnExit）。egress 是已设好出口的账号副本，account 是入池/记账用的原账号。
-func (s *OpenAITurnStateHunterService) doProbe(ctx context.Context, account, egress *Account, proxyURL string, closeConn bool, model string, cfg openAITurnStateHunterConfig, attempt *openAITurnStateHuntAttempt) {
-	probeCtx, cancel := context.WithTimeout(ctx, openAITurnStateHuntProbeTimeout)
+// （probeOwnExit）。egress 是已设好出口的账号副本，account 是入池/记账用的原账号。text 是
+// 用户消息；readAnswer=true（恢复探测）读完整个 SSE 体、按回答判健康、用上游真实用量记账，
+// false（猎手）头到手即断、按 turn-state 长度判。
+func (s *OpenAITurnStateHunterService) doProbe(ctx context.Context, account, egress *Account, proxyURL string, closeConn bool, model string, cfg openAITurnStateHunterConfig, text string, readAnswer bool, attempt *openAITurnStateHuntAttempt) {
+	timeout := openAITurnStateHuntProbeTimeout
+	if readAnswer {
+		timeout = openAITurnStateRecoveryProbeTimeout
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	c, req, err := s.gateway.buildOpenAITurnStateProbe(probeCtx, egress, model, cfg.ReasoningEffort)
+	c, req, err := s.gateway.buildOpenAITurnStateProbe(probeCtx, egress, model, cfg.ReasoningEffort, text)
 	if err != nil {
 		attempt.Error = "build probe: " + sanitizeUpstreamErrorMessage(err.Error())
 		attempt.preflight = true
@@ -1096,21 +1109,45 @@ func (s *OpenAITurnStateHunterService) doProbe(ctx context.Context, account, egr
 		}
 		return
 	}
-	// 头到手即断：不读 SSE。提前关体让 HTTP/2 发 RST_STREAM（req.Close 的连接随之关掉），
-	// 上游立刻停止生成——必须排在下面的入池读写库**之前**，数据库慢的时候不能让上游多
-	// 生成一秒。cancel 留给 defer：c 的请求上下文就是 probeCtx，入池还要用它读写库。
-	_ = resp.Body.Close()
+	var usage *OpenAIUsage
+	if readAnswer {
+		// 恢复探测要的是回答本身：读完整个流（有上限），耗时算到读完为止。
+		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, openAITurnStateRecoveryReadLimit))
+		attempt.LatencyMs = time.Since(started).Milliseconds()
+		_ = resp.Body.Close()
+		if readErr != nil {
+			attempt.Error = "read answer: " + sanitizeUpstreamErrorMessage(readErr.Error())
+		} else if answer, got, ok := openAITurnStateRecoveryAnswer(raw); !ok {
+			attempt.Error = "no completed response"
+		} else {
+			attempt.Answer = answer
+			attempt.Healthy = answer == openAITurnStateRecoveryExpectedAnswer
+			usage = got
+		}
+	} else {
+		// 头到手即断：不读 SSE。提前关体让 HTTP/2 发 RST_STREAM（req.Close 的连接随之关掉），
+		// 上游立刻停止生成——必须排在下面的入池读写库**之前**，数据库慢的时候不能让上游多
+		// 生成一秒。cancel 留给 defer：c 的请求上下文就是 probeCtx，入池还要用它读写库。
+		_ = resp.Body.Close()
+	}
 	// 200 就是一次计费请求，不管铸没铸出 turn-state。排在入池之后：记账是一串读写库
-	//（GetByID、倍率、扣费事务、用量行），DB 慢的时候不能让猎到的票晚入池；用 probeCtx 给它
-	// 同一个 60 秒上限，别吃掉整轮预算。
-	defer s.recordProbeUsage(probeCtx, account, cfg, c, req, resp.Header, attempt)
+	//（GetByID、倍率、扣费事务、用量行），DB 慢的时候不能让猎到的票晚入池。记账不能挂在
+	// probeCtx 上：恢复探测读回答可能把 3 分钟花光，ctx 一到期这笔真实发生的请求就 0 计费
+	//（第二轮评审 S3）；给它自己的 30 秒。
+	billCtx, cancelBill := context.WithTimeout(context.WithoutCancel(probeCtx), openAITurnStateProbeBillTimeout)
+	defer cancelBill()
+	defer s.recordProbeUsage(billCtx, account, cfg, c, req, resp.Header, attempt, usage, text)
 	blob := extractOpenAICodexTurnState(resp.Header)
 	if blob == "" {
-		attempt.Error = "no turn-state in response"
+		if !readAnswer {
+			attempt.Error = "no turn-state in response"
+		}
 		return
 	}
 	attempt.Chars = len(blob)
-	attempt.Healthy = openAITurnStateHealthy(blob)
+	if !readAnswer {
+		attempt.Healthy = openAITurnStateHealthy(blob)
+	}
 	// 与真实响应同一个入口：记铸造者、写形态观测、健康则入池。传原账号而不是出口副本，
 	// 池子按账号 ID 读写，两者本来相同，这里只是不让副本流出去。
 	s.gateway.relayOpenAICodexTurnState(c, account, resp.Header)
@@ -1119,11 +1156,12 @@ func (s *OpenAITurnStateHunterService) doProbe(ctx context.Context, account, egr
 // recordProbeUsage 把一次 200 探测按标准用量路径落一行，挂在配置的 API Key 下走正常计费
 // （余额/额度/倍率与人工流量同一套），request_type=probe 与人工流量区分。
 //
-// 探测头到手即断，上游不会发 usage 事件：输入 token 用本地 tiktoken 估算（含该模型的
+// 猎手探测头到手即断，上游不会发 usage 事件：输入 token 用本地 tiktoken 估算（含该模型的
 // base prompt，与 /responses/input_tokens 的本地回退同一个估算器），输出恒 0——上游在
-// RST_STREAM 前生成了多少无从得知，金额因此是输入侧估算值。请求 ID 用上游 x-request-id
-// （计费幂等键要求每次探测唯一），没有就自造。
-func (s *OpenAITurnStateHunterService) recordProbeUsage(ctx context.Context, account *Account, cfg openAITurnStateHunterConfig, c *gin.Context, req *http.Request, upstream http.Header, attempt *openAITurnStateHuntAttempt) {
+// RST_STREAM 前生成了多少无从得知，金额因此是输入侧估算值。恢复探测读完了流，usage 非 nil
+// 时按上游 response.completed 里的真实用量记。请求 ID 用上游 x-request-id（计费幂等键要求
+// 每次探测唯一），没有就自造。
+func (s *OpenAITurnStateHunterService) recordProbeUsage(ctx context.Context, account *Account, cfg openAITurnStateHunterConfig, c *gin.Context, req *http.Request, upstream http.Header, attempt *openAITurnStateHuntAttempt, usage *OpenAIUsage, text string) {
 	if s == nil || s.apiKeys == nil || s.recordUsage == nil || cfg.UsageAPIKeyID <= 0 || account == nil || req == nil || attempt == nil {
 		return
 	}
@@ -1155,11 +1193,15 @@ func (s *OpenAITurnStateHunterService) recordProbeUsage(ctx context.Context, acc
 	if c != nil && c.Request != nil {
 		sessionID = c.Request.Header.Get("session-id")
 	}
+	billed := OpenAIUsage{InputTokens: openAITurnStateProbeInputTokens(attempt.Model, effort, text)}
+	if usage != nil {
+		billed = *usage
+	}
 	input := &OpenAIRecordUsageInput{
 		Result: &OpenAIForwardResult{
 			RequestID:        requestID,
 			UpstreamHeaders:  upstream,
-			Usage:            OpenAIUsage{InputTokens: openAITurnStateProbeInputTokens(attempt.Model, effort)},
+			Usage:            billed,
 			Model:            attempt.Model,
 			UpstreamEndpoint: endpoint,
 			ReasoningEffort:  &effort,
@@ -1184,10 +1226,10 @@ func (s *OpenAITurnStateHunterService) recordProbeUsage(ctx context.Context, acc
 }
 
 // openAITurnStateProbeInputTokens 估算探测体的输入 token。探测体只有 instructions（base
-// prompt）+ 一条 "hi" + 空工具表，身份字段不计数，所以用零值身份即可。估不出来记 1：
+// prompt）+ 一条用户消息 + 空工具表，身份字段不计数，所以用零值身份即可。估不出来记 1：
 // 与 input_tokens 端点的本地回退同一个下限，行仍然要落（它确实发生了）。
-func openAITurnStateProbeInputTokens(model, effort string) int {
-	raw, err := json.Marshal(openAITurnStateProbeBody(model, effort, openAITurnStateProbeIdentity{}))
+func openAITurnStateProbeInputTokens(model, effort, text string) int {
+	raw, err := json.Marshal(openAITurnStateProbeBody(model, effort, openAITurnStateProbeIdentity{}, text))
 	if err != nil {
 		return openAIInputTokensFallbackMinimum
 	}
@@ -1303,28 +1345,6 @@ func (s *OpenAIGatewayService) openAITurnStateTrafficModels(a *Account, since ti
 	return out
 }
 
-// openAITurnStateLatestTrafficModel 取窗口内最近一次真实流量的模型（同一套资格筛：画图与
-// 从不铸票的模型排除）。恢复探测据此在没填模型时决定探哪个。
-func (s *OpenAIGatewayService) openAITurnStateLatestTrafficModel(a *Account, since time.Time) string {
-	if s == nil || a == nil {
-		return ""
-	}
-	prefix := openAITurnStateTrafficKey(a.ID, "")
-	var best openAITurnStateTrafficMark
-	s.openaiTurnStateTraffic.Range(func(key, value any) bool {
-		k, _ := key.(string)
-		mark, ok := value.(openAITurnStateTrafficMark)
-		if !ok || !strings.HasPrefix(k, prefix) || (!since.IsZero() && !mark.at.After(since)) || !s.openAITurnStateAutoHuntable(a, mark.model) {
-			return true
-		}
-		if best.model == "" || mark.at.After(best.at) {
-			best = mark
-		}
-		return true
-	})
-	return best.model
-}
-
 func containsFold(list []string, want string) bool {
 	for _, item := range list {
 		if strings.EqualFold(strings.TrimSpace(item), want) {
@@ -1413,16 +1433,16 @@ func newOpenAITurnStateProbeContext(ids openAITurnStateProbeIdentity) *gin.Conte
 	return c
 }
 
-// openAITurnStateProbeBody 是最小的第一回合请求体：字段集照真实 Codex CLI，内容只有
-// 一个 "hi"。instructions 用该模型的真实 base prompt（与真客户端一致；头到手即断，
-// 成本只有这段输入的 token）。
-func openAITurnStateProbeBody(model, effort string, ids openAITurnStateProbeIdentity) map[string]any {
+// openAITurnStateProbeBody 是最小的第一回合请求体：字段集照真实 Codex CLI，内容只有一条
+// 用户消息（猎手是 "hi"，恢复探测是糖果题）。instructions 用该模型的真实 base prompt（与真
+// 客户端一致；猎手头到手即断，成本只有这段输入的 token）。
+func openAITurnStateProbeBody(model, effort string, ids openAITurnStateProbeIdentity, text string) map[string]any {
 	return map[string]any{
 		"model":        model,
 		"instructions": openai.CodexBaseInstructionsForModel(model),
 		"input": []any{map[string]any{
 			"type": "message", "role": "user",
-			"content": []any{map[string]any{"type": "input_text", "text": "hi"}},
+			"content": []any{map[string]any{"type": "input_text", "text": text}},
 		}},
 		"tools":               []any{},
 		"tool_choice":         "auto",
@@ -1455,7 +1475,7 @@ func openAITurnStateProbeBody(model, effort string, ids openAITurnStateProbeIden
 // Connection: close 头，H2 路径没有这条差异；探测直接走 httpUpstream，不经插件路径——
 // 装了接管 oauth 出站的插件时，探测与真实流量的传输层/TLS 指纹不同（插件协议不带
 // req.Close，走插件就换不了出口，两害取其轻）。
-func (s *OpenAIGatewayService) buildOpenAITurnStateProbe(ctx context.Context, account *Account, model, effort string) (*gin.Context, *http.Request, error) {
+func (s *OpenAIGatewayService) buildOpenAITurnStateProbe(ctx context.Context, account *Account, model, effort, text string) (*gin.Context, *http.Request, error) {
 	if s == nil || account == nil {
 		return nil, nil, errors.New("turn-state probe: gateway or account is nil")
 	}
@@ -1468,7 +1488,7 @@ func (s *OpenAIGatewayService) buildOpenAITurnStateProbe(ctx context.Context, ac
 	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
 		return nil, nil, err
 	}
-	decoded := openAITurnStateProbeBody(model, effort, ids)
+	decoded := openAITurnStateProbeBody(model, effort, ids, text)
 	result := applyCodexOAuthTransformWithOptions(decoded, codexOAuthTransformOptions{IsCodexCLI: true})
 	if result.Error != nil {
 		return nil, nil, result.Error

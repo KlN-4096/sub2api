@@ -2719,6 +2719,18 @@
                 <input v-model.number="openAITurnStateRecovery.streak_target" type="number" min="1" max="50" placeholder="5" class="input text-xs" />
               </div>
               <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateRecoverySuccess') }}</label>
+                <input
+                  v-model.number="openAITurnStateRecovery.success_target"
+                  type="number"
+                  min="1"
+                  max="50"
+                  placeholder="4"
+                  class="input text-xs"
+                  data-testid="edit-openai-turn-state-recovery-success"
+                />
+              </div>
+              <div>
                 <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateRecoveryCooldown') }}</label>
                 <input v-model.number="openAITurnStateRecovery.cooldown_hours" type="number" min="1" max="168" placeholder="16" class="input text-xs" />
               </div>
@@ -2745,7 +2757,7 @@
               <div>
                 <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterEffort') }}</label>
                 <select v-model="openAITurnStateRecovery.reasoning_effort" class="input text-xs" data-testid="edit-openai-turn-state-recovery-effort">
-                  <option value="">{{ t('admin.accounts.openai.turnStateHunterEffortDefault') }}</option>
+                  <option value="">{{ t('admin.accounts.openai.turnStateRecoveryEffortDefault') }}</option>
                   <option v-for="e in turnStateHunterEfforts" :key="e" :value="e">{{ e }}</option>
                 </select>
               </div>
@@ -4179,13 +4191,17 @@ interface TurnStateHunterConfig {
   /** 探测记账用的 API Key ID：每次 200 探测按标准用量路径落一行；空 = 不记。 */
   usage_api_key_id: number | null
 }
-// 降智恢复探测（extra.openai_turn_state_recovery）：走账号**自己的出口**、间隔随机，连续
-// streak_target 次 292 判定恢复并打标记；连续同样多次失败进 cooldown_hours 冷却。只标记，不改配置。
+// 降智恢复探测（extra.openai_turn_state_recovery）：走账号**自己的出口**、间隔随机，每次出一道
+// 糖果题，最近 streak_target 次里答对 success_target 次判定恢复并打标记；连续 streak_target 次
+// 失败进 cooldown_hours 冷却。只标记，不改配置。
 interface TurnStateRecoveryConfig {
   enabled: boolean
-  /** 探哪个模型；留空 = 最近有真实流量的那个。 */
+  /** 探哪个模型；留空 = gpt-5.6-sol。 */
   model: string
+  /** 判定窗口（总次数）。 */
   streak_target: number | null
+  /** 窗口内需要答对的次数。 */
+  success_target: number | null
   min_minutes: number | null
   max_minutes: number | null
   cooldown_hours: number | null
@@ -4197,6 +4213,7 @@ const emptyTurnStateRecovery = (): TurnStateRecoveryConfig => ({
   enabled: false,
   model: '',
   streak_target: null,
+  success_target: null,
   min_minutes: null,
   max_minutes: null,
   cooldown_hours: null,
@@ -4212,6 +4229,7 @@ const readOpenAITurnStateRecovery = (extra: unknown): TurnStateRecoveryConfig =>
   cfg.model = typeof table.model === 'string' ? table.model : ''
   const int = (key: string) => (typeof table[key] === 'number' ? (table[key] as number) : null)
   cfg.streak_target = int('streak_target')
+  cfg.success_target = int('success_target')
   cfg.min_minutes = int('min_minutes')
   cfg.max_minutes = int('max_minutes')
   cfg.cooldown_hours = int('cooldown_hours')
@@ -4226,6 +4244,7 @@ const normalizeTurnStateRecovery = (cfg: TurnStateRecoveryConfig): Record<string
   if (model) out.model = model
   const numeric: Array<[string, number | null]> = [
     ['streak_target', cfg.streak_target],
+    ['success_target', cfg.success_target],
     ['min_minutes', cfg.min_minutes],
     ['max_minutes', cfg.max_minutes],
     ['cooldown_hours', cfg.cooldown_hours],

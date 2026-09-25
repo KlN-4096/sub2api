@@ -481,40 +481,65 @@ describe('AccountTurnStateCell', () => {
     expect(bar.text()).toBe('50')
     expect(bar.attributes('data-resets')).toBe(new Date((nowSec - 300 + 600) * 1000).toISOString())
   })
-  // 降智恢复探测：独立于猎手的一行。连胜进度 / 冷却 / 已恢复三态，关着时整行不渲染。
+  // 降智恢复探测：独立于猎手的一行。答题进度 / 冷却 / 已恢复三态，关着时整行不渲染。
   describe('降智恢复探测行', () => {
     const isoIn = (sec: number) => new Date((nowSec + sec) * 1000).toISOString()
 
-    it('攒连胜时显示进度与下次窗口', () => {
+    it('攒答对次数时显示 答对/窗口（需几次）与下次窗口', () => {
       const w = render(
         account([], {
           openai_turn_state_recovery: { enabled: true },
           openai_turn_state_recovery_state: {
-            streak: 3,
+            results: [true, false, true, true],
             next_at: isoIn(1800),
-            last: [{ at: isoAgo(60), model: 'gpt-6-astra', proxy: 'cox', status: 200, chars: 292, healthy: true }]
+            last: [{ at: isoAgo(60), model: 'gpt-5.6-sol', proxy: 'cox', status: 200, chars: 292, healthy: true, answer: '21' }]
           }
         })
       )
       const line = w.get('[data-testid="account-turn-state-recovery"]')
       expect(line.text()).toContain('recoverySummary')
-      expect(line.text()).toContain('"streak":3')
-      expect(line.text()).toContain('"target":5')
+      expect(line.text()).toContain('"successes":3')
+      expect(line.text()).toContain('"success":4')
+      expect(line.text()).toContain('"window":5')
       expect(line.text()).toContain('hunterNext')
       expect(line.classes()).not.toContain('text-emerald-600')
-      expect(line.attributes('title')).toContain('hunterResultHit')
+      expect(line.attributes('title')).toContain('recoveryDetail')
+      expect(line.attributes('title')).toContain('recoveryResultHit')
+      // t 的 mock 会把嵌套的参数再 JSON.stringify 一次，引号被转义。
+      expect(line.attributes('title')).toContain('answer')
+      expect(line.attributes('title')).toContain('21')
+    })
+
+    it('答错的探测在 tooltip 里写出回答，票长不再是判据', () => {
+      const w = render(
+        account([], {
+          openai_turn_state_recovery: { enabled: true },
+          openai_turn_state_recovery_state: {
+            results: [false],
+            next_at: isoIn(1800),
+            last: [{ at: isoAgo(60), model: 'gpt-5.6-sol', proxy: 'cox', status: 200, chars: 292, healthy: false, answer: '29' }]
+          }
+        })
+      )
+      const line = w.get('[data-testid="account-turn-state-recovery"]')
+      expect(line.text()).toContain('"successes":0')
+      expect(line.attributes('title')).toContain('recoveryResultMiss')
+      expect(line.attributes('title')).toContain('answer')
+      expect(line.attributes('title')).toContain('29')
+      expect(line.attributes('title')).not.toContain('hunterResult')
     })
 
     it('冷却中显示冷却到点，而不是下次窗口', () => {
       const w = render(
         account([], {
           openai_turn_state_recovery: { enabled: true, streak_target: 3 },
-          openai_turn_state_recovery_state: { streak: 0, fail_streak: 0, cooling_until: isoIn(3600), next_at: isoIn(3600) }
+          openai_turn_state_recovery_state: { fail_streak: 0, cooling_until: isoIn(3600), next_at: isoIn(3600) }
         })
       )
       const line = w.get('[data-testid="account-turn-state-recovery"]')
       expect(line.text()).toContain('recoveryCooling')
-      expect(line.text()).toContain('"target":3')
+      expect(line.text()).toContain('"window":3')
+      expect(line.text()).toContain('"success":3')
       expect(line.text()).not.toContain('hunterNext')
     })
 
@@ -522,7 +547,7 @@ describe('AccountTurnStateCell', () => {
       const w = render(
         account([], {
           openai_turn_state_recovery: { enabled: true },
-          openai_turn_state_recovery_state: { streak: 5, recovered_at: isoAgo(120), next_at: isoIn(1800) }
+          openai_turn_state_recovery_state: { results: [true, true, false, true, true], recovered_at: isoAgo(120), next_at: isoIn(1800) }
         })
       )
       const line = w.get('[data-testid="account-turn-state-recovery"]')
@@ -538,7 +563,7 @@ describe('AccountTurnStateCell', () => {
         account([], {
           openai_turn_state_recovery: { enabled: true },
           openai_turn_state_recovery_state: {
-            streak: 1,
+            results: [true],
             next_at: isoIn(1800),
             recovered_at: '0001-01-01T00:00:00Z',
             cooling_until: '0001-01-01T00:00:00Z'
@@ -552,23 +577,23 @@ describe('AccountTurnStateCell', () => {
       expect(line.classes()).not.toContain('text-emerald-600')
     })
 
-    // 「开着但探不了」（模型名配错、没流量也没观测过）要看得见：一行中性的 0/5 会被无视。
-    it('探不出模型时显示错误并用告警色', () => {
+    // 「开着但探不了」（出口不通）要看得见：一行中性的 0/5 会被无视。
+    it('探测出错时显示错误并用告警色', () => {
       const w = render(
         account([], {
           openai_turn_state_recovery: { enabled: true },
-          openai_turn_state_recovery_state: { streak: 0, next_at: isoIn(1800), last_error: 'no model to probe' }
+          openai_turn_state_recovery_state: { next_at: isoIn(1800), last_error: 'dial tcp: proxy refused' }
         })
       )
       const line = w.get('[data-testid="account-turn-state-recovery"]')
       expect(line.text()).toContain('hunterResultError')
-      expect(line.text()).toContain('no model to probe')
+      expect(line.text()).toContain('dial tcp: proxy refused')
       expect(line.classes()).toContain('text-amber-600')
     })
 
     it('没开恢复探测就不渲染这一行', () => {
       expect(
-        render(account([], { openai_turn_state_recovery_state: { streak: 2 } }))
+        render(account([], { openai_turn_state_recovery_state: { results: [true, true] } }))
           .find('[data-testid="account-turn-state-recovery"]').exists()
       ).toBe(false)
       expect(

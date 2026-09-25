@@ -122,8 +122,8 @@
  *    而「这个号在铸 312」用量表每行都写着。降智那条仍参与 starved 判定，见下。表外形态
  *    （780）照常展示、标黄——它同样进不了池（后端只收 292/332）。
  *
- * 已废弃（2026-09-23）：候选池 / 手填 / 猎手 / 恢复探测都建立在「注入 292 能换回正常服务」上，
- * 2026-09-21 起这个前提已失效，只保留不维护，后续版本移除。形态观测是读数，不在此列。
+ * 已废弃（2026-09-23）：候选池 / 手填 / 猎手都建立在「注入 292 能换回正常服务」上，
+ * 2026-09-21 起这个前提已失效，只保留不维护，后续版本移除。形态观测是读数、恢复探测改做糖果题，都不在此列。
  */
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -454,6 +454,8 @@ interface HuntAttempt {
   latency_ms?: number
   exit?: string
   error?: string
+  /** 恢复探测独有：糖果题的回答（归一化后）。 */
+  answer?: string
 }
 interface HuntState {
   next_at?: string
@@ -587,13 +589,13 @@ const hunterTitle = computed(() =>
 )
 
 /**
- * 已废弃（2026-09-23，判据是「连续 N 次 292」，已失效）：只保留展示，后续版本移除。
- *
  * 降智恢复探测（extra.openai_turn_state_recovery / _state）：走账号自己的出口、间隔随机，
- * 连续若干次 292 判定恢复。判定后后端停止探测，所以这行改说「已恢复」而不是下次窗口。
+ * 每次出一道糖果题，最近 window 次里答对 success 次判定恢复。判定后后端停止探测，
+ * 所以这行改说「已恢复」而不是下次窗口。
  */
 interface RecoveryState {
-  streak?: number
+  /** 判定窗口，新的在前；true = 答对。 */
+  results?: boolean[]
   fail_streak?: number
   next_at?: string
   recovered_at?: string
@@ -601,14 +603,18 @@ interface RecoveryState {
   last?: HuntAttempt[]
   last_error?: string
 }
-const RECOVERY_DEFAULT_STREAK = 5
+const RECOVERY_DEFAULT_WINDOW = 5
+const RECOVERY_DEFAULT_SUCCESS = 4
 
-const recoveryStreakTarget = computed<number | null>(() => {
+// 与后端 applyDefaults 同一套兜底：窗口默认 5，成功次数默认 4 且不超过窗口。
+const recoveryTargets = computed<{ window: number; success: number } | null>(() => {
   const raw = extra.value['openai_turn_state_recovery']
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
-  const cfg = raw as { enabled?: unknown; streak_target?: unknown }
+  const cfg = raw as { enabled?: unknown; streak_target?: unknown; success_target?: unknown }
   if (cfg.enabled !== true) return null
-  return typeof cfg.streak_target === 'number' && cfg.streak_target > 0 ? cfg.streak_target : RECOVERY_DEFAULT_STREAK
+  const positive = (v: unknown, fallback: number) => (typeof v === 'number' && v > 0 ? v : fallback)
+  const window = positive(cfg.streak_target, RECOVERY_DEFAULT_WINDOW)
+  return { window, success: Math.min(positive(cfg.success_target, RECOVERY_DEFAULT_SUCCESS), window) }
 })
 
 const recoveryState = computed<RecoveryState>(() => {
@@ -627,8 +633,8 @@ const parsePresentTime = (raw: unknown): Date | null => {
 const recovered = computed(() => !!parsePresentTime(recoveryState.value.recovered_at))
 
 const recoveryLine = computed(() => {
-  const target = recoveryStreakTarget.value
-  if (target === null || !replacesTurnState.value) return ''
+  const targets = recoveryTargets.value
+  if (targets === null || !replacesTurnState.value) return ''
   const st = recoveryState.value
   const recoveredAt = parsePresentTime(st.recovered_at)
   if (recoveredAt) {
@@ -645,14 +651,15 @@ const recoveryLine = computed(() => {
   } else {
     next = t('admin.accounts.openai.turnStatePool.hunterProbing')
   }
-  // 「开着但探不了」（模型名配错、账号没流量也没观测过）要看得见，否则这行永远是中性的
+  // 「开着但探不了」（出口不通、上游一直报错）要看得见，否则这行永远是中性的
   // 「恢复探测 0/5 · 下次 12:34」，原因只在 tooltip 里（第一轮评审 S6）。
   if (st.last_error && !st.last?.length) {
     next = t('admin.accounts.openai.turnStatePool.hunterResultError', { status: '-', error: st.last_error })
   }
   return t('admin.accounts.openai.turnStatePool.recoverySummary', {
-    streak: st.streak ?? 0,
-    target,
+    successes: (st.results ?? []).filter(Boolean).length,
+    success: targets.success,
+    window: targets.window,
     next
   })
 })
@@ -663,17 +670,28 @@ const recoveryErrored = computed(() => {
   return !recovered.value && (!!st.last?.[0]?.error || (!!st.last_error && !st.last?.length))
 })
 
+// 恢复探测按回答判，不按票长：tooltip 里写答了什么。
+const recoveryAttemptResult = (a: HuntAttempt) => {
+  if (a.error) return t('admin.accounts.openai.turnStatePool.hunterResultError', { status: a.status || '-', error: a.error })
+  return t(
+    a.healthy
+      ? 'admin.accounts.openai.turnStatePool.recoveryResultHit'
+      : 'admin.accounts.openai.turnStatePool.recoveryResultMiss',
+    { answer: a.answer || '-' }
+  )
+}
+
 const recoveryTitle = computed(() => {
   const attempts = Array.isArray(recoveryState.value.last) ? recoveryState.value.last : []
   if (!attempts.length) return recoveryState.value.last_error ?? ''
   return attempts
     .map((a) =>
-      t('admin.accounts.openai.turnStatePool.hunterDetail', {
+      t('admin.accounts.openai.turnStatePool.recoveryDetail', {
         time: formatDateTime(parseTime(a.at) ?? new Date(NaN)),
         model: a.model || '-',
         proxy: a.proxy || '-',
         exit: a.exit ? ` (${a.exit})` : '',
-        result: hunterAttemptResult(a),
+        result: recoveryAttemptResult(a),
         latency: typeof a.latency_ms === 'number' ? `${(a.latency_ms / 1000).toFixed(1)}s` : '-'
       })
     )
