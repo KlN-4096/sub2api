@@ -49,18 +49,38 @@ func setRecoveryState(a *Account, st openAITurnStateRecoveryState) {
 	a.Extra[openAITurnStateRecoveryStateExtraKey] = generic
 }
 
-// recoverySSE 造一份真实形态的探测响应体：response.created + 一条 message 输出 + completed 里带用量。
+// recoverySSE 造一份 Codex 后端真实形态的探测响应体（2026-09-18 实抓）：正文只在
+// output_text.delta / output_item.done 里，**completed 的 output 是 []**，只带 usage。
 func recoverySSE(answer string) string {
+	text, _ := json.Marshal(answer)
+	return strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_probe","model":"gpt-5.6-sol","status":"in_progress","output":[]}}`,
+		``,
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","summary":[]}}`,
+		``,
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":` + string(text) + `}`,
+		``,
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":` + string(text) + `,"annotations":[]}]}}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_probe","model":"gpt-5.6-sol","status":"completed","output":[],"usage":{"input_tokens":1200,"output_tokens":300}}}`,
+		``, ``,
+	}, "\n")
+}
+
+// recoverySSEInlineOutput 是 Responses API 标准形态：completed 的 output 里自带 message。
+func recoverySSEInlineOutput(answer string) string {
 	text, _ := json.Marshal(answer)
 	return strings.Join([]string{
 		`event: response.created`,
 		`data: {"type":"response.created","response":{"id":"resp_probe","model":"gpt-5.6-sol"}}`,
 		``,
-		`event: response.output_text.delta`,
-		`data: {"type":"response.output_text.delta","delta":` + string(text) + `}`,
-		``,
 		`event: response.completed`,
-		`data: {"type":"response.completed","response":{"id":"resp_probe","model":"gpt-5.6-sol","output":[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":` + string(text) + `}]}],"usage":{"input_tokens":1200,"output_tokens":300}}}`,
+		`data: {"type":"response.completed","response":{"id":"resp_probe","model":"gpt-5.6-sol","status":"completed","output":[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":` + string(text) + `}]}],"usage":{"input_tokens":1200,"output_tokens":300}}}`,
 		``, ``,
 	}, "\n")
 }
@@ -253,29 +273,89 @@ func TestOpenAITurnStateRecoveryProbeShape(t *testing.T) {
 	require.Equal(t, 300, capture.inputs[0].Result.Usage.OutputTokens, "读完了流，输出 token 不再记 0")
 }
 
-// TestOpenAITurnStateRecoveryAnswerNormalization 钉住回答的归一化与终态缺失。
+// TestOpenAITurnStateRecoveryAnswerNormalization 钉住回答的归一化、「含 21 即答对」（用户 2026-09-25 定）
+// 与终态缺失。
 func TestOpenAITurnStateRecoveryAnswerNormalization(t *testing.T) {
-	for raw, want := range map[string]string{
-		"21": "21", " 21。": "21", "**21**": "21", "\"21\"": "21", "21.": "21", "**21**。": "21", "「21」": "21",
-		"": "", "29": "29", "21.5": "21.5", "210": "210", "21颗": "21颗", "答案是 21": "答案是 21",
+	type want struct {
+		answer  string
+		healthy bool
+	}
+	for raw, w := range map[string]want{
+		"21": {"21", true}, " 21。": {"21", true}, "**21**": {"21", true}, "\"21\"": {"21", true}, "21.": {"21", true},
+		"**21**。": {"21", true}, "「21」": {"21", true}, "21颗": {"21颗", true}, "答案是 21": {"答案是 21", true},
+		"一共 21 颗糖": {"一共 21 颗糖", true}, "21.5": {"21.5", true}, "210": {"210", true},
+		"29": {"29", false}, "36": {"36", false}, "12": {"12", false}, "2 1": {"2 1", false},
 	} {
-		answer, usage, ok := openAITurnStateRecoveryAnswer([]byte(recoverySSE(raw)))
+		answer, healthy, usage, ok := openAITurnStateRecoveryAnswer([]byte(recoverySSE(raw)))
 		require.True(t, ok, raw)
-		require.Equal(t, want, answer, raw)
+		require.Equal(t, w.answer, answer, raw)
+		require.Equal(t, w.healthy, healthy, raw)
 		require.NotNil(t, usage, raw)
 		require.Equal(t, 1200, usage.InputTokens)
 		require.Equal(t, 300, usage.OutputTokens)
 	}
 
-	_, _, ok := openAITurnStateRecoveryAnswer([]byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"x\"}}\n\n"))
+	// 长篇解释里 21 出现在展示截断（200 字节）之后也算答对：判定看整段，截断只影响展示。
+	long := strings.Repeat("先算每人拿到的糖数再相加。", 30) + "所以一共是 21 颗。"
+	answer, healthy, _, ok := openAITurnStateRecoveryAnswer([]byte(recoverySSE(long)))
+	require.True(t, ok)
+	require.True(t, healthy)
+	require.LessOrEqual(t, len(answer), openAITurnStateRecoveryAnswerKeep)
+	require.NotContains(t, answer, "21", "截断后的展示串里已经没有 21，说明判定不是看它")
+
+	_, _, _, ok = openAITurnStateRecoveryAnswer([]byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"x\"}}\n\n"))
 	require.False(t, ok, "没有 completed 终态就不算有回答")
-	_, _, ok = openAITurnStateRecoveryAnswer(nil)
+	_, _, _, ok = openAITurnStateRecoveryAnswer(nil)
 	require.False(t, ok)
 
-	answer, usage, ok := openAITurnStateRecoveryAnswer([]byte(recoverySSENoUsage("21")))
+	answer, healthy, usage, ok := openAITurnStateRecoveryAnswer([]byte(recoverySSENoUsage("21")))
 	require.True(t, ok)
+	require.True(t, healthy)
 	require.Equal(t, "21", answer)
 	require.Nil(t, usage, "终态没带 usage 时不能当 0 token 记账")
+
+	// Responses 标准形态（completed 自带 output）同样认。
+	answer, healthy, _, ok = openAITurnStateRecoveryAnswer([]byte(recoverySSEInlineOutput("29")))
+	require.True(t, ok)
+	require.False(t, healthy)
+	require.Equal(t, "29", answer)
+}
+
+// TestOpenAITurnStateRecoveryEmptyAnswerIsDescribed 钉住用户 09-25 的要求：日志要写明模型答了什么，
+// 不能只有一个 ✗。模型交白卷时回答写成形态说明（status / output 项类型 / refusal），且判为答错；
+// 09-25 首次线上探测正是 completed output=[] 让回答落成空、页面只显示「答 -✗」。
+func TestOpenAITurnStateRecoveryEmptyAnswerIsDescribed(t *testing.T) {
+	answer, healthy, usage, ok := openAITurnStateRecoveryAnswer([]byte(recoverySSE("")))
+	require.True(t, ok)
+	require.False(t, healthy)
+	require.Equal(t, "∅ status=completed output=[reasoning,message]", answer)
+	require.NotNil(t, usage)
+
+	refused := strings.Join([]string{
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"I can't help with that."}]}}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_probe","status":"completed","output":[],"incomplete_details":null}}`,
+		``, ``,
+	}, "\n")
+	answer, healthy, _, ok = openAITurnStateRecoveryAnswer([]byte(refused))
+	require.True(t, ok)
+	require.False(t, healthy)
+	require.Equal(t, "∅ status=completed refusal=I can't help with that. output=[message]", answer)
+
+	// 走完整探测链路：白卷要落进 attempt.answer 与 results=false。
+	now := time.Now().UTC()
+	h := newHunterHarness(recoveryAccount(recoveryConfig(nil)), hunterCoxProxy)
+	h.svc.now = func() time.Time { return now }
+	queueAnswers(h, now, "")
+	h.run(t)
+	st := recoveryState(h.account)
+	require.False(t, st.Last[0].Healthy)
+	require.Equal(t, "∅ status=completed output=[reasoning,message]", st.Last[0].Answer)
+	require.Empty(t, st.Last[0].Error, "白卷是答错，不是探测出错")
+	raw := h.account.Extra[openAITurnStateRecoveryStateExtraKey].(map[string]any)
+	require.Contains(t, raw["last"].([]any)[0].(map[string]any), "answer", "落库里要有 answer 键，页面才能显示")
 }
 
 // recoverySSENoUsage 是 completed 里不带 usage 的探测响应体。

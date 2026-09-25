@@ -87,15 +87,8 @@
                 {{ isLikelyModelVariant(row) ? t('usage.modelVariant') : t('usage.modelMismatch') }}
               </span>
             </div>
-            <div
-              v-if="row.safety_buffering_faster_model || typeof row.safety_buffering_enabled === 'boolean'"
-              data-testid="safety-buffering-marker"
-              class="break-all pl-3 text-[11px] text-gray-500 dark:text-gray-400"
-              :title="`x-codex-safety-buffering-enabled: ${row.safety_buffering_enabled ?? '-'} / x-codex-safety-buffering-faster-model: ${row.safety_buffering_faster_model ?? '-'}`"
-            >
-              <span class="mr-1">↳ {{ t('usage.safetyBuffering') }}:</span>{{ row.safety_buffering_faster_model ?? '-' }}
-              <span class="ml-1">(enabled={{ row.safety_buffering_enabled ?? '-' }})</span>
-            </div>
+            <!-- safety_buffering_enabled / _faster_model 只落库不展示（用户 2026-09-25 定）：
+                 faster-model 是客户端「换更快模型重试」的备选，不是路由结果，摆在模型下面会被读成错误路由。 -->
           </div>
         </template>
 

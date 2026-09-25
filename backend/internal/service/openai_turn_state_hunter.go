@@ -1117,11 +1117,11 @@ func (s *OpenAITurnStateHunterService) doProbe(ctx context.Context, account, egr
 		_ = resp.Body.Close()
 		if readErr != nil {
 			attempt.Error = "read answer: " + sanitizeUpstreamErrorMessage(readErr.Error())
-		} else if answer, got, ok := openAITurnStateRecoveryAnswer(raw); !ok {
+		} else if answer, healthy, got, ok := openAITurnStateRecoveryAnswer(raw); !ok {
 			attempt.Error = "no completed response"
 		} else {
 			attempt.Answer = answer
-			attempt.Healthy = answer == openAITurnStateRecoveryExpectedAnswer
+			attempt.Healthy = healthy
 			usage = got
 		}
 	} else {

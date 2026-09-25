@@ -49,8 +49,9 @@ const (
 	// openAITurnStateRecoveryProbeTimeout 要等整个回答：sol@medium 做糖果题实测 20–60s，留 3 分钟。
 	openAITurnStateRecoveryProbeTimeout = 3 * time.Minute
 	openAITurnStateRecoveryReadLimit    = 2 << 20
-	openAITurnStateRecoveryAnswerKeep   = 64
+	openAITurnStateRecoveryAnswerKeep   = 200
 	// openAITurnStateRecoveryExpectedAnswer 是糖果题的正确答案；降智账号典型答 29 / 36 / 空。
+	// 判「答对」只看整段回答里是否含它（用户 2026-09-25 定：误判概率极低，别让「答案是 21 颗」被判错）。
 	openAITurnStateRecoveryExpectedAnswer = "21"
 )
 
@@ -307,16 +308,27 @@ func (s *OpenAITurnStateHunterService) probeOwnExit(ctx context.Context, account
 	return attempt
 }
 
-// openAITurnStateRecoveryAnswer 从探测的 SSE 体里取模型回答与真实用量：只认 response.completed
-// 里 message 项的 output_text（与网关非流式路径同一个终态提取器）。没有终态事件（流被截断、
-// response.failed）返回 ok=false；终态里没带 usage 时 usage 为 nil，记账退回输入估算。
-func openAITurnStateRecoveryAnswer(raw []byte) (answer string, usage *OpenAIUsage, ok bool) {
-	final, ok := extractCodexFinalResponse(string(raw))
+// openAITurnStateRecoveryAnswer 从探测的 SSE 体里取模型回答与真实用量。终态用网关同一个提取器
+// （response.completed / response.done）；Codex 后端的 completed 里 output 是 []（2026-09-18 实抓，
+// 09-25 首次线上探测也因此把回答记成了空），正文只在 output_item.done / output_text.delta 里，
+// 所以 output 为空时用网关的 reconstructResponseOutputFromSSE 从事件流重建再取 message 的
+// output_text。healthy = 整段回答里含 "21"（在截断之前判，长篇解释也算）。模型确实什么都没答时
+// 回答写成「∅ status=… output=[…]」的形态说明，不留空——页面与日志要写明模型答了什么。没有终态
+// 事件（流被截断、response.failed）返回 ok=false；终态里没带 usage 时 usage 为 nil，记账退回输入估算。
+func openAITurnStateRecoveryAnswer(raw []byte) (answer string, healthy bool, usage *OpenAIUsage, ok bool) {
+	body := string(raw)
+	final, ok := extractCodexFinalResponse(body)
 	if !ok {
-		return "", nil, false
+		return "", false, nil, false
+	}
+	output := gjson.GetBytes(final, "output")
+	if len(output.Array()) == 0 {
+		if rebuilt, ok := reconstructResponseOutputFromSSE(body); ok {
+			output = gjson.ParseBytes(rebuilt)
+		}
 	}
 	var text strings.Builder
-	gjson.GetBytes(final, "output").ForEach(func(_, item gjson.Result) bool {
+	output.ForEach(func(_, item gjson.Result) bool {
 		if item.Get("type").String() != "message" {
 			return true
 		}
@@ -331,7 +343,40 @@ func openAITurnStateRecoveryAnswer(raw []byte) (answer string, usage *OpenAIUsag
 	if got, ok := extractOpenAIUsageFromJSONBytes(final); ok {
 		usage = &got
 	}
-	return normalizeOpenAITurnStateRecoveryAnswer(text.String()), usage, true
+	full := text.String()
+	healthy = strings.Contains(full, openAITurnStateRecoveryExpectedAnswer)
+	answer = normalizeOpenAITurnStateRecoveryAnswer(full)
+	if answer == "" {
+		answer = openAITurnStateRecoveryEmptyAnswer(final, output)
+	}
+	return answer, healthy, usage, true
+}
+
+// openAITurnStateRecoveryEmptyAnswer 把「没有正文」写成能看懂的形态：终态 status、未完成原因、
+// output 各项类型，message 里若有 refusal 也带上。降智账号确实会交白卷（用户实测 29/36/空三种），
+// 页面和日志上要能区分「答错」与「没答」，也要能看出是被拒还是截断。
+func openAITurnStateRecoveryEmptyAnswer(final []byte, output gjson.Result) string {
+	status := gjson.GetBytes(final, "status").String()
+	if status == "" {
+		status = "?"
+	}
+	parts := []string{"∅ status=" + status}
+	if reason := gjson.GetBytes(final, "incomplete_details.reason").String(); reason != "" {
+		parts = append(parts, "reason="+reason)
+	}
+	var types []string
+	output.ForEach(func(_, item gjson.Result) bool {
+		types = append(types, item.Get("type").String())
+		item.Get("content").ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "refusal" {
+				parts = append(parts, "refusal="+strings.TrimSpace(part.Get("refusal").String()))
+			}
+			return true
+		})
+		return true
+	})
+	parts = append(parts, "output=["+strings.Join(types, ",")+"]")
+	return truncateUTF8(strings.Join(parts, " "), openAITurnStateRecoveryAnswerKeep)
 }
 
 // normalizeOpenAITurnStateRecoveryAnswer 去掉首尾的空白、标点与符号：题目要求「只输出一个数字」，
