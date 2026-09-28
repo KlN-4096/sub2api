@@ -37,6 +37,19 @@ var cursorResponsesUnsupportedFields = []string{
 	"stream_options",
 }
 
+// stripChatPromptCacheBreakpoints 删掉各内容段的 prompt_cache_breakpoint：真实 Codex 从不发它，
+// 删掉后转换器也不会再为只剩断点的空文本段生成没有 text 的 input_text。
+// prompt_cache_options 由 Codex 转换按 openAIChatGPTInternalUnsupportedFields 删。
+func stripChatPromptCacheBreakpoints(messages []apicompat.ChatMessage) {
+	for i := range messages {
+		for j := range gjson.GetBytes(messages[i].Content, "#").Int() {
+			if out, err := sjson.DeleteBytes(messages[i].Content, fmt.Sprintf("%d.prompt_cache_breakpoint", j)); err == nil {
+				messages[i].Content = out
+			}
+		}
+	}
+}
+
 // ForwardAsChatCompletions accepts a Chat Completions request body, converts it
 // to OpenAI Responses API format, forwards to the OpenAI upstream, and converts
 // the response back to Chat Completions format.
@@ -267,6 +280,9 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		// Normal path: convert Chat Completions → Responses.
 		// ChatCompletionsToResponses always sets Stream=true (upstream always streams).
 		chatReq.Model = upstreamModel
+		if account.UsesOpenAICodexProtocol() {
+			stripChatPromptCacheBreakpoints(chatReq.Messages)
+		}
 		responsesReq, err = apicompat.ChatCompletionsToResponses(&chatReq)
 		if err != nil {
 			return nil, fmt.Errorf("convert chat completions to responses: %w", err)
