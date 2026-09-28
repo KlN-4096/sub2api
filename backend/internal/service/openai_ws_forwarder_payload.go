@@ -109,6 +109,13 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 			"session-id",
 			"thread-id",
 			"x-client-request-id",
+			// 真实 WS 握手同样条件性携带这两个头：前者来自
+			// build_responses_compatibility_headers（codex-rs core/src/client.rs:817），
+			// 后者由 build_websocket_headers 直接插入（同文件 :1262）。HTTP 两张白名单
+			// 已放行，WS 用的是这份独立拷贝列表，漏掉会让上游只在 WS 上看到一个
+			// 「从不做记忆整合、从不开计时」的客户端。
+			"x-openai-memgen-request",
+			"x-responsesapi-include-timing-metrics",
 		} {
 			if value := c.Request.Header.Get(name); strings.TrimSpace(value) != "" {
 				headers.Set(name, value)
@@ -146,6 +153,7 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 	}
 	applyCodexAccountIdentityHeaders(headers, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 	applyStagedCodexFingerprintHeaders(c, account, headers)
+	applyCodexFingerprintConvergenceHeaders(c, codexAccountIdentitySource(c, account), headers)
 
 	if account != nil && account.UsesOpenAICodexProtocol() {
 		if err := resolveAndSetOpenAIChatGPTAccountHeaders(ctx, s.accountRepo, headers, account); err != nil {
@@ -184,6 +192,7 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 	// 覆盖所有 WS 模式（ctx_pool/dedicated/passthrough）的握手头。
 	account.ApplyHeaderOverrides(headers)
 	setOpenAICodexRoutingHint(headers, account, routingModel, routingServiceTier)
+	applyCodexDeviceWireProfile(c, account, headers, true)
 	logOpenAIRoutingDiagnostics(
 		ctx,
 		account,
@@ -218,6 +227,8 @@ func (s *OpenAIGatewayService) buildOpenAIWSCreatePayload(reqBody map[string]any
 	return payload
 }
 
+// setOpenAIWSTurnMetadata fills missing frame metadata from the request headers.
+// A frame's own metadata includes its current turn/window, unlike a reused handshake.
 func setOpenAIWSTurnMetadata(payload map[string]any, turnMetadata string) {
 	if len(payload) == 0 {
 		return
@@ -229,9 +240,15 @@ func setOpenAIWSTurnMetadata(payload map[string]any, turnMetadata string) {
 
 	switch existing := payload["client_metadata"].(type) {
 	case map[string]any:
+		if current, ok := existing[openAIWSTurnMetadataHeader].(string); ok && strings.TrimSpace(current) != "" {
+			return
+		}
 		existing[openAIWSTurnMetadataHeader] = metadata
 		payload["client_metadata"] = existing
 	case map[string]string:
+		if strings.TrimSpace(existing[openAIWSTurnMetadataHeader]) != "" {
+			return
+		}
 		next := make(map[string]any, len(existing)+1)
 		for k, v := range existing {
 			next[k] = v
