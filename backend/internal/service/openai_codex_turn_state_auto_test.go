@@ -131,7 +131,7 @@ func turnStateAutoAccount() *Account {
 	return &Account{
 		ID:       7,
 		Platform: PlatformOpenAI,
-		Type:     AccountTypeCPR,
+		Type:     AccountTypeOAuth,
 		Extra:    map[string]any{openAITurnStateAutoExtraKey: true},
 	}
 }
@@ -733,7 +733,7 @@ func TestOpenAITurnStateWSManualRecordsUsageSource(t *testing.T) {
 
 	// 没配手填 = 功能不存在，一个标记都不留
 	plain := turnStateAutoCtx("sess")
-	bare := &Account{ID: 8, Platform: PlatformOpenAI, Type: AccountTypeCPR}
+	bare := &Account{ID: 8, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	require.Equal(t, "客户端自带", svc.applyOpenAICodexTurnStateOverrideWSManualOnly(plain, bare, "客户端自带"))
 	require.Empty(t, OpenAITurnStateUsageSource(plain))
 	require.Empty(t, openAITurnStateInjectedFromContext(plain))
@@ -744,12 +744,12 @@ func TestOpenAITurnStateWSManualRecordsUsageSource(t *testing.T) {
 func TestOpenAITurnStateInjectionMarkerClearedPerAttempt(t *testing.T) {
 	svc := &OpenAIGatewayService{accountRepo: newTurnStateAutoRepo()}
 	first := &Account{
-		ID: 11, Platform: PlatformOpenAI, Type: AccountTypeCPR,
+		ID: 11, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
 		Extra: map[string]any{openAITurnStateOverrideExtraKey: map[string]any{
 			turnStateTestModel: "第一个账号的手填值",
 		}},
 	}
-	second := &Account{ID: 12, Platform: PlatformOpenAI, Type: AccountTypeCPR}
+	second := &Account{ID: 12, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 
 	c := turnStateAutoCtx("sess")
 	svc.applyOpenAICodexTurnStateOverrideHeader(c, first, http.Header{})
@@ -1201,4 +1201,31 @@ func TestOpenAITurnStateShapeTableIsSelfConsistent(t *testing.T) {
 	// 与前端 frontend/src/utils/turnState.ts 的 TURN_STATE_SHAPES 是两份拷贝,
 	// 唯一的约束是注释里那句「改一边要改两边」。这里至少钉住本侧的自洽。
 	require.Len(t, openAITurnStateShapes, 2, "改形态表时记得同步前端 TURN_STATE_SHAPES")
+}
+
+// TestCPRTurnStateObservedButNeverReplaced 钉住 2026-09-23 的取舍：cpr 走原样中继，
+// 残留的手填覆写 / 自动接管配置一律不生效；但用量表「出站」列与形态观测照旧。
+func TestCPRTurnStateObservedButNeverReplaced(t *testing.T) {
+	repo := newTurnStateAutoRepo()
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	cpr := &Account{ID: 21, Platform: PlatformOpenAI, Type: AccountTypeCPR, Extra: map[string]any{
+		openAITurnStateAutoExtraKey:     true,
+		openAITurnStateOverrideExtraKey: map[string]any{turnStateTestModel: "残留的手填值"},
+	}}
+	require.False(t, cpr.IsOpenAITurnStateAutoEnabled())
+	require.Empty(t, cpr.OpenAICodexTurnStateOverride(turnStateTestModel))
+
+	c := turnStateAutoCtx("sess")
+	h := http.Header{}
+	h.Set(openAICodexTurnStateHeader, "客户端自带")
+	svc.applyOpenAICodexTurnStateOverrideHeader(c, cpr, h)
+	require.Equal(t, "客户端自带", h.Get(openAICodexTurnStateHeader))
+	require.Empty(t, openAITurnStateInjectedFromContext(c))
+	require.Empty(t, OpenAITurnStateUsageSource(c))
+	require.Equal(t, "客户端自带", OpenAITurnStateUsageSent(c), "出站列照记")
+
+	svc.observeOpenAITurnStateMint(c, cpr, turnStateFernetBlob(time.Now().UTC(), openAIHealthyTurnStateBlocks+1))
+	observed, ok := readOpenAITurnStateObservation(cpr)
+	require.True(t, ok, "形态观测照记")
+	require.Equal(t, openAIHealthyTurnStateBlocks+1, observed.Blocks)
 }

@@ -742,6 +742,9 @@ export default {
         oauthPassthrough: '自动透传（仅替换认证）',
         oauthPassthroughDesc:
           '开启后，该 OpenAI 账号将自动透传请求与响应，仅替换认证并保留计费/并发/审计及必要安全过滤；如遇兼容性问题可随时关闭回滚。',
+        rawRelay: '原样中继（klno）',
+        rawRelayDesc:
+          '开启后该账号只替换认证：请求按原始字节（含压缩）与全部请求头发出，响应状态码/头/正文原样返回；仅按分组策略改推理强度、渠道模型映射与 Fast。上游整体不可用才换号。适合下一跳是另一个 sub2api 的账号；账号级模型映射与自定义请求头不生效。',
         flattenNamespaces: '摊平 Codex namespace 工具（兼容）',
         flattenNamespacesDesc:
           '默认关闭：/responses 上的 namespace 工具声明原样转发，这正是 ChatGPT Codex 后端期望的形态。仅当该 OAuth 账号指向不认识 namespace 的兼容上游时才开启——摊平会把工具改名为 namespace__tool，使按 functions.<命名空间>.<工具> 寻址的模型（如 gpt-5.6 多智能体）无法调用。压缩（compact）请求不受该开关影响，始终摊平。',

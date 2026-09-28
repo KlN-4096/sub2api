@@ -101,6 +101,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			ctx = withOpenAIFastPolicyContext(ctx, settings)
 		}
 	}
+	if account.UsesOpenAIRawRelay() {
+		return s.proxyResponsesWebSocketRawRelay(ctx, c, clientConn, account, token, firstClientMessage, hooks)
+	}
 
 	// The handler normally owns this registration across retry attempts. Direct
 	// callers still get the same session-scoped preemption behavior here.
