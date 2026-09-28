@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func convRunMap(t *testing.T, account *Account, raw []byte, stripInbound bool) (http.Header, []byte) {
@@ -261,6 +262,7 @@ func TestCodexFingerprintConvergence_WSEntriesKeepIdentityAcrossTurns(t *testing
 						defer cancel(context.Canceled)
 						raw := convTestBody(t)
 						clientHeaders := newConvTestContext(t, raw).Request.Header.Clone()
+						clientHeaders.Set(openAIWSTurnMetadataHeader, metadataSerializationFixture())
 						if bodyOnly {
 							clientHeaders = http.Header{"User-Agent": []string{"codex_cli_rs/0.153.4"}}
 						}
@@ -277,13 +279,11 @@ func TestCodexFingerprintConvergence_WSEntriesKeepIdentityAcrossTurns(t *testing
 							cm, ok := body["client_metadata"].(map[string]any)
 							require.True(t, ok)
 							cm["x-codex-window-id"] = fmt.Sprintf("%s:%d", convTestSession, turn)
-							var metadata map[string]any
-							require.NoError(t, json.Unmarshal([]byte(convTestTurnMetadata()), &metadata))
-							metadata["window_id"] = cm["x-codex-window-id"]
-							metadata["window_number"] = turn
-							encodedMetadata, err := json.Marshal(metadata)
+							encodedMetadata, err := sjson.Set(metadataSerializationFixture(), "window_id", cm["x-codex-window-id"])
 							require.NoError(t, err)
-							cm[openAIWSTurnMetadataHeader] = string(encodedMetadata)
+							encodedMetadata, err = sjson.Set(encodedMetadata, "window_number", turn)
+							require.NoError(t, err)
+							cm[openAIWSTurnMetadataHeader] = encodedMetadata
 							payload, err := json.Marshal(body)
 							require.NoError(t, err)
 							writeCtx, cancelWrite := context.WithTimeout(context.Background(), 3*time.Second)
@@ -319,6 +319,10 @@ func TestCodexFingerprintConvergence_WSEntriesKeepIdentityAcrossTurns(t *testing
 							window := fmt.Sprintf("%s:%d", frameMetadata.Get("thread_id").String(), turn)
 							require.Equal(t, window, frameMetadata.Get("x-codex-window-id").String(), "current frame, not the fixed handshake, owns its window")
 							embedded := gjson.Parse(frameMetadata.Get(openAIWSTurnMetadataHeader).String())
+							requireMetadataSerializationPreserved(t, embedded.Raw)
+							if !bodyOnly {
+								requireMetadataSerializationPreserved(t, headers.Get(openAIWSTurnMetadataHeader))
+							}
 							require.Equal(t, window, embedded.Get("window_id").String())
 							require.Equal(t, int64(turn), embedded.Get("window_number").Int())
 							if turn == 1 {

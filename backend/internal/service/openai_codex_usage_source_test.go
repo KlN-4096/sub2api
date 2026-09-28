@@ -54,9 +54,6 @@ func TestGetOpenAIUsage_OrdinaryOAuthUsesQuotaEndpoint(t *testing.T) {
 			if err := json.NewEncoder(w).Encode(window); err != nil {
 				t.Error(err)
 			}
-		case "/backend-api/wham/rate-limit-reset-credits":
-			// QueryUsage also reads credit details; it must not consume a credit.
-			_, _ = w.Write([]byte(`{"available_count":0,"credits":[]}`))
 		default:
 			t.Errorf("unexpected quota refresh endpoint: %s", r.URL.Path)
 			http.Error(w, "unexpected endpoint", http.StatusBadRequest)
@@ -137,15 +134,12 @@ func TestNextOpenAIProbeAllowedAtJitters(t *testing.T) {
 	require.Greater(t, len(seen), 1, "必须有抖动，否则和固定间隔没区别")
 }
 
-// shouldProbeOpenAICodexSnapshot 现在存的是"下次允许刷新的时刻"而不是"上次刷新时刻"。
-func TestShouldProbeOpenAICodexSnapshotHonoursStoredDeadline(t *testing.T) {
-	s := &AccountUsageService{cache: &UsageCache{}}
+func TestOpenAIQuotaCacheHonoursStoredDeadline(t *testing.T) {
 	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
-
-	require.True(t, s.shouldProbeOpenAICodexSnapshot(1, now), "首次必须放行")
-	require.False(t, s.shouldProbeOpenAICodexSnapshot(1, now.Add(openAIProbeCacheTTL-time.Second)),
-		"最小间隔内不得再刷")
-	require.True(t, s.shouldProbeOpenAICodexSnapshot(1, now.Add(openAIProbeCacheTTLMax+time.Second)),
-		"超过最大间隔必定放行")
-	require.True(t, s.shouldProbeOpenAICodexSnapshot(1, now, true), "force 无视间隔")
+	var cached *openAIQuotaCachedUsage
+	require.False(t, cached.fresh(now))
+	cached = &openAIQuotaCachedUsage{nextAllowedAt: nextOpenAIProbeAllowedAt(now)}
+	require.True(t, cached.fresh(now.Add(openAIProbeCacheTTL-time.Second)))
+	require.False(t, cached.fresh(now.Add(openAIProbeCacheTTLMax+time.Second)))
+	require.False(t, cached.fresh(cached.nextAllowedAt), "到期边界必须允许刷新")
 }

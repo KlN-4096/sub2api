@@ -121,7 +121,6 @@ type UsageCache struct {
 	antigravityCache  sync.Map           // accountID -> *antigravityUsageCache
 	apiFlight         singleflight.Group // 防止同一账号的并发请求击穿缓存（Anthropic）
 	antigravityFlight singleflight.Group // 防止同一 Antigravity 账号的并发请求击穿缓存
-	openAIProbeCache  sync.Map           // accountID -> time.Time（下次允许刷新的时刻）
 	grokProbeCache    sync.Map           // accountID -> last billing probe attempt
 }
 
@@ -710,18 +709,19 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 	if account == nil {
 		return usage, nil
 	}
+	account = snapshotOpenAIOutboundAccount(account)
 
 	applyExtraToUsage(usage, account.Extra, now)
 
-	if (force || shouldRefreshOpenAICodexSnapshot(account, usage, now)) && s.shouldProbeOpenAICodexSnapshot(account.ID, now, force) {
+	if force || shouldRefreshOpenAICodexSnapshot(account, usage, now) {
 		if account.IsShadow() {
 			// Spark shadow accounts fetch usage from /wham/usage (bengalfox channel)
 			// via the shared OpenAIQuotaService, which resolves credentials from the
 			// parent account.  The result is written to the shadow row's own codex_*
 			// Extra keys and immediately reflected in the returned UsageInfo.
 			if s.openAIQuotaService != nil {
-				if quotaUsage, err := s.openAIQuotaService.QueryUsage(ctx, account.ID); err == nil {
-					if updates := buildCodexSparkWindowExtraUpdates(quotaUsage, now); len(updates) > 0 {
+				if quotaUsage, err := s.openAIQuotaService.QueryUsageOnly(ctx, account.ID, force); err == nil {
+					if updates := buildCodexSparkWindowExtraUpdates(quotaUsage, time.Unix(quotaUsage.FetchedAt, 0)); len(updates) > 0 {
 						mergeAccountExtra(account, updates)
 						s.persistOpenAICodexProbeSnapshot(account.ID, updates)
 						if account.ParentAccountID != nil {
@@ -742,9 +742,9 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 			// OpenAI-Beta: responses=experimental），每 10 分钟一次形成周期性异常信号。
 			//
 			// 取不到时不回退到合成请求：那等于没改。额度另有 usage_logs 窗口统计兜底。
-			if quotaUsage, err := s.openAIQuotaService.QueryUsage(ctx, account.ID); err != nil {
+			if quotaUsage, err := s.openAIQuotaService.QueryUsageOnly(ctx, account.ID, force); err != nil {
 				slog.Warn("openai_codex_usage_query_failed", "account_id", account.ID, "error", err)
-			} else if updates := buildCodexPrimaryWindowExtraUpdates(quotaUsage, now); len(updates) > 0 {
+			} else if updates := buildCodexPrimaryWindowExtraUpdates(quotaUsage, time.Unix(quotaUsage.FetchedAt, 0)); len(updates) > 0 {
 				mergeAccountExtra(account, updates)
 				s.persistOpenAICodexProbeSnapshot(account.ID, updates)
 				if usage.UpdatedAt == nil {
@@ -797,7 +797,7 @@ func isOpenAICodexSnapshotStale(account *Account, now time.Time) bool {
 		return false
 	}
 	// 普通与影子 OAuth 账号均通过 /wham/usage 刷新，与推理是否启用 WSv2 无关。
-	// 是否过期只看快照时间；实际查询频率由 shouldProbeOpenAICodexSnapshot 节流。
+	// 是否过期只看快照时间；实际查询频率由 quota service 按凭证来源共享节流。
 	if account.Extra == nil {
 		return true
 	}
@@ -810,22 +810,6 @@ func isOpenAICodexSnapshotStale(account *Account, now time.Time) bool {
 		return true
 	}
 	return now.Sub(ts) >= openAIProbeCacheTTL
-}
-
-func (s *AccountUsageService) shouldProbeOpenAICodexSnapshot(accountID int64, now time.Time, force ...bool) bool {
-	if s == nil || s.cache == nil || accountID <= 0 {
-		return true
-	}
-	forceProbe := len(force) > 0 && force[0]
-	if !forceProbe {
-		if cached, ok := s.cache.openAIProbeCache.Load(accountID); ok {
-			if next, ok := cached.(time.Time); ok && now.Before(next) {
-				return false
-			}
-		}
-	}
-	s.cache.openAIProbeCache.Store(accountID, nextOpenAIProbeAllowedAt(now))
-	return true
 }
 
 // nextOpenAIProbeAllowedAt 在 [openAIProbeCacheTTL, openAIProbeCacheTTLMax] 之间

@@ -31,6 +31,14 @@ type ScheduledTestResult struct {
 	StartedAt    time.Time `json:"started_at"`
 	FinishedAt   time.Time `json:"finished_at"`
 	CreatedAt    time.Time `json:"created_at"`
+	// CredentialsOnly：本次只验证了凭据（双开账号的 GET /models 探针），没有跑推理。
+	// 仓库层按显式列清单写入结果表，本字段不在其中；runner 据此只按凭据范围恢复账号状态
+	// （AccountRecoveryOptions.CredentialsOnly）。
+	CredentialsOnly bool `json:"-"`
+}
+
+type ScheduledTestPlanLease interface {
+	Release() error
 }
 
 // ScheduledTestPlanRepository defines the data access interface for test plans.
@@ -39,9 +47,10 @@ type ScheduledTestPlanRepository interface {
 	GetByID(ctx context.Context, id int64) (*ScheduledTestPlan, error)
 	ListByAccountID(ctx context.Context, accountID int64) ([]*ScheduledTestPlan, error)
 	ListDue(ctx context.Context, now time.Time) ([]*ScheduledTestPlan, error)
+	TryClaimDue(ctx context.Context, plan *ScheduledTestPlan, now, nextRunAt time.Time) (ScheduledTestPlanLease, bool, error)
 	Update(ctx context.Context, plan *ScheduledTestPlan) (*ScheduledTestPlan, error)
 	Delete(ctx context.Context, id int64) error
-	UpdateAfterRun(ctx context.Context, id int64, lastRunAt time.Time, nextRunAt time.Time) error
+	MarkRunFinished(ctx context.Context, id int64, lastRunAt time.Time) error
 }
 
 // ScheduledTestResultRepository defines the data access interface for test results.
