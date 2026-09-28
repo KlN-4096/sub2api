@@ -19,7 +19,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
-const usageLogSelectColumns = "id, user_id, api_key_id, account_id, request_id, model, requested_model, upstream_model, upstream_response_model, upstream_model_mismatch, group_id, subscription_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens, image_output_tokens, image_output_cost, image_input_tokens, image_input_cost, input_cost, output_cost, cache_creation_cost, cache_read_cost, total_cost, actual_cost, rate_multiplier, account_rate_multiplier, billing_type, request_type, stream, openai_ws_mode, duration_ms, first_token_ms, user_agent, ip_address, image_count, image_size, image_input_size, image_output_size, image_size_source, image_size_breakdown, video_count, video_resolution, video_duration_seconds, service_tier, reasoning_effort, requested_reasoning_effort, inbound_endpoint, upstream_endpoint, cache_ttl_overridden, long_context_billing_applied, channel_id, model_mapping_chain, billing_tier, billing_mode, account_stats_cost, upstream_request_id, session_id, native_compaction_v2, created_at"
+const usageLogSelectColumns = "id, user_id, api_key_id, account_id, request_id, model, requested_model, upstream_model, upstream_response_model, upstream_model_mismatch, group_id, subscription_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens, image_output_tokens, image_output_cost, image_input_tokens, image_input_cost, input_cost, output_cost, cache_creation_cost, cache_read_cost, total_cost, actual_cost, rate_multiplier, account_rate_multiplier, billing_type, request_type, stream, openai_ws_mode, duration_ms, first_token_ms, user_agent, ip_address, image_count, image_size, image_input_size, image_output_size, image_size_source, image_size_breakdown, video_count, video_resolution, video_duration_seconds, service_tier, reasoning_effort, requested_reasoning_effort, inbound_endpoint, upstream_endpoint, cache_ttl_overridden, long_context_billing_applied, channel_id, model_mapping_chain, billing_tier, billing_mode, account_stats_cost, upstream_request_id, session_id, native_compaction_v2, turn_state, turn_state_overridden, turn_state_source, turn_state_sent, created_at"
 
 func (r *usageLogRepository) GetByID(ctx context.Context, id int64) (log *service.UsageLog, err error) {
 	query := "SELECT " + usageLogSelectColumns + " FROM usage_logs WHERE id = $1"
@@ -131,6 +131,7 @@ func (r *usageLogRepository) ListWithFilters(ctx context.Context, params paginat
 	if filters.UpstreamModelMismatch != nil {
 		conditions = append(conditions, upstreamModelMismatchCondition("upstream_model_mismatch", *filters.UpstreamModelMismatch))
 	}
+	conditions, args = appendTurnStateWhereCondition(conditions, args, filters.TurnState)
 	if filters.StartTime != nil {
 		conditions = append(conditions, fmt.Sprintf("created_at >= $%d", len(args)+1))
 		args = append(args, *filters.StartTime)
@@ -502,6 +503,10 @@ func scanUsageLog(scanner interface{ Scan(...any) error }) (*service.UsageLog, e
 		upstreamRequestID         sql.NullString
 		sessionID                 sql.NullString
 		nativeCompactionV2        bool
+		turnState                 sql.NullString
+		turnStateOverridden       sql.NullBool
+		turnStateSource           sql.NullString
+		turnStateSent             sql.NullString
 		createdAt                 time.Time
 	)
 
@@ -568,6 +573,10 @@ func scanUsageLog(scanner interface{ Scan(...any) error }) (*service.UsageLog, e
 		&upstreamRequestID,
 		&sessionID,
 		&nativeCompactionV2,
+		&turnState,
+		&turnStateOverridden,
+		&turnStateSource,
+		&turnStateSent,
 		&createdAt,
 	); err != nil {
 		return nil, err
@@ -705,6 +714,18 @@ func scanUsageLog(scanner interface{ Scan(...any) error }) (*service.UsageLog, e
 	if upstreamRequestID.Valid {
 		log.UpstreamRequestID = &upstreamRequestID.String
 	}
+	if turnState.Valid {
+		log.TurnState = &turnState.String
+	}
+	if turnStateOverridden.Valid {
+		log.TurnStateOverridden = &turnStateOverridden.Bool
+	}
+	if turnStateSource.Valid {
+		log.TurnStateSource = &turnStateSource.String
+	}
+	if turnStateSent.Valid {
+		log.TurnStateSent = &turnStateSent.String
+	}
 
 	return log, nil
 }
@@ -783,4 +804,30 @@ func setToSlice(set map[int64]struct{}) []int64 {
 		out = append(out, id)
 	}
 	return out
+}
+
+// appendTurnStateWhereCondition 把 Codex 回合状态筛选翻成 SQL。
+//
+// 健康判据在 Go 侧是「密文 10 块」，这里用 char_length = 292：两者一一对应
+// （实测 1300 条只见过 292/312），而 SQL 里解 base64 数块既慢又没索引可用。
+// 未知取值一律不筛，别把拼错的参数变成「查不到任何数据」。
+func appendTurnStateWhereCondition(conditions []string, args []any, filter string) ([]string, []any) {
+	switch strings.TrimSpace(filter) {
+	case usagestats.TurnStateFilterMinted:
+		conditions = append(conditions, "turn_state IS NOT NULL")
+	case usagestats.TurnStateFilterHealthy:
+		conditions = append(conditions, "char_length(turn_state) = 292")
+	case usagestats.TurnStateFilterSuspect:
+		conditions = append(conditions, "turn_state IS NOT NULL AND char_length(turn_state) <> 292")
+	case usagestats.TurnStateFilterSent:
+		conditions = append(conditions, "turn_state_sent IS NOT NULL")
+	case usagestats.TurnStateFilterInjected:
+		conditions = append(conditions, "turn_state_overridden IS TRUE")
+	case usagestats.TurnStateFilterAuto,
+		usagestats.TurnStateFilterAutoStale,
+		usagestats.TurnStateFilterManual:
+		conditions = append(conditions, fmt.Sprintf("turn_state_source = $%d", len(args)+1))
+		args = append(args, strings.TrimSpace(filter))
+	}
+	return conditions, args
 }
