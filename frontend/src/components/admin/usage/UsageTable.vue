@@ -87,6 +87,15 @@
                 {{ isLikelyModelVariant(row) ? t('usage.modelVariant') : t('usage.modelMismatch') }}
               </span>
             </div>
+            <div
+              v-if="row.safety_buffering_faster_model || typeof row.safety_buffering_enabled === 'boolean'"
+              data-testid="safety-buffering-marker"
+              class="break-all pl-3 text-[11px] text-gray-500 dark:text-gray-400"
+              :title="`x-codex-safety-buffering-enabled: ${row.safety_buffering_enabled ?? '-'} / x-codex-safety-buffering-faster-model: ${row.safety_buffering_faster_model ?? '-'}`"
+            >
+              <span class="mr-1">↳ {{ t('usage.safetyBuffering') }}:</span>{{ row.safety_buffering_faster_model ?? '-' }}
+              <span class="ml-1">(enabled={{ row.safety_buffering_enabled ?? '-' }})</span>
+            </div>
           </div>
         </template>
 
