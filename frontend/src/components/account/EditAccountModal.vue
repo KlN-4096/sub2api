@@ -2354,6 +2354,24 @@
         </div>
       </div>
 
+      <!-- 账号级出站 User-Agent（仅 OpenAI OAuth）：留空回落到全局设置 -->
+      <div
+        v-if="account?.platform === 'openai' && account?.type === 'oauth'"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <label class="input-label">{{ t('admin.accounts.openai.codexUserAgent') }}</label>
+        <p class="mt-1 mb-2 text-xs text-gray-500 dark:text-gray-400">
+          {{ t('admin.accounts.openai.codexUserAgentDesc') }}
+        </p>
+        <input
+          v-model="codexUserAgent"
+          type="text"
+          class="input"
+          data-testid="edit-codex-user-agent-input"
+          :placeholder="t('admin.accounts.openai.codexUserAgentPlaceholder')"
+        />
+      </div>
+
       <!-- klno 实验性指纹收敛：按账号开关，见 backend/internal/service/openai_codex_fingerprint_convergence.go -->
       <div
         v-if="account?.platform === 'openai' && account?.type === 'oauth'"
@@ -3720,6 +3738,8 @@ const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
+// 账号级出站 User-Agent：留空表示沿用全局设置（后端 GetOpenAIUserAgent 的回落顺序）
+const codexUserAgent = ref('')
 const codexFingerprintConvergence = ref(false)
 type CodexImageToolMode = 'inherit' | 'enabled' | 'disabled' | 'block'
 const codexImageToolMode = ref<CodexImageToolMode>('inherit')
@@ -4205,6 +4225,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   codexCLIOnlyAppServerEnabled.value = false
   codexFingerprintMode.value = 'off'
   codexFingerprintConvergence.value = false
+  codexUserAgent.value = ''
   codexImageToolMode.value = 'inherit'
   anthropicPassthroughEnabled.value = false
   anthropicAPIKeyAuthScheme.value = 'x_api_key'
@@ -4263,6 +4284,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
         ? fpMode as CodexFingerprintMode
         : 'off')
       codexFingerprintConvergence.value = extra?.codex_experimental_fingerprint_convergence === true
+      codexUserAgent.value = typeof extra?.codex_user_agent === 'string' ? extra.codex_user_agent : ''
     }
     const credentials = newAccount.credentials as Record<string, unknown> | undefined
     const compactMappings = credentials?.compact_model_mapping as Record<string, string> | undefined
@@ -5804,6 +5826,13 @@ const handleSubmit = async () => {
           newExtra.codex_experimental_fingerprint_convergence = true
         } else {
           delete newExtra.codex_experimental_fingerprint_convergence
+        }
+        // 账号级出站 UA：留空删键，回落到全局设置
+        const codexUA = codexUserAgent.value.trim()
+        if (codexUA) {
+          newExtra.codex_user_agent = codexUA
+        } else {
+          delete newExtra.codex_user_agent
         }
       }
 

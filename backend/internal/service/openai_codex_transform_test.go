@@ -1150,36 +1150,35 @@ func TestValidateCodexSparkInputAllowsTextOnly(t *testing.T) {
 	require.NoError(t, validateCodexSparkInput(reqBody, "gpt-5.3-codex-spark"))
 }
 
-func TestApplyCodexOAuthTransform_AddsSparkImageUnsupportedInstructions(t *testing.T) {
-	reqBody := map[string]any{
-		"model":        "gpt-5.3-codex-spark",
-		"instructions": "existing instructions",
-		"input":        "hello",
+// issue #6911：凡是会随请求发到上游的固定文本（instructions 标记、保留字工具别名）
+// 都不得含代理名。这条断言直接钉住意图，改名后忘了它就会红。
+func TestOutboundLiteralsCarryNoProxyName(t *testing.T) {
+	for name, value := range map[string]string{
+		"todo guard":          openAICompatClaudeCodeTodoGuardText,
+		"image bridge":        codexImageGenerationBridgeText,
+		"reserved tool alias": codexPythonToolAlias,
+	} {
+		require.NotContains(t, strings.ToLower(value), "sub2api", "%s 会随请求发给上游", name)
 	}
-
-	result := applyCodexOAuthTransform(reqBody, true, false)
-	require.True(t, result.Modified)
-
-	instructions, ok := reqBody["instructions"].(string)
-	require.True(t, ok)
-	require.Contains(t, instructions, "existing instructions")
-	require.Contains(t, instructions, codexSparkImageUnsupportedMarker)
-	require.Contains(t, instructions, "does not support image generation")
-	require.Contains(t, instructions, "switch to a non-Spark Codex model")
-	require.NotContains(t, instructions, codexImageGenerationBridgeMarker)
 }
 
-func TestApplyCodexOAuthTransform_DoesNotAddSparkImageUnsupportedForNonSpark(t *testing.T) {
-	reqBody := map[string]any{
-		"model":        "gpt-5.4",
-		"instructions": "existing instructions",
-		"input":        "hello",
+// issue #6911：不得往 instructions 注入任何带 sub2api 标记的文字（上游可据此识别代理）。
+// spark 只剥 image_generation 工具（stripCodexSparkImageGenerationTools），提示词原样。
+func TestApplyCodexOAuthTransform_SparkDoesNotInjectInstructions(t *testing.T) {
+	for _, model := range []string{"gpt-5.3-codex-spark", "gpt-5.4"} {
+		reqBody := map[string]any{
+			"model":        model,
+			"instructions": "existing instructions",
+			"input":        "hello",
+		}
+		applyCodexOAuthTransform(reqBody, true, false)
+		instructions, ok := reqBody["instructions"].(string)
+		require.True(t, ok)
+		require.Equal(t, "existing instructions", instructions, model)
+		raw, err := json.Marshal(reqBody)
+		require.NoError(t, err)
+		require.NotContains(t, string(raw), "sub2api", model)
 	}
-
-	applyCodexOAuthTransform(reqBody, true, false)
-	instructions, ok := reqBody["instructions"].(string)
-	require.True(t, ok)
-	require.NotContains(t, instructions, codexSparkImageUnsupportedMarker)
 }
 
 // gpt-5.3-codex-spark rejects the image_generation tool upstream (HTTP 400

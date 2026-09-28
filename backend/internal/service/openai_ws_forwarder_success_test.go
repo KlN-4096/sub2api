@@ -1536,9 +1536,11 @@ func TestOpenAIGatewayService_PrewarmReadHonorsParentContext(t *testing.T) {
 	start := time.Now()
 	err := svc.performOpenAIWSGeneratePrewarm(
 		ctx,
+		nil,
 		lease,
 		OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2},
 		payload,
+		"",
 		"",
 		map[string]any{"model": "gpt-5.1"},
 		account,
@@ -1955,6 +1957,7 @@ type openAIWSCaptureConn struct {
 	events     [][]byte
 	lastWrite  map[string]any
 	writes     []map[string]any
+	rawWrites  [][]byte // 原始字节：键序与转义只能在这里断言
 	closed     bool
 }
 
@@ -1969,18 +1972,21 @@ func (c *openAIWSCaptureConn) WriteJSON(ctx context.Context, value any) error {
 	case map[string]any:
 		c.lastWrite = cloneMapStringAny(payload)
 		c.writes = append(c.writes, cloneMapStringAny(payload))
+		c.rawWrites = append(c.rawWrites, []byte(requestToJSONString(payload)))
 	case json.RawMessage:
 		var parsed map[string]any
 		if err := decodeOpenAIJSONUseNumber(payload, &parsed); err == nil {
 			c.lastWrite = cloneMapStringAny(parsed)
 			c.writes = append(c.writes, cloneMapStringAny(parsed))
 		}
+		c.rawWrites = append(c.rawWrites, append([]byte(nil), payload...))
 	case []byte:
 		var parsed map[string]any
 		if err := decodeOpenAIJSONUseNumber(payload, &parsed); err == nil {
 			c.lastWrite = cloneMapStringAny(parsed)
 			c.writes = append(c.writes, cloneMapStringAny(parsed))
 		}
+		c.rawWrites = append(c.rawWrites, append([]byte(nil), payload...))
 	}
 	return nil
 }
