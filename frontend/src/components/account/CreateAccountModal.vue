@@ -364,7 +364,7 @@
       <!-- Account Type Selection (OpenAI) -->
       <div v-if="form.platform === 'openai'">
         <label class="input-label">{{ t('admin.accounts.accountType') }}</label>
-        <div class="mt-2 grid grid-cols-2 gap-3" data-tour="account-form-type">
+        <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3" data-tour="account-form-type">
           <button
             type="button"
             @click="accountCategory = 'oauth-based'"
@@ -417,6 +417,61 @@
             </div>
           </button>
 
+          <button
+            type="button"
+            @click="accountCategory = 'cpr'"
+            :class="[
+              'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
+              accountCategory === 'cpr'
+                ? 'border-orange-500 bg-orange-50 dark:bg-orange-900/20'
+                : 'border-gray-200 hover:border-orange-300 dark:border-dark-600 dark:hover:border-orange-700'
+            ]"
+          >
+            <div
+              :class="[
+                'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
+                accountCategory === 'cpr'
+                  ? 'bg-orange-500 text-white'
+                  : 'bg-gray-100 text-gray-500 dark:bg-dark-600 dark:text-gray-400'
+              ]"
+            >
+              <Icon name="key" size="sm" />
+            </div>
+            <div>
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">CPR</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.cpr.typeHint') }}</span>
+            </div>
+          </button>
+
+        </div>
+      </div>
+
+      <!-- CPR 中继：一个账号对应 CPR 里的一个 OpenAI 账号（单账号分组 + 专属 client key）。 -->
+      <div v-if="form.platform === 'openai' && accountCategory === 'cpr'" class="space-y-4">
+        <div>
+          <label class="input-label">{{ t('admin.accounts.cpr.baseUrl') }} <span class="text-red-500">*</span></label>
+          <input v-model="cprBaseUrl" type="text" class="input mt-1" placeholder="http://127.0.0.1:18081" />
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.cpr.baseUrlHint') }}</p>
+        </div>
+        <div>
+          <label class="input-label">{{ t('admin.accounts.cpr.clientKey') }} <span class="text-red-500">*</span></label>
+          <input v-model="cprClientKey" type="password" autocomplete="off" class="input mt-1" placeholder="sk_..." />
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.cpr.clientKeyHint') }}</p>
+        </div>
+        <div>
+          <label class="input-label">{{ t('admin.accounts.cpr.accountId') }} <span class="text-red-500">*</span></label>
+          <input v-model="cprAccountId" type="text" class="input mt-1" placeholder="acct_..." />
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.cpr.accountIdHint') }}</p>
+        </div>
+        <div>
+          <label class="input-label">{{ t('admin.accounts.cpr.adminApiKey') }} <span class="text-red-500">*</span></label>
+          <input v-model="cprAdminApiKey" type="password" autocomplete="off" class="input mt-1" placeholder="admin-..." />
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.cpr.adminApiKeyHint') }}</p>
+        </div>
+        <div>
+          <label class="input-label">{{ t('admin.accounts.cpr.adminBaseUrl') }}</label>
+          <input v-model="cprAdminBaseUrl" type="text" class="input mt-1" :placeholder="cprBaseUrl || 'http://127.0.0.1:18081'" />
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.cpr.adminBaseUrlHint') }}</p>
         </div>
       </div>
 
@@ -3059,9 +3114,11 @@
         </p>
       </div>
 
-      <!-- OpenAI 自动透传开关（OAuth/API Key） -->
+      <!-- OpenAI 自动透传开关（OAuth/API Key）。
+           cpr 中继本身就是透传层，不显示该开关——它在编辑页也不显示，
+           创建时开了就再也关不掉。后端 IsOpenAIPassthroughEnabled 另有兜底。 -->
       <div
-        v-if="form.platform === 'openai'"
+        v-if="form.platform === 'openai' && (accountCategory === 'oauth-based' || accountCategory === 'apikey')"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -4147,7 +4204,7 @@ interface TempUnschedRuleForm {
 // State
 const step = ref(1)
 const submitting = ref(false)
-const accountCategory = ref<'oauth-based' | 'apikey' | 'bedrock' | 'service_account'>('oauth-based') // UI selection for account category
+const accountCategory = ref<'oauth-based' | 'apikey' | 'bedrock' | 'service_account' | 'cpr'>('oauth-based') // UI selection for account category
 const addMethod = ref<AddMethod>('oauth') // For oauth-based: 'oauth' or 'setup-token'
 const apiKeyBaseUrl = ref('https://api.anthropic.com')
 const apiKeyValue = ref('')
@@ -4326,6 +4383,17 @@ function onCnPresetSelect(preset: { mode: CnAccountMode; protocol: CnApiProtocol
 }
 
 const syncPreviewCredentials = computed(() => {
+  // cpr 的凭据在独立的一组 ref 里；后端 buildOpenAIAPIKeyModelsRequest 对 cpr
+  // 走同一条 {base_url}/v1/models，所以这里只需把字段换过来。
+  if (accountCategory.value === 'cpr') {
+    if (!cprClientKey.value || !cprBaseUrl.value.trim()) return undefined
+    return {
+      platform: form.platform,
+      type: form.type,
+      base_url: cprBaseUrl.value.trim(),
+      api_key: cprClientKey.value
+    }
+  }
   if (!apiKeyValue.value) return undefined
   const baseUrl = isMultiProtocolPlatform.value && apiProtocol.value === 'adaptive'
     ? adaptiveBaseUrls.value.chat_completions.trim() || apiKeyBaseUrl.value.trim()
@@ -4475,6 +4543,12 @@ const antigravityAccountType = ref<'oauth' | 'upstream'>('oauth') // For antigra
 const antigravityProjectId = ref('')
 const upstreamBaseUrl = ref('') // For upstream type: base URL
 const upstreamApiKey = ref('') // For upstream type: API key
+// CPR 中继：base_url/api_key 是 CPR 网关的，admin_* 用于拉额度，cpr_account_id 指定绑定哪个 CPR 账号。
+const cprBaseUrl = ref('')
+const cprClientKey = ref('')
+const cprAccountId = ref('')
+const cprAdminApiKey = ref('')
+const cprAdminBaseUrl = ref('')
 const antigravityModelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist')
 const antigravityWhitelistModels = ref<string[]>([])
 const antigravityModelMappings = ref<ModelMapping[]>([])
@@ -4817,6 +4891,11 @@ watch(
       form.type = 'bedrock' as AccountType
       return
     }
+    // CPR 中继类型（仅 openai）
+    if (form.platform === 'openai' && category === 'cpr') {
+      form.type = 'cpr' as AccountType
+      return
+    }
     if ((form.platform === 'gemini' || form.platform === 'anthropic') && category === 'service_account') {
       form.type = 'service_account' as AccountType
     } else if (category === 'oauth-based') {
@@ -4877,6 +4956,11 @@ watch(
       accountCategory.value = 'oauth-based'
     }
     if (newPlatform !== 'anthropic' && accountCategory.value === 'bedrock') {
+      accountCategory.value = 'oauth-based'
+    }
+    // 漏了这条会落进类型同步 watcher 末尾的 `else { form.type = 'apikey' }` 兜底：
+    // 没有任何类型按钮高亮，apikey 凭据表单也不渲染，是个死状态。
+    if (newPlatform !== 'openai' && accountCategory.value === 'cpr') {
       accountCategory.value = 'oauth-based'
     }
     // Reset Bedrock fields when switching platforms
@@ -5387,6 +5471,11 @@ const resetForm = () => {
   antigravityAccountType.value = 'oauth'
   antigravityProjectId.value = ''
   upstreamBaseUrl.value = ''
+  cprBaseUrl.value = ''
+  cprClientKey.value = ''
+  cprAccountId.value = ''
+  cprAdminApiKey.value = ''
+  cprAdminBaseUrl.value = ''
   upstreamApiKey.value = ''
   vertexServiceAccountJson.value = ''
   vertexProjectId.value = ''
@@ -5632,6 +5721,44 @@ const handleSubmit = async () => {
       return
     }
     step.value = 2
+    return
+  }
+
+  // CPR 中继：直接创建。凭据全部是 CPR 的，不含任何 OpenAI 凭据——
+  // 真实的 OAuth token 由 CPR 自己持有，sub2api 从不接触。
+  if (form.platform === 'openai' && accountCategory.value === 'cpr') {
+    if (!form.name.trim()) {
+      appStore.showError(t('admin.accounts.pleaseEnterAccountName'))
+      return
+    }
+    if (!cprBaseUrl.value.trim()) {
+      appStore.showError(t('admin.accounts.cpr.baseUrlRequired'))
+      return
+    }
+    if (!cprClientKey.value.trim()) {
+      appStore.showError(t('admin.accounts.cpr.clientKeyRequired'))
+      return
+    }
+    if (!cprAccountId.value.trim()) {
+      appStore.showError(t('admin.accounts.cpr.accountIdRequired'))
+      return
+    }
+    if (!cprAdminApiKey.value.trim()) {
+      appStore.showError(t('admin.accounts.cpr.adminApiKeyRequired'))
+      return
+    }
+
+    const credentials: Record<string, unknown> = {
+      base_url: cprBaseUrl.value.trim().replace(/\/+$/, ''),
+      api_key: cprClientKey.value.trim(),
+      cpr_account_id: cprAccountId.value.trim(),
+      admin_api_key: cprAdminApiKey.value.trim()
+    }
+    if (cprAdminBaseUrl.value.trim()) {
+      credentials.admin_base_url = cprAdminBaseUrl.value.trim().replace(/\/+$/, '')
+    }
+
+    await createAccountAndFinish('openai', 'cpr' as AccountType, credentials)
     return
   }
 

@@ -269,6 +269,12 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			normalized = next
 		}
 		responsesLite := isOpenAIResponsesLiteWebSocketPayload(normalized)
+		// 时区投影必须抢在归一化之前：它会删掉 internal_chat_message_metadata_passthrough
+		// （上游 #7066，ChatGPT 拒收该字段），而本改写正是靠该字段的 create_time 定位消息
+		// 时刻、靠 content_item_kinds 判定哪段是 environment_context。删掉之后再改写只会
+		// 静默退化成 no-op。帧收口 applyCodexWSFrameWireProfile 里的同名调用保留：重复执行
+		// 幂等，且它还负责 user_location 那一半。
+		normalized = rewriteCodexEnvironmentTimezone(c, account, normalized)
 		if compatibilityBody, compatibilityChanged, compatibilityErr := normalizeOpenAIResponsesWebSocketCompatibilityBody(normalized, account, responsesLite); compatibilityErr != nil {
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", compatibilityErr)
 		} else if compatibilityChanged {
