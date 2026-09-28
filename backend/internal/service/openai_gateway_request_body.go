@@ -967,7 +967,12 @@ func rawOpenAIResponsesRequestPathSuffix(c *gin.Context) string {
 	if c == nil || c.Request == nil || c.Request.URL == nil {
 		return ""
 	}
-	normalizedPath := strings.TrimRight(strings.TrimSpace(c.Request.URL.Path), "/")
+	return openAIResponsesPathSuffix(c.Request.URL.Path)
+}
+
+// openAIResponsesPathSuffix 提取路径中 /responses 之后的子路径，不做安全判断。
+func openAIResponsesPathSuffix(path string) string {
+	normalizedPath := strings.TrimRight(strings.TrimSpace(path), "/")
 	if normalizedPath == "" {
 		return ""
 	}
