@@ -25,6 +25,12 @@ export const TURN_STATE_SHAPES = [
 /** 票自铸造起 1 小时有效（对家实时池六张卡的「到期」都精确等于 Fernet 戳 + 1h）。 */
 export const TURN_STATE_DEFAULT_TTL_MINUTES = 60
 
+/**
+ * 降智暂停（后端 openai_turn_state_hold.go）借 model_rate_limits 存，reason 标本功能。
+ * 状态列徽标和猎手行都要按它判，两边必须是同一个串——各抄一份就会在漂移时悄悄错位。
+ */
+export const TURN_STATE_HOLD_REASON = 'turn_state_hold'
+
 export interface TurnStateEnvelope {
   blocks: number
   mintedAt: Date

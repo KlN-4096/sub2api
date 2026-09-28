@@ -808,17 +808,18 @@ func setToSlice(set map[int64]struct{}) []int64 {
 
 // appendTurnStateWhereCondition 把 Codex 回合状态筛选翻成 SQL。
 //
-// 健康判据在 Go 侧是「密文 10 块」，这里用 char_length = 292：两者一一对应
-// （实测 1300 条只见过 292/312），而 SQL 里解 base64 数块既慢又没索引可用。
+// 健康判据在 Go 侧是密文块数（service 的 openAITurnStateShapes：individual 10 块 / 292 字符，
+// team 12 块 / 332），这里用 char_length 一一对应，SQL 里解 base64 数块既慢又没索引可用。
+// 只写 292 的话 team 号每一条都会被筛成「疑似降智」。改形态表要同步改这里。
 // 未知取值一律不筛，别把拼错的参数变成「查不到任何数据」。
 func appendTurnStateWhereCondition(conditions []string, args []any, filter string) ([]string, []any) {
 	switch strings.TrimSpace(filter) {
 	case usagestats.TurnStateFilterMinted:
 		conditions = append(conditions, "turn_state IS NOT NULL")
 	case usagestats.TurnStateFilterHealthy:
-		conditions = append(conditions, "char_length(turn_state) = 292")
+		conditions = append(conditions, "char_length(turn_state) IN (292, 332)")
 	case usagestats.TurnStateFilterSuspect:
-		conditions = append(conditions, "turn_state IS NOT NULL AND char_length(turn_state) <> 292")
+		conditions = append(conditions, "turn_state IS NOT NULL AND char_length(turn_state) NOT IN (292, 332)")
 	case usagestats.TurnStateFilterSent:
 		conditions = append(conditions, "turn_state_sent IS NOT NULL")
 	case usagestats.TurnStateFilterInjected:

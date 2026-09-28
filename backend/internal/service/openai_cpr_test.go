@@ -200,6 +200,23 @@ func TestCPRDoesNotDisturbOtherAccountTypes(t *testing.T) {
 
 // --- 额度适配器 ---
 
+// TestCPRAdminDoesNotFollowRedirects 钉住：白名单只校验初始地址，admin 客户端不能跟着 3xx 把
+// x-api-key 带去别的主机（Go 只在跨域时剥 Authorization，自定义头原样带走）。
+func TestCPRAdminDoesNotFollowRedirects(t *testing.T) {
+	leak, leaked := startCPRAdminStub(t, http.StatusOK, `{"code":200,"data":{"account":{}}}`)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, leak.URL+r.URL.RequestURI(), http.StatusFound)
+	}))
+	t.Cleanup(redirector.Close)
+
+	account := newCPRTestAccount()
+	account.Credentials["admin_base_url"] = redirector.URL
+
+	_, err := NewCPRQuotaService(cprTestConfig()).FetchAccountState(context.Background(), account)
+	require.Error(t, err)
+	require.Empty(t, *leaked, "重定向目标一个请求都不该收到，更不该收到 x-api-key")
+}
+
 func TestCPRQuotaAdapterMapsWindows(t *testing.T) {
 	now := time.Now()
 	// 5h 窗口 2 小时后重置，7d 窗口 3 天后重置。
