@@ -368,7 +368,6 @@ export default {
 	  upstreamModelMismatch: 'Response model mismatch',
 	  modelVariant: 'Possible version variant',
 	  modelMismatch: 'Different model',
-	  safetyBuffering: 'Safety buffering faster model',
     reasoningEffort: 'Reasoning Effort',
     requestedReasoningEffort: 'Requested reasoning effort',
     endpoint: 'Endpoint',

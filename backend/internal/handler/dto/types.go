@@ -702,6 +702,10 @@ type AdminUsageLog struct {
 	// SafetyBufferingEnabled / SafetyBufferingFasterModel 是上游响应头 x-codex-safety-buffering-* 的读数。
 	SafetyBufferingEnabled     *bool   `json:"safety_buffering_enabled,omitempty"`
 	SafetyBufferingFasterModel *string `json:"safety_buffering_faster_model,omitempty"`
+	// RouteGateway / RoutePair 是这一发生效的路由对读数：网关段从 __oailb 的 JWT 载荷解出，
+	// 整串留着以便原样复现。只作观测。
+	RouteGateway *string `json:"route_gateway,omitempty"`
+	RoutePair    *string `json:"route_pair,omitempty"`
 	// BillingTier 计费层级标签（per_request/image 模式）
 	BillingTier *string `json:"billing_tier,omitempty"`
 
