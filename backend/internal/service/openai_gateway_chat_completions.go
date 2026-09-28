@@ -296,6 +296,12 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	logger.L().Debug("openai chat_completions: model mapping applied", logFields...)
 
 	if account.UsesOpenAICodexProtocol() {
+		// 时区投影必须抢在 applyCodexOAuthTransform* 之前：上游 #7066 在其中删掉
+		// internal_chat_message_metadata_passthrough，而投影正是靠它的 create_time
+		// 定位消息时刻。只有 isResponsesShape 分支会原样转发客户端 body（:237
+		// sjson.SetBytes(body, ...)），其余分支的体由网关现造、带不进该字段，此处为 no-op。
+		// 与 Forward / WS 三处同形，重复执行幂等。
+		responsesBody = rewriteCodexEnvironmentTimezone(c, account, responsesBody)
 		var reqBody map[string]any
 		if err := json.Unmarshal(responsesBody, &reqBody); err != nil {
 			return nil, fmt.Errorf("unmarshal for codex transform: %w", err)
