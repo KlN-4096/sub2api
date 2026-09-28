@@ -2,7 +2,24 @@ name: CI
 
 on:
   push:
+    # main 只是 sync-upstream.yml 的 cron 宿主，每天 03:17 UTC 被重建成
+    # upstream/main + 那一个工作流文件。上面跑的是上游的代码不是 klno 的，
+    # 每天白跑一整轮 CI 没有意义。
+    #
+    # 只写 branches-ignore、不写 tags，等于 tag push 也不再触发：sync-upstream
+    # 推 klno 时已经对同一棵树跑过一模一样的 CI，紧接着推的 <tag>-klno.N 再跑
+    # 一遍只是让 release.yml 多等十几分钟。
+    branches-ignore:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
   pull_request:
+
+# 同一分支连续推送时取消还在跑的上一轮，只留最新的那次。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
