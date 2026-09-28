@@ -1290,6 +1290,48 @@ describe('EditAccountModal', () => {
 	  expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.auto_pause_7d_threshold).toBe(0.96)
 	})
 
+	it('submits OpenAI extra settings for cpr accounts', async () => {
+	  // 回归：cpr 走不进那个写 updatePayload.extra 的分支时，自动暂停阈值的控件
+	  // 照常显示、能改、保存提示成功，但 extra 从头到尾没被赋值——重开弹窗全空，
+	  // 额度打满后账号继续被调度直到上游 429。回填与写入必须共用同一个判定。
+	  const account = buildAccount()
+	  account.type = 'cpr'
+	  account.credentials = {
+	    base_url: 'http://127.0.0.1:18081',
+	    api_key: 'sk_cpr',
+	    admin_base_url: 'http://127.0.0.1:18081',
+	    admin_api_key: 'admin_cpr',
+	    cpr_account_id: 'acct_0199c0ffee'
+	  }
+	  account.extra = { auto_pause_5h_threshold: 0.9 }
+	  updateAccountMock.mockReset()
+	  checkMixedChannelRiskMock.mockReset()
+	  checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+	  updateAccountMock.mockResolvedValue(account)
+
+	  const wrapper = mountModal(account)
+
+	  // 回填：cpr 也要读得出已有的阈值，否则会出现「保存后一刷新变默认值」。
+	  expect(
+	    wrapper.get<HTMLInputElement>('[data-testid="auto-pause-5h-threshold"]').element.value
+	  ).toBe('90')
+
+	  await wrapper.get('[data-testid="auto-pause-5h-threshold"]').setValue('95')
+	  await wrapper.get('[data-testid="auto-pause-7d-threshold"]').setValue('80')
+	  await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+	  expect(updateAccountMock).toHaveBeenCalledTimes(1)
+	  const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+	  expect(extra?.auto_pause_5h_threshold).toBe(0.95)
+	  expect(extra?.auto_pause_7d_threshold).toBe(0.8)
+	  // 同一个门控放开的另外两项也必须落库。
+	  expect(extra).toHaveProperty('openai_long_context_billing_enabled')
+	  // 自动透传与 WS 模式对 cpr 后端硬返回 false，不得因此被写进来。
+	  expect(extra).not.toHaveProperty('openai_passthrough')
+	  expect(extra).not.toHaveProperty('openai_oauth_responses_websockets_v2_mode')
+	  expect(extra).not.toHaveProperty('openai_apikey_responses_websockets_v2_mode')
+	})
+
 	it('submits OpenAI quota auto-pause disable flag in extra', async () => {
 	  // Toggling the per-account disable flag must persist as auto_pause_5h_disabled
 	  // so an admin can exempt one account from auto-pause even when a global default

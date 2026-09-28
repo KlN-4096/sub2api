@@ -167,7 +167,9 @@ func duplicateAccountExtra(value map[string]any) (map[string]any, error) {
 
 func canDuplicateAccountType(accountType string) bool {
 	switch accountType {
-	case AccountTypeAPIKey, AccountTypeUpstream, AccountTypeBedrock, AccountTypeServiceAccount:
+	// cpr 的凭据是静态的（base_url / api_key / admin_* / cpr_account_id），没有任何
+	// 轮换态，与 apikey 同构；OAuth 被排除的理由是 token 会被后台刷新器改写，对 cpr 不成立。
+	case AccountTypeAPIKey, AccountTypeUpstream, AccountTypeBedrock, AccountTypeServiceAccount, AccountTypeCPR:
 		return true
 	default:
 		return false

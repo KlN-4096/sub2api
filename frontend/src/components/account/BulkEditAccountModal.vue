@@ -135,7 +135,7 @@
 
       <!-- OpenAI API long-context billing -->
       <div
-        v-if="allOpenAIPassthroughCapable"
+        v-if="allOpenAIExtraSettingsCapable"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="mb-3 flex items-center justify-between gap-4">
@@ -1164,7 +1164,7 @@
       </div>
 
       <!-- OpenAI Compact mode -->
-      <div v-if="allOpenAIPassthroughCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div v-if="allOpenAIExtraSettingsCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
           <div class="flex-1 pr-4">
             <label
@@ -1200,7 +1200,7 @@
       </div>
 
       <!-- OpenAI Compact model mapping -->
-      <div v-if="allOpenAIPassthroughCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div v-if="allOpenAIExtraSettingsCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
           <div class="flex-1 pr-4">
             <label
@@ -1554,12 +1554,28 @@ const allTargetsGrok = computed(
 )
 const isMixedPlatform = computed(() => targetSelectedPlatforms.value.length > 1)
 
+// 仅用于「自动透传」区块：后端 IsOpenAIPassthroughEnabled() 对 cpr 硬返回 false
+// （CPR 本身就是透传层，再套一层没有意义），所以这里不含 cpr。
 const allOpenAIPassthroughCapable = computed(() => {
   return (
     targetSelectedPlatforms.value.length === 1 &&
     targetSelectedPlatforms.value[0] === 'openai' &&
     targetSelectedTypes.value.length > 0 &&
     targetSelectedTypes.value.every(t => t === 'oauth' || t === 'setup-token' || t === 'apikey')
+  )
+})
+
+// 长上下文计费 / compact 模式 / compact 模型映射：后端只按 platform 判定，cpr 同样生效。
+// 与上面拆开是因为原先四个区块共用一个 every()——选中集合里混进 1 个 cpr，
+// 那些 oauth 账号的区块会一起消失，看起来像 bug。
+const allOpenAIExtraSettingsCapable = computed(() => {
+  return (
+    targetSelectedPlatforms.value.length === 1 &&
+    targetSelectedPlatforms.value[0] === 'openai' &&
+    targetSelectedTypes.value.length > 0 &&
+    targetSelectedTypes.value.every(
+      t => t === 'oauth' || t === 'setup-token' || t === 'apikey' || t === 'cpr'
+    )
   )
 })
 
@@ -1926,7 +1942,7 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
   const credentials: Record<string, unknown> = {}
   let credentialsChanged = false
   const applyOpenAILongContextBilling =
-    enableOpenAILongContextBilling.value && allOpenAIPassthroughCapable.value
+    enableOpenAILongContextBilling.value && allOpenAIExtraSettingsCapable.value
   const applyOpenAIEndpointCapabilities =
     enableOpenAIEndpointCapabilities.value && allOpenAIAPIKey.value
   const applyOpenAIResponsesMode = enableOpenAIResponsesMode.value && allOpenAIAPIKey.value
@@ -2204,7 +2220,7 @@ const handleSubmit = async () => {
     enableBaseUrl.value ||
     enableOpenAIPassthrough.value ||
     enableOpenAIFlattenNamespaces.value ||
-    (enableOpenAILongContextBilling.value && allOpenAIPassthroughCapable.value) ||
+    (enableOpenAILongContextBilling.value && allOpenAIExtraSettingsCapable.value) ||
     (enableOpenAIEndpointCapabilities.value && allOpenAIAPIKey.value) ||
     (enableOpenAIResponsesMode.value && allOpenAIAPIKey.value) ||
     enableModelRestriction.value ||

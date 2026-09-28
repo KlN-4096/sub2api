@@ -63,8 +63,10 @@ func serviceTierCostRank(tier string) (rank int, known bool) {
 // may lower billing. The private ChatGPT Codex endpoint does not: it commonly
 // reports default for effective Fast turns, so OAuth-like credentials retain
 // the final outbound tier while still exposing the observed value.
+// cpr 中继的是同一个 ChatGPT Codex 后端（CPR 对 service_tier 只读不写），
+// 按「上游是谁」分流，否则同一份响应 cpr 会被按 default 降档计费。
 func ResolveOpenAIServiceTierBilling(account *Account, requested, observed string) ServiceTierBillingResolution {
-	if account != nil && account.IsOpenAIOAuthLike() && codexOAuthResponseTierIsNonAuthoritative(observed) {
+	if account != nil && account.TargetsChatGPTCodexUpstream() && codexOAuthResponseTierIsNonAuthoritative(observed) {
 		return ServiceTierBillingResolution{
 			Requested: normalizeBillingServiceTier(requested),
 			Observed:  normalizeBillingServiceTier(observed),
