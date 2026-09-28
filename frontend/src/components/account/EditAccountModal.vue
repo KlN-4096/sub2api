@@ -2466,6 +2466,34 @@
         </div>
       </div>
 
+      <!-- Basis Points 直通：只对 ChatGPT 登录的 oauth 账号，见 backend/internal/service/openai_basispoints.go。顶替原来的 292 猎手。
+           影子行也要藏：后端 IsOpenAIAgentIdentity 读 GetCredential("auth_mode") 而它只读本行、不回落母号，
+           所以母号是 Agent Identity 的影子行这里判不出来，勾上以后每一发都会硬报错（missing_token）。 -->
+      <div
+        v-if="
+          account?.platform === 'openai' &&
+          account?.type === 'oauth' &&
+          !isOpenAIAgentIdentity &&
+          !isSparkShadow
+        "
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div class="min-w-0">
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.basisPoints') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.openai.basisPointsDesc') }}
+            </p>
+          </div>
+          <input
+            v-model="openAIBasisPoints"
+            data-testid="edit-openai-basispoints"
+            type="checkbox"
+            class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+          />
+        </div>
+      </div>
+
       <!-- OpenAI 订阅档位手动覆盖（Plus/Pro/Free），仅 OAuth 非影子账号 -->
       <div
         v-if="account?.platform === 'openai' && account?.type === 'oauth' && !isSparkShadow"
@@ -3957,6 +3985,13 @@ const isBedrockAPIKeyMode = computed(() =>
   props.account?.type === 'bedrock' &&
   (props.account?.credentials as Record<string, unknown>)?.auth_mode === 'apikey'
 )
+// Agent Identity 没有 bearer token，后端 UsesOpenAIBasisPoints 会直接拒掉；开关得跟着藏起来，
+// 不然勾上是个静默空操作。凭据键两种拼法都收（CreateAccountModal 也是这么防的）。
+const isOpenAIAgentIdentity = computed(() => {
+  const credentials = props.account?.credentials as Record<string, unknown> | undefined
+  const mode = credentials?.auth_mode ?? credentials?.authMode
+  return String(mode ?? '').toLowerCase() === 'agentidentity'
+})
 const modelMappings = ref<ModelMapping[]>([])
 const openAICompactModelMappings = ref<ModelMapping[]>([])
 const modelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist')
@@ -4487,6 +4522,8 @@ const codexFingerprintMode = ref<CodexFingerprintMode>('off')
 // 账号级出站 User-Agent：留空表示沿用全局设置（后端 GetOpenAIUserAgent 的回落顺序）
 const codexUserAgent = ref('')
 const codexFingerprintConvergence = ref(false)
+// Basis Points 直通（extra.openai_basispoints）：勾选落 true，不勾删键。
+const openAIBasisPoints = ref(false)
 type CodexImageToolMode = 'inherit' | 'enabled' | 'disabled' | 'block'
 const codexImageToolMode = ref<CodexImageToolMode>('inherit')
 type AnthropicAPIKeyAuthScheme = 'x_api_key' | 'authorization_bearer'
@@ -4983,6 +5020,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   codexCLIOnlyAppServerEnabled.value = false
   codexFingerprintMode.value = 'off'
   codexFingerprintConvergence.value = false
+  openAIBasisPoints.value = false
   codexUserAgent.value = ''
   codexImageToolMode.value = 'inherit'
   anthropicPassthroughEnabled.value = false
@@ -5043,6 +5081,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
         ? fpMode as CodexFingerprintMode
         : 'off')
       codexFingerprintConvergence.value = extra?.codex_experimental_fingerprint_convergence === true
+      openAIBasisPoints.value = extra?.openai_basispoints === true
       codexUserAgent.value = typeof extra?.codex_user_agent === 'string' ? extra.codex_user_agent : ''
     }
     const credentials = newAccount.credentials as Record<string, unknown> | undefined
@@ -6649,6 +6688,15 @@ const handleSubmit = async () => {
           newExtra.codex_experimental_fingerprint_convergence = true
         } else {
           delete newExtra.codex_experimental_fingerprint_convergence
+        }
+        // Basis Points 直通：勾选落 true，不勾删键（对应后端 UsesOpenAIBasisPoints）。
+        // 开关的 v-if(:2472) 比这里窄——影子 / Agent Identity 行不显示开关——但这里不用再判：
+        // :5084 对任何 openai+oauth 账号都把 extra.openai_basispoints 回读进 ref，所以那些行
+        // 上「此前经 API/DB 置过 true」的值会原样写回，不会被改无关字段的保存顺手清掉。
+        if (openAIBasisPoints.value) {
+          newExtra.openai_basispoints = true
+        } else {
+          delete newExtra.openai_basispoints
         }
         // 账号级出站 UA：留空删键，回落到全局设置
         const codexUA = codexUserAgent.value.trim()

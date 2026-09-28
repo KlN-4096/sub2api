@@ -141,7 +141,7 @@ func TestOpenAIWSTerminalEvent_ResponseFailedRecordsModelTransient(t *testing.T)
 	payload := []byte(`{"type":"response.failed","response":{"error":{"code":"server_error","message":"Internal error"}}}`)
 
 	for range 2 {
-		terminalEvent := svc.handleOpenAIWSTerminalTransientFailure(context.Background(), account, "gpt-5.5", http.Header{}, payload)
+		terminalEvent := svc.handleOpenAIWSTerminalTransientFailure(context.Background(), nil, account, "gpt-5.5", http.Header{}, payload)
 		require.Equal(t, "response.failed", terminalEvent)
 	}
 

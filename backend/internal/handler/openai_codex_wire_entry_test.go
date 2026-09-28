@@ -34,7 +34,7 @@ const (
 	codexWireConvergeKey = "codex_experimental_fingerprint_convergence"
 	codexWireInboundInst = "7f582abd-05d2-4a59-b4e5-ec1b733b4edc"
 	// 非 legacy 的 openai-beta：只有透传构造器原样转发，用作分支判别标记。
-	codexWirePassthroughMarker = "responses_websockets=2026-02-06"
+	codexWirePassthroughMarker = "application/x-passthrough-probe"
 	codexWireInboundSess       = "01a07c73-e312-76e1-9054-e4665b8ee0a1"
 	codexWireTurnMetadata      = `{"installation_id":"` + codexWireInboundInst + `","session_id":"` + codexWireInboundSess +
 		`","thread_id":"` + codexWireInboundSess + `","turn_id":"01a07c73-e3a0-7ae1-baf0-ce1c532f019c",` +
@@ -498,8 +498,37 @@ func TestCodexWireEntryCompactCacheKeyPathsAgree(t *testing.T) {
 			codexWireAccount(806, "target", extra),
 		})
 		defer cleanup()
-		// 非 legacy 的 openai-beta 只有透传构造器会原样转发，用它证明确实走了那条分支，
-		// 而不是悄悄回落到非透传后两边"当然一致"。
+		// 先打一发普通 /responses 当分支探针：inbound `accept` 只在透传白名单里
+		// （openaiPassthroughAllowedHeaders 有、openaiAllowedHeaders 没有），而非 compact 路径上
+		// 透传构造器只在 accept 为空时才覆盖它，所以它能证明确实走了透传那条分支、而不是悄悄
+		// 回落到非透传后两边「当然一致」。
+		//
+		// **不再用 openai-beta 当标记**：真 Codex 在 HTTP /responses 上从不发这个头，两条路现在
+		// 都整条删掉它（openai_gateway_forward.go / openai_gateway_passthrough.go）。拿一条真实
+		// 出站指纹给测试当路标，等于把生产行为绑在测试便利上。
+		probe := httptest.NewRequest(http.MethodPost, "/v1/responses",
+			strings.NewReader(codexWireCompactBody()))
+		probe.Header.Set("content-type", "application/json")
+		probe.Header.Set("originator", "codex-tui")
+		probe.Header.Set("session-id", codexWireInboundSess)
+		probe.Header.Set("thread-id", codexWireInboundSess)
+		probe.Header.Set("x-codex-turn-metadata", codexWireTurnMetadata)
+		probe.Header.Set("accept", codexWirePassthroughMarker)
+		probe.Header.Set("openai-beta", "responses_websockets=2026-02-06")
+		probeRec := httptest.NewRecorder()
+		router.ServeHTTP(probeRec, probe)
+		probeTaken := upstream.taken()
+		require.Len(t, probeTaken, 1)
+		if passthrough {
+			require.Equal(t, codexWirePassthroughMarker, probeTaken[0].header.Get("accept"),
+				"标记缺失说明没走透传分支，后面的一致性断言就没有意义了")
+		} else {
+			require.Equal(t, "text/event-stream", probeTaken[0].header.Get("accept"))
+		}
+		// 两条路都不许把客户端的 openai-beta 带出去。
+		require.Empty(t, probeTaken[0].header.Get("openai-beta"),
+			"真 Codex 在 HTTP /responses 上从不发这个头（passthrough=%v）", passthrough)
+
 		req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact",
 			strings.NewReader(codexWireCompactBody()))
 		req.Header.Set("content-type", "application/json")
@@ -507,19 +536,19 @@ func TestCodexWireEntryCompactCacheKeyPathsAgree(t *testing.T) {
 		req.Header.Set("session-id", codexWireInboundSess)
 		req.Header.Set("thread-id", codexWireInboundSess)
 		req.Header.Set("x-codex-turn-metadata", codexWireTurnMetadata)
-		req.Header.Set("openai-beta", codexWirePassthroughMarker)
+		req.Header.Set("openai-beta", "responses_websockets=2026-02-06")
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		// taken() 累积不清空：探针那一发在前面，compact 这一发取最后一条。
 		taken := upstream.taken()
-		require.Len(t, taken, 1)
-		return taken[0]
+		require.Len(t, taken, 2, "探针 + compact 各一发")
+		return taken[len(taken)-1]
 	}
 
 	forward, passthrough := derive(false), derive(true)
 	require.Empty(t, forward.header.Get("openai-beta"), "非透传不转发该头")
-	require.Equal(t, codexWirePassthroughMarker, passthrough.header.Get("openai-beta"),
-		"标记头缺失说明没走透传分支，后面的一致性断言就没有意义了")
+	require.Empty(t, passthrough.header.Get("openai-beta"), "透传也不转发：真 Codex 在 HTTP 上不发它")
 
 	forwardKey := gjson.GetBytes(forward.body, "prompt_cache_key").String()
 	passthroughKey := gjson.GetBytes(passthrough.body, "prompt_cache_key").String()

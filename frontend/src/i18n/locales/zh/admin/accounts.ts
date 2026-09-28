@@ -807,6 +807,8 @@ export default {
         codexFingerprintModeDesc: '多人共享同一 OAuth 账号时，将各用户的设备/会话标识收敛为账号级恒定值，减少上游可见的设备数和会话数。默认关闭（原样透传客户端标识），需要时再显式开启；部分账号开启收敛后出现过额度缩水，请按自己的实测结果选择。',
         codexFingerprintConvergence: '实验性指纹收敛（klno）',
         codexFingerprintConvergenceDesc: '让这把 API key 的出站身份在 HTTP / WS 上与真 Codex 客户端形态一致：补齐 session-id / thread-id 头，x-client-request-id 等于 thread-id，去掉 session_id / conversation_id 别名，root_turn_id 等与同类字段同源派生，保持 UUIDv7。关闭时与上游行为完全一致；开启那一刻该账号的会话标识会一次性轮换。',
+        basisPoints: 'Basis Points 直通（实验）',
+        basisPointsDesc: '开启后这个账号的 /v1/responses 改打 OpenAI Excel 产品的后端 bps.openai.com（同一份登录、同一个账号），绕开 Codex 后端；模型名原样发。工具目录写进提示、模型经 run_officejs 回传调用；用户消息里的图片先传成 BPS 附件。承载不了的请求「不回落 Codex」：显式联网搜索、生图、结构化输出、强制指定工具、工具历史找不回，以及被 BPS 拒绝的请求，一律返回客户端可见的错误（error.type=basispoints_unavailable，上游自己回的状态码原样透出，本层判定的才是 502），免得同一把 key 上混着满血和降智的回答。上游按 usage policy 封掉这个号的 BPS 通道时会**停用这个账号**（403 有冷却，接着打没意义），需要管理员手动恢复；其余情况账号状态不动。只支持 /v1/responses（WS 客户端走 HTTP 桥）；Codex 的自动压缩回合也走 BPS（实测支持），而老客户端那种 /v1/responses/compact 的压缩回合会直接报错（走 Codex 生成的摘要会进入后续每一轮的历史 = 掺杂）；用量记录的上游端点显示为 /basispoints/api/responses。上游会按并发封掉这个号的 BPS 通道，建议把账号并发设为 1。',
         codexFingerprintOff: '关闭（透传，默认）',
         codexFingerprintDevice: '仅设备',
         codexFingerprintSession: '设备+会话',

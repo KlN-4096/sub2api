@@ -369,8 +369,45 @@ func TestOpenAIWSStandaloneFailedStructured403AppliesAccountSideEffectsOnce(t *t
 	account := &Account{ID: 923, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	failed := []byte(`{"type":"response.failed","response":{"error":{"type":"permission_error","code":"invalid_api_key","status_code":403,"message":"credential rejected"}}}`)
 
-	require.True(t, svc.handleOpenAIWSFailureAccountSideEffects(context.Background(), account, "gpt-5", nil, failed))
+	require.True(t, svc.handleOpenAIWSFailureAccountSideEffects(context.Background(), nil, account, "gpt-5", nil, failed))
 	require.Equal(t, 1, repo.setErrorCalls)
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+}
+
+// 现在生产调用方会把真 gin context 透进来（为了那道 isOpenAIBasisPointsResponse 闸门），于是
+// handleOpenAIStreamTerminalAccountSideEffects 里 `ctx = c.Request.Context()` 让**请求级 ctx**
+// 成了落库用的 ctx。流终态上客户端断开是常态，所以这些账号状态迁移现在依赖
+// openAIAccountStateContext 的 context.WithoutCancel。少了这条用例，把那个 WithoutCancel 拆掉
+// 整仓库照旧全绿，而线上表现是「客户端一断开，401/429/529 的账号状态就再也写不进去」。
+// openAICtxAwareAccountRepo 像真驱动那样对待被取消的 ctx（database/sql 在 ctx.Err() != nil 时
+// 直接返回错误、不发语句）。共享的那个桩忽略 ctx，用它测不出取消。
+type openAICtxAwareAccountRepo struct {
+	AccountRepository
+	setErrorCalls int
+}
+
+func (r *openAICtxAwareAccountRepo) SetError(ctx context.Context, _ int64, _ string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.setErrorCalls++
+	return nil
+}
+
+func TestOpenAIWSFailureSideEffectsPersistWithCanceledRequestContext(t *testing.T) {
+	repo := &openAICtxAwareAccountRepo{}
+	svc := &OpenAIGatewayService{rateLimitService: &RateLimitService{accountRepo: repo}}
+	account := &Account{ID: 925, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	failed := []byte(`{"type":"response.failed","response":{"error":{"type":"permission_error","code":"invalid_api_key","status_code":403,"message":"credential rejected"}}}`)
+
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	reqCtx, cancel := context.WithCancel(context.Background())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(reqCtx)
+	cancel()
+
+	require.True(t, svc.handleOpenAIWSFailureAccountSideEffects(context.Background(), c, account, "gpt-5", nil, failed))
+	require.Equal(t, 1, repo.setErrorCalls, "请求 ctx 已取消，账号状态仍然要落库")
 	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
@@ -381,9 +418,9 @@ func TestOpenAIWSPairedStructured403SideEffectsCanBeDeduplicated(t *testing.T) {
 	errorEvent := []byte(`{"type":"error","error":{"code":"workspace_suspended","status_code":403,"message":"workspace is suspended"}}`)
 	failedEvent := []byte(`{"type":"response.failed","response":{"error":{"code":"workspace_suspended","status_code":403,"message":"workspace is suspended"}}}`)
 
-	applied := svc.handleOpenAIWSFailureAccountSideEffects(context.Background(), account, "gpt-5", nil, errorEvent)
+	applied := svc.handleOpenAIWSFailureAccountSideEffects(context.Background(), nil, account, "gpt-5", nil, errorEvent)
 	if !applied {
-		applied = svc.handleOpenAIWSFailureAccountSideEffects(context.Background(), account, "gpt-5", nil, failedEvent)
+		applied = svc.handleOpenAIWSFailureAccountSideEffects(context.Background(), nil, account, "gpt-5", nil, failedEvent)
 	}
 
 	require.True(t, applied)

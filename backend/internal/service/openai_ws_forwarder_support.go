@@ -323,13 +323,13 @@ func openAIWSPayloadTransientStatus(payload []byte) int {
 	}
 }
 
-func (s *OpenAIGatewayService) handleOpenAIWSTerminalTransientFailure(ctx context.Context, account *Account, canonicalModel string, headers http.Header, payload []byte) string {
+func (s *OpenAIGatewayService) handleOpenAIWSTerminalTransientFailure(ctx context.Context, c *gin.Context, account *Account, canonicalModel string, headers http.Header, payload []byte) string {
 	eventType, _, _ := parseOpenAIWSEventEnvelope(payload)
 	terminalEvent := normalizeOpenAIWSTerminalEvent(eventType)
 	if terminalEvent != "response.failed" {
 		return terminalEvent
 	}
-	s.handleOpenAIWSFailureAccountSideEffects(ctx, account, canonicalModel, headers, payload)
+	s.handleOpenAIWSFailureAccountSideEffects(ctx, c, account, canonicalModel, headers, payload)
 	return terminalEvent
 }
 
@@ -350,18 +350,33 @@ func (s *OpenAIGatewayService) handleOpenAIWSErrorEventTransientFailure(ctx cont
 // handleOpenAIWSFailureAccountSideEffects applies both structured credential
 // failures and transient failures. Its return value lets stream callers avoid
 // applying the same transition twice for an error/response.failed pair.
-func (s *OpenAIGatewayService) handleOpenAIWSFailureAccountSideEffects(ctx context.Context, account *Account, canonicalModel string, headers http.Header, payload []byte) bool {
+// c 可以为 nil（测试），但生产调用方必须把它透下来：handleOpenAIStreamTerminalAccountSideEffects
+// 里那道 isOpenAIBasisPointsResponse(c) 闸门是 `c != nil &&` 短路的，传 nil 等于让它恒为假。
+// BPS 目前不会走到这里（桥上的调用点另外用 bpsAttempt == nil 拦住了），但那是两套判据、其中一套
+// 在这条路上结构性失效 —— 下一个人加一条 BPS 路径时不会知道只有另一套在起作用。
+//
+// **透下来只覆盖上半边的三个 case。** 下面 transient 那一支是**直接**调
+// handleOpenAIAccountUpstreamError，压根不经过带闸门的 handleOpenAIStreamTerminalAccountSideEffects；
+// 兄弟函数 handleOpenAIWSErrorEventTransientFailure 连 c 参数都还没有。今天两条都不可达（BPS 强制
+// 走 HTTP 桥、桥上另有 bpsAttempt == nil），别当成「这个函数整个都挡住了」。
+//
+// **透下来之后请求级 ctx 也跟着进去了**（那边 `ctx = c.Request.Context()` 取代了原来的
+// context.Background()），所以这些 401/429/529 落库现在依赖 openAIAccountStateContext 的
+// context.WithoutCancel —— 少了它，客户端一断开这批账号状态迁移就全部写不进去，而这是流终态、
+// 客户端断开恰恰是常态。别把那个 WithoutCancel 当成可选的保险。用例：
+// TestOpenAIWSFailureSideEffectsPersistWithCanceledRequestContext。
+func (s *OpenAIGatewayService) handleOpenAIWSFailureAccountSideEffects(ctx context.Context, c *gin.Context, account *Account, canonicalModel string, headers http.Header, payload []byte) bool {
 	message := extractOpenAISSEErrorMessage(payload)
 	status := openAIStreamFailureStatus(payload, message)
 	switch status {
 	case http.StatusUnauthorized, http.StatusTooManyRequests, 529:
-		s.handleOpenAIStreamTerminalAccountSideEffects(nil, account, payload, message, headers, canonicalModel)
+		s.handleOpenAIStreamTerminalAccountSideEffects(c, account, payload, message, headers, canonicalModel)
 		return true
 	case http.StatusForbidden:
 		if !openAIStream403AccountFailure(payload, message) {
 			return false
 		}
-		s.handleOpenAIStreamTerminalAccountSideEffects(nil, account, payload, message, headers, canonicalModel)
+		s.handleOpenAIStreamTerminalAccountSideEffects(c, account, payload, message, headers, canonicalModel)
 		return true
 	}
 

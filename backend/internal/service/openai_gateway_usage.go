@@ -426,10 +426,13 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	usageLog.SafetyBufferingEnabled = usageCodexSafetyBufferingEnabledPtr(result.UpstreamHeaders)
 	usageLog.SafetyBufferingFasterModel = usageCodexSafetyBufferingFasterModelPtr(result.UpstreamHeaders)
 	// 路由对读数（openai_codex_route_cookies.go）：上游新下发就记新的，否则回读罐里当前那一组。
-	// 纯观测，不参与任何判定。
-	routePair := s.routePairInUse(account, result.UpstreamHeaders)
-	usageLog.RoutePair = usageCodexRoutePairPtr(routePair)
-	usageLog.RouteGateway = usageCodexRouteGatewayPtr(routePair)
+	// 纯观测，不参与任何判定。Basis Points 请求打的是另一个 host，根本不碰 Codex 网关，
+	// 回读罐子只会把上一发 Codex 请求的网关记到它头上 —— 那是假读数，留 NULL。
+	if input.UpstreamEndpoint != openAIBasisPointsUpstreamEndpoint {
+		routePair := s.routePairInUse(account, result.UpstreamHeaders)
+		usageLog.RoutePair = usageCodexRoutePairPtr(routePair)
+		usageLog.RouteGateway = usageCodexRouteGatewayPtr(routePair)
+	}
 	isVideoUsage := isGrokVideoUsageResult(result, billingModels)
 	if isVideoUsage {
 		usageLog.VideoCount = result.VideoCount

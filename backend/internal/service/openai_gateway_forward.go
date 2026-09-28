@@ -22,6 +22,7 @@ import (
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
+	markOpenAIBasisPointsResponse(c, false)
 	if account.UsesOpenAIRawRelay() {
 		return s.forwardOpenAIRawRelay(ctx, c, account, body)
 	}
@@ -37,6 +38,129 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	clearOpenAIResponsesClientToolMapping(c)
 	clearOpenAIResponsesNamespaceNames(c)
 	setCodexToolNameReverse(c, nil)
+	// Basis Points 直通只接普通 /responses。开着开关时承载不了的请求一律报错，不回落原路径。
+	// 放在上面几行清理之后：上一次 failover 尝试留下的映射不能套到 BPS 的输出上。
+	//
+	// 只排除 `/v1/responses/<子路径>`（legacy 的 body-signal 压缩会被 handler 改写成 /compact 从而
+	// 天然不进来）。
+	//
+	// **原生 v2 压缩回合（input 末尾一个 compaction_trigger）不再排除。** 2026-09-29 直连
+	// bps.openai.com 实测（bpstest-pro1，3 发）：带 trigger 的体 HTTP 200，事件序列与 Codex 后端
+	// 一致 —— response.created → in_progress → output_item.added(item.type=compaction) →
+	// response.compaction.compacting → output_item.done(compaction) → completed(output=[compaction])，
+	// 无正文 delta（压缩回合本来就不产正文）；对照组（同历史不带 trigger）13 种事件 + 有正文。
+	// `x-codex-beta-features: remote_compaction_v2` 加不加结果一样，BPS 不需要那个头。
+	// 原先豁免的三条理由实测都不成立：prologue 在的体照样 200；trigger 挪到末尾对真 Codex 是
+	// no-op（真客户端本来就放末尾，见 normalizeOpenAIResponsesCompactRequest 把「单个 trigger 在
+	// 末尾」当已规范直接 return）；那个头不需要。
+	// 豁免它意味着开着开关的账号每约 20 万 token 有一整轮摘要由降智的 Codex 生成、且那份摘要成为
+	// 此后每一轮 BPS 请求的历史 —— 用户的口径是「打开开关后不允许降智的请求」，所以这条豁免删掉。
+	// 顶层 messages / prompt / commands 这类 legacy 入站形态先归一成 input，否则
+	// openAIBasisPointsRouteReason 会把它判成 prompt_template / request_json 直接硬报错，
+	// 而原路径（下面 normalizeOpenAIResponsesLegacyIngress）是能正常服务的。
+	// 归一结果只给 BPS 用：万一走回原路径，body 保持原样，下面那次归一照旧执行。
+	//
+	// 闸门查 bpsBody 而不是 body，只是为了让「判据读的就是真正会发出去的那个体」在结构上成立。
+	// **今天两者的判定结果逐字相同**：`normalizeOpenAIResponsesLegacyIngress` 只会在没有 native
+	// `input` 时用 `convertLegacyResponsesMessages` 的结果覆盖它，而那个转换只产出
+	// message / function_call / function_call_output 三类项，永远产不出 compaction_trigger；
+	// `input` 已存在时它根本不碰 `input`。所以这不是在修一个现存的漏，**别把它当成「归一会造出
+	// trigger」的证据**（第五轮的注释这么写，是错的）。
+	// 归一本身是必要的，理由是下面那个：不归一 openAIBasisPointsRouteReason 会把顶层 messages
+	// 判成 prompt_template / request_json 直接硬报错。
+	bpsBody := body
+	if account.UsesOpenAIBasisPoints() {
+		if normalized, changed, ingressErr := normalizeOpenAIResponsesLegacyIngress(body); ingressErr == nil && changed {
+			bpsBody = normalized
+		}
+	}
+	// **legacy compact 回合（`/responses/compact`）判死，不许悄悄走 Codex。** 它和上面刚删掉的
+	// 原生 v2 豁免逐字同一个后果：那一轮摘要由降智的 Codex 生成，然后成为此后每一轮 BPS 请求的历史
+	// ⇒ 同一个会话一半满血一半降智，而客户端拿到的是 HTTP 200 + 一份正常摘要，没有任何可见信号
+	// （唯一读数是事后 usage_logs.upstream_endpoint）。命中路径有两条：客户端直接打
+	// `/v1/responses/compact`，或者裸 `/responses` 带 compaction_trigger 但 stream 不是 bool true
+	// —— 后者被 handler 的 body-signal 提升改写成 /compact（openai_gateway_handler.go 的
+	// codex.remote_compact.detected_body_signal）。
+	// **刻意判死而不是归一成原生 trigger 形态走 BPS**：那要新写一层 /compact → trigger 的协议翻译，
+	// 而 BPS 收不收 legacy compact 的体没有实测。判死是可见的一次性失败，符合「宁可硬错也不掺杂」；
+	// 代价是走 legacy compact 的老客户端在开着开关的账号上压缩不了（真 Codex 用的是原生 v2，走上面
+	// 那条已经进 BPS 的路）。要改成走 BPS 得先直连实测。
+	// 用仓库自己的谓词，**别在这里写字符串比较**：`/responses/compact/<子路径>` 在本仓是一等公民
+	// （路由 `/responses/*subpath`、`endpoint.go` 明文把四种嵌套形态都归到 EndpointResponsesCompact、
+	// handler 用例名就叫 nested_compact），精确相等 `== "/compact"` 漏掉它 ⇒ 那一格照旧静默走 Codex。
+	// 这个谓词的两个分支都蕴含 suffix != ""，所以只会扩大判死范围，抢不走下面那条 BPS 分派。
+	if account.UsesOpenAIBasisPoints() && isOpenAIResponsesCompactPath(c) {
+		ClearActualOpenAIUpstreamEndpoint(c)
+		return nil, writeOpenAIBasisPointsUnavailable(c, account.ID, "legacy_compact_path")
+	}
+	if account.UsesOpenAIBasisPoints() && openAIResponsesRequestPathSuffix(c) == "" {
+		// Fast 策略必须抢在 BPS 之前评估：原路径是在 openai_gateway_passthrough.go:278 才评估，
+		// 排在这个分派点之后。不先评估就有两个后果 —— ①管理员配的 BetaPolicyActionBlock 闸门
+		// 被一个账号级实验开关绕过；②强制 Fast 分组里的账号静默降级成标准档（BPS 收不了
+		// service_tier，2026-09-29 直连实测 422）。
+		// 策略处理过的体要接下来用：action=filter 会剥掉 service_tier，丢了它
+		// beginOpenAIBasisPoints 里那道 service_tier 网就会把这条本该正常服务的请求打成硬报错。
+		patchedBody, reason, fastErr := s.openAIBasisPointsFastPolicyReason(ctx, c, account, bpsBody)
+		if fastErr != nil {
+			return nil, fastErr
+		}
+		if len(patchedBody) > 0 {
+			bpsBody = patchedBody
+		}
+		// 生图意图同样要在这里判死。原路径的分组闸门（下面 imageIntent && !imageGenerationAllowed）
+		// 排在分派点之后，而 openAIBasisPointsRouteReason 只看 tools / tool_choice 里的
+		// image_generation —— 光按模型名请求生图（gpt-image-1 之类）会既绕开分组闸门、又把模型名
+		// 带着账号主人的 bearer token 发到 bps.openai.com。BPS 本来就做不了生图，判死即可。
+		if reason == "" && IsImageGenerationIntent(openAIResponsesEndpoint, gjson.GetBytes(bpsBody, "model").String(), bpsBody) {
+			reason = "image_generation"
+		}
+		if reason != "" {
+			ClearActualOpenAIUpstreamEndpoint(c)
+			return nil, writeOpenAIBasisPointsUnavailable(c, account.ID, reason)
+		}
+		result, err := s.forwardOpenAIBasisPoints(ctx, c, account, bpsBody)
+		if reason, native := openAIBasisPointsNativeReason(err); native {
+			ClearActualOpenAIUpstreamEndpoint(c)
+			// 开着开关就不回落 Codex：混着满血和降智的回答比直接失败更糟（用户 2026-09-29 定的口径）。
+			if !openAIBasisPointsFallbackReasonKeepsNativeRoute(reason) {
+				return nil, writeOpenAIBasisPointsUnavailable(c, account.ID, reason)
+			}
+			logger.LegacyPrintf("service.openai_gateway", "[Basispoints] account=%d route=native_codex reason=%s", account.ID, reason)
+		} else {
+			// 上游接受之后的流内失败走的是共用处理器，它有 6 处会产出 *UpstreamFailoverError
+			// （openai_gateway_response_handling.go）。那种 error 原样返回的话 handler 会换号，
+			// 换到一个没开开关的账号就在 Codex 路径上把同一个请求重跑一遍 —— 掺杂从这个口子
+			// 原封不动地回来，而且还会按「账号失败」拖低这个账号的调度分。所以在这里收口成
+			// 同一条硬报错：**只换 error，result 原样带出**（用量已经拿到就别丢账）。
+			//
+			// 不能加 `result == nil` 前置条件：`handleStreamingResponseWithReasoning` 里的 usage 是
+			// `&OpenAIUsage{}` 恒非 nil（openai_gateway_response_handling.go:164），resultWithUsage()
+			// 原样带出，所以流式请求上 result 几乎恒非 nil —— 加了那个条件整段就是死代码。
+			var failoverErr *UpstreamFailoverError
+			if errors.As(err, &failoverErr) {
+				ClearActualOpenAIUpstreamEndpoint(c)
+				// 带 status_ 前缀才会被 openAIBasisPointsUnavailableStatus 透成上游状态码。
+				// 这个 StatusCode 同样是从上游流内的 error.code / error.type 推出来的
+				// （openAIStreamFailureStatus → openAIStreamFailedEventSemanticStatus），
+				// 能拿它当状态码用**不是因为输入不来自上游，而是因为那个映射器的值域封闭**
+				// （{401,403,429,503,529,502}）。peek 抓到的同一族信号走的也是这一套。
+				reason := "stream_incomplete"
+				if failoverErr.StatusCode >= 400 && failoverErr.StatusCode <= 599 {
+					reason = fmt.Sprintf("status_%d_stream", failoverErr.StatusCode)
+				}
+				return result, writeOpenAIBasisPointsUnavailable(c, account.ID, reason)
+			}
+			// compact 兜底信号（换个 compact 模型同号重试一次）在压缩回合进 BPS 之后才变得可达。
+			// BPS 路上没有任何消费者 —— 那套重试循环在下面的 Codex 分支里，这里永远进不去 ——
+			// 所以原样返回等于把一条上游原文的裸 error 丢给 handler，客户端拿到的不是 basispoints_*
+			// 码、也拿不到状态码映射。收口成同一条硬报错。
+			if _, compactSignal := asOpenAICompactFallbackSignal(err); compactSignal {
+				ClearActualOpenAIUpstreamEndpoint(c)
+				return result, writeOpenAIBasisPointsUnavailable(c, account.ID, "compact_model_unavailable")
+			}
+			return result, err
+		}
+	}
 	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
 		return nil, err
 	}

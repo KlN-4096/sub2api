@@ -2526,6 +2526,25 @@ func (s *OpenAIGatewayService) isOpenAIAccountTransportCompatible(account *Accou
 	return s.getOpenAIWSProtocolResolver().Resolve(account).Transport == requiredTransport
 }
 
+// ReportOpenAIForwardScheduleResult 按一条 forward 结果上报调度结果，是 `/responses` 两条路
+// （HTTP 与 WS 桥）唯一的上报入口。
+//
+// **ScheduleNeutral 的结果既不报成功也不报失败。** 判断刻意收在这里而不是放在调用方的 if 里：
+// 那样每个调用点都得记得查一次，而漏查的后果是罚一个满血的 Basis Points 账号的调度分 ⇒ 调度器
+// 更倾向挑没开开关的账号 ⇒ 满血与降智掺杂。也**不能**改成报成功 —— 那会清掉模型级瞬时状态。
+// 返回是否真的上报了。
+func (s *OpenAIGatewayService) ReportOpenAIForwardScheduleResult(account *Account, model string, result *OpenAIForwardResult) bool {
+	if result != nil && result.ScheduleNeutral {
+		return false
+	}
+	var firstTokenMs *int
+	if result != nil {
+		firstTokenMs = result.FirstTokenMs
+	}
+	s.ReportOpenAIAccountScheduleResult(account, model, result.SucceededForScheduling(), firstTokenMs)
+	return true
+}
+
 func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Account, model string, success bool, firstTokenMs *int, observedErr ...error) bool {
 	if account == nil {
 		return false

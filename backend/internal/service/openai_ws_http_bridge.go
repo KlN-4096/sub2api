@@ -420,7 +420,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	grokCacheIdentity string,
 	turn int,
 	writeClientMessage func([]byte) error,
-) (*OpenAIForwardResult, error) {
+) (_ *OpenAIForwardResult, bridgeErr error) {
 	if s == nil {
 		return nil, errors.New("service is nil")
 	}
@@ -434,6 +434,15 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		return nil, errors.New("client websocket writer is nil")
 	}
 	responseModelObserver := &upstreamResponseModelObserver{}
+	// 上一轮 / 上一个账号的 BPS 标记不能带进这一轮。
+	markOpenAIBasisPointsResponse(c, false)
+	// 端点读数同样每轮从无残留开始（Forward 也是每次都清，openai_gateway_forward.go）。
+	// 不清的后果：BPS 那一轮把 gin 键钉成 /basispoints/api/responses，而非 BPS 轮次的
+	// resultWithUsage() 不填 UpstreamEndpoint，于是 handler 的 resolveOpenAIUpstreamEndpoint
+	// 回落读到残留值 —— 一发真打到 Codex 后端的压缩请求会被记成 BPS，而且
+	// openai_gateway_usage.go 那道「非 BPS 才落 route_pair/route_gateway」的闸门会跳过它，
+	// 恰好把要保护的 Codex 真读数弄丢。
+	ClearActualOpenAIUpstreamEndpoint(c)
 
 	body, err := prepareOpenAIWSHTTPBridgeBody(account, payload)
 	if err != nil {
@@ -488,6 +497,37 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			body = liteBody
 		}
 	}
+	// Basis Points 直通：WS 客户端被强制走这座桥，桥体已是 /responses 形态，每一轮先试 BPS。
+	// 承载不了的请求一律给客户端发 response.failed 并结束这一轮 —— 开着开关就不让满血和降智的
+	// 回答混在同一个会话里（用户 2026-09-29 定的口径）。
+	//
+	// **这里连 client_restriction 也不放行**，与 HTTP 路径不同：HTTP 上放行它是因为原路径
+	// （openai_gateway_forward.go 的 detectCodexClientRestriction）会写自己那条规范的拒绝文案，
+	// 而这座桥上没有那次检查（该函数的调用点只有 Forward / chat_completions / raw_relay），
+	// 放行的结果不是"换一条更好的拒绝文案"，而是由 Codex 正常服务 —— 正好是要禁的掺杂。
+	// 原生 v2 压缩回合与 HTTP 侧同一个口径：**不再排除**（BPS 实测支持，见
+	// openai_gateway_forward.go 那段的实测记录）。Codex CLI 的 WS 接入同样会自动压缩，
+	// 两侧必须一致，否则同一个账号 HTTP 上不降智、WS 上每约 20 万 token 降智一轮。
+	var bpsAttempt *openAIBasisPointsAttempt
+	if account.UsesOpenAIBasisPoints() {
+		attempt, bpsErr := s.beginOpenAIBasisPoints(ctx, c, account, body, token)
+		if reason, native := openAIBasisPointsNativeReason(bpsErr); native {
+			ClearActualOpenAIUpstreamEndpoint(c)
+			return nil, s.failOpenAIBasisPointsWSTurn(c, account, turn, originalModel, writeClientMessage,
+				"ingress_ws_http_bridge_basispoints_error", reason)
+		} else if bpsErr != nil {
+			return nil, bpsErr
+		} else {
+			bpsAttempt = attempt
+		}
+	}
+	if bpsAttempt != nil {
+		// 与 HTTP 侧（markOpenAIBasisPointsNotAccountFault 的注释）同一个理由：上游已经接受，
+		// 这一轮往后的任何失败都不是账号的错。桥上「wroteDownstream 之后」那几条尾巴返回的是
+		// 共用处理器 / 扫描器的裸 error，shouldReportOpenAIWSProxyAccountFailure 会按账号失败罚
+		// 调度分。在这里收一次，新增出口不会再漏。
+		defer func() { bridgeErr = markOpenAIBasisPointsNotAccountFault(bridgeErr) }()
+	}
 
 	buildUpstreamRequest := func(requestBody []byte) (*http.Request, error) {
 		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
@@ -530,6 +570,9 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	if actualModel == "" {
 		actualModel = canonicalOpenAIAccountSchedulingModel(account, originalModel)
 	}
+	if bpsAttempt != nil {
+		actualModel = bpsAttempt.upstreamModel
+	}
 	SetOpsUpstreamModel(c, actualModel)
 
 	proxyURL := ""
@@ -542,9 +585,19 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	}
 
 	turnStart := time.Now()
+	if bpsAttempt != nil {
+		// BPS 轮次的 TTFT 与 Duration 都要从**出站请求发出那一刻**算。这一行原来排在
+		// beginOpenAIBasisPoints 之后，而那里面的 peek 一直读到「第一个会到客户端的事件」为止
+		// —— 从这里起算，firstTokenMs 恒等于 ~0（它还是 scheduler 的延迟分输入），Duration 也漏掉
+		// peek + prepare + 图片上传的全部耗时。对非 BPS 轮次逐字无影响（那一段只有被跳过的 BPS 块）。
+		turnStart = bpsAttempt.requestStart
+	}
 	rejectedFieldRetryState := newOpenAIResponsesRejectedFieldRetryState(body)
 	var resp *http.Response
-	for {
+	if bpsAttempt != nil {
+		resp = bpsAttempt.resp
+	}
+	for bpsAttempt == nil {
 		upstreamReq, buildErr := buildUpstreamRequest(body)
 		if buildErr != nil {
 			return nil, buildErr
@@ -673,6 +726,21 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			Duration:                      time.Since(turnStart),
 			FirstTokenMs:                  firstTokenMs,
 		}
+		if bpsAttempt != nil {
+			result.UpstreamEndpoint = openAIBasisPointsUpstreamEndpoint
+			// BPS 请求体不带 service_tier、档位也归一过：按实际出站计费，不按客户端请求体。
+			result.ServiceTier = nil
+			result.ReasoningEffort = bpsAttempt.effort
+			// **失败终态不许拖低这个账号的调度分。** 首输出之后到的 response.failed 从
+			// `return resultWithUsage(), nil` 这条出口走（upstreamEventErr 是 nil），于是
+			// markOpenAIBasisPointsNotAccountFault 那套哨兵**结构上救不了它** —— 哨兵只挂在 error 上。
+			// 而 AfterTurn 在 turnErr == nil 时会把 SucceededForScheduling()（对 response.failed 是
+			// false）喂给 ReportOpenAIAccountScheduleResult ⇒ 罚一个满血账号的分 ⇒ 调度器更倾向挑
+			// 没开开关的账号 ⇒ 掺杂，正是 ErrOpenAIRawRelayNotAccountFault 存在的全部理由。
+			// 并发打出来的 429 与 usage-policy 403 恰好就是这个形态，是常态不是尾部。
+			// **只中立失败终态**：成功轮次照常上报（要那个延迟样本，也要清模型级瞬时状态）。
+			result.ScheduleNeutral = !result.SucceededForScheduling()
+		}
 		if replayInput := replayCollector.Items(); len(replayInput) > 0 {
 			result.wsReplayInput = replayInput
 			result.wsReplayInputExists = true
@@ -705,8 +773,8 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		if !bareErrorPending {
 			return nil
 		}
-		if !failureAccountSideEffectsApplied {
-			failureAccountSideEffectsApplied = s.handleOpenAIWSFailureAccountSideEffects(ctx, account, mappedModel, resp.Header, bareErrorPayload)
+		if bpsAttempt == nil && !failureAccountSideEffectsApplied {
+			failureAccountSideEffectsApplied = s.handleOpenAIWSFailureAccountSideEffects(ctx, c, account, mappedModel, resp.Header, bareErrorPayload)
 		}
 		upstreamTerminalEvent = "response.failed"
 		if clientDisconnected {
@@ -813,16 +881,34 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			}
 			statusCode := openAIStreamFailureStatus(upstreamMessage, errMessage)
 			shouldFailover := openAIStreamFailedEventShouldFailover(upstreamMessage, errMessage)
+			// BPS 轮次记进它自己的 bps: 命名空间：「BPS 解不开」不等于「这个 blob 失效」，写裸键会让
+			// 下一轮落到没开开关的账号时，Codex 把本来能用的推理密文也剥掉。peek 抓到的那半在 begin 里
+			// 已经这么记，这里是首输出**之后**才到的失败帧。
+			// **两种 eventType 都要收**：response.failed 把码放在 response.error.code，而下面那个
+			// Codex 分支用的 parseOpenAIWSErrorEventFields 只读 error.code —— 只在 eventType=="error"
+			// 里调就等于漏掉 BPS 上更常见的那一半（第八轮 blocker 点名的就是这个形态）。
+			if bpsAttempt != nil {
+				s.noteOpenAIBasisPointsInvalidEncryptedLineage(c, account, upstreamMessage, body, turn)
+				// usage policy 封通道同理：判据是签名不是 HTTP 403，凡是拿得到这份报文的出口都判一次。
+				// secrets 与 HTTP 两个出口对齐（token + chatgpt_account_id）：落库的原因会在管理台上
+				// 原样显示，而 sanitizeUpstreamErrorMessage 这两个都不打码。
+				bpsCode, bpsMessage := openAIBasisPointsErrorDetail(upstreamMessage)
+				s.disableOpenAIBasisPointsAccountOnUsagePolicyBlock(ctx, account, bpsCode, bpsMessage,
+					[]string{bpsAttempt.upstreamModel, bpsAttempt.requestedModel},
+					token, account.GetChatGPTAccountID())
+			}
 			if eventType == "error" {
 				errCodeRaw, errTypeRaw, _ := parseOpenAIWSErrorEventFields(upstreamMessage)
 				shouldFailover = openAIStreamErrorEventShouldFailover(upstreamMessage, errMessage)
 				if account.Platform == PlatformGrok {
 					statusCode = openAIWSErrorHTTPStatusFromRaw(errCodeRaw, errTypeRaw)
 				}
-				if reason, _ := classifyOpenAIWSErrorEventFromRaw(errCodeRaw, errTypeRaw, errMessage); reason == openAIWSFallbackReasonInvalidEncryptedContent {
-					s.markOpenAIWSInvalidEncryptedContentLineageFromPayload(
-						c, body, "ingress_ws_http_bridge_invalid_encrypted_lineage_mark", account.ID, turn,
-					)
+				if bpsAttempt == nil {
+					if reason, _ := classifyOpenAIWSErrorEventFromRaw(errCodeRaw, errTypeRaw, errMessage); reason == openAIWSFallbackReasonInvalidEncryptedContent {
+						s.markOpenAIWSInvalidEncryptedContentLineageFromPayload(
+							c, body, "ingress_ws_http_bridge_invalid_encrypted_lineage_mark", account.ID, turn,
+						)
+					}
 				}
 			}
 			requestScopedCapacity := isOpenAIUpstreamCapacityShedEvent(upstreamMessage)
@@ -841,14 +927,28 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			// A disconnected client needs this attempt drained for usage, not replayed,
 			// even when only non-semantic heartbeats were delivered.
 			if !clientDisconnected && !wroteDownstream && shouldFailover && (turn == 1 || statusCode == http.StatusTooManyRequests) {
+				// BPS 这一轮不产出 failover error。两条可达后果都要禁掉：turn>1 的流内 429
+				// （正是 BPS 通道被限流的表现）会让 openai_ws_forwarder_ingress.go 把它转成
+				// current-turn failover ⇒ 会话中途换号 ⇒ 新号没开开关就走 Codex；turn==1 时
+				// 这个 error 不包 ErrOpenAIRawRelayNotAccountFault ⇒ handler 罚调度分。
+				// 与 :497 那段同一口径：发一条 response.failed，结束这一轮。
+				if bpsAttempt != nil {
+					reason := "stream_incomplete"
+					if statusCode >= 400 && statusCode <= 599 {
+						reason = fmt.Sprintf("status_%d_stream", statusCode)
+					}
+					return nil, s.failOpenAIBasisPointsWSTurn(c, account, turn, originalModel, writeClientMessage,
+						"ingress_ws_http_bridge_basispoints_stream_error", reason)
+				}
 				if account.Platform == PlatformGrok {
 					return nil, newOpenAIUpstreamFailoverError(statusCode, resp.Header, upstreamMessage, errMessage, false)
 				}
 				return nil, s.newOpenAIStreamFailoverErrorWithModel(c, account, true, resp.Header.Get("x-request-id"), upstreamMessage, errMessage, mappedModel, resp.Header)
 			}
-			if account.Platform != PlatformGrok && !failureAccountSideEffectsApplied {
+			// BPS 流内的失败不改账号状态：它的限流 / 鉴权与 Codex 后端不是一回事。
+			if bpsAttempt == nil && account.Platform != PlatformGrok && !failureAccountSideEffectsApplied {
 				if eventType == "response.failed" || (!officialOpenAIResponses && shouldFailover && !requestScopedCapacity) {
-					failureAccountSideEffectsApplied = s.handleOpenAIWSFailureAccountSideEffects(ctx, account, mappedModel, resp.Header, upstreamMessage)
+					failureAccountSideEffectsApplied = s.handleOpenAIWSFailureAccountSideEffects(ctx, c, account, mappedModel, resp.Header, upstreamMessage)
 				}
 			}
 			if wroteDownstream && requestScopedCapacity && !capacityFailoverSuppressedLogged {
@@ -885,6 +985,12 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 				isOpenAIWSTerminalEvent(eventType)
 			if stageBeforeSemanticOutput && !commitStagedMessages && !isKeepalive {
 				if pendingClientMessageBytes+int64(len(clientMessage)) > openAIFirstOutputStageMaxBytes {
+					// 与桥上另外三处同一个闸门：newOpenAIStreamFailoverError 会让 ingress 换号。
+					// 可达性窄（peek 已吃掉首输出前的事件），但注释把「每一处」写成了不变量。
+					if bpsAttempt != nil {
+						return nil, s.failOpenAIBasisPointsWSTurn(c, account, turn, originalModel, writeClientMessage,
+							"ingress_ws_http_bridge_basispoints_stream_error", "first_output_stage_overflow")
+					}
 					return nil, s.newOpenAIStreamFailoverError(
 						c,
 						account,
@@ -944,7 +1050,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			if eventType == "response.failed" {
 				upstreamTerminalEvent = "response.failed"
 			} else {
-				upstreamTerminalEvent = s.handleOpenAIWSTerminalTransientFailure(ctx, account, mappedModel, resp.Header, upstreamMessage)
+				upstreamTerminalEvent = s.handleOpenAIWSTerminalTransientFailure(ctx, c, account, mappedModel, resp.Header, upstreamMessage)
 			}
 			terminalEventCount++
 			firstTokenMsValue := -1
@@ -981,6 +1087,10 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	if err := scanner.Err(); err != nil {
 		streamErr := fmt.Errorf("read upstream http bridge stream: %w", err)
 		if turn == 1 && !clientDisconnected && !wroteDownstream {
+			if bpsAttempt != nil {
+				return nil, s.failOpenAIBasisPointsWSTurn(c, account, turn, originalModel, writeClientMessage,
+					"ingress_ws_http_bridge_basispoints_stream_error", "stream_read")
+			}
 			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, streamErr, true)
 		}
 		return resultWithUsage(), streamErr
@@ -990,9 +1100,37 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		terminalErr = errors.New("upstream http bridge stream sent [DONE] before terminal event")
 	}
 	if turn == 1 && !clientDisconnected && !wroteDownstream {
+		if bpsAttempt != nil {
+			return nil, s.failOpenAIBasisPointsWSTurn(c, account, turn, originalModel, writeClientMessage,
+				"ingress_ws_http_bridge_basispoints_stream_error", "stream_incomplete")
+		}
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, terminalErr, true)
 	}
 	return resultWithUsage(), terminalErr
+}
+
+// failOpenAIBasisPointsWSTurn 给 WS 客户端发一条 BPS 规范的 response.failed 并结束这一轮。
+//
+// 桥上每一处「产出 *UpstreamFailoverError」的出口在 BPS 这一轮都要改走这里：那种 error 会让
+// ingress 在 turn>1 时换号（换到没开开关的账号就是掺杂），turn==1 时又因为不包
+// ErrOpenAIRawRelayNotAccountFault 而按账号失败罚调度分 —— 而 BPS 的流内失败与 Codex 后端的
+// 账号健康没有关系。调用点必须满足 !wroteDownstream（此刻写这条错误是干净的）。
+func (s *OpenAIGatewayService) failOpenAIBasisPointsWSTurn(
+	c *gin.Context, account *Account, turn int, model string,
+	writeClientMessage func([]byte) error, logEvent, reason string,
+) error {
+	logOpenAIWSModeInfo(logEvent+" account_id=%d turn=%d reason=%s", account.ID, turn, reason)
+	failure := buildOpenAIBasisPointsUnavailableWSEvent(model, reason)
+	if writeErr := writeClientMessage(failure); writeErr != nil {
+		if !isOpenAIWSClientDisconnectError(writeErr) {
+			// 下游写失败（非 disconnect，比如写超时）同样不是账号的错。
+			return fmt.Errorf("%w: write basispoints stream failure response.failed: %w",
+				ErrOpenAIRawRelayNotAccountFault, writeErr)
+		}
+	} else {
+		markOpenAIWSClientVisibleFailure(c, "response.failed", failure)
+	}
+	return openAIBasisPointsUnavailableError(reason)
 }
 
 func resolveGrokWSCacheIdentity(c *gin.Context, account *Account, seedPayload, currentPayload []byte, originalModel string) (string, error) {

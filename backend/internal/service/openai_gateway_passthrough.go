@@ -703,10 +703,16 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 
 	// OAuth 透传到 ChatGPT internal API 时补齐必要头。
 	if account.UsesOpenAICodexProtocol() {
-		// Current Codex OAuth HTTP no longer negotiates the legacy Responses
-		// experiment. Passthrough may receive it from an older client, so remove
-		// only that token while preserving any independent beta negotiation.
-		stripOpenAILegacyResponsesBeta(req.Header)
+		// 真 Codex 在 HTTP /responses 上从不发 OpenAI-Beta（rust-v0.156.1：OPENAI_BETA_HEADER 只写在
+		// client.rs:1320 的 WS 握手与 doctor.rs 的 WS 探测，HTTP/WS 共用的 build_responses_headers
+		// 只写 x-codex-beta-features / x-codex-turn-state），所以 Codex 协议这条路整条删掉，
+		// 不是只剥 legacy 值 —— 客户端给的任何非 legacy 值（`responses_websockets=…` 之类）跟着出站
+		// 就是一条真客户端不存在的指纹。
+		//
+		// 这里和 buildUpstreamRequest 里那处必须同口径：**WS HTTP 桥对所有非 Grok 账号都走这个
+		// 构造器**（openai_ws_http_bridge.go:533），只修非透传那一半等于主路径上还在漏。
+		// api-key 账号不在这个分支里（目标是 openaiPlatformAPIURL），调用方可控的语义不变。
+		req.Header.Del("OpenAI-Beta")
 		promptCacheKey := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
 		req.Host = "chatgpt.com"
 		if err := resolveAndSetOpenAIChatGPTAccountHeaders(ctx, s.accountRepo, req.Header, account); err != nil {
@@ -800,6 +806,11 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	return req, nil
 }
 
+// stripOpenAILegacyResponsesBeta 只剥 `responses=experimental`，保留调用方的其它 beta token。
+//
+// 两个 /responses builder 现在对 Codex 协议账号是**整头 Del**（真 Codex 在 HTTP 上一个 OpenAI-Beta
+// 都不发），所以这里唯一还活着的调用点是 applyCodexDeviceWireProfile 的非 websocket 分支 ——
+// messages 桥会把 `responses=experimental` 加回来，那条路上仍需要它。别按"删头已经覆盖了"就删掉。
 func stripOpenAILegacyResponsesBeta(headers http.Header) {
 	if headers == nil {
 		return
@@ -1694,6 +1705,10 @@ func (s *OpenAIGatewayService) handleOpenAIStreamTerminalAccountSideEffects(
 	canonicalModel ...string,
 ) (int, bool) {
 	statusCode := openAIStreamFailureStatus(payload, message)
+	if isOpenAIBasisPointsResponse(c) {
+		// BPS 的限流 / 鉴权失败不是 Codex 账号的状态。
+		return statusCode, false
+	}
 	switch statusCode {
 	case http.StatusForbidden:
 		if !openAIStream403AccountFailure(payload, message) {
@@ -2429,6 +2444,10 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 // response for the passthrough path. It mirrors handleSSEToJSON while
 // preserving passthrough payloads, except compact-only model remapping may
 // rewrite model fields back to the original requested model.
+// 与 handleSSEToJSON 的一处**刻意**不同构：那边的终态失败出口会把已解出的 usage 带出来
+// （BPS 非流分支要用它记账，那条路失败即终态、不换号），这里三条终态出口仍然 `return nil, err`。
+// BPS 到不了这条路（Forward 的 BPS 分派排在 passthrough 之前就 return 了），而透传的调用方在
+// err != nil 时一律丢弃 result，带出来没有消费者。要改就两侧一起改，别只改一边。
 func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c *gin.Context, account *Account, body []byte, originalModel string, mappedModel string) (*openaiNonStreamingResultPassthrough, error) {
 	bodyText := string(body)
 	terminalType, terminalPayload, terminalOK := extractOpenAISSETerminalEvent(bodyText)

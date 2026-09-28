@@ -123,6 +123,9 @@ func TestOpenAIOAuthHTTPBuildersSendRoutingHintFromFinalBody(t *testing.T) {
 	}
 }
 
+// 函数名是上游的（"StripsOnly…Legacy"），行为已经不是：Codex 协议账号整头删 OpenAI-Beta，
+// 只有 apikey 还是调用方说了算。名字**刻意不改** —— 下次同步上游时冲突落在同一个符号上，
+// 才会有人看到这个差异；改了名就变成静默并存两份相反的期望。
 func TestOpenAIHTTPPassthroughStripsOnlyOAuthLegacyResponsesBeta(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	svc := &OpenAIGatewayService{cfg: &config.Config{
@@ -170,12 +173,15 @@ func TestOpenAIHTTPPassthroughStripsOnlyOAuthLegacyResponsesBeta(t *testing.T) {
 		require.Empty(t, headers.Values("OpenAI-Beta"))
 	})
 
-	t.Run("oauth mixed beta preserves independent tokens", func(t *testing.T) {
+	// 真 Codex 在 HTTP /responses 上一个 OpenAI-Beta 都不发（codex-rs rust-v0.156.1：
+	// OPENAI_BETA_HEADER 只出现在 build_websocket_headers 与 codex doctor 的 WS 探测里），
+	// 所以 Codex 协议账号这里整头删掉，不再挑 token —— 留任何一个都是我们独有的出站指纹。
+	t.Run("oauth drops every beta token, legacy or not", func(t *testing.T) {
 		headers := build(t, oauth, []string{
 			"responses=experimental, future_feature=v1",
 			"another_feature=v2, RESPONSES=EXPERIMENTAL",
 		}, false)
-		require.Equal(t, []string{"future_feature=v1", "another_feature=v2"}, headers.Values("OpenAI-Beta"))
+		require.Empty(t, headers.Values("OpenAI-Beta"))
 	})
 
 	t.Run("api key explicit beta remains caller controlled", func(t *testing.T) {

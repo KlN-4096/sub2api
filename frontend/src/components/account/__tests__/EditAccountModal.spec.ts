@@ -1968,14 +1968,6 @@ describe('EditAccountModal 292 猎手', () => {
     wrapper.unmount()
   })
 
-  it('cpr 账号不显示 turn-state 替换设置：原样中继，只观测不替换', () => {
-    const wrapper = mountModal({ ...buildCodexAccount({ openai_turn_state_auto: true }), type: 'cpr' })
-    expect(wrapper.find('[data-testid="edit-openai-turn-state-hunter-section"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="edit-openai-turn-state-auto"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="edit-openai-turn-state-deprecated"]').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
   it('开猎手、选模型和代理后只写 openai_turn_state_hunter，留空的数值不写', async () => {
     const wrapper = mountModal(buildCodexAccount({ openai_turn_state_auto: true }))
 
@@ -2221,6 +2213,88 @@ describe('EditAccountModal 292 猎手', () => {
     await flushPromises()
 
     expect(updateAccountMock).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+})
+
+describe('EditAccountModal Basis Points 直通', () => {
+  const buildCodexAccount = (extra: Record<string, unknown> = {}) =>
+    ({
+      ...buildOpenAIOAuthParentAccount(),
+      extra
+    }) as any
+
+  beforeEach(() => {
+    updateAccountMock.mockReset().mockResolvedValue({})
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+  })
+
+  // BPS 是独立开关：开它不碰同一弹窗里的猎手 / 恢复探测配置，两者各自照旧提交。
+  it('开 Basis Points 直通落 openai_basispoints，猎手与恢复探测配置原样带回', async () => {
+    const wrapper = mountModal(
+      buildCodexAccount({
+        openai_turn_state_auto: true,
+        openai_turn_state_hunter: { enabled: true, models: ['gpt-6-astra'], proxy_ids: [1] },
+        openai_turn_state_recovery: { enabled: true }
+      })
+    )
+    expect(wrapper.find('[data-testid="edit-openai-turn-state-hunter-section"]').exists()).toBe(true)
+
+    await wrapper.get('[data-testid="edit-openai-basispoints"]').setValue(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra?.openai_basispoints).toBe(true)
+    expect(extra?.openai_turn_state_auto).toBe(true)
+    expect(extra?.openai_turn_state_hunter).toEqual({ enabled: true, models: ['gpt-6-astra'], proxy_ids: [1] })
+    expect(extra?.openai_turn_state_recovery).toEqual({ enabled: true })
+    wrapper.unmount()
+  })
+
+  it('关掉 Basis Points 直通时删键', async () => {
+    const wrapper = mountModal(buildCodexAccount({ openai_basispoints: true }))
+    const box = wrapper.get('[data-testid="edit-openai-basispoints"]')
+    expect((box.element as HTMLInputElement).checked).toBe(true)
+    await box.setValue(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_basispoints')
+    wrapper.unmount()
+  })
+
+  it.each(['setup-token', 'cpr', 'apikey'])('非 oauth 账号（%s）没有 Basis Points 开关', (type) => {
+    const wrapper = mountModal({ ...buildCodexAccount(), type })
+    expect(wrapper.find('[data-testid="edit-openai-basispoints"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  // 开关藏起来的账号：提交任何无关字段都不许碰这个键。三条咬的不是同一处：
+  // 影子 / Agent Identity 两条咬 syncFormFromAccount 的回读（:5084 只要 openai+oauth，比开关的
+  // v-if 宽，谁把它挪进「非影子」分支这两条就红）；setup-token 那条咬提交侧的 type==='oauth'
+  // 闸门（回读压根不执行，ref 停在 false，闸门一没就会 delete 掉）。
+  it.each([
+    ['影子账号', { parent_account_id: 7 }],
+    ['Agent Identity', { credentials: { auth_mode: 'agentidentity' } }],
+    ['setup-token', { type: 'setup-token' }]
+  ])('开关藏起来时（%s）不动 openai_basispoints 键', async (_name, patch) => {
+    const account = { ...buildCodexAccount({ openai_basispoints: true }), ...patch } as any
+    const wrapper = mountModal(account)
+    expect(wrapper.find('[data-testid="edit-openai-basispoints"]').exists()).toBe(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_basispoints).toBe(true)
+    wrapper.unmount()
+  })
+
+  // 全仓唯一一处 cpr 账号的 turn-state 断言。
+  it('cpr 账号不显示 turn-state 替换设置：原样中继，只观测不替换', () => {
+    const wrapper = mountModal({ ...buildCodexAccount({ openai_turn_state_auto: true }), type: 'cpr' })
+    expect(wrapper.find('[data-testid="edit-openai-turn-state-hunter-section"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="edit-openai-turn-state-auto"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="edit-openai-turn-state-deprecated"]').exists()).toBe(false)
     wrapper.unmount()
   })
 })

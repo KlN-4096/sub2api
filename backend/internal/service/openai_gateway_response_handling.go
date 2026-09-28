@@ -923,8 +923,10 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				return resultWithUsage(), fmt.Errorf("stream usage incomplete after timeout")
 			}
 			logger.LegacyPrintf("service.openai_gateway", "Stream data interval timeout: account=%d model=%s interval=%s", account.ID, originalModel, streamInterval)
-			// 处理流超时，可能标记账户为临时不可调度或错误状态
-			if s.rateLimitService != nil {
+			// 处理流超时，可能标记账户为临时不可调度或错误状态。
+			// BPS 排除在外：那条路打的是另一个 host，它的静默与 Codex 后端的账号健康无关，
+			// 而且工具事件被扣到终态才补发，空闲窗口天然比 Codex 长。
+			if s.rateLimitService != nil && !isOpenAIBasisPointsResponse(c) {
 				s.rateLimitService.HandleStreamTimeout(ctx, account, originalModel)
 			}
 			// Grok: short cool + account failover when no client-visible bytes
@@ -1725,13 +1727,22 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		if msg == "" {
 			msg = "Upstream compact response failed"
 		}
+		// 失败但上游已经吃掉额度时把 usage 带出去。原来这三条出口一律 `return nil, err`，而
+		// parseSSEUsageFromBody 排在它们之后，所以 usage 压根没解。换号重跑的调用方
+		// （gateway_forward / grok）在 err != nil 时本来就把 result 丢掉，对它们是 no-op；
+		// 只有不换号的路径（BPS：失败就是终态，不会在别处重记）才会真的用它记账。
+		// 没 token 就仍然给 nil，省得调用方分辨"有 result 但没东西可记"。
+		var failed *openaiNonStreamingResult
+		if usage := s.parseSSEUsageFromBody(bodyText); openAIUsageHasTokens(usage) {
+			failed = &openaiNonStreamingResult{usage: usage, OpenAIUsage: usage}
+		}
 		if compactErr := newOpenAICompactFallbackSignal(c, terminalPayload, msg); compactErr != nil {
-			return nil, compactErr
+			return failed, compactErr
 		}
 		if failoverErr := s.nonStreamingTerminalFailureFailover(c, resp, account, false, terminalType, terminalPayload, msg, mappedModel); failoverErr != nil {
-			return nil, failoverErr
+			return failed, failoverErr
 		}
-		return nil, s.writeOpenAINonStreamingProtocolError(resp, c, msg)
+		return failed, s.writeOpenAINonStreamingProtocolError(resp, c, msg)
 	}
 	finalResponse, ok := extractCodexFinalResponse(bodyText)
 

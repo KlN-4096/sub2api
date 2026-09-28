@@ -287,19 +287,25 @@ type OpenAIForwardResult struct {
 	// UpstreamTerminalEvent is the normalized terminal event observed on an
 	// upstream Responses WebSocket turn. Empty preserves legacy/non-WS success.
 	UpstreamTerminalEvent string
-	ResponseHeaders       http.Header
-	Duration              time.Duration
-	FirstTokenMs          *int
-	ClientDisconnect      bool
-	ImageCount            int
-	ImageSize             string
-	ImageInputSize        string
-	ImageOutputSize       string
-	ImageOutputSizes      []string
-	ImageSizeSource       string
-	ImageSizeBreakdown    map[string]int
-	VideoCount            int
-	VideoResolution       string
+	// ScheduleNeutral 表示这条结果**不许影响这个账号的调度分**（既不报成功也不报失败）。
+	// 目前只有 Basis Points 直通的失败终态置它：那条路上的失败是 BPS 通道的事、与这个 Codex
+	// 账号的健康无关，罚分会把流量推给没开开关的账号 = 满血与降智掺杂。error 出口靠
+	// ErrOpenAIRawRelayNotAccountFault 哨兵收口，而 WS 桥「首输出之后的 response.failed」
+	// 是 nil-error 出口，哨兵结构上挂不上去，只能靠这个字段。
+	ScheduleNeutral    bool
+	ResponseHeaders    http.Header
+	Duration           time.Duration
+	FirstTokenMs       *int
+	ClientDisconnect   bool
+	ImageCount         int
+	ImageSize          string
+	ImageInputSize     string
+	ImageOutputSize    string
+	ImageOutputSizes   []string
+	ImageSizeSource    string
+	ImageSizeBreakdown map[string]int
+	VideoCount         int
+	VideoResolution    string
 	// VideoDurationSeconds 是提交时请求的生成时长（xAI 按输出秒数计费），已归一化到 1-15 秒。
 	VideoDurationSeconds int
 	// WebSearchCalls 是 Codex alpha/search 网页搜索调用次数（每次成功请求为 1）。
