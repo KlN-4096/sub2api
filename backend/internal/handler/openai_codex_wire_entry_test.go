@@ -18,6 +18,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
@@ -43,6 +44,7 @@ const (
 
 type codexWireCapture struct {
 	accountID int64
+	method    string
 	path      string
 	header    http.Header
 	body      []byte
@@ -60,10 +62,21 @@ func (u *codexWireUpstream) Do(req *http.Request, _ string, accountID int64, _ i
 	var body []byte
 	if req.Body != nil {
 		body, _ = io.ReadAll(req.Body)
+		// 双开 /responses 的体是 zstd（真客户端默认 enable_request_compression）；断言看明文。
+		if strings.EqualFold(req.Header.Get("Content-Encoding"), "zstd") {
+			dec, err := zstd.NewReader(bytes.NewReader(body))
+			if err == nil {
+				if plain, err := io.ReadAll(dec); err == nil {
+					body = plain
+				}
+				dec.Close()
+			}
+		}
 	}
 	u.mu.Lock()
 	u.captures = append(u.captures, codexWireCapture{
 		accountID: accountID,
+		method:    req.Method,
 		path:      req.URL.Path,
 		header:    req.Header.Clone(),
 		body:      body,
@@ -94,11 +107,27 @@ func (u *codexWireUpstream) Do(req *http.Request, _ string, accountID int64, _ i
 	}, nil
 }
 
+// taken 只返回推理请求（POST）。双开账号还会异步补一条只读 GET
+// （settings/user，见 service/openai_codex_side_calls.go），
+// 它不属于出站推理形态，由 sideCalls 单独断言。
 func (u *codexWireUpstream) taken() []codexWireCapture {
+	return u.capturedWithMethod(http.MethodPost)
+}
+
+// sideCalls 返回账号面的只读 GET。异步补发，调用方需自行等待。
+func (u *codexWireUpstream) sideCalls() []codexWireCapture {
+	return u.capturedWithMethod(http.MethodGet)
+}
+
+func (u *codexWireUpstream) capturedWithMethod(method string) []codexWireCapture {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	out := make([]codexWireCapture, len(u.captures))
-	copy(out, u.captures)
+	out := make([]codexWireCapture, 0, len(u.captures))
+	for _, capture := range u.captures {
+		if capture.method == method {
+			out = append(out, capture)
+		}
+	}
 	return out
 }
 
@@ -275,6 +304,83 @@ func TestCodexWireEntryCompact(t *testing.T) {
 			require.Empty(t, got.header.Get("x-client-request-id"))
 			require.NotEmpty(t, got.header.Get("x-codex-installation-id"),
 				"compact 是唯一发独立安装头的端点")
+		})
+	}
+}
+
+func TestCodexWireEntryCompactAccessPrograms(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		for _, passthrough := range []bool{false, true} {
+			for _, program := range []string{"", "standard", "daybreak_blue", "daybreak_red"} {
+				name := "disabled/map/"
+				if enabled {
+					name = "enabled/map/"
+				}
+				if passthrough {
+					name += "raw/"
+				}
+				t.Run(name+program, func(t *testing.T) {
+					extra := map[string]any{
+						codexWireFPModeKey:   "device",
+						codexWireFPSeedKey:   codexWireConverged[codexWireFPSeedKey],
+						codexWireConvergeKey: enabled,
+						"openai_passthrough": passthrough,
+					}
+					upstream, router, cleanup := newCodexWireEntry(t, []service.Account{
+						codexWireAccount(707, "target", extra),
+					})
+					defer cleanup()
+					body := codexWireCompactBody()
+					if program != "" {
+						body = strings.TrimSuffix(body, "}") + `,"access_programs":{"cyber":"` + program + `"}}`
+					}
+					rec := codexWireSend(t, router, "/v1/responses/compact", body)
+					require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+					taken := upstream.taken()
+					require.Len(t, taken, 1)
+					programs := gjson.GetBytes(taken[0].body, "access_programs")
+					if enabled && program != "" {
+						require.JSONEq(t, `{"cyber":"`+program+`"}`, programs.Raw)
+					} else {
+						require.False(t, programs.Exists(), "do not synthesize a program or change opt-out traffic")
+					}
+				})
+			}
+		}
+	}
+}
+
+// 双开账号在 /responses 与 /compact 上必须声明同一个准入等级。/responses 那条路径没有
+// 任何字段裁剪，access_programs 一路原样出站；compact 若单独丢弃，同一个账号就会按端点
+// 报出两套准入等级——那是确凿的形态矛盾，比"透传客户端声明"更糟。
+func TestCodexWireEntryAccessProgramsAgreeAcrossEndpoints(t *testing.T) {
+	for _, program := range []string{"standard", "daybreak_blue", "daybreak_red"} {
+		t.Run(program, func(t *testing.T) {
+			extra := map[string]any{
+				codexWireFPModeKey:   "device",
+				codexWireFPSeedKey:   codexWireConverged[codexWireFPSeedKey],
+				codexWireConvergeKey: true,
+			}
+			upstream, router, cleanup := newCodexWireEntry(t, []service.Account{
+				codexWireAccount(709, "target", extra),
+			})
+			defer cleanup()
+			want := `{"cyber":"` + program + `"}`
+			seen := make([]string, 0, 2)
+			for _, path := range []string{"/v1/responses", "/v1/responses/compact"} {
+				base := codexWireResponsesBody(false)
+				if path == "/v1/responses/compact" {
+					base = codexWireCompactBody()
+				}
+				rec := codexWireSend(t, router, path,
+					strings.TrimSuffix(base, "}")+`,"access_programs":`+want+`}`)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				taken := upstream.taken()
+				require.NotEmpty(t, taken)
+				seen = append(seen, gjson.GetBytes(taken[len(taken)-1].body, "access_programs").Raw)
+			}
+			require.JSONEq(t, want, seen[0], "/v1/responses")
+			require.JSONEq(t, seen[0], seen[1], "两个端点必须声明同一个准入等级")
 		})
 	}
 }
@@ -564,4 +670,39 @@ func TestCodexWireEntryMessagesBridgeMatchesResponses(t *testing.T) {
 		require.Empty(t, c.header.Get("conversation_id"))
 		require.NotEmpty(t, c.header.Get("session-id"))
 	}
+}
+
+// TestCodexWireEntrySideCalls 盯的是构造器真的把线程去重窗口装上了：codexSideCalls 为 nil
+// 时整条侧信道静默停用，service 包里用裸结构体拼的用例发现不了（那里本来就期望它是 nil）。
+func TestCodexWireEntrySideCalls(t *testing.T) {
+	t.Run("双开按真客户端补发 settings/user", func(t *testing.T) {
+		upstream, router, cleanup := newCodexWireEntry(t, []service.Account{
+			codexWireAccount(704, "target", codexWireConverged),
+		})
+		defer cleanup()
+
+		require.Equal(t, http.StatusOK,
+			codexWireSend(t, router, "/v1/responses", codexWireResponsesBody(true)).Code)
+
+		require.Eventually(t, func() bool { return len(upstream.sideCalls()) == 1 },
+			3*time.Second, 10*time.Millisecond, "线程首见补一条 settings/user")
+
+		side := upstream.sideCalls()[0]
+		require.Equal(t, "/backend-api/wham/settings/user", side.path,
+			"config/bundle 只在 business/edu/enterprise plan 上由真客户端发起，一条都不该有")
+		require.NotEmpty(t, side.header.Get("authorization"))
+	})
+
+	t.Run("非双开一条都不发", func(t *testing.T) {
+		upstream, router, cleanup := newCodexWireEntry(t, []service.Account{
+			codexWireAccount(705, "target", map[string]any{}),
+		})
+		defer cleanup()
+
+		require.Equal(t, http.StatusOK,
+			codexWireSend(t, router, "/v1/responses", codexWireResponsesBody(true)).Code)
+
+		time.Sleep(300 * time.Millisecond) // 异步补发：给足触发窗口再判空
+		require.Empty(t, upstream.sideCalls())
+	})
 }
