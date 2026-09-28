@@ -78,6 +78,9 @@ const DataTableStub = {
       <div v-for="row in data" :key="row.id" data-test="account-rate">
         <slot name="cell-rate_multiplier" :row="row" />
       </div>
+      <div v-for="row in data" :key="'proxy-' + row.id" data-test="account-proxy">
+        <slot name="cell-proxy" :row="row" />
+      </div>
     </div>
   `
 }
@@ -204,6 +207,45 @@ describe('admin AccountsView usage windows hint', () => {
     )).toBe(true)
     const columns = wrapper.getComponent(DataTableStub).props('columns') as Array<{ key: string; sortable: boolean }>
     expect(columns.find(column => column.key === 'upstream_billing_rate')?.sortable).toBe(true)
+  })
+
+  // cpr 账号真正的出口在 CPR 那一层；账号自己绑的 proxy 只作用于 sub2api → CPR 这一跳
+  // (现网是 127.0.0.1)。照代理列判断"这个号从哪出去"会得到完全错误的答案，所以出口要
+  // 跟在代理列里一起显示。凭据必须在渲染前剥掉 —— CPR 是独立仓库的上游服务,"它只返回
+  // 脱敏值"是观察不是不变量。
+  it('shows the CPR exit next to the account proxy, with credentials stripped', async () => {
+    listAccounts.mockResolvedValueOnce({
+      items: [{
+        id: 11,
+        name: 'cpr-account',
+        platform: 'openai',
+        type: 'cpr',
+        status: 'active',
+        schedulable: true,
+        extra: { cpr_outbound_proxy: 'socks5h://user:p@ss@198.51.100.7:1080' },
+        created_at: '2026-09-17T00:00:00Z',
+        updated_at: '2026-09-17T00:00:00Z'
+      }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    const exit = wrapper.get('[data-testid="account-cpr-outbound"]')
+    expect(exit.text()).toContain('socks5h://198.51.100.7:1080')
+    expect(exit.text()).not.toContain('p@ss')
+    expect(exit.text()).not.toContain('user')
+  })
+
+  it('omits the CPR exit row for accounts without one', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="account-cpr-outbound"]').exists()).toBe(false)
   })
 
   it('shows account multipliers with enough precision to match declared rates', async () => {

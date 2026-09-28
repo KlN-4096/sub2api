@@ -291,6 +291,64 @@
           <span v-else class="text-sm text-gray-400 dark:text-gray-500">-</span>
         </template>
 
+        <template #cell-turn_state="{ row }">
+          <div v-if="row.turn_state" class="flex max-w-[220px] items-center gap-1.5">
+            <!-- 显示字符数（292 = 不降智）；判定仍按密文块数，块数只把明文框进 16 字节的窗口，是疑似不是确证 -->
+            <span
+              class="shrink-0 rounded px-1.5 py-0.5 font-mono text-[11px] font-semibold"
+              :class="turnStateBadgeClass(row.turn_state)"
+              :title="turnStateTitle(row.turn_state)"
+            >
+              {{ turnStateBadgeText(row.turn_state) }}
+            </span>
+            <span
+              v-if="row.turn_state_overridden"
+              class="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+              :title="turnStateSourceTitle(row.turn_state_source)"
+            >
+              {{ turnStateSourceBadge(row.turn_state_source) }}
+            </span>
+            <span class="truncate font-mono text-xs text-gray-500 dark:text-gray-400" :title="row.turn_state">
+              {{ row.turn_state }}
+            </span>
+            <button
+              type="button"
+              class="shrink-0 rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-dark-700 dark:hover:text-gray-300"
+              :class="copiedRequestId === row.turn_state ? 'text-green-500 hover:text-green-500' : ''"
+              :title="copiedRequestId === row.turn_state ? t('keys.copied') : t('keys.copyToClipboard')"
+              @click="copyTurnState(row.turn_state)"
+            >
+              <Icon :name="copiedRequestId === row.turn_state ? 'check' : 'copy'" size="sm" class="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <span v-else class="text-sm text-gray-400 dark:text-gray-500">-</span>
+        </template>
+
+        <template #cell-turn_state_sent="{ row }">
+          <div v-if="row.turn_state_sent" class="flex max-w-[220px] items-center gap-1.5">
+            <span
+              class="shrink-0 rounded px-1.5 py-0.5 font-mono text-[11px] font-semibold"
+              :class="turnStateBadgeClass(row.turn_state_sent)"
+              :title="turnStateTitle(row.turn_state_sent)"
+            >
+              {{ turnStateBadgeText(row.turn_state_sent) }}
+            </span>
+            <span class="truncate font-mono text-xs text-gray-500 dark:text-gray-400" :title="row.turn_state_sent">
+              {{ row.turn_state_sent }}
+            </span>
+            <button
+              type="button"
+              class="shrink-0 rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-dark-700 dark:hover:text-gray-300"
+              :class="copiedRequestId === row.turn_state_sent ? 'text-green-500 hover:text-green-500' : ''"
+              :title="copiedRequestId === row.turn_state_sent ? t('keys.copied') : t('keys.copyToClipboard')"
+              @click="copyTurnState(row.turn_state_sent)"
+            >
+              <Icon :name="copiedRequestId === row.turn_state_sent ? 'check' : 'copy'" size="sm" class="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <span v-else class="text-sm text-gray-400 dark:text-gray-500">-</span>
+        </template>
+
         <template #cell-user_agent="{ row }">
           <span v-if="row.user_agent" class="text-sm text-gray-600 dark:text-gray-400 block max-w-[320px] truncate" :title="row.user_agent">{{ formatUserAgent(row.user_agent) }}</span>
           <span v-else class="text-sm text-gray-400 dark:text-gray-500">-</span>
@@ -532,6 +590,7 @@
 </template>
 
 <script setup lang="ts">
+import { decodeTurnState, isTurnStateHealthy } from '@/utils/turnState'
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
@@ -687,6 +746,47 @@ const copyIdentifier = async (value: string, copiedMessage: string) => {
 const copyRequestId = (requestId: string) => copyIdentifier(requestId, t('admin.usage.requestIdCopied'))
 const copyUpstreamRequestId = (upstreamRequestId: string) =>
   copyIdentifier(upstreamRequestId, t('admin.usage.upstreamRequestIdCopied'))
+
+const copyTurnState = (turnState: string) =>
+  copyIdentifier(turnState, t('admin.usage.turnStateCopied'))
+
+// 徽章直接显示字符长度：292 / 312 是运维实际在说的那两个数，比「10 块 / 11 块」直观，
+// 而且一一对应（每块 16 字节 → 差一块正好差 20 个 base64 字符），不损失信息。
+// 健康判定仍走密文块数（isTurnStateHealthy），那才是真判据。
+const turnStateBadgeText = (blob: string) => String(blob.length)
+
+// 覆写来源徽标：后端存的是 manual/auto/auto_stale 枚举，直接渲染就是一串英文。
+// 白名单而不是直接拼 key：拼 key 遇到没见过的取值会把原始 key 显示出来，
+// 比显示一个中性的「覆写」更糟。历史行没有 source 列（overridden 为 true 但
+// source 为 NULL），同样兜底成「覆写」。
+const TURN_STATE_SOURCES = ['manual', 'auto', 'auto_stale'] as const
+
+const turnStateSourceBadge = (source?: string | null) =>
+  source && (TURN_STATE_SOURCES as readonly string[]).includes(source)
+    ? t(`admin.usage.turnStateSourceShort.${source}`)
+    : t('admin.usage.turnStateOverriddenShort')
+
+const turnStateSourceTitle = (source?: string | null) =>
+  source && (TURN_STATE_SOURCES as readonly string[]).includes(source)
+    ? t(`admin.usage.turnStateSourceLong.${source}`)
+    : t('admin.usage.turnStateOverridden')
+
+const turnStateBadgeClass = (blob: string) =>
+  isTurnStateHealthy(blob)
+    ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
+    : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+
+const turnStateTitle = (blob: string) => {
+  const env = decodeTurnState(blob)
+  if (!env) return t('admin.usage.turnStateUndecodable', { n: blob.length })
+  return t('admin.usage.turnStateHint', {
+    blocks: env.blocks,
+    chars: blob.length,
+    min: env.blocks * 16 - 16,
+    max: env.blocks * 16 - 1,
+    minted: formatDateTime(env.mintedAt),
+  })
+}
 
 // Tooltip state - cost
 const tooltipVisible = ref(false)
