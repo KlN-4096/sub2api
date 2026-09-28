@@ -1826,6 +1826,9 @@ export interface AdminUsageLog extends UsageLog {
   // 上游响应头 x-codex-safety-buffering-enabled / -faster-model 的读数（上游没带为 null）
   safety_buffering_enabled?: boolean | null
   safety_buffering_faster_model?: string | null
+  // 这一发生效的路由对读数：网关段从 __oailb 的 JWT 载荷解出，整串留着以便原样复现
+  route_gateway?: string | null
+  route_pair?: string | null
 
   // 账号计费倍率（仅管理员可见）
   account_rate_multiplier?: number | null

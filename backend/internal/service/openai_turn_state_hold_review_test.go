@@ -45,7 +45,7 @@ func TestOpenAITurnStateHoldSurfacesFromBuildUpstreamRequest(t *testing.T) {
 	c := turnStateAutoCtxModel("real", hunterTestModel)
 	_, err := h.gw.prepareCodexAccountIdentitySource(ctx, c, h.account)
 	require.NoError(t, err)
-	decoded := openAITurnStateProbeBody(hunterTestModel, "high", newOpenAITurnStateProbeIdentity(h.account))
+	decoded := openAITurnStateProbeBody(hunterTestModel, "high", newOpenAITurnStateProbeIdentity(h.account), openAITurnStateHuntProbeText)
 	stageCodexOAuthIdentity(c, h.account, decoded, false)
 	body, err := json.Marshal(decoded)
 	require.NoError(t, err)

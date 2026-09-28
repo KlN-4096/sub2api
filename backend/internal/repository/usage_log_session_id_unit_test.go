@@ -40,7 +40,7 @@ func TestPrepareUsageLogInsert_SessionIDArgWiring(t *testing.T) {
 
 	// 尾部顺序：session_id, native_compaction_v2, turn_state, turn_state_overridden,
 	// turn_state_source, turn_state_sent, safety_buffering_enabled, safety_buffering_faster_model, created_at
-	sessionArg := prepared.args[len(prepared.args)-9]
+	sessionArg := prepared.args[len(prepared.args)-11]
 	ns, ok := sessionArg.(sql.NullString)
 	require.True(t, ok, "session_id arg should be a sql.NullString, got %T", sessionArg)
 	require.True(t, ns.Valid)
@@ -56,14 +56,14 @@ func TestPrepareUsageLogInsert_SessionIDArgWiring(t *testing.T) {
 // persisted as SQL NULL rather than an empty string.
 func TestPrepareUsageLogInsert_SessionIDNullWhenAbsent(t *testing.T) {
 	prepared := prepareUsageLogInsert(newSessionIDUsageLog(nil))
-	sessionArg := prepared.args[len(prepared.args)-9]
+	sessionArg := prepared.args[len(prepared.args)-11]
 	ns, ok := sessionArg.(sql.NullString)
 	require.True(t, ok, "session_id arg should be a sql.NullString, got %T", sessionArg)
 	require.False(t, ns.Valid, "absent session id must be NULL, not empty string")
 
 	empty := ""
 	preparedEmpty := prepareUsageLogInsert(newSessionIDUsageLog(&empty))
-	nsEmpty := preparedEmpty.args[len(preparedEmpty.args)-7].(sql.NullString)
+	nsEmpty := preparedEmpty.args[len(preparedEmpty.args)-9].(sql.NullString)
 	require.False(t, nsEmpty.Valid, "empty session id must also be NULL")
 }
 
