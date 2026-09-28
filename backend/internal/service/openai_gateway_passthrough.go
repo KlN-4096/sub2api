@@ -2559,4 +2559,6 @@ func writeOpenAIPassthroughResponseHeaders(dst http.Header, src http.Header, fil
 	for _, v := range getCaseInsensitiveValues(src, openAICodexTurnStateHeader) {
 		dst.Add(turnStateKey, v)
 	}
+	// x-codex-safety-buffering-*：同样强制放行、缺失即清（openai_codex_safety_buffering.go）。
+	relayOpenAICodexSafetyBufferingHeaders(dst, src)
 }

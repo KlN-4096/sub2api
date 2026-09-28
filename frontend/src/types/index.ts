@@ -1823,6 +1823,9 @@ export interface AdminUsageLog extends UsageLog {
   turn_state_source?: string | null
   // 本次出站实际带的 turn-state（客户端回带的或注入的），与 turn_state（上游新铸的）分开
   turn_state_sent?: string | null
+  // 上游响应头 x-codex-safety-buffering-enabled / -faster-model 的读数（上游没带为 null）
+  safety_buffering_enabled?: boolean | null
+  safety_buffering_faster_model?: string | null
 
   // 账号计费倍率（仅管理员可见）
   account_rate_multiplier?: number | null
