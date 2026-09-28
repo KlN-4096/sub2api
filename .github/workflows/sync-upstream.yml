@@ -6,6 +6,8 @@ name: Sync upstream into klno
 # 所以漂移检查必须排在推分支/推标签/触发 release 之前——排在后面等于包已经发出去才报错。
 # 每次运行还会把默认分支 main 重建成 upstream/main + 本文件：GitHub 的定时 workflow 只从默认
 # 分支触发，main 只是 cron 的宿主，没人同步它就会一直落后（仓库首页那条 "N commits behind"）。
+# GITHUB_TOKEN 没有 workflows 权限：上游这段提交改过 .github/workflows 时推不动 main，只告警，
+# 要用有 workflow 权限的凭据在本地重做该步。同理，改了本文件也要手动推到 main——cron 跑的是 main 那份。
 
 on:
   schedule:
@@ -24,7 +26,8 @@ permissions:
 env:
   UPSTREAM_REPO: Wei-Shaw/sub2api
   FORK_BRANCH: klno
-  CODEX_PINNED_COMMIT: e763730
+  # 已人工核对过身份恒等式的 codex 版本（正式版标签或完整提交号）；漂移检查拿它和最新正式版比（不比 main，见该步注释）
+  CODEX_PINNED_REF: e7637306bc9246a3e42e407cb94f96b7ed345e3e
   CODEX_IDENTITY_PATHS: >-
     codex-rs/codex-api/src/requests/headers.rs
     codex-rs/codex-api/src/endpoint/responses.rs
@@ -53,7 +56,7 @@ jobs:
           if [ -n "${{ inputs.upstream_tag }}" ]; then
             latest="${{ inputs.upstream_tag }}"
           else
-            latest=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+            latest=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed -n 1p) # 不用 head：pipefail 下会 SIGPIPE
           fi
           base=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${FORK_BRANCH}" | sed -E 's/-klno\.[0-9]+$//')
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
@@ -98,18 +101,19 @@ jobs:
           go test -tags=unit ./internal/service -count=1 -run 'CodexFingerprintConvergence|CodexAccountIdentity|CodexFingerprint|CodexDeviceWireProfile|OAuthPassthrough|BuildOpenAIWSHeaders|SetupTokenCompat|IngressSession|CPR|OAuthOnlyGroupPredicate' 2>&1 | grep -vE '"level":"(DEBUG|INFO|WARN)"' | tail -20
 
       - name: Check codex-rs identity sources for drift
+        # 比最新正式版而不是 main：网关冒充的是用户在跑的发行版，main 上天天在改（client.rs 两周近千行），
+        # 比 main 会天天红、真正的发版漂移反而淹没在噪音里。
         run: |
           set -euo pipefail
           git clone -q --filter=blob:none https://github.com/openai/codex.git /tmp/codex
           cd /tmp/codex
-          head=$(git rev-parse --short HEAD)
-          changed=$(git diff --stat "${CODEX_PINNED_COMMIT}" HEAD -- ${CODEX_IDENTITY_PATHS} | tail -1 || true)
-          if [ -n "$changed" ]; then
-            git diff --stat "${CODEX_PINNED_COMMIT}" HEAD -- ${CODEX_IDENTITY_PATHS}
-            echo "::error title=codex-rs identity drift::被跟踪的 codex-rs 身份文件相对 ${CODEX_PINNED_COMMIT} 有变动（当前 ${head}），请核对 openai_codex_fingerprint_convergence.go 的恒等式，确认后更新 CODEX_PINNED_COMMIT。"
+          latest=$(git tag -l 'rust-v*' --sort=-v:refname | grep -E '^rust-v[0-9]+\.[0-9]+\.[0-9]+$' | sed -n 1p)
+          if ! git diff --quiet "${CODEX_PINNED_REF}" "${latest}" -- ${CODEX_IDENTITY_PATHS}; then
+            git diff --stat "${CODEX_PINNED_REF}" "${latest}" -- ${CODEX_IDENTITY_PATHS}
+            echo "::error title=codex-rs identity drift::codex 正式版 ${latest} 的身份文件相对 ${CODEX_PINNED_REF} 有变动，请核对 openai_codex_fingerprint_convergence.go 的恒等式，确认后更新 CODEX_PINNED_REF（并手动推到 main）。"
             exit 1
           fi
-          echo "codex identity sources unchanged since ${CODEX_PINNED_COMMIT}"
+          echo "codex identity sources unchanged between ${CODEX_PINNED_REF} and ${latest}"
 
       - name: Push rebased branch and tag, trigger release
         if: steps.up.outputs.latest != steps.up.outputs.base
@@ -148,5 +152,13 @@ jobs:
           git checkout "${FORK_BRANCH}" -- .github/workflows/sync-upstream.yml
           git commit -q -m "ci: host sync-upstream workflow on the default branch" || true
           test -f .github/workflows/sync-upstream.yml # 丢了这个文件 cron 就停了
-          git push --force-with-lease origin main
+          if ! out=$(git push --force-with-lease origin main 2>&1); then
+            echo "$out"
+            if grep -q 'without .workflows. permission' <<<"$out"; then
+              echo "::warning title=main 未同步::上游这段提交改过 .github/workflows，GITHUB_TOKEN 没有 workflows 权限推不动；用有 workflow 权限的凭据在本地重做本步即可。main 只是 cron 宿主，落后不影响 klno 同步。"
+              exit 0
+            fi
+            exit 1
+          fi
+          echo "$out"
           echo "default branch resynced onto upstream/main ($(git rev-parse --short upstream/main)), was $behind behind"
