@@ -690,6 +690,15 @@ type AdminUsageLog struct {
 	ModelMappingChain *string `json:"model_mapping_chain,omitempty"`
 	// UpstreamRequestID 是直接上游声明的请求标识，仅管理端可见。
 	UpstreamRequestID *string `json:"upstream_request_id,omitempty"`
+	// TurnState 是上游本次铸出的 x-codex-turn-state（不透明 Fernet 密文），仅管理端可见。
+	// 长度在前端直接由该字符串算，不单独存列。
+	TurnState *string `json:"turn_state,omitempty"`
+	// TurnStateOverridden 表示本次出站带的是账号级 turn-state 覆写值。
+	TurnStateOverridden *bool `json:"turn_state_overridden,omitempty"`
+	// TurnStateSource 是覆写来源：manual / auto / auto_stale。
+	TurnStateSource *string `json:"turn_state_source,omitempty"`
+	// TurnStateSent 是本次出站实际带的 turn-state（回带或注入）。
+	TurnStateSent *string `json:"turn_state_sent,omitempty"`
 	// BillingTier 计费层级标签（per_request/image 模式）
 	BillingTier *string `json:"billing_tier,omitempty"`
 

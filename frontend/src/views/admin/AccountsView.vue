@@ -325,6 +325,7 @@
               @account-updated="handleAccountUpdated"
               @usage-loaded="handleAccountUsageLoaded(row.id, $event)"
             />
+            <AccountTurnStateCell :account="row" />
           </template>
           <template #cell-proxy="{ row }">
             <div class="flex flex-col gap-1">
@@ -335,6 +336,18 @@
                 </span>
               </div>
               <span v-else class="text-sm text-gray-400 dark:text-dark-500">-</span>
+              <!-- cpr 账号真正的出口在 CPR 那一层：上面那个 proxy 只作用于 sub2api→CPR
+                   这一跳（现网是 127.0.0.1），照它判断「这个号从哪出去」会得到完全错误的
+                   答案。展示前必须过 cprOutboundProxy() 剥 userinfo——CPR 现在返回的是
+                   脱敏值，但那是上游的行为、不是我们能保证的不变量，别在这里直接插值。 -->
+              <div
+                v-if="cprOutboundProxy(row)"
+                class="flex items-center gap-1 text-xs"
+                data-testid="account-cpr-outbound"
+              >
+                <span class="text-gray-500 dark:text-gray-400">{{ t('admin.accounts.cprOutbound') }}</span>
+                <span class="font-mono text-gray-700 dark:text-gray-300">{{ cprOutboundProxy(row) }}</span>
+              </div>
               <div v-if="row.proxy && row.proxy.expires_at" class="flex items-center gap-2 text-xs">
                 <span class="text-gray-600 dark:text-gray-300">{{ formatDateTime(row.proxy.expires_at) }}</span>
                 <span :class="proxyExpiryBadge(row.proxy)">{{ proxyExpiryText(row.proxy) }}</span>
@@ -516,6 +529,7 @@ import ScheduledTestsPanel from '@/components/admin/account/ScheduledTestsPanel.
 import type { SelectOption } from '@/components/common/Select.vue'
 import AccountStatusIndicator from '@/components/account/AccountStatusIndicator.vue'
 import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
+import AccountTurnStateCell from '@/components/account/AccountTurnStateCell.vue'
 import AccountTodayStatsCell from '@/components/account/AccountTodayStatsCell.vue'
 import AccountGroupsCell from '@/components/account/AccountGroupsCell.vue'
 import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'
@@ -532,6 +546,7 @@ import { extractApiErrorMessage } from '@/utils/apiError'
 import { sanitizeUrl } from '@/utils/url'
 import { getFloatingPanelPosition } from '@/utils/floatingPanel'
 import { formatMultiplier } from '@/utils/formatters'
+import { cprOutboundProxy } from '@/utils/turnState'
 import type { Account, AccountListItem, AccountPlatform, AccountSchedulerGroupScore, AccountType, AccountUsageInfo, Proxy as AccountProxy, AdminGroup, WindowStats, ClaudeModel, UpstreamBillingProbeSnapshot } from '@/types'
 
 const { t } = useI18n()
