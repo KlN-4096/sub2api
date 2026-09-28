@@ -181,9 +181,9 @@ func registerAgentIdentityTask(ctx context.Context, account *Account) (string, e
 	if err != nil {
 		return "", err
 	}
-	proxyURL := ""
-	if account.ProxyID != nil && account.Proxy != nil {
-		proxyURL = account.Proxy.URL()
+	proxyURL, err := resolveConfiguredProxyURL(ctx, nil, account.ProxyID, account.Proxy)
+	if err != nil {
+		return "", err
 	}
 	client, err := httpclient.GetClient(httpclient.Options{
 		ProxyURL:              proxyURL,
