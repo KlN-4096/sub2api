@@ -36,6 +36,38 @@ type noAccountErrorClassification struct {
 
 var selectionModelRateLimitedPattern = regexp.MustCompile(`(?:model_rate_limited|rate_limited)=(\d+)`)
 
+// selectionTurnStateHoldPattern 认出降智暂停造成的空池。它借 model_rate_limits 存放，但不是限流：
+// 回 429「所有账号都在限流」既说不清原因，又让 Codex 按限流硬重试（客户端只显示 "exceeded retry
+// limit, last status: 429"，正文被吞）。单独分类后与注入点的换号错误同口径回 503 + 说明。
+//
+// 计数由 OpenAI 侧的 openAISelectionFilterStats.summary 产出（形如 "pool=1, filtered:
+// turn_state_hold=1"）——Codex 走的是那条调度路径，不是 GatewayService 的 summarize。
+// 正则由 service 侧的常量拼出来：手抄一份的话，改名时两边的测试都绿而生产静默掉回 429。
+var selectionTurnStateHoldPattern = regexp.MustCompile(regexp.QuoteMeta(service.OpenAITurnStateHoldSelectionReason) + `=(\d+)`)
+
+// selectionPoolPattern 取 OpenAI 侧 summary 的池子大小。summary 的构造保证
+// sum(reasons) + len(passed) == pool，所以「暂停计数 >= pool」精确等价于「池里每个账号
+// 都是因降智暂停被挡的」。GatewayService 那份 summary 没有 pool= 字段，取不到就是 0，
+// 暂停分支自然不会在那条路上触发（降智暂停也本来不写在那些账号上）。
+var selectionPoolPattern = regexp.MustCompile(`\bpool=(\d+)`)
+
+// selectionTurnStateHoldMessage 与 service.openAITurnStateHoldError 的 ClientMessage 同口径。
+// 不写「几分钟」：暂停时长是一个空闲窗口（默认 60 分钟），猎到票会提前放回，但上界是一小时。
+const selectionTurnStateHoldMessage = "All accounts serving this model are paused: no healthy x-codex-turn-state is available and the hunter is fetching one. This clears as soon as the hunter finds a ticket."
+
+// selectionFailureCount 取 pattern 的计数，未匹配或非正数返回 0。
+func selectionFailureCount(pattern *regexp.Regexp, lowered string) int {
+	match := pattern.FindStringSubmatch(lowered)
+	if len(match) != 2 {
+		return 0
+	}
+	count, err := strconv.Atoi(match[1])
+	if err != nil || count <= 0 {
+		return 0
+	}
+	return count
+}
+
 // classifySelectionFailureError preserves the scheduler's compact reason when
 // every model-capable account is temporarily rate limited.
 func classifySelectionFailureError(err error, fallback noAccountErrorClassification) noAccountErrorClassification {
@@ -59,12 +91,21 @@ func classifySelectionFailureError(err error, fallback noAccountErrorClassificat
 	if fallback.ModelNotFound {
 		return fallback
 	}
-	match := selectionModelRateLimitedPattern.FindStringSubmatch(strings.ToLower(err.Error()))
-	if len(match) != 2 {
-		return fallback
+	lowered := strings.ToLower(err.Error())
+	// 只有整个池子都被降智暂停挡住时才说「都被暂停了」。拿暂停去比限流是不够的：池子还可能
+	// 被 quota_auto_pause_7d / runtime_blocked / capability_mismatch 等十几个 reason 占满，
+	// 那时 1 个暂停也会 held >= rateLimited，于是把「9 个号周额度打满」说成「猎手在补票」——
+	// 正是这次改动要消灭的那个毛病换个方向复发。
+	if held := selectionFailureCount(selectionTurnStateHoldPattern, lowered); held > 0 {
+		if pool := selectionFailureCount(selectionPoolPattern, lowered); pool > 0 && held >= pool {
+			return noAccountErrorClassification{
+				Status:  http.StatusServiceUnavailable,
+				ErrType: "api_error",
+				Message: selectionTurnStateHoldMessage,
+			}
+		}
 	}
-	count, parseErr := strconv.Atoi(match[1])
-	if parseErr != nil || count <= 0 {
+	if selectionFailureCount(selectionModelRateLimitedPattern, lowered) <= 0 {
 		return fallback
 	}
 	return noAccountErrorClassification{
