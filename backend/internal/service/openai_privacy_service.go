@@ -14,6 +14,11 @@ import (
 // Injected from repository layer to avoid import cycles.
 type PrivacyClientFactory func(proxyURL string) (*req.Client, error)
 
+// CodexBackendClientFactory 与 PrivacyClientFactory 同签名但语义不同：它建出的客户端
+// 不做浏览器伪装，供 Codex 客户端面的 chatgpt.com/backend-api 请求（额度查询）使用，
+// 使额度面与推理面自报同一个客户端身份。两个类型分开是为了让 wire 能各注各的实现。
+type CodexBackendClientFactory func(proxyURL string) (*req.Client, error)
+
 const (
 	openAISettingsURL = "https://chatgpt.com/backend-api/settings/account_user_setting"
 
