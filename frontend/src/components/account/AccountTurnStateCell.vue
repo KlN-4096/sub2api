@@ -46,11 +46,7 @@
            两个页面共用一套词汇。 -->
       <span
         class="shrink-0 rounded px-1 text-[9px] font-medium leading-4"
-        :class="
-          entry.healthy
-            ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
-            : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
-        "
+        :class="TURN_STATE_BADGE_CLASS[entry.verdict]"
         data-testid="account-turn-state-shape"
       >
         {{ entry.chars }}
@@ -63,7 +59,7 @@
         :utilization="entry.remainingPercent"
         :resets-at="entry.expiresAt"
         remaining-capacity
-        :color="entry.healthy ? 'purple' : 'amber'"
+        :color="entry.verdict === 'healthy' ? 'purple' : 'amber'"
         :data-testid="`account-turn-state-${entry.model}-${entry.active}`"
       />
     </div>
@@ -122,8 +118,12 @@
  *  - openai_turn_state_override：手填覆写，只在自动接管关着时生效，带 blob。
  *  - openai_turn_state_observed：形态观测，所有 Codex 账号都记，**不带 blob**
  *    （blob 是上游令牌，后端刻意只存块数/字符数）。接管关着时它是唯一有数据的源。
- *    **只有未降智的进展示**：一条 312 永远注不出去，摆在票旁边只会被读成票，而
- *    「这个号在铸 312」用量表每行都写着。降智那条仍参与 starved 判定，见下。
+ *    **认得出的降智形态（312/356）不展示**：一条 312 永远注不出去，摆在票旁边只会被读成票，
+ *    而「这个号在铸 312」用量表每行都写着。降智那条仍参与 starved 判定，见下。表外形态
+ *    （780）照常展示、标黄——它同样进不了池（后端只收 292/332）。
+ *
+ * 已废弃（2026-09-23）：候选池 / 手填 / 猎手 / 恢复探测都建立在「注入 292 能换回正常服务」上，
+ * 2026-09-21 起这个前提已失效，只保留不维护，后续版本移除。形态观测是读数，不在此列。
  */
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -132,11 +132,13 @@ import { useNowTicker } from '@/composables/useNowTicker'
 import type { Account } from '@/types'
 import {
   decodeTurnState,
-  isTurnStateHealthy,
   targetsCodexUpstream,
+  TURN_STATE_BADGE_CLASS,
   TURN_STATE_DEFAULT_TTL_MINUTES,
   TURN_STATE_HOLD_REASON,
-  TURN_STATE_SHAPES
+  turnStateVerdict,
+  turnStateVerdictByBlocks,
+  type TurnStateVerdict
 } from '@/utils/turnState'
 import { formatDateTime, formatTime } from '@/utils/format'
 
@@ -176,7 +178,7 @@ interface ShapeObservation {
 }
 
 /**
- * 三个源归一后的一行。带 blob 的两个源（候选池 / 手填）在这里就折成 chars + healthy，
+ * 三个源归一后的一行。带 blob 的两个源（候选池 / 手填）在这里就折成 chars + verdict，
  * 与只有形态的观测源对齐——下游只用得着这两个值，留着 blob 只会让渲染路径多一条
  * 「这一行有没有 blob」的分支。
  *
@@ -187,7 +189,7 @@ interface ShapeObservation {
 interface PoolTicket {
   model: string
   chars: number
-  healthy: boolean
+  verdict: TurnStateVerdict
   mintedAt: Date
   active: boolean
 }
@@ -233,7 +235,7 @@ const manualOverrides = computed<PoolTicket[]>(() => {
     out.push({
       model: model.trim(),
       chars: trimmed.length,
-      healthy: isTurnStateHealthy(trimmed),
+      verdict: turnStateVerdict(trimmed),
       mintedAt: env.mintedAt,
       active: true
     })
@@ -259,7 +261,7 @@ const candidatePool = computed<PoolTicket[]>(() => {
     out.push({
       model,
       chars: blob.length,
-      healthy: isTurnStateHealthy(blob),
+      verdict: turnStateVerdict(blob),
       mintedAt: minted,
       active: true
     })
@@ -270,7 +272,7 @@ const candidatePool = computed<PoolTicket[]>(() => {
 /**
  * 网关对所有 Codex 账号采集的形态观测，与接管开关无关，最多一条。
  *
- * 健康与否都解出来，但**只有健康的进展示**（见 poolGroups）。降智那条留着是因为
+ * 健康与否都解出来，但**认得出的降智形态不展示**（见 poolGroups）。降智那条留着是因为
  * starved 要靠它回答「这个号在不在跑流量」——展示上没意义（一条永远注不出去的 312
  * 摆在票旁边只会被读成票），判定上不可替代。
  */
@@ -289,7 +291,7 @@ const observedShapes = computed<PoolTicket[]>(() => {
       model: typeof model === 'string' ? model.trim() : '',
       chars,
       // 走块数而不是 chars：块数是真判据，字符长度受 base64 padding 影响。
-      healthy: TURN_STATE_SHAPES.some((shape) => shape.blocks === blocks),
+      verdict: turnStateVerdictByBlocks(blocks),
       mintedAt: minted,
       active: false
     }
@@ -300,7 +302,7 @@ const observedShapes = computed<PoolTicket[]>(() => {
  * 两件事要同时说清楚：现在有哪些票，以及其中哪些**真的会被注入**。后端的分支是
  * 自动接管开着就只认候选池、完全忽略手填；关着就只认手填。
  *
- * 观测行两种模式下都展示（标成「最近铸出」），但**只展示未降智的**：一条 312 永远
+ * 观测行两种模式下都展示（标成「最近铸出」），但**不展示认得出的降智形态**：一条 312 永远
  * 注不出去，摆在票旁边只会被读成票（2026-09-18 用户就是这么读的），而「这个号在铸
  * 312」用量表每行都写着，不需要账号页再说一遍。降智那条仍参与 starved 判定。
  *
@@ -311,7 +313,8 @@ const poolGroups = computed<PoolTicket[][]>(() => {
   if (!isCodexAccount.value) return []
   return [
     isManualMode.value ? manualOverrides.value : candidatePool.value,
-    observedShapes.value.filter((o) => o.healthy)
+    // 表外形态（780）也展示：它判不了，藏起来账号页就什么都答不出来（2026-09-23 用户要求）。
+    observedShapes.value.filter((o) => o.verdict !== 'degraded')
   ]
 })
 
@@ -321,7 +324,7 @@ interface PoolEntry {
   /** 「手填」/「最近铸出」标记；空串表示这行就是当前生效的自动注入票。 */
   tag: string
   chars: number
-  healthy: boolean
+  verdict: TurnStateVerdict
   active: boolean
   mintedAt: Date
   expiresAt: string
@@ -365,7 +368,7 @@ const entries = computed<PoolEntry[]>(() => {
             : ''
           : t('admin.accounts.openai.turnStatePool.observedTag'),
         chars: c.chars,
-        healthy: c.healthy,
+        verdict: c.verdict,
         active: c.active,
         mintedAt: c.mintedAt,
         expiresAt: new Date(expires).toISOString(),
@@ -432,6 +435,8 @@ const emptyLabel = computed(() =>
 )
 
 /**
+ * 已废弃（2026-09-23，292 注入已失效）：只保留展示，后续版本随猎手一起移除。
+ *
  * 292 猎手（extra.openai_turn_state_hunter 是配置，openai_turn_state_hunt 是运行态）。
  * 配置只读 enabled 与每小时上限；运行态是猎手每次探测后写的：下次窗口、小时计数、
  * 最近 10 次。时间戳都来自后端，页面只做展示。
@@ -579,6 +584,8 @@ const hunterTitle = computed(() =>
 )
 
 /**
+ * 已废弃（2026-09-23，判据是「连续 N 次 292」，已失效）：只保留展示，后续版本移除。
+ *
  * 降智恢复探测（extra.openai_turn_state_recovery / _state）：走账号自己的出口、间隔随机，
  * 连续若干次 292 判定恢复。判定后后端停止探测，所以这行改说「已恢复」而不是下次窗口。
  */
@@ -677,11 +684,7 @@ const detailTitle = computed(() =>
         // 标记在 tooltip 里要跟回来：徽章上的文字现在只有裸模型名了。
         model: e.tag ? `${e.model}(${e.tag})` : e.model,
         shape: `${e.chars}c`,
-        health: t(
-          e.healthy
-            ? 'admin.accounts.openai.turnStatePool.healthy'
-            : 'admin.accounts.openai.turnStatePool.suspect'
-        ),
+        health: t(`admin.accounts.openai.turnStatePool.${e.verdict}`),
         minted: formatDateTime(e.mintedAt),
         expires: formatDateTime(new Date(e.expiresAt))
       })

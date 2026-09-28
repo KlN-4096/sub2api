@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { cprOutboundProxy, isTurnStateHealthy, TURN_STATE_SHAPES } from '@/utils/turnState'
+import { cprOutboundProxy, isTurnStateHealthy, TURN_STATE_SHAPES, turnStateVerdict } from '@/utils/turnState'
 
 import { turnStateFixture } from '@/components/account/__tests__/turnStateFixture'
 
@@ -22,6 +22,30 @@ describe('isTurnStateHealthy', () => {
     expect(isTurnStateHealthy('x'.repeat(292))).toBe(true)
     expect(isTurnStateHealthy(` ${'x'.repeat(332)}\n`)).toBe(true)
     expect(isTurnStateHealthy('x'.repeat(312))).toBe(false)
+  })
+})
+
+describe('turnStateVerdict', () => {
+  // 红色只给认得出的降智形态；表外形态（2026-09-23 起 pro2 铸出 780 / 33 块）判不了，标黄。
+  it.each([
+    [10, 'healthy'],
+    [12, 'healthy'],
+    [11, 'degraded'],
+    [13, 'degraded'],
+    [33, 'unknown'],
+    [9, 'unknown']
+  ])('%i 块判 %s', (blocks, want) => {
+    expect(turnStateVerdict(turnStateFixture(nowSec, blocks))).toBe(want)
+  })
+
+  it('780 字符就是 33 块的真信封', () => {
+    expect(turnStateFixture(nowSec, 33)).toHaveLength(780)
+  })
+
+  it('解不出信封时按字符长度兜底', () => {
+    expect(turnStateVerdict('x'.repeat(292))).toBe('healthy')
+    expect(turnStateVerdict(` ${'x'.repeat(356)}\n`)).toBe('degraded')
+    expect(turnStateVerdict('x'.repeat(780))).toBe('unknown')
   })
 })
 

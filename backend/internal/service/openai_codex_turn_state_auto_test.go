@@ -963,6 +963,23 @@ func TestOpenAITurnStateShapeTable(t *testing.T) {
 	require.False(t, openAITurnStateHealthy(turnStateBlob(356)), "356 是 team 的降智值")
 }
 
+// TestOpenAITurnStateUnknownShapeNeverEntersPool 钉住：2026-09-23 起上游铸出的 780 字符 / 33 块
+// 判不了是否降智（前端标黄、账号页照常展示），但它不是 292/332，不能进候选池、不能被注入。
+func TestOpenAITurnStateUnknownShapeNeverEntersPool(t *testing.T) {
+	repo := newTurnStateAutoRepo()
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	account := turnStateAutoAccount()
+
+	unknown := turnStateFernetBlob(time.Now().UTC(), 33)
+	require.Len(t, unknown, 780)
+	svc.observeOpenAITurnStateMint(turnStateAutoCtx("sess"), account, unknown)
+	require.Empty(t, readOpenAITurnStatePool(account), "780 不进池")
+
+	// 对照：同一条路径上 292 照常入池，证明上面的空池不是路径没走通。
+	svc.observeOpenAITurnStateMint(turnStateAutoCtx("sess"), account, turnStateFernetBlob(time.Now().UTC(), 10))
+	require.Len(t, readOpenAITurnStatePool(account), 1)
+}
+
 // TestOpenAITurnStateObservedWithAutoDisabled 钉住：自动接管关着时，
 // **记形态、不入池、不读库**。
 //

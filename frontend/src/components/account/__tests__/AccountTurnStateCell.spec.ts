@@ -216,6 +216,23 @@ describe('AccountTurnStateCell', () => {
     expect(empty.attributes('data-starved')).toBe('true')
   })
 
+  it('表外形态（780 / 33 块）的观测照常展示、标黄；312 照旧不展示', () => {
+    // 2026-09-23 起上游铸出 780，判不了是否降智。藏起来的话账号页只剩一个「Turn-State -」，
+    // 等于什么都没说（用户要求展示）。它不是票：后端只收 292/332 入池。
+    const unknown = render(
+      account([], { openai_turn_state_auto: false, openai_turn_state_observed: obs('gpt-5.6-sol', 60, 33) })
+    )
+    expect(rows(unknown)).toEqual(['admin.accounts.openai.turnStatePool.observedTag|gpt-5.6-sol'])
+    const shape = unknown.get('[data-testid="account-turn-state-shape"]')
+    expect(shape.text()).toBe('780')
+    expect(shape.classes()).toContain('bg-yellow-100')
+
+    const degraded = render(
+      account([], { openai_turn_state_auto: false, openai_turn_state_observed: obs('m', 60, 11) })
+    )
+    expect(rows(degraded)).toEqual([])
+  })
+
   it('形态观测异常时安全降级为不展示', () => {
     const bad = (observed: unknown) =>
       render(account([], { openai_turn_state_auto: false, openai_turn_state_observed: observed }))
