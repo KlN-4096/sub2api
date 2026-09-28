@@ -2503,6 +2503,10 @@ func (s *OpenAIGatewayService) isOpenAIAccountTransportCompatible(account *Accou
 		return false
 	}
 	if requiredTransport == OpenAIUpstreamTransportResponsesWebsocketV2Ingress {
+		if account.IsCPR() {
+			// CPR 原生接受 WS，走原样中继的一对一隧道；只认全局与账号的强制 HTTP 开关。
+			return s.cfg != nil && s.cfg.Gateway.OpenAIWS.Enabled && !s.cfg.Gateway.OpenAIWS.ForceHTTP && !account.IsOpenAIWSForceHTTPEnabled()
+		}
 		if s.cfg == nil || !s.cfg.Gateway.OpenAIWS.ModeRouterV2Enabled {
 			return s.getOpenAIWSProtocolResolver().Resolve(account).Transport == OpenAIUpstreamTransportResponsesWebsocketV2
 		}

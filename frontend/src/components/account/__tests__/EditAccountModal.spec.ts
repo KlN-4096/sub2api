@@ -848,6 +848,33 @@ describe('EditAccountModal', () => {
     )
   })
 
+  it('toggles the API-key-only raw relay switch in extra', async () => {
+    const account = buildAccount()
+    account.type = 'apikey'
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    await wrapper.get('[data-testid="edit-openai-raw-relay-toggle"]').trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_raw_relay).toBe(true)
+
+    account.extra = { openai_raw_relay: true }
+    updateAccountMock.mockReset()
+    updateAccountMock.mockResolvedValue(account)
+    const enabled = mountModal(account)
+    // 关闭后删键，不写 false
+    await enabled.get('[data-testid="edit-openai-raw-relay-toggle"]').trigger('click')
+    await enabled.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_raw_relay')
+
+    const oauth = buildAccount()
+    oauth.type = 'oauth'
+    expect(mountModal(oauth).find('[data-testid="edit-openai-raw-relay-toggle"]').exists()).toBe(false)
+  })
+
   it('writes the upstream request id header into extra only when it changes', async () => {
     const account = buildAccount()
     account.extra = { openai_compact_mode: 'force_on' }
@@ -1922,9 +1949,11 @@ describe('EditAccountModal 292 猎手', () => {
     wrapper.unmount()
   })
 
-  it('cpr 账号不显示猎手：出口由 codex-proxy-rs 决定', () => {
+  it('cpr 账号不显示 turn-state 替换设置：原样中继，只观测不替换', () => {
     const wrapper = mountModal({ ...buildCodexAccount({ openai_turn_state_auto: true }), type: 'cpr' })
     expect(wrapper.find('[data-testid="edit-openai-turn-state-hunter-section"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="edit-openai-turn-state-auto"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="edit-openai-turn-state-deprecated"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
