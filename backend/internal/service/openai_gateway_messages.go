@@ -258,6 +258,15 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 			promptCacheKey = codexResult.PromptCacheKey
 		}
 		applyCodexAccountIdentityClientMetadataMap(reqBody, codexAccountIdentitySource(c, account), apiKeyID)
+		// 指纹收敛：与 /responses 走同一套解析与暂存。此前 Messages 桥没有这一步，
+		// 同一个账号在两个端点上会报出两套不同的设备身份（体内是按账号命名空间哈希
+		// 客户端原值得到的，而 /responses 是收敛值）。暂存后 buildUpstreamRequest 里的
+		// applyStagedCodexFingerprintHeaders / applyCodexDeviceWireProfile 才能生效。
+		fpIDs := resolveCodexFingerprintIDsWithBody(c, account, nil, reqBody["client_metadata"])
+		if fpIDs != nil {
+			applyCodexFingerprintClientMetadata(reqBody, fpIDs)
+		}
+		stageCodexFingerprintIDs(c, fpIDs)
 		delete(reqBody, "prompt_cache_key")
 		if shouldAutoInjectPromptCacheKeyForCompat(upstreamModel) {
 			compatTurnState = s.getOpenAICompatSessionTurnState(ctx, c, account, promptCacheKey)
@@ -368,7 +377,11 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 
 	// Override session_id with a deterministic UUID derived from the isolated
 	// session key, ensuring different API keys produce different upstream sessions.
-	if account.Platform != PlatformGrok && promptCacheKey != "" {
+	//
+	// 双开账号跳过：真实 Codex 只发连字符会话头，下划线别名是网关的历史形态。写进去
+	// 会让同一账号同时带两套取值不同的会话标识（连字符那套已由收敛按账号+密钥派生，
+	// 隔离性不依赖这里）。
+	if account.Platform != PlatformGrok && promptCacheKey != "" && !codexDeviceWireProfileEnabled(c, account) {
 		isolatedSessionID := generateSessionUUID(isolateOpenAIUpstreamSessionID(apiKeyID, codexAccountIdentitySource(c, account), promptCacheKey))
 		upstreamReq.Header.Set("session_id", isolatedSessionID)
 		if upstreamReq.Header.Get("conversation_id") != "" {
@@ -381,6 +394,11 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		// originator/OpenAI-Beta 返回 404（issue #3901）。
 		ensureCodexIdentityHeaders(upstreamReq.Header)
 		enforceCodexIdentityHeaders(upstreamReq.Header)
+		// ensureCodexIdentityHeaders 末尾会无条件 Set 回 OpenAI-Beta:responses=experimental，
+		// 把 buildUpstreamRequest 里刚做完的线协议投影抵消掉。双开账号在 /responses 上不发
+		// 该头、在这里发，同一账号就是两种客户端形态。补回投影收口（其内部按双开门控，
+		// 未开投影的账号行为不变）。
+		applyCodexDeviceWireProfile(c, account, upstreamReq.Header, false)
 		logger.L().Debug("openai messages: upstream identity restored",
 			zap.Int64("account_id", account.ID),
 			zap.String("upstream_model", upstreamModel),
