@@ -214,6 +214,9 @@ const ttlMs = computed(() => {
  */
 // 只有最终落到 ChatGPT Codex 后端的账号才有这个头（oauth / setup-token / cpr）。
 const isCodexAccount = computed(() => targetsCodexUpstream(props.account))
+// cpr 走原样中继，只观测不替换（2026-09-23）：手填 / 候选池 / 裸奔告警 / 猎手 / 恢复探测都不适用，
+// extra 里残留的旧配置一律不展示。
+const replacesTurnState = computed(() => props.account.type !== 'cpr')
 
 /**
  * 自动接管关着时生效的是手填覆写表——后端的分支正好相反（开了自动就完全忽略手填）。
@@ -311,11 +314,10 @@ const observedShapes = computed<PoolTicket[]>(() => {
  */
 const poolGroups = computed<PoolTicket[][]>(() => {
   if (!isCodexAccount.value) return []
-  return [
-    isManualMode.value ? manualOverrides.value : candidatePool.value,
-    // 表外形态（780）也展示：它判不了，藏起来账号页就什么都答不出来（2026-09-23 用户要求）。
-    observedShapes.value.filter((o) => o.verdict !== 'degraded')
-  ]
+  // 表外形态（780）也展示：它判不了，藏起来账号页就什么都答不出来（2026-09-23 用户要求）。
+  const observed = observedShapes.value.filter((o) => o.verdict !== 'degraded')
+  if (!replacesTurnState.value) return [observed]
+  return [isManualMode.value ? manualOverrides.value : candidatePool.value, observed]
 })
 
 interface PoolEntry {
@@ -421,6 +423,7 @@ const hasRecentMint = computed(() =>
 const starved = computed(
   () =>
     isCodexAccount.value &&
+    replacesTurnState.value &&
     !isManualMode.value &&
     activeCount.value === 0 &&
     hasRecentMint.value
@@ -528,7 +531,7 @@ const heldByTurnState = computed(() => {
 
 const hunterLine = computed(() => {
   const max = hunterMaxPerHour.value
-  if (max === null) return ''
+  if (max === null || !replacesTurnState.value) return ''
   if (hunterNeedsAuto.value) return t('admin.accounts.openai.turnStatePool.hunterNeedsAuto')
   const now = sharedNow.value
   const st = huntState.value
@@ -625,7 +628,7 @@ const recovered = computed(() => !!parsePresentTime(recoveryState.value.recovere
 
 const recoveryLine = computed(() => {
   const target = recoveryStreakTarget.value
-  if (target === null) return ''
+  if (target === null || !replacesTurnState.value) return ''
   const st = recoveryState.value
   const recoveredAt = parsePresentTime(st.recovered_at)
   if (recoveredAt) {

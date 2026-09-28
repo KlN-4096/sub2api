@@ -62,6 +62,11 @@ func (s *OpenAIGatewayService) buildOpenAIResponsesWSURL(account *Account) (stri
 		return "", fmt.Errorf("unsupported account type for openai websocket: %s", account.Type)
 	}
 
+	return openAIWSURLFromHTTP(targetURL)
+}
+
+// openAIWSURLFromHTTP 把 http(s) 端点换成对应的 ws(s) 端点。
+func openAIWSURLFromHTTP(targetURL string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(targetURL))
 	if err != nil {
 		return "", fmt.Errorf("invalid target url: %w", err)
