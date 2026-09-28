@@ -6,13 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
-// recoveryConfig 造一份恢复探测配置：默认区间 30–90 分钟、连胜 5、冷却 16 小时。
+// recoveryConfig 造一份恢复探测配置：默认区间 30–90 分钟、总次数 5、成功次数 4、冷却 16 小时。
 func recoveryConfig(overrides map[string]any) map[string]any {
 	cfg := map[string]any{"enabled": true, "model": hunterTestModel}
 	for k, v := range overrides {
@@ -47,90 +49,128 @@ func setRecoveryState(a *Account, st openAITurnStateRecoveryState) {
 	a.Extra[openAITurnStateRecoveryStateExtraKey] = generic
 }
 
-// queueBlobs 往替身上游排一串响应：healthy=true 就是 292，false 就是 312。
-func queueBlobs(h *hunterHarness, minted time.Time, healthy ...bool) {
-	for _, ok := range healthy {
-		blocks := openAIHealthyTurnStateBlocks
-		if !ok {
-			blocks++
-		}
-		resp, _ := hunterResp(http.StatusOK, turnStateFernetBlob(minted, blocks), "")
+// recoverySSE 造一份 Codex 后端真实形态的探测响应体（2026-09-18 实抓）：正文只在
+// output_text.delta / output_item.done 里，**completed 的 output 是 []**，只带 usage。
+func recoverySSE(answer string) string {
+	text, _ := json.Marshal(answer)
+	return strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_probe","model":"gpt-5.6-sol","status":"in_progress","output":[]}}`,
+		``,
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","summary":[]}}`,
+		``,
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":` + string(text) + `}`,
+		``,
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":` + string(text) + `,"annotations":[]}]}}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_probe","model":"gpt-5.6-sol","status":"completed","output":[],"usage":{"input_tokens":1200,"output_tokens":300}}}`,
+		``, ``,
+	}, "\n")
+}
+
+// recoverySSEInlineOutput 是 Responses API 标准形态：completed 的 output 里自带 message。
+func recoverySSEInlineOutput(answer string) string {
+	text, _ := json.Marshal(answer)
+	return strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_probe","model":"gpt-5.6-sol"}}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_probe","model":"gpt-5.6-sol","status":"completed","output":[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":` + string(text) + `}]}],"usage":{"input_tokens":1200,"output_tokens":300}}}`,
+		``, ``,
+	}, "\n")
+}
+
+// queueAnswers 往替身上游排一串探测响应：每个 answer 一条 200 + 292 票 + 完整 SSE 体。
+func queueAnswers(h *hunterHarness, minted time.Time, answers ...string) {
+	for _, answer := range answers {
+		resp, _ := hunterResp(http.StatusOK, turnStateFernetBlob(minted, openAIHealthyTurnStateBlocks), recoverySSE(answer))
 		h.up.queue = append(h.up.queue, resp)
 	}
 }
 
-// TestOpenAITurnStateRecoveryMarksAfterStreak 钉住主判据：连续 5 次 292 → 标记已恢复；
+// TestOpenAITurnStateRecoveryMarksAtSuccessRate 钉住主判据：最近 5 次里答对 4 次 → 标记已恢复；
 // 猎手关着也照跑；每次只探一次、间隔落在配置区间内；标记之后不再探。
-func TestOpenAITurnStateRecoveryMarksAfterStreak(t *testing.T) {
+func TestOpenAITurnStateRecoveryMarksAtSuccessRate(t *testing.T) {
 	now := time.Now().UTC()
 	h := newHunterHarness(recoveryAccount(recoveryConfig(nil)), hunterCoxProxy)
 	clock := now
 	h.svc.now = func() time.Time { return clock }
-	queueBlobs(h, now, true, true, true, true, true, true)
+	answers := []string{"21", "21", "29", "21", "21"}
+	queueAnswers(h, now, append(answers, "21")...)
 
-	for i := 1; i <= defaultOpenAITurnStateRecoveryStreak; i++ {
+	for i, answer := range answers {
 		h.run(t)
 		st := recoveryState(h.account)
-		require.Len(t, h.up.requests, i, "一个 tick 只探一次")
-		require.Equal(t, i, st.Streak)
-		require.Zero(t, st.FailStreak)
-		if i < defaultOpenAITurnStateRecoveryStreak {
-			require.True(t, st.RecoveredAt.IsZero(), "没攒够不许判定恢复")
+		require.Len(t, h.up.requests, i+1, "一个 tick 只探一次")
+		require.Equal(t, answer, st.Last[0].Answer)
+		require.Equal(t, answer == "21", st.Last[0].Healthy)
+		if i < len(answers)-1 {
+			require.True(t, st.RecoveredAt.IsZero(), "没攒够 4 次不许判定恢复")
 			wait := st.NextAt.Sub(clock)
 			require.GreaterOrEqual(t, wait, time.Duration(defaultOpenAITurnStateRecoveryMinMinutes)*time.Minute)
 			require.LessOrEqual(t, wait, time.Duration(defaultOpenAITurnStateRecoveryMaxMinutes)*time.Minute)
 			h.run(t)
-			require.Len(t, h.up.requests, i, "没到点不探")
+			require.Len(t, h.up.requests, i+1, "没到点不探")
 			clock = st.NextAt
 		}
 	}
 
 	st := recoveryState(h.account)
-	require.False(t, st.RecoveredAt.IsZero(), "连续 5 次 292 = 降智恢复")
-	require.Equal(t, defaultOpenAITurnStateRecoveryStreak, st.Streak)
+	require.False(t, st.RecoveredAt.IsZero(), "5 次里答对 4 次 = 降智恢复")
+	require.Equal(t, []bool{true, true, false, true, true}, st.Results)
+	require.Equal(t, 4, st.successes())
 
 	// 判定之后不再探：结论已经有了，继续探只是白付额度。
 	clock = clock.Add(24 * time.Hour)
 	h.run(t)
-	require.Len(t, h.up.requests, defaultOpenAITurnStateRecoveryStreak)
+	require.Len(t, h.up.requests, len(answers))
 }
 
-// TestOpenAITurnStateRecoveryStreakResetsOn312 钉住：中间任意一次失败把连胜清零，重新数。
-func TestOpenAITurnStateRecoveryStreakResetsOn312(t *testing.T) {
+// TestOpenAITurnStateRecoveryWindowSlides 钉住窗口语义：答错不清零，只是把窗口往前推；成功次数
+// 不够就继续探，够了才判。
+func TestOpenAITurnStateRecoveryWindowSlides(t *testing.T) {
 	now := time.Now().UTC()
 	h := newHunterHarness(recoveryAccount(recoveryConfig(nil)), hunterCoxProxy)
 	clock := now
 	h.svc.now = func() time.Time { return clock }
-	queueBlobs(h, now, true, true, false, true)
+	queueAnswers(h, now, "21", "29", "21", "29", "21", "21", "21")
 
 	advance := func() {
 		h.run(t)
 		clock = recoveryState(h.account).NextAt
 	}
-	advance()
-	advance()
-	require.Equal(t, 2, recoveryState(h.account).Streak)
-
-	advance() // 312
+	for range 5 {
+		advance()
+	}
 	st := recoveryState(h.account)
-	require.Zero(t, st.Streak, "一次 312 就从头数")
-	require.Equal(t, 1, st.FailStreak)
+	require.Equal(t, 3, st.successes(), "5 次里 3 对")
+	require.True(t, st.RecoveredAt.IsZero())
+	require.Zero(t, st.FailStreak, "最后一次答对，连续失败清零")
+
+	advance() // 第 6 次：窗口变成 21,21,29,21,29 → 仍 3 对
+	st = recoveryState(h.account)
+	require.Equal(t, []bool{true, true, false, true, false}, st.Results)
 	require.True(t, st.RecoveredAt.IsZero())
 
-	advance() // 292
+	advance() // 第 7 次：21,21,21,29,21 → 4 对
 	st = recoveryState(h.account)
-	require.Equal(t, 1, st.Streak)
-	require.Zero(t, st.FailStreak, "一次成功清掉失败计数")
+	require.Equal(t, 4, st.successes())
+	require.False(t, st.RecoveredAt.IsZero(), "窗口滑到 4/5 就判恢复")
 }
 
 // TestOpenAITurnStateRecoveryCooldownAfterFailures 钉住用户要的 CD：连续 5 次失败 → 冷却 16 小时，
-// 冷却期内不探；醒来后失败计数从零开始。传输错误与 312 同样算失败。
+// 冷却期内不探、这一批结果作废；醒来后失败计数从零开始。传输错误与答错同样算失败。
 func TestOpenAITurnStateRecoveryCooldownAfterFailures(t *testing.T) {
 	now := time.Now().UTC()
 	h := newHunterHarness(recoveryAccount(recoveryConfig(nil)), hunterCoxProxy)
 	clock := now
 	h.svc.now = func() time.Time { return clock }
-	queueBlobs(h, now, false, false, false, false)
+	queueAnswers(h, now, "29", "36", "", "29")
 	h.up.queue = append(h.up.queue, nil) // 第五次：传输错误
 	h.up.errOnNil = errors.New("dial tcp: proxy refused")
 
@@ -144,6 +184,7 @@ func TestOpenAITurnStateRecoveryCooldownAfterFailures(t *testing.T) {
 
 	st := recoveryState(h.account)
 	require.Zero(t, st.FailStreak, "进冷却时计数归零，醒来不能一探就又满")
+	require.Empty(t, st.Results, "进冷却时这一批结果作废")
 	require.True(t, st.RecoveredAt.IsZero())
 	require.Equal(t, lastProbeAt.Add(defaultOpenAITurnStateRecoveryCooldownHours*time.Hour), st.CoolingUntil,
 		"连续失败够数 → 从最后一次探测起冷却 16 小时")
@@ -155,12 +196,12 @@ func TestOpenAITurnStateRecoveryCooldownAfterFailures(t *testing.T) {
 	require.Len(t, h.up.requests, defaultOpenAITurnStateRecoveryStreak)
 
 	// 醒来接着探。
-	queueBlobs(h, now, true)
+	queueAnswers(h, now, "21")
 	h.up.errOnNil = nil
 	clock = st.CoolingUntil
 	h.run(t)
 	require.Len(t, h.up.requests, defaultOpenAITurnStateRecoveryStreak+1)
-	require.Equal(t, 1, recoveryState(h.account).Streak)
+	require.Equal(t, []bool{true}, recoveryState(h.account).Results)
 }
 
 // TestOpenAITurnStateRecoveryUsesAccountExit 钉住「走账号自己的出口」：不是猎手代理、不关连接
@@ -171,7 +212,7 @@ func TestOpenAITurnStateRecoveryUsesAccountExit(t *testing.T) {
 	account.Extra[openAITurnStateHunterExtraKey] = hunterConfig(map[string]any{"proxy_ids": []any{float64(20)}})
 	h := newHunterHarness(account, hunterWebshareProxy, hunterCoxProxy)
 	h.svc.now = func() time.Time { return now }
-	queueBlobs(h, now, true)
+	queueAnswers(h, now, "21")
 
 	h.run(t)
 
@@ -191,24 +232,295 @@ func TestOpenAITurnStateRecoveryDirectAccount(t *testing.T) {
 	account.ProxyID, account.Proxy = nil, nil
 	h := newHunterHarness(account)
 	h.svc.now = func() time.Time { return now }
-	queueBlobs(h, now, true)
+	queueAnswers(h, now, "21")
 
 	h.run(t)
 
 	require.Len(t, h.up.requests, 1)
 	require.Empty(t, h.up.proxyURLs[0], "直连")
-	require.Equal(t, 1, recoveryState(h.account).Streak)
+	require.Equal(t, []bool{true}, recoveryState(h.account).Results)
+}
+
+// TestOpenAITurnStateRecoveryProbeShape 钉住探测本身：默认探 gpt-5.6-sol@medium、用户消息是糖果题、
+// 读完整个体并按回答判定；用量按上游 completed 里的真实数记，不再是「输入估算 + 输出 0」。
+func TestOpenAITurnStateRecoveryProbeShape(t *testing.T) {
+	now := time.Now().UTC()
+	h := newHunterHarness(recoveryAccount(recoveryConfig(map[string]any{"model": "", "usage_api_key_id": float64(77)})), hunterCoxProxy)
+	keys := &hunterAPIKeys{key: &APIKey{ID: 77, User: &User{ID: 5}, Group: &Group{ID: 3, RateMultiplier: 1}}}
+	capture := &probeUsageCapture{}
+	h.svc.SetAPIKeys(keys)
+	h.svc.recordUsage = capture.record
+	h.svc.now = func() time.Time { return now }
+	queueAnswers(h, now, "21。")
+
+	h.run(t)
+
+	require.Len(t, h.up.bodies, 1)
+	body := h.up.bodies[0]
+	require.Equal(t, defaultOpenAITurnStateRecoveryModel, gjson.GetBytes(body, "model").String())
+	require.Equal(t, defaultOpenAITurnStateRecoveryEffort, gjson.GetBytes(body, "reasoning.effort").String())
+	require.Equal(t, openAITurnStateRecoveryPrompt, gjson.GetBytes(body, "input.0.content.0.text").String())
+	require.True(t, gjson.GetBytes(body, "stream").Bool())
+
+	st := recoveryState(h.account)
+	require.Equal(t, defaultOpenAITurnStateRecoveryModel, st.Last[0].Model)
+	require.Equal(t, "21", st.Last[0].Answer, "句末标点不算答错")
+	require.True(t, st.Last[0].Healthy)
+
+	require.Len(t, capture.inputs, 1)
+	require.Equal(t, RequestTypeTurnStateProbe, capture.inputs[0].RequestType)
+	require.Equal(t, 1200, capture.inputs[0].Result.Usage.InputTokens, "用上游报的输入 token")
+	require.Equal(t, 300, capture.inputs[0].Result.Usage.OutputTokens, "读完了流，输出 token 不再记 0")
+}
+
+// TestOpenAITurnStateRecoveryAnswerNormalization 钉住回答的归一化、「含 21 即答对」（用户 2026-09-25 定）
+// 与终态缺失。
+func TestOpenAITurnStateRecoveryAnswerNormalization(t *testing.T) {
+	type want struct {
+		answer  string
+		healthy bool
+	}
+	for raw, w := range map[string]want{
+		"21": {"21", true}, " 21。": {"21", true}, "**21**": {"21", true}, "\"21\"": {"21", true}, "21.": {"21", true},
+		"**21**。": {"21", true}, "「21」": {"21", true}, "21颗": {"21颗", true}, "答案是 21": {"答案是 21", true},
+		"一共 21 颗糖": {"一共 21 颗糖", true}, "21.5": {"21.5", true}, "210": {"210", true},
+		"29": {"29", false}, "36": {"36", false}, "12": {"12", false}, "2 1": {"2 1", false},
+	} {
+		answer, healthy, usage, ok := openAITurnStateRecoveryAnswer([]byte(recoverySSE(raw)))
+		require.True(t, ok, raw)
+		require.Equal(t, w.answer, answer, raw)
+		require.Equal(t, w.healthy, healthy, raw)
+		require.NotNil(t, usage, raw)
+		require.Equal(t, 1200, usage.InputTokens)
+		require.Equal(t, 300, usage.OutputTokens)
+	}
+
+	// 长篇解释里 21 出现在展示截断（200 字节）之后也算答对：判定看整段，截断只影响展示。
+	long := strings.Repeat("先算每人拿到的糖数再相加。", 30) + "所以一共是 21 颗。"
+	answer, healthy, _, ok := openAITurnStateRecoveryAnswer([]byte(recoverySSE(long)))
+	require.True(t, ok)
+	require.True(t, healthy)
+	require.LessOrEqual(t, len(answer), openAITurnStateRecoveryAnswerKeep)
+	require.NotContains(t, answer, "21", "截断后的展示串里已经没有 21，说明判定不是看它")
+
+	_, _, _, ok = openAITurnStateRecoveryAnswer([]byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"x\"}}\n\n"))
+	require.False(t, ok, "没有 completed 终态就不算有回答")
+	_, _, _, ok = openAITurnStateRecoveryAnswer(nil)
+	require.False(t, ok)
+
+	answer, healthy, usage, ok := openAITurnStateRecoveryAnswer([]byte(recoverySSENoUsage("21")))
+	require.True(t, ok)
+	require.True(t, healthy)
+	require.Equal(t, "21", answer)
+	require.Nil(t, usage, "终态没带 usage 时不能当 0 token 记账")
+
+	// Responses 标准形态（completed 自带 output）同样认。
+	answer, healthy, _, ok = openAITurnStateRecoveryAnswer([]byte(recoverySSEInlineOutput("29")))
+	require.True(t, ok)
+	require.False(t, healthy)
+	require.Equal(t, "29", answer)
+}
+
+// TestOpenAITurnStateRecoveryEmptyAnswerIsDescribed 钉住用户 09-25 的要求：日志要写明模型答了什么，
+// 不能只有一个 ✗。模型交白卷时回答写成形态说明（status / output 项类型 / refusal），且判为答错；
+// 09-25 首次线上探测正是 completed output=[] 让回答落成空、页面只显示「答 -✗」。
+func TestOpenAITurnStateRecoveryEmptyAnswerIsDescribed(t *testing.T) {
+	answer, healthy, usage, ok := openAITurnStateRecoveryAnswer([]byte(recoverySSE("")))
+	require.True(t, ok)
+	require.False(t, healthy)
+	require.Equal(t, "∅ output=[reasoning,message]", answer)
+	require.NotNil(t, usage)
+
+	refused := strings.Join([]string{
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"I can't help with that."}]}}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_probe","status":"completed","output":[],"incomplete_details":null}}`,
+		``, ``,
+	}, "\n")
+	answer, healthy, _, ok = openAITurnStateRecoveryAnswer([]byte(refused))
+	require.True(t, ok)
+	require.False(t, healthy)
+	require.Equal(t, "∅ refusal=I can't help with that. output=[message]", answer)
+
+	// 走完整探测链路：白卷要落进 attempt.answer 与 results=false。
+	now := time.Now().UTC()
+	h := newHunterHarness(recoveryAccount(recoveryConfig(nil)), hunterCoxProxy)
+	h.svc.now = func() time.Time { return now }
+	queueAnswers(h, now, "")
+	h.run(t)
+	st := recoveryState(h.account)
+	require.False(t, st.Last[0].Healthy)
+	require.Equal(t, "∅ output=[reasoning,message]", st.Last[0].Answer)
+	require.Empty(t, st.Last[0].Error, "白卷是答错，不是探测出错")
+	raw := h.account.Extra[openAITurnStateRecoveryStateExtraKey].(map[string]any)
+	require.Contains(t, raw["last"].([]any)[0].(map[string]any), "answer", "落库里要有 answer 键，页面才能显示")
+}
+
+// recoverySSENoUsage 是 completed 里不带 usage 的探测响应体。
+func recoverySSENoUsage(answer string) string {
+	return strings.Replace(recoverySSE(answer), `,"usage":{"input_tokens":1200,"output_tokens":300}`, "", 1)
+}
+
+// TestOpenAITurnStateRecoveryBillsEstimateWithoutUsage 钉住第二轮评审 S4：终态没带 usage 时按
+// 输入估算记账（与猎手同一套），不能记成 0。
+func TestOpenAITurnStateRecoveryBillsEstimateWithoutUsage(t *testing.T) {
+	now := time.Now().UTC()
+	h := newHunterHarness(recoveryAccount(recoveryConfig(map[string]any{"usage_api_key_id": float64(77)})), hunterCoxProxy)
+	keys := &hunterAPIKeys{key: &APIKey{ID: 77, User: &User{ID: 5}, Group: &Group{ID: 3, RateMultiplier: 1}}}
+	capture := &probeUsageCapture{}
+	h.svc.SetAPIKeys(keys)
+	h.svc.recordUsage = capture.record
+	h.svc.now = func() time.Time { return now }
+	resp, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks), recoverySSENoUsage("21"))
+	h.up.queue = append(h.up.queue, resp)
+
+	h.run(t)
+
+	require.True(t, recoveryState(h.account).Last[0].Healthy)
+	require.Len(t, capture.inputs, 1)
+	require.Equal(t, openAITurnStateProbeInputTokens(hunterTestModel, defaultOpenAITurnStateRecoveryEffort, openAITurnStateRecoveryPrompt),
+		capture.inputs[0].Result.Usage.InputTokens)
+	require.Zero(t, capture.inputs[0].Result.Usage.OutputTokens)
+}
+
+// TestOpenAITurnStateRecoveryLegacyMarkerReprobes 钉住第二轮评审 S2：旧判据（连续 292）打下的
+// 「已恢复」没有判定窗口，不能让它永久停探——清掉标记照常探，判定从头攒。
+func TestOpenAITurnStateRecoveryLegacyMarkerReprobes(t *testing.T) {
+	now := time.Now().UTC()
+	account := recoveryAccount(recoveryConfig(nil))
+	account.Extra[openAITurnStateRecoveryStateExtraKey] = map[string]any{
+		"streak":       float64(5),
+		"recovered_at": now.Add(-48 * time.Hour).Format(time.RFC3339),
+		"next_at":      now.Add(-47 * time.Hour).Format(time.RFC3339),
+		"updated_at":   now.Add(-48 * time.Hour).Format(time.RFC3339),
+	}
+	h := newHunterHarness(account, hunterCoxProxy)
+	h.svc.now = func() time.Time { return now }
+	queueAnswers(h, now, "29")
+
+	h.run(t)
+
+	require.Len(t, h.up.requests, 1, "老标记不算数，照常探")
+	st := recoveryState(h.account)
+	require.True(t, st.RecoveredAt.IsZero(), "老标记清掉，落库")
+	require.Equal(t, []bool{false}, st.Results)
+	require.Equal(t, 1, st.FailStreak)
+
+	// 老行的 next_at 还在未来：不探，但标记要立刻清掉落库，页面不能再写「已恢复」。
+	waiting := recoveryAccount(recoveryConfig(nil))
+	waiting.Extra[openAITurnStateRecoveryStateExtraKey] = map[string]any{
+		"streak":       float64(5),
+		"recovered_at": now.Add(-time.Hour).Format(time.RFC3339),
+		"next_at":      now.Add(time.Hour).Format(time.RFC3339),
+	}
+	h = newHunterHarness(waiting, hunterCoxProxy)
+	h.svc.now = func() time.Time { return now }
+
+	h.run(t)
+
+	require.Empty(t, h.up.requests, "没到点不探")
+	require.True(t, recoveryState(h.account).RecoveredAt.IsZero())
+	require.Len(t, h.repo.extraWrites, 1, "清老标记写一次库")
+
+	h.run(t)
+	require.Len(t, h.repo.extraWrites, 1, "清过就不再重复写")
+}
+
+// TestOpenAITurnStateRecoveryTruncatedStreamIsFailure 钉住流被截断（没有终态）按失败记，不按答对也不按答错。
+func TestOpenAITurnStateRecoveryTruncatedStreamIsFailure(t *testing.T) {
+	now := time.Now().UTC()
+	h := newHunterHarness(recoveryAccount(recoveryConfig(nil)), hunterCoxProxy)
+	h.svc.now = func() time.Time { return now }
+	resp, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks),
+		"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"x\"}}\n\n")
+	h.up.queue = append(h.up.queue, resp)
+
+	h.run(t)
+
+	st := recoveryState(h.account)
+	require.Equal(t, []bool{false}, st.Results)
+	require.Equal(t, 1, st.FailStreak)
+	require.Equal(t, "no completed; last=response.created", st.LastError)
+}
+
+// TestOpenAITurnStateRecoveryNoTerminalIsDiagnosed 钉住 2026-09-26 01:26 那种现场：200 却没有 completed，
+// 错误里要写出流里有什么——事件序列、failed/incomplete 的原因与错误、error 事件、已吐出的部分正文。
+func TestOpenAITurnStateRecoveryNoTerminalIsDiagnosed(t *testing.T) {
+	failed := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_probe","status":"in_progress","output":[]}}`,
+		``,
+		`event: response.in_progress`,
+		`data: {"type":"response.in_progress","response":{"id":"resp_probe","status":"in_progress"}}`,
+		``,
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"29"}`,
+		``,
+		`event: response.failed`,
+		`data: {"type":"response.failed","response":{"id":"resp_probe","status":"failed","output":[],"error":{"code":"server_error","message":"Something went wrong"}}}`,
+		``, ``,
+	}, "\n")
+	require.Equal(t, "last=response.failed error=Something went wrong partial=29", openAITurnStateRecoveryStreamDiagnostic(failed))
+
+	incomplete := strings.Join([]string{
+		`event: response.incomplete`,
+		`data: {"type":"response.incomplete","response":{"id":"resp_probe","status":"incomplete","output":[],"incomplete_details":{"reason":"max_output_tokens"}}}`,
+		``, ``,
+	}, "\n")
+	require.Equal(t, "last=response.incomplete reason=max_output_tokens", openAITurnStateRecoveryStreamDiagnostic(incomplete))
+
+	errored := "event: error\ndata: {\"type\":\"error\",\"message\":\"The server had an error while processing your request\"}\n\n"
+	require.Equal(t, "last=error error=The server had an error while processing your request", openAITurnStateRecoveryStreamDiagnostic(errored))
+
+	// tooltip 要短（用户要求）：长错误信息截 60 字节，整串不超过 120 字节。
+	longErr := "event: error\ndata: {\"type\":\"error\",\"message\":\"" + strings.Repeat("x", 300) + "\"}\n\n"
+	diag := openAITurnStateRecoveryStreamDiagnostic(longErr)
+	require.LessOrEqual(t, len(diag), 120)
+	require.Equal(t, "last=error error="+strings.Repeat("x", 60), diag)
+
+	// 各段都到上限时整串仍不超过 120 字节（外层截断不是摆设）。
+	crowded := strings.Join([]string{
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"` + strings.Repeat("7", 100) + `"}`,
+		``,
+		`event: response.failed`,
+		`data: {"type":"response.failed","response":{"id":"resp_probe","status":"failed","output":[],"incomplete_details":{"reason":"max_output_tokens"},"error":{"message":"` + strings.Repeat("y", 300) + `"}}}`,
+		``, ``,
+	}, "\n")
+	diag = openAITurnStateRecoveryStreamDiagnostic(crowded)
+	require.Len(t, diag, 120)
+	require.True(t, strings.HasPrefix(diag, "last=response.failed reason=max_output_tokens error="+strings.Repeat("y", 60)), diag)
+
+	require.Equal(t, "no sse frames", openAITurnStateRecoveryStreamDiagnostic(""))
+	require.Equal(t, "no sse frames", openAITurnStateRecoveryStreamDiagnostic("garbage without frames"))
+
+	// 走完整探测链路：错误串带着现场落进 attempt.error（页面 tooltip「出错 200 …」就读它）。
+	now := time.Now().UTC()
+	h := newHunterHarness(recoveryAccount(recoveryConfig(nil)), hunterCoxProxy)
+	h.svc.now = func() time.Time { return now }
+	resp, _ := hunterResp(http.StatusOK, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks), failed)
+	h.up.queue = append(h.up.queue, resp)
+
+	h.run(t)
+
+	st := recoveryState(h.account)
+	require.Equal(t, []bool{false}, st.Results)
+	require.Equal(t, http.StatusOK, st.Last[0].Status)
+	require.Equal(t, "no completed; last=response.failed error=Something went wrong partial=29", st.Last[0].Error)
+	require.Empty(t, st.Last[0].Answer)
 }
 
 // TestOpenAITurnStateRecoveryResetOnNatural312 钉住标记的失效：真实流量又自然铸出 312 →
-// 清掉「已恢复」与连胜，从头攒；注入回声（带票的请求）不算。
+// 清掉「已恢复」与判定窗口，从头攒；注入回声（带票的请求）不算。
 func TestOpenAITurnStateRecoveryResetOnNatural312(t *testing.T) {
 	now := time.Now().UTC()
 	repo := newTurnStateAutoRepo()
 	account := recoveryAccount(recoveryConfig(nil))
 	repo.latest = account
 	gw := &OpenAIGatewayService{accountRepo: repo}
-	st := openAITurnStateRecoveryState{Streak: 5, RecoveredAt: now}
+	st := openAITurnStateRecoveryState{Results: []bool{true, true, true, true}, RecoveredAt: now}
 	setRecoveryState(account, st)
 
 	// 注入过的响应不算数：92% 的带票请求上游原样回带，拿它判定就是拿自己的票当证据。
@@ -222,7 +534,7 @@ func TestOpenAITurnStateRecoveryResetOnNatural312(t *testing.T) {
 		turnStateFernetBlob(now, openAIHealthyTurnStateBlocks+1))
 	got := recoveryState(account)
 	require.True(t, got.RecoveredAt.IsZero(), "又铸 312 = 之前判定的恢复不作数")
-	require.Zero(t, got.Streak)
+	require.Empty(t, got.Results)
 
 	// 标记已经清掉之后不再重复写库（响应热路径）。
 	before := repo.extraWrites
@@ -247,7 +559,7 @@ func TestOpenAITurnStateRecoverySkips(t *testing.T) {
 			mutate(account)
 			h := newHunterHarness(account, hunterCoxProxy)
 			h.svc.now = func() time.Time { return now }
-			queueBlobs(h, now, true)
+			queueAnswers(h, now, "21")
 
 			h.run(t)
 
@@ -256,11 +568,40 @@ func TestOpenAITurnStateRecoverySkips(t *testing.T) {
 	}
 }
 
-// TestOpenAITurnStateRecoveryConfigBounds 钉住配置兜底：区间填反按固定间隔走，非法值取默认。
+// TestOpenAITurnStateRecoveryDisableClearsState 钉住「关掉开关即清」：残留的标记与窗口在下一个
+// tick 清空（只写一次库），再开从头攒。
+func TestOpenAITurnStateRecoveryDisableClearsState(t *testing.T) {
+	now := time.Now().UTC()
+	account := recoveryAccount(recoveryConfig(map[string]any{"enabled": false}))
+	setRecoveryState(account, openAITurnStateRecoveryState{Results: []bool{true, true, true, true}, RecoveredAt: now, FailStreak: 0})
+	h := newHunterHarness(account, hunterCoxProxy)
+	h.svc.now = func() time.Time { return now }
+
+	h.run(t)
+
+	st := recoveryState(h.account)
+	require.True(t, st.RecoveredAt.IsZero(), "关掉开关，标记随之清空")
+	require.Empty(t, st.Results)
+	require.Empty(t, h.up.requests, "关着不探")
+	writes := len(h.repo.extraWrites)
+	require.Positive(t, writes)
+
+	h.run(t)
+	require.Len(t, h.repo.extraWrites, writes, "清空之后不再重复写库")
+
+	// 再开：从头攒。
+	h.account.Extra[openAITurnStateRecoveryExtraKey] = recoveryConfig(nil)
+	queueAnswers(h, now, "21")
+	h.run(t)
+	require.Equal(t, []bool{true}, recoveryState(h.account).Results)
+}
+
+// TestOpenAITurnStateRecoveryConfigBounds 钉住配置兜底：区间填反按固定间隔走，非法值取默认，
+// 成功次数不能超过总次数，模型 / effort 留空走 gpt-5.6-sol@medium。
 func TestOpenAITurnStateRecoveryConfigBounds(t *testing.T) {
 	account := recoveryAccount(recoveryConfig(map[string]any{
-		"min_minutes": float64(90), "max_minutes": float64(30),
-		"streak_target": float64(0), "cooldown_hours": float64(0), "reasoning_effort": "bogus",
+		"model": "", "min_minutes": float64(90), "max_minutes": float64(30),
+		"streak_target": float64(0), "success_target": float64(0), "cooldown_hours": float64(0), "reasoning_effort": "bogus",
 	}))
 	cfg, ok := readOpenAITurnStateRecoveryConfig(account)
 	require.True(t, ok)
@@ -268,20 +609,31 @@ func TestOpenAITurnStateRecoveryConfigBounds(t *testing.T) {
 	require.Equal(t, 90, cfg.MaxMinutes, "填反了按固定间隔走，别让区间变负数")
 	require.Equal(t, 90*time.Minute, cfg.interval())
 	require.Equal(t, defaultOpenAITurnStateRecoveryStreak, cfg.StreakTarget)
+	require.Equal(t, defaultOpenAITurnStateRecoverySuccess, cfg.SuccessTarget)
 	require.Equal(t, defaultOpenAITurnStateRecoveryCooldownHours*time.Hour, cfg.cooldown())
-	require.Equal(t, defaultOpenAITurnStateHuntReasoningEffort, cfg.ReasoningEffort)
+	require.Equal(t, defaultOpenAITurnStateRecoveryEffort, cfg.ReasoningEffort)
+	require.Equal(t, defaultOpenAITurnStateRecoveryModel, cfg.Model)
 
 	capped := recoveryAccount(recoveryConfig(map[string]any{
 		"min_minutes": float64(99999), "max_minutes": float64(99999), "cooldown_hours": float64(99999),
+		"streak_target": float64(3), "success_target": float64(9),
 	}))
 	cfg, _ = readOpenAITurnStateRecoveryConfig(capped)
 	require.Equal(t, openAITurnStateRecoveryMaxMinutes, cfg.MaxMinutes)
 	require.Equal(t, openAITurnStateRecoveryMaxCooldownHours, cfg.CooldownHours)
+	require.Equal(t, 3, cfg.StreakTarget)
+	require.Equal(t, 3, cfg.SuccessTarget, "成功次数压到总次数")
+
+	small := recoveryAccount(recoveryConfig(map[string]any{"streak_target": float64(2)}))
+	cfg, _ = readOpenAITurnStateRecoveryConfig(small)
+	require.Equal(t, 2, cfg.SuccessTarget, "默认 4 也不能超过总次数 2")
 }
 
 // TestValidateOpenAITurnStateRecoveryExtra 钉住管理员配置的校验（随猎手配置一起在 handler 入口调）。
 func TestValidateOpenAITurnStateRecoveryExtra(t *testing.T) {
-	require.NoError(t, ValidateOpenAITurnStateHunterExtra(map[string]any{openAITurnStateRecoveryExtraKey: recoveryConfig(nil)}))
+	require.NoError(t, ValidateOpenAITurnStateHunterExtra(map[string]any{openAITurnStateRecoveryExtraKey: recoveryConfig(map[string]any{"success_target": float64(4)})}))
+	require.NoError(t, ValidateOpenAITurnStateHunterExtra(map[string]any{openAITurnStateRecoveryExtraKey: recoveryConfig(map[string]any{"streak_target": float64(6), "success_target": float64(6)})}),
+		"成功次数等于总次数是合法的（全对才算恢复）")
 
 	nulled := map[string]any{openAITurnStateRecoveryExtraKey: nil}
 	require.NoError(t, ValidateOpenAITurnStateHunterExtra(nulled))
@@ -292,6 +644,9 @@ func TestValidateOpenAITurnStateRecoveryExtra(t *testing.T) {
 		{openAITurnStateRecoveryExtraKey: recoveryConfig(map[string]any{"enabled": "yes"})},
 		{openAITurnStateRecoveryExtraKey: recoveryConfig(map[string]any{"model": float64(1)})},
 		{openAITurnStateRecoveryExtraKey: recoveryConfig(map[string]any{"streak_target": float64(0)})},
+		{openAITurnStateRecoveryExtraKey: recoveryConfig(map[string]any{"success_target": float64(0)})},
+		{openAITurnStateRecoveryExtraKey: recoveryConfig(map[string]any{"success_target": float64(6)})},
+		{openAITurnStateRecoveryExtraKey: recoveryConfig(map[string]any{"streak_target": float64(3), "success_target": float64(4)})},
 		{openAITurnStateRecoveryExtraKey: recoveryConfig(map[string]any{"cooldown_hours": float64(1.5)})},
 		{openAITurnStateRecoveryExtraKey: recoveryConfig(map[string]any{"reasoning_effort": "bogus"})},
 	} {
@@ -301,26 +656,26 @@ func TestValidateOpenAITurnStateRecoveryExtra(t *testing.T) {
 
 // TestOpenAITurnStateRecoveryNotResetByHunterOrEcho 钉住第一轮评审 B1：清标记只认真实流量自己
 // 铸出的 312。猎手走的是**别的出口**，恢复探测的失败自己记；带票请求 92% 是上游原样回带——
-// 三者都清一次连胜的话，降智账号永远攒不满。
+// 三者都清一次窗口的话，降智账号永远攒不满。
 func TestOpenAITurnStateRecoveryNotResetByHunterOrEcho(t *testing.T) {
 	now := time.Now().UTC()
 	degraded := turnStateFernetBlob(now, openAIHealthyTurnStateBlocks+1)
 
-	t.Run("猎手探测的 312 不清连胜", func(t *testing.T) {
+	t.Run("猎手探测的 312 不清窗口", func(t *testing.T) {
 		h := newHunterHarness(recoveryAccount(recoveryConfig(nil)), hunterCoxProxy, hunterWebshareProxy)
 		// 猎手猎另一个模型：否则恢复探测铸出的 292 入池后，猎手看到票新鲜就不再探了。
 		h.account.Extra[openAITurnStateHunterExtraKey] = hunterConfig(map[string]any{
 			"proxy_ids": []any{float64(20)}, "models": []any{"gpt-5.6-luna"},
 		})
 		h.svc.now = func() time.Time { return now }
-		queueBlobs(h, now, true)                           // 恢复探测：292
+		queueAnswers(h, now, "21")                         // 恢复探测：答对
 		miss, _ := hunterResp(http.StatusOK, degraded, "") // 猎手：312
 		h.up.queue = append(h.up.queue, miss)
 
 		h.run(t)
 
 		require.GreaterOrEqual(t, len(h.up.requests), 2, "同一个 tick 里两种探测都跑了")
-		require.Equal(t, 1, recoveryState(h.account).Streak, "猎手在别的出口上撞 312，不是账号自己出口的证据")
+		require.Equal(t, []bool{true}, recoveryState(h.account).Results, "猎手在别的出口上撞 312，不是账号自己出口的证据")
 	})
 
 	t.Run("回带的 312 不清标记", func(t *testing.T) {
@@ -328,13 +683,13 @@ func TestOpenAITurnStateRecoveryNotResetByHunterOrEcho(t *testing.T) {
 		account := recoveryAccount(recoveryConfig(nil))
 		repo.latest = account
 		gw := &OpenAIGatewayService{accountRepo: repo}
-		setRecoveryState(account, openAITurnStateRecoveryState{Streak: 4})
+		setRecoveryState(account, openAITurnStateRecoveryState{Results: []bool{true, true, true}})
 
 		c := turnStateAutoCtxModel("carried", hunterTestModel)
 		markOpenAITurnStateSent(c, account, degraded) // 出站带了票（客户端自带透传，非我们注入）
 		gw.observeOpenAITurnStateMint(c, account, degraded)
 
-		require.Equal(t, 4, recoveryState(account).Streak, "回声不是证据")
+		require.Equal(t, 3, recoveryState(account).successes(), "回声不是证据")
 	})
 
 	t.Run("裸请求的 312 才清", func(t *testing.T) {
@@ -342,11 +697,11 @@ func TestOpenAITurnStateRecoveryNotResetByHunterOrEcho(t *testing.T) {
 		account := recoveryAccount(recoveryConfig(nil))
 		repo.latest = account
 		gw := &OpenAIGatewayService{accountRepo: repo}
-		setRecoveryState(account, openAITurnStateRecoveryState{Streak: 4})
+		setRecoveryState(account, openAITurnStateRecoveryState{Results: []bool{true, true, true}})
 
 		gw.observeOpenAITurnStateMint(turnStateAutoCtxModel("bare", hunterTestModel), account, degraded)
 
-		require.Zero(t, recoveryState(account).Streak)
+		require.Empty(t, recoveryState(account).Results)
 	})
 }
 
@@ -356,7 +711,7 @@ func TestOpenAITurnStateRecoveryStateOmitsZeroTimes(t *testing.T) {
 	now := time.Now().UTC()
 	h := newHunterHarness(recoveryAccount(recoveryConfig(nil)), hunterCoxProxy)
 	h.svc.now = func() time.Time { return now }
-	queueBlobs(h, now, true)
+	queueAnswers(h, now, "21")
 
 	h.run(t)
 
@@ -365,45 +720,11 @@ func TestOpenAITurnStateRecoveryStateOmitsZeroTimes(t *testing.T) {
 	require.NotContains(t, raw, "recovered_at", "没判定恢复就不该有这个键")
 	require.NotContains(t, raw, "cooling_until")
 	require.Contains(t, raw, "next_at")
-}
-
-// TestOpenAITurnStateRecoveryModelFallback 钉住选模型：窗口内**最近**一次流量的模型（不是字母序
-// 第一个），画图模型一律排除（它们结构上只铸 312，探它必然连败进冷却）。
-func TestOpenAITurnStateRecoveryModelFallback(t *testing.T) {
-	now := time.Now().UTC()
-	h := newHunterHarness(recoveryAccount(recoveryConfig(map[string]any{"model": ""})), hunterCoxProxy)
-	h.svc.now = func() time.Time { return now }
-	// 两个模型都铸过票，luna 字母序在前、astra 是最近的一次。水位时间必须岔开：
-	// 选最近用的是 `mark.at.After(best.at)`，同一时刻的两条谁赢由 sync.Map.Range 的
-	// 顺序定，写成同一个 now 的话这条断言是掷骰子。
-	for i, m := range []string{"gpt-5.6-luna", "gpt-6-astra"} {
-		c := turnStateAutoCtxModel("seed-"+m, m)
-		h.gw.observeOpenAITurnStateMint(c, h.account, turnStateFernetBlob(now, openAIHealthyTurnStateBlocks))
-		h.gw.noteOpenAITurnStateTraffic(h.account.ID, m, now.Add(time.Duration(i)*time.Second))
-	}
-	queueBlobs(h, now, true)
-
-	h.run(t)
-
-	require.Len(t, h.up.requests, 1)
-	require.Equal(t, "gpt-6-astra", recoveryState(h.account).Last[0].Model, "取最近有流量的，不是字母序第一个")
-
-	// 观测兜底也排除画图模型：没有流量记录时，最近一次观测来自 gpt-image-2 就什么都不探。
-	img := newHunterHarness(recoveryAccount(recoveryConfig(map[string]any{"model": ""})), hunterCoxProxy)
-	img.svc.now = func() time.Time { return now }
-	img.account.Extra[openAITurnStateObservedExtraKey] = map[string]any{
-		"model": "gpt-image-2", "blocks": openAIHealthyTurnStateBlocks + 1, "chars": 312,
-		"minted_at": now.Format(time.RFC3339), "observed_at": now.Format(time.RFC3339),
-	}
-	queueBlobs(img, now, true)
-	img.run(t)
-	require.Empty(t, img.up.requests, "画图模型只铸 312，探它等于每轮必然连败")
-	require.Equal(t, "no model to probe", recoveryState(img.account).LastError)
-	require.Equal(t, 1, recoveryState(img.account).FailStreak, "配不出模型也记失败，免得每窗白写一次库")
+	require.Contains(t, raw, "results")
 }
 
 // TestOpenAITurnStateRecoveryOneAccountPerTick 钉住第一轮评审 S4：恢复探测一个 tick 只做一个账号，
-// 不能几十个账号一起在收集阶段各阻塞 60 秒、把猎手的 15 分钟预算吃光。
+// 不能几十个账号一起在收集阶段各阻塞几分钟、把猎手的 15 分钟预算吃光。
 func TestOpenAITurnStateRecoveryOneAccountPerTick(t *testing.T) {
 	now := time.Now().UTC()
 	first := recoveryAccount(recoveryConfig(nil))
@@ -413,7 +734,7 @@ func TestOpenAITurnStateRecoveryOneAccountPerTick(t *testing.T) {
 	h := newHunterHarness(first, hunterCoxProxy)
 	h.repo.others = []*Account{second}
 	h.svc.now = func() time.Time { return now }
-	queueBlobs(h, now, true, true)
+	queueAnswers(h, now, "21", "21")
 
 	h.run(t)
 	require.Len(t, h.up.requests, 1, "一个 tick 只探一个账号")

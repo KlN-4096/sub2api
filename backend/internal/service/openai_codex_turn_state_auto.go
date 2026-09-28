@@ -107,6 +107,22 @@ type openAITurnStateCandidate struct {
 	MintedAt   time.Time `json:"minted_at"`
 	Failed     bool      `json:"failed,omitempty"`
 	FailStreak int       `json:"fail_streak,omitempty"`
+	// 以下三项只有 pair 模式的候选有（openai_turn_state_pair.go）：
+	//   Cookies    铸票那次响应的路由 cookie（__cflb / __oailb），注入时随票一起回放。
+	//   TTLSeconds 这条票自己的有效期，盖过账号级的 openai_turn_state_stale_after_minutes：
+	//              pair 的可用窗口比票的 1 小时寿命短得多。
+	//   Reminted   注入这张票之后上游又铸新票的次数。**纯读数**，不判失效、不停号。
+	Cookies    []string `json:"cookies,omitempty"`
+	TTLSeconds int      `json:"ttl_seconds,omitempty"`
+	Reminted   int      `json:"reminted,omitempty"`
+}
+
+// ttlOr 返回这条候选实际的有效期：pair 候选用自己那份（短），其余用账号级的。
+func (c openAITurnStateCandidate) ttlOr(ttl time.Duration) time.Duration {
+	if c.TTLSeconds > 0 {
+		return time.Duration(c.TTLSeconds) * time.Second
+	}
+	return ttl
 }
 
 // usable 判这条候选此刻能不能注给 model。有效期是硬门槛，见 pickOpenAITurnStateCandidate。
@@ -239,7 +255,7 @@ func openAITurnStateRequestModel(c *gin.Context) string {
 // expired 判候选是否已过铸造后 ttl。MintedAt 为零值说明信封解不出来，按不过期处理：
 // 宁可注进去撞一次 400，也不要因为解码失败静默停掉整个功能。
 func (c openAITurnStateCandidate) expired(ttl time.Duration, now time.Time) bool {
-	return !c.MintedAt.IsZero() && !now.Before(c.MintedAt.Add(ttl))
+	return !c.MintedAt.IsZero() && !now.Before(c.MintedAt.Add(c.ttlOr(ttl)))
 }
 
 // openAITurnStateSessionlessKey 是客户端不发 session-id 时的占位会话名。
@@ -379,6 +395,9 @@ func (s *OpenAIGatewayService) resolveOpenAITurnStateOverride(c *gin.Context, ac
 		return "", ""
 	}
 	markOpenAITurnStateInjected(c, candidate.Blob, source)
+	// pair 模式：把铸票那次响应的 __cflb / __oailb 种回账号罐，出站时随票一起回放
+	// （openai_turn_state_pair.go）。非 pair 候选没有这一项，什么都不做。
+	s.seedOpenAITurnStatePairCookies(account, candidate.Cookies, candidate.TTLSeconds)
 	return candidate.Blob, source
 }
 
@@ -538,8 +557,20 @@ func (s *OpenAIGatewayService) observeOpenAITurnStateMint(c *gin.Context, accoun
 	// 入池不分「本次有没有注入」：一个 session 被判降智后每条请求都带注入，若入池只认
 	// 未注入的请求，降智账号就补不到票——池子只出不进，候选到期后自动接管静默停摆。
 	// （补票实际来自同账号其它未降智的 session：降智 session 注入后上游照样铸 312。）
-	if healthy {
-		s.pushOpenAITurnStateCandidate(c, account, minted)
+	// pair 模式下票长**不是**判据，这条路必须让开：它按块数/字符数判健康，只要上游又铸出一张
+	// 认得出的形态（292/332），答错的那张票、以及真实流量在本出口自己铸的票都会被入池——不带
+	// pair、还吃账号级 1 小时有效期，于是开窗判定以为票够用（newestUsableExpiry 取最晚到期的），
+	// 猎手最多 50 分钟不补 pair 票，而栈顶那张正好是注给真实流量的。780 时代它恒不成立，但猎手
+	// 存在的理由就是去找能铸健康票的出口，这个假设一成立功能就自己走偏。
+	if healthy && !account.IsOpenAITurnStatePairModeEnabled() {
+		s.pushOpenAITurnStateCandidate(c, account, minted, nil)
+	}
+
+	// pair 模式的读数：注入了票、上游还是铸了一张新的。只记一次计数给页面看——不判这张票
+	// 失效、不停号（openai_turn_state_pair.go 文件头；判据错在哪见本函数末尾的长注释）。
+	// 探测自己不算：pair 探测每次都是新会话、本来就要铸新票。
+	if injected != "" && injected != minted && !openAITurnStateProbeContext(c) {
+		s.noteOpenAITurnStatePairRemint(c, account, injected)
 	}
 
 	// 只在本次没注入时回写 session 判定。
@@ -736,7 +767,10 @@ func (s *OpenAIGatewayService) noteOpenAITurnStateRejected(c *gin.Context, accou
 }
 
 // pushOpenAITurnStateCandidate 把新铸的健康 blob 推入候选池栈顶。
-func (s *OpenAIGatewayService) pushOpenAITurnStateCandidate(c *gin.Context, account *Account, blob string) {
+//
+// pair 非 nil 时（只有 pair 模式的探测这么传）连带把铸票响应的路由 cookie 与这条票自己的
+// 有效期一起存下来，见 openai_turn_state_pair.go。
+func (s *OpenAIGatewayService) pushOpenAITurnStateCandidate(c *gin.Context, account *Account, blob string, pair *openAITurnStatePair) {
 	ctx := turnStateOpCtx(c)
 	mu := openAITurnStatePoolLock(account.ID)
 	mu.Lock()
@@ -773,7 +807,11 @@ func (s *OpenAIGatewayService) pushOpenAITurnStateCandidate(c *gin.Context, acco
 		perModel[existing.Model]++
 		kept = append(kept, existing)
 	}
-	pool = append([]openAITurnStateCandidate{{Blob: blob, Model: model, MintedAt: minted}}, kept...)
+	fresh := openAITurnStateCandidate{Blob: blob, Model: model, MintedAt: minted}
+	if pair != nil {
+		fresh.Cookies, fresh.TTLSeconds = pair.Cookies, pair.TTLSeconds
+	}
+	pool = append([]openAITurnStateCandidate{fresh}, kept...)
 	s.persistOpenAITurnStatePool(c, account, pool)
 }
 
@@ -792,13 +830,17 @@ func (s *OpenAIGatewayService) recordOpenAITurnStateFailure(c *gin.Context, acco
 
 	pool := s.loadOpenAITurnStatePoolFresh(ctx, account)
 	threshold := account.openAITurnStateFailThreshold()
-	changed, exhausted := false, false
+	changed, exhausted, wasPair := false, false, false
 	for i := range pool {
 		if pool[i].Blob != injected {
 			continue
 		}
 		pool[i].FailStreak++
 		changed = true
+		// 被拒的这张是不是 pair 票，看它自己带不带 pair 的东西，而不是看开关此刻开没开：
+		// 关掉 pair 模式之后池里还躺着几张只活 4 分钟的 pair 票，那几分钟里撞一次拒绝
+		// 不该把账号停掉。
+		wasPair = len(pool[i].Cookies) > 0 || pool[i].TTLSeconds > 0
 		if pool[i].FailStreak >= threshold {
 			pool[i].Failed = true
 		}
@@ -817,9 +859,17 @@ func (s *OpenAIGatewayService) recordOpenAITurnStateFailure(c *gin.Context, acco
 	// 耗尽只看「该模型下还有没有未失效的候选」，不看有效期：过期是等新票，不是降级链走完。
 	exhausted = model != "" && !openAITurnStateModelAlive(pool, model)
 	s.persistOpenAITurnStatePool(c, account, pool)
-	if exhausted {
-		s.disableAccountForExhaustedTurnState(c, account, model, pool)
+	if !exhausted {
+		return
 	}
+	// pair 票本来就活得短、每张都是探测现摇的，一轮全被拒掉是常态而不是「要人工介入」，
+	// 停号只会把一个实验性功能升级成线上事故：只记日志，账号照常跑（真实流量自己会发现真问题）。
+	if wasPair || account.IsOpenAITurnStatePairModeEnabled() {
+		logOpenAITurnStateAuto("account=%d model=%s pair candidates exhausted (pool=%d), account left running",
+			account.ID, model, len(pool))
+		return
+	}
+	s.disableAccountForExhaustedTurnState(c, account, model, pool)
 }
 
 // persistOpenAITurnStatePool 写回候选池。调用方必须已持有账号锁。

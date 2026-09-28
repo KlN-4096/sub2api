@@ -12,7 +12,7 @@ import (
 )
 
 // TestPrepareUsageLogInsert_SafetyBufferingArgWiring 把 safety_buffering_enabled /
-// safety_buffering_faster_model 钉在 created_at 之前的倒数第 3、第 2 位，与本文件顶部的
+// safety_buffering_faster_model 钉在 created_at 之前的倒数第 5、第 4 位，与本文件顶部的
 // 四处清单契约同步（usage_log_repo_insert_shape_unit_test.go）。
 func TestPrepareUsageLogInsert_SafetyBufferingArgWiring(t *testing.T) {
 	enabled := true
@@ -29,17 +29,17 @@ func TestPrepareUsageLogInsert_SafetyBufferingArgWiring(t *testing.T) {
 	require.Len(t, prepared.args, len(usageLogInsertArgTypes))
 
 	n := len(prepared.args)
-	enabledArg, ok := prepared.args[n-3].(sql.NullBool)
-	require.True(t, ok, "safety_buffering_enabled 应是 sql.NullBool，实际 %T", prepared.args[n-3])
+	enabledArg, ok := prepared.args[n-5].(sql.NullBool)
+	require.True(t, ok, "safety_buffering_enabled 应是 sql.NullBool，实际 %T", prepared.args[n-5])
 	require.True(t, enabledArg.Valid)
 	require.True(t, enabledArg.Bool)
-	require.Equal(t, "boolean", usageLogInsertArgTypes[n-3])
+	require.Equal(t, "boolean", usageLogInsertArgTypes[n-5])
 
-	fasterArg, ok := prepared.args[n-2].(sql.NullString)
-	require.True(t, ok, "safety_buffering_faster_model 应是 sql.NullString，实际 %T", prepared.args[n-2])
+	fasterArg, ok := prepared.args[n-4].(sql.NullString)
+	require.True(t, ok, "safety_buffering_faster_model 应是 sql.NullString，实际 %T", prepared.args[n-4])
 	require.True(t, fasterArg.Valid)
 	require.Equal(t, faster, fasterArg.String)
-	require.Equal(t, "text", usageLogInsertArgTypes[n-2])
+	require.Equal(t, "text", usageLogInsertArgTypes[n-4])
 
 	_, ok = prepared.args[n-1].(time.Time)
 	require.True(t, ok, "created_at 必须仍在末位，实际 %T", prepared.args[n-1])
@@ -48,10 +48,10 @@ func TestPrepareUsageLogInsert_SafetyBufferingArgWiring(t *testing.T) {
 		UserID: 1, APIKeyID: 2, RequestID: "client:safety-buffering-absent", Model: "gpt-6-astra",
 		CreatedAt: time.Now().UTC(),
 	})
-	nullEnabled, ok := absent.args[n-3].(sql.NullBool)
+	nullEnabled, ok := absent.args[n-5].(sql.NullBool)
 	require.True(t, ok)
 	require.False(t, nullEnabled.Valid, "上游没带头时必须写 NULL，而不是 false")
-	nullFaster, ok := absent.args[n-2].(sql.NullString)
+	nullFaster, ok := absent.args[n-4].(sql.NullString)
 	require.True(t, ok)
 	require.False(t, nullFaster.Valid, "上游没带头时必须写 NULL，而不是空串")
 
@@ -59,7 +59,7 @@ func TestPrepareUsageLogInsert_SafetyBufferingArgWiring(t *testing.T) {
 	require.Contains(t, usageLogSelectColumns, "safety_buffering_faster_model")
 }
 
-// usageLogTailScannerStub 只写 scan 参数的尾部三列（enabled、faster_model、created_at），其余列零值：
+// usageLogTailScannerStub 只写 scan 参数尾部的 enabled、faster_model、created_at，其余列零值：
 // 钉住 scanUsageLog 的尾部顺序与类型——两列写反或漏 scan，这里的类型断言/取值就失败。
 type usageLogTailScannerStub struct {
 	t       *testing.T
@@ -71,12 +71,12 @@ type usageLogTailScannerStub struct {
 func (s usageLogTailScannerStub) Scan(dest ...any) error {
 	s.t.Helper()
 	n := len(dest)
-	require.GreaterOrEqual(s.t, n, 3)
-	enabled, ok := dest[n-3].(*sql.NullBool)
-	require.True(s.t, ok, "倒数第 3 个 scan 目标应是 *sql.NullBool，实际 %T", dest[n-3])
+	require.GreaterOrEqual(s.t, n, 5)
+	enabled, ok := dest[n-5].(*sql.NullBool)
+	require.True(s.t, ok, "倒数第 5 个 scan 目标应是 *sql.NullBool，实际 %T", dest[n-5])
 	*enabled = s.enabled
-	faster, ok := dest[n-2].(*sql.NullString)
-	require.True(s.t, ok, "倒数第 2 个 scan 目标应是 *sql.NullString，实际 %T", dest[n-2])
+	faster, ok := dest[n-4].(*sql.NullString)
+	require.True(s.t, ok, "倒数第 4 个 scan 目标应是 *sql.NullString，实际 %T", dest[n-4])
 	*faster = s.faster
 	created, ok := dest[n-1].(*time.Time)
 	require.True(s.t, ok, "created_at 必须仍在末位，实际 %T", dest[n-1])
