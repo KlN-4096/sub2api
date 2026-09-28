@@ -337,9 +337,12 @@ func (s *OpenAIGatewayService) resolveOpenAITurnStateOverride(c *gin.Context, ac
 	if openAITurnStateAutoSkipped(c) {
 		return "", ""
 	}
-	// 只在已判定降智的 session 上注入，其余保持真客户端形态。
+	// 只在已判定降智的 session 上注入，其余保持真客户端形态——除非猎手在为本次模型
+	// 补票：那时形态读数由猎手的探测提供，不再需要拿真实流量的首回合去试权重，池里
+	// 有票就直接注，新会话第一回合也不裸奔。猎手不管的模型仍走「先判定再注入」。
 	key := openAITurnStateSessionKey(c, account, openAITurnStateRequestSessionID(c))
-	if !s.sessionNeedsTurnStateInjection(key) {
+	degraded := s.sessionNeedsTurnStateInjection(key)
+	if !degraded && !s.openAITurnStateHuntedModel(account, model) {
 		return "", ""
 	}
 	// 必须读新鲜池，不能读请求手里的 account 快照。
@@ -358,9 +361,13 @@ func (s *OpenAIGatewayService) resolveOpenAITurnStateOverride(c *gin.Context, ac
 	candidate, source, ok := pickOpenAITurnStateCandidate(
 		pool, model, account.openAITurnStateStaleAfter(), time.Now())
 	if !ok {
-		// 「判了降智但拿不出票」是接管停摆的唯一形态，不打日志就只能靠猜。
-		logOpenAITurnStateAuto("account=%d model=%s degraded but no usable candidate (pool=%d)",
-			account.ID, model, len(pool))
+		// 「判了降智但拿不出票」是接管停摆的唯一形态，不打日志就只能靠猜。猎手路径上
+		// 池空是还没摇到票的常态，每条请求都刷一行只会淹没日志。
+		if degraded {
+			logOpenAITurnStateAuto("account=%d model=%s degraded but no usable candidate (pool=%d)",
+				account.ID, model, len(pool))
+		}
+		s.holdOpenAITurnStateIfUnfilled(c, account, model)
 		return "", ""
 	}
 	markOpenAITurnStateInjected(c, candidate.Blob, source)
@@ -401,6 +408,7 @@ func clearOpenAITurnStateInjected(c *gin.Context) {
 	if c != nil {
 		c.Set(ctxKeyTurnStateInjected, "")
 		c.Set(ctxKeyTurnStateSource, "")
+		c.Set(ctxKeyTurnStateHold, "")
 	}
 }
 
@@ -494,7 +502,18 @@ func (s *OpenAIGatewayService) observeOpenAITurnStateMint(c *gin.Context, accoun
 	// 只记形态、不记 blob：blob 是上游令牌，无条件存进每个账号的 extra 就等于让它随
 	// 账号列表接口下发、进每一份 DB dump。形态（块数/字符数）足够回答上面那个问题。
 	if injected == "" {
+		// 同一道闸：只有自然铸造才证明「这个模型会铸票」，猎手自动定模型据此筛。
+		s.noteOpenAITurnStateMinted(account.ID, openAITurnStateRequestModel(c))
 		s.noteOpenAITurnStateObservation(c, account, minted, healthy)
+		// 又铸 312：之前判定的「降智已恢复」不作数了，清掉标记从头攒（只在挂着标记时写库）。
+		// 两道闸缺一不可（第一轮评审 B1）：
+		//   - 探测上下文不算：猎手走的是**别的出口**，它那里 312 说明不了账号自己的出口降不降智；
+		//     恢复探测自己的失败由 probeRecovery 记（否则一次失败探测把连胜清成 0 两次）。
+		//   - 出站带了票的请求不算：这个入口是「响应里有这个头就调」，而带票请求 92% 是上游把同一条
+		//     原样回带——拿回声当证据的话，降智账号每条真实请求都会把连胜清零，永远攒不满。
+		if !healthy && !openAITurnStateProbeContext(c) && OpenAITurnStateUsageSent(c) == "" {
+			s.resetOpenAITurnStateRecovery(turnStateOpCtx(c), account)
+		}
 	}
 
 	if !account.IsOpenAITurnStateAutoEnabled() {
@@ -524,7 +543,8 @@ func (s *OpenAIGatewayService) observeOpenAITurnStateMint(c *gin.Context, accoun
 	// 消耗它），而凭单次健康铸造就停掉注入，下一轮撞上权重抖动就是用户实打实吃一个
 	// 降智回合。代价是恢复判定要晚一步——账号权重回正后，该 session 仍会一直注到
 	// session 标记自己过期（openAITurnStateSessionTTL），此后的请求重新按自然铸造判。
-	if injected == "" {
+	// 探测的 session 是一次性的（每次新 UUID，永远不会再出现），不给它留 session 判定。
+	if injected == "" && !openAITurnStateProbeContext(c) {
 		if key := openAITurnStateSessionKey(c, account, openAITurnStateRequestSessionID(c)); key != "" {
 			s.setSessionTurnStateNeedsInjection(key, !healthy)
 		}
