@@ -262,6 +262,8 @@ const codexWSStreamRequestStartKey = "x-codex-ws-stream-request-start-ms"
 //  2. 发送前无条件盖 x-codex-ws-stream-request-start-ms，与真客户端每次 attempt 重盖一致；
 //     转发客户端原帧时也重盖：那个戳记的是客户端到网关那一跳，出站这一跳的时刻才是上游读到的。
 //  3. 顶层字段按 ResponseCreateWsRequest 声明序（codex-api/src/common.rs:334-363）。
+//  4. codex 0.156 的 guardian 计费标记与 turn-metadata 的 model，规则同 HTTP
+//     （openai_codex_guardian_credits.go、codexTurnMetadataExecutionValues）。
 //
 // client_metadata 存在但不是对象时不往里塞键（sjson 会把标量整个换成对象）。
 func applyCodexWSFrameWireProfile(c *gin.Context, account *Account, payload []byte, turnState string) []byte {
@@ -291,6 +293,11 @@ func applyCodexWSFrameWireProfile(c *gin.Context, account *Account, payload []by
 		}
 		payload = setCodexWSClientMetadataString(payload, codexWSStreamRequestStartKey,
 			strconv.FormatInt(time.Now().UnixMilli(), 10))
+		// codex 0.156 与 HTTP 同两条规则（client.rs:1976 帧也经 set_guardian_metadata）。
+		if codexGuardianCreditsRequested(c, account, payload) {
+			payload = setCodexWSClientMetadataString(payload, codexGuardianCreditsRequestedKey, "true")
+		}
+		payload = alignCodexEmbeddedTurnMetadata(payload, codexTurnMetadataExecutionValues(payload))
 	}
 	timezone := codexWireTimezoneName(account)
 	payload = rewriteCodexEnvironmentTimezoneWithName(timezone, payload)

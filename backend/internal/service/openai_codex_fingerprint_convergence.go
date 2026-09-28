@@ -214,7 +214,9 @@ func applyCodexAlphaSearchWireProfile(c *gin.Context, account *Account, headers 
 	stripCodexTurnMetadataFields(headers,
 		"installation_id", "window_id", "window_number", "context_window_id",
 		"agent_name", "parent_turn_id", "root_turn_id", "request_kind", "compaction",
-		"history_ingest_requested", "forked_from_ordinal_exclusive",
+		// analytics_enabled 与 history_ingest_requested 同在 with_window_and_fork_metadata 里写（0.156.1
+		// session/session.rs:719），MCP 投影不经那一步（turn_metadata.rs:271 current_meta_value_for_mcp_request）。
+		"history_ingest_requested", "analytics_enabled", "forked_from_ordinal_exclusive",
 	)
 	// MCP 投影里的 codex_version / model 在真客户端是与出站值同源的：前者是客户端自己的
 	// 编译版本（16ff14c: core/src/turn_metadata.rs CODEX_VERSION_KEY），后者是当前轮次的
@@ -232,24 +234,35 @@ func applyCodexAlphaSearchWireProfile(c *gin.Context, account *Account, headers 
 // 出站值为空时同样跳过，宁可留着客户端原值也不写一个空串。
 func alignCodexTurnMetadataFields(headers http.Header, values map[string]string) {
 	raw := headers.Get(openAIWSTurnMetadataHeader)
-	if !gjson.Valid(raw) || !gjson.Parse(raw).IsObject() {
-		return
+	if next := alignCodexTurnMetadataJSON(raw, values); next != raw {
+		headers.Set(openAIWSTurnMetadataHeader, next)
 	}
+}
+
+// alignCodexTurnMetadataJSON 是它的字符串形态（请求体 / WS 帧内嵌的那份也用它）。没有要改的值时原样
+// 返回：整段改写会顺带把非 ASCII 转成 \u 形式，值本来就一致的请求不能因此动字节。
+func alignCodexTurnMetadataJSON(raw string, values map[string]string) string {
+	if !gjson.Valid(raw) || !gjson.Parse(raw).IsObject() {
+		return raw
+	}
+	stale := false
 	next := rewriteCodexTurnMetadataJSON(raw, false, func(metadata map[string]any) map[string]any {
 		updates := make(map[string]any, len(values))
 		for name, value := range values {
 			if value = strings.TrimSpace(value); value == "" {
 				continue
 			}
-			if _, ok := metadata[name]; ok {
+			if current, ok := metadata[name]; ok {
 				updates[name] = value
+				stale = stale || current != value
 			}
 		}
 		return updates
 	})
-	if next != raw {
-		headers.Set(openAIWSTurnMetadataHeader, next)
+	if !stale {
+		return raw
 	}
+	return next
 }
 
 func stripCodexTurnMetadataFields(headers http.Header, fields ...string) {
