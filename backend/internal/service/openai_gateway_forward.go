@@ -36,6 +36,14 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
 		return nil, err
 	}
+	// 时区投影必须抢在任何规范化之前：上游 #7066 会从 input item 删掉
+	// internal_chat_message_metadata_passthrough（ChatGPT 拒收该字段），而本改写正是
+	// 靠它的 create_time 定位消息时刻、靠 content_item_kinds 判定哪段是 environment_context。
+	// 删掉之后再改写只会静默退化成 no-op。放在 prepareCodexAccountIdentitySource 之后是
+	// 因为双开判定读的就是它准备的身份来源。
+	// 各 builder 里的同名调用保留：图片等路径不经过 Forward；重复执行是幂等的
+	// （证据已被删 → no-op；未被删 → 值已是目标时区，next == text.Raw）。
+	body = rewriteCodexEnvironmentTimezone(c, account, body)
 	startTime := time.Now()
 	// 固定渠道映射后的请求级 canonical body；账号 normalize/strip 不得改写跨 failover hint。
 	canonicalImageIntentBody := body
@@ -1407,10 +1415,29 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 			}
 			targetURL = buildOpenAIResponsesURLForPlatform(account.Platform, validatedURL)
 		}
+	case AccountTypeCPR:
+		// CPR 中继：必须显式配置 base_url。这里**不能**回落到 openaiPlatformAPIURL——
+		// 那会把 CPR 的 client key 当成 OpenAI API key 发给官方。
+		baseURL := account.GetCPRGatewayBaseURL()
+		if baseURL == "" {
+			return nil, errors.New("cpr account requires credentials.base_url")
+		}
+		validatedURL, err := s.validateUpstreamBaseURL(baseURL)
+		if err != nil {
+			return nil, err
+		}
+		targetURL = buildOpenAIResponsesURL(validatedURL)
 	default:
 		targetURL = openaiPlatformAPIURL
 	}
 	targetURL = appendOpenAIResponsesRequestPathSuffix(targetURL, openAIResponsesRequestPathSuffix(c))
+
+	// 线协议按出站端点判定，而自建图片请求由调用方在本函数返回后改写 URL。
+	// wireTargetURL 只喂给按路径分流的字段序/压缩，不影响 http.NewRequest 用的 targetURL。
+	wireTargetURL := targetURL
+	if override := openAIImagesWireTarget(ctx); override != "" {
+		wireTargetURL = override
+	}
 
 	// DeepSeek / Kimi 原生 Responses 端点为无状态实现：强制 store=false、清除
 	// previous_response_id，避免携带状态字段被上游拒绝。
@@ -1422,7 +1449,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	}
 
 	// 顶层键序：只重排，不改任何值（下面的时区改写与压缩仍会动体）。
-	body = applyCodexBodyFieldOrder(c, account, targetURL, body)
+	body = applyCodexBodyFieldOrder(c, account, wireTargetURL, body)
 
 	// 双开出站时区收口：真客户端把本机时区与当天日期写进 environment_context，客户端在国内、
 	// 出口在美国时两者矛盾。按出口时区改写这两个标签（openai_codex_wire_timezone.go）。
@@ -1433,7 +1460,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 
 	// 上线字节：双开 /responses 的请求体按真客户端默认做 zstd 压缩（openai_codex_request_compression.go）。
 	// body 仍是明文 JSON，供下面的路由提示与诊断日志读取；每次构造独立压缩。
-	wireBody, contentEncoding, err := compressCodexRequestBody(c, account, targetURL, body)
+	wireBody, contentEncoding, err := compressCodexRequestBody(c, account, wireTargetURL, body)
 	if err != nil {
 		return nil, err
 	}

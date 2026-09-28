@@ -479,6 +479,9 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 }
 
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
+	if err := validateCPRAccountShape(input.Platform, input.Type); err != nil {
+		return nil, err
+	}
 	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Extra)
 	if err != nil {
 		return nil, err
@@ -579,8 +582,14 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	if err != nil {
 		return nil, err
 	}
-	if account.Platform == PlatformTypeSafe && input.Type != "" && input.Type != AccountTypeAPIKey {
-		return nil, errors.New("typesafe accounts only support apikey credentials")
+	// Platform 在更新路径不可变，只需用生效后的 type 复核平台×类型组合。
+	if input.Type != "" {
+		if account.Platform == PlatformTypeSafe && input.Type != AccountTypeAPIKey {
+			return nil, errors.New("typesafe accounts only support apikey credentials")
+		}
+		if err := validateCPRAccountShape(account.Platform, input.Type); err != nil {
+			return nil, err
+		}
 	}
 	var normalizedExtra map[string]any
 	if input.Extra != nil {

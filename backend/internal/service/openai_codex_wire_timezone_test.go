@@ -312,3 +312,34 @@ func TestCodexEnvironmentContextBlocksStaysLinearOnAdversarialBody(t *testing.T)
 		t.Fatal("区间配对退化成二次复杂度：客户端可控的请求体能钉死一个核")
 	}
 }
+
+// TestCodexEnvironmentTimezoneOnChatCompletionsResponsesShape 覆盖
+// /v1/chat/completions 收到 Responses 形状体的那条路径。
+//
+// 该分支（openai_gateway_chat_completions.go:237）用 sjson.SetBytes 原样转发客户端
+// 的 body，因此 internal_chat_message_metadata_passthrough 会活着到达
+// applyCodexOAuthTransformWithOptions；而上游 #7066 正是在那里把它删掉的，删完再走
+// buildUpstreamRequest，投影就没有证据可用了。Forward 与三个 WS 入口各自补的投影
+// 都够不到这条路径，必须在 transform 之前单独补一次。
+func TestCodexEnvironmentTimezoneOnChatCompletionsResponsesShape(t *testing.T) {
+	body := wireTimezoneTestBody(t)
+	c := newConvTestContext(t, body)
+	c.Request.URL.Path = "/v1/chat/completions"
+	account := wireProfileTestAccount(true)
+	account.Extra[codexWireTimezoneExtraKey] = wireTimezoneTestExit
+	svc, up := wireProfileTestService()
+
+	_, _ = svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
+
+	require.NotNil(t, up.lastReq, "必须真的构造出上游请求")
+	require.True(t, gjson.ValidBytes(up.lastBody))
+	// 断语义值而不是线上字节：这条路径在 :330 用 json.Marshal(reqBody) 重新序列化，
+	// Go 默认把 < > & 转义成 <。那是既有差异（de3444184 同一处也是 json.Marshal），
+	// 与本用例要守的时区投影无关，另行处理。
+	text := gjson.GetBytes(up.lastBody, "input.0.content.0.text").String()
+	require.Contains(t, text, "<timezone>"+wireTimezoneTestExit+"</timezone>")
+	require.NotContains(t, text, "Asia/Shanghai")
+	require.Contains(t, text,
+		"<current_date>"+wireTimezoneExpectedDate(t, wireTimezoneTestExit)+"</current_date>")
+	require.Contains(t, text, "<cwd>/home/dev/proj</cwd>")
+}

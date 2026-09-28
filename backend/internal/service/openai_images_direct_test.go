@@ -18,6 +18,7 @@ func directImagesTestAccount() *Account {
 }
 
 func TestCodexDirectImagesRouting(t *testing.T) {
+	requireCodexDirectImages(t)
 	for _, model := range []string{"gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare-2026-09-08", "gpt-image-2.5-sunburst-2026-09-08"} {
 		t.Run(model, func(t *testing.T) {
 			body := []byte(fmt.Sprintf(`{"model":%q,"prompt":"  原样保留 prompt  ","quality":"max","size":"auto","response_format":"url","extra":{"preserve":true}}`, model))
@@ -53,6 +54,7 @@ func TestCodexDirectImagesRouting(t *testing.T) {
 }
 
 func TestCodexDirectImagesMappingBeforeRouting(t *testing.T) {
+	requireCodexDirectImages(t)
 	for _, accountType := range []string{AccountTypeOAuth, AccountTypeSetupToken} {
 		t.Run(accountType, func(t *testing.T) {
 			body := []byte(`{"model":"gpt-image-1","prompt":"draw"}`)
@@ -81,6 +83,7 @@ func TestCodexDirectImagesMappingBeforeRouting(t *testing.T) {
 }
 
 func TestCodexDirectImagesHTTPErrorFallbacksOnlyWhenEndpointUnavailable(t *testing.T) {
+	requireCodexDirectImages(t)
 	for _, status := range []int{400, 401, 403, 429, 500, 502, 503, 404, 405} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			calls := 0
@@ -123,6 +126,7 @@ func TestCodexDirectImagesStreamRejectsPlainJSON(t *testing.T) {
 }
 
 func TestCodexDirectImagesMultipleOutputs(t *testing.T) {
+	requireCodexDirectImages(t)
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprint(stream), func(t *testing.T) {
 			body := []byte(fmt.Sprintf(`{"model":"gpt-image-2.5-flare","prompt":"draw","n":2,"stream":%t}`, stream))
@@ -144,6 +148,7 @@ func TestCodexDirectImagesMultipleOutputs(t *testing.T) {
 }
 
 func TestCodexDirectImagesStreaming(t *testing.T) {
+	requireCodexDirectImages(t)
 	for _, test := range []struct {
 		name, events          string
 		wantCount             int
@@ -212,6 +217,7 @@ func TestCodexDirectImagesEmptyResponseFails(t *testing.T) {
 }
 
 func TestCodexDirectImagesAccountTestAndWhitelist(t *testing.T) {
+	requireCodexDirectImages(t)
 	body := []byte(`{"model":"gpt-image-2.5-sunburst","prompt":"draw"}`)
 	c, rec := newOpenAIImagesTestContext(t, body)
 	upstream := &httpUpstreamRecorder{resp: openAIImagesJSONResponse()}
@@ -227,5 +233,16 @@ func TestCodexDirectImagesAccountTestAndWhitelist(t *testing.T) {
 	require.NoError(t, err)
 	for _, model := range models {
 		require.NotEqual(t, "gpt-image-2.5-sunburst", model.ID)
+	}
+}
+
+// requireCodexDirectImages 在图片直调端点被关闭时跳过依赖它的用例。
+// 关闭原因与重开前提见 openai_images_direct.go 的 codexDirectImagesEnabled。
+// 用 Skip 而不是删用例：这些是上游 0.2.5 带来的覆盖，重开时要原样复活，
+// 删掉会在以后每次 rebase 上游时制造冲突。
+func requireCodexDirectImages(t *testing.T) {
+	t.Helper()
+	if !codexDirectImagesEnabled {
+		t.Skip("codexDirectImagesEnabled=false：图片直调端点暂时关闭，图片回落 /responses")
 	}
 }
