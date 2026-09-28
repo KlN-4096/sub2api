@@ -82,6 +82,7 @@ const messages: Record<string, string> = {
 	'usage.upstreamResponseModel': 'Upstream response',
 	'usage.modelVariant': 'Possible version variant',
 	'usage.modelMismatch': 'Different model',
+	'usage.safetyBuffering': 'Safety buffering faster model',
 }
 
 vi.mock('vue-i18n', async () => {
@@ -975,5 +976,39 @@ describe('admin UsageTable deleted-user badge', () => {
 
     expect(wrapper.text()).not.toContain('Deleted')
     expect(wrapper.text()).toContain('active@test.com')
+  })
+
+  it('shows the upstream safety-buffering faster model under the model cell', () => {
+    const mountRow = (row: Record<string, unknown>) => mount(UsageTable, {
+      props: { data: [row], loading: false, columns: [] },
+      global: { stubs: { DataTable: DataTableStub, EmptyState: true, Icon: true, Teleport: true } },
+    })
+
+    const flagged = mountRow({
+      request_id: 'req-safety-buffering',
+      model: 'gpt-6-astra',
+      safety_buffering_enabled: true,
+      safety_buffering_faster_model: 'gpt-5.6-luna',
+    })
+    const marker = flagged.find('[data-testid="safety-buffering-marker"]')
+    expect(marker.exists()).toBe(true)
+    expect(marker.text()).toContain('Safety buffering faster model')
+    expect(marker.text()).toContain('gpt-5.6-luna')
+    expect(marker.text()).toContain('enabled=true')
+    expect(marker.attributes('title')).toContain('x-codex-safety-buffering-enabled: true')
+    expect(marker.attributes('title')).toContain('x-codex-safety-buffering-faster-model: gpt-5.6-luna')
+
+    // enabled 单独存在（上游只带了 enabled 头）也要显示，不能因为没有 faster-model 而隐藏读数
+    const enabledOnly = mountRow({
+      request_id: 'req-safety-buffering-enabled-only',
+      model: 'gpt-6-astra',
+      safety_buffering_enabled: false,
+    })
+    const enabledMarker = enabledOnly.find('[data-testid="safety-buffering-marker"]')
+    expect(enabledMarker.exists()).toBe(true)
+    expect(enabledMarker.text()).toContain('enabled=false')
+
+    const plain = mountRow({ request_id: 'req-no-safety-buffering', model: 'gpt-6-astra' })
+    expect(plain.find('[data-testid="safety-buffering-marker"]').exists()).toBe(false)
   })
 })
