@@ -27,7 +27,7 @@ env:
   UPSTREAM_REPO: Wei-Shaw/sub2api
   FORK_BRANCH: klno
   # 已人工核对过身份恒等式的 codex 版本（正式版标签或完整提交号）；漂移检查拿它和最新正式版比（不比 main，见该步注释）
-  CODEX_PINNED_REF: e7637306bc9246a3e42e407cb94f96b7ed345e3e
+  CODEX_PINNED_REF: rust-v0.156.1
   CODEX_IDENTITY_PATHS: >-
     codex-rs/codex-api/src/requests/headers.rs
     codex-rs/codex-api/src/endpoint/responses.rs
