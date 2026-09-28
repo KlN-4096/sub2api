@@ -373,7 +373,6 @@ export default {
 	  upstreamModelMismatch: '上游响应模型不一致',
 	  modelVariant: '疑似版本变体',
 	  modelMismatch: '模型不一致',
-	  safetyBuffering: '安全缓冲·更快模型',
     reasoningEffort: '推理强度',
     requestedReasoningEffort: '请求推理强度',
     endpoint: '端点',
