@@ -1584,10 +1584,10 @@ type openAIModelsRequest struct {
 	credentialAccount   *Account
 	accountConcurrency  int
 	useAPIKeyUpstream   bool
-	// forceHTTP2：双开账号的 /models 与该账号的 /responses 转发走同一协议（h2）。
+	// deviceWireProfile（双开）：/models 与该账号的 /responses 转发走同一协议（h2）——
 	// httpclient 的 transport 设了自定义 DialContext，不强制就会退回 HTTP/1.1，
-	// 同一账号同一主机上出现两种协议画像。
-	forceHTTP2 bool
+	// 同一账号同一主机上出现两种协议画像；缓存刷新也不发 If-None-Match（真客户端不发）。
+	deviceWireProfile bool
 	// Cached bodies have already been converted to their requested format.
 	standardModelsList bool
 }
@@ -1864,7 +1864,7 @@ func (s *OpenAIGatewayService) buildCodexModelsManifestRequest(ctx context.Conte
 		accountConcurrency:  account.Concurrency,
 		useAPIKeyUpstream:   useAPIKeyUpstream,
 		// 双开只可能是 OAuth 类凭据（codexFingerprintConvergenceEnabled），API-key 上游走 s.httpUpstream。
-		forceHTTP2: deviceWireProfile,
+		deviceWireProfile: deviceWireProfile,
 	}
 	return request, credAccount, nil
 }
@@ -1979,7 +1979,7 @@ func (s *OpenAIGatewayService) fetchOpenAIModelsUpstream(ctx context.Context, re
 		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_REQUEST_FAILED", "create codex models request: %v", err)
 	}
 	req.Header = request.headers.Clone()
-	if ifNoneMatch = strings.TrimSpace(ifNoneMatch); ifNoneMatch != "" {
+	if ifNoneMatch = strings.TrimSpace(ifNoneMatch); ifNoneMatch != "" && !request.deviceWireProfile {
 		req.Header.Set("If-None-Match", ifNoneMatch)
 	}
 
@@ -2000,7 +2000,7 @@ func (s *OpenAIGatewayService) fetchOpenAIModelsUpstream(ctx context.Context, re
 				ProxyURL:              request.proxyURL,
 				Timeout:               codexModelsManifestRequestTimeout,
 				ResponseHeaderTimeout: 10 * time.Second,
-				ForceHTTP2:            request.forceHTTP2,
+				ForceHTTP2:            request.deviceWireProfile,
 			})
 			if clientErr != nil {
 				return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_PROXY_INVALID", "invalid proxy configuration: %v", clientErr)

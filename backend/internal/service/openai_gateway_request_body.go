@@ -1395,30 +1395,29 @@ func normalizeOpenAIResponsesReasoningMode(body []byte, model string) ([]byte, b
 	if len(body) == 0 {
 		return body, false, nil
 	}
-	// GPT-6 treats reasoning.mode and reasoning.effort as independent
-	// official fields. Preserve both verbatim; earlier models retain the
-	// established mode stripping and pro-to-max compatibility behavior.
+	// 真实 Codex 的 reasoning 只有 effort/summary/context，任何模型（含 GPT-6）都不发 mode：
+	// 出站一律删掉，mode=pro 且没给 effort 时换算成 Codex 的最高档 max。
 	if model == "" {
 		model = gjson.GetBytes(body, "model").String()
 	}
-	if isOpenAIGPT6Model(model) {
-		return normalizeGPT6ResponsesSampling(body, model)
+	body, sampled, err := normalizeGPT6ResponsesSampling(body, model)
+	if err != nil {
+		return body, false, err
 	}
 	mode := gjson.GetBytes(body, "reasoning.mode")
 	if !mode.Exists() || mode.Type != gjson.String {
-		return body, false, nil
+		return body, sampled, nil
 	}
 	updated := body
 	effort := gjson.GetBytes(body, "reasoning.effort")
 	if (!effort.Exists() || effort.Type == gjson.Null || strings.TrimSpace(effort.String()) == "") &&
 		strings.EqualFold(strings.TrimSpace(mode.String()), "pro") {
-		var err error
 		updated, err = sjson.SetBytes(updated, "reasoning.effort", "max")
 		if err != nil {
 			return body, false, fmt.Errorf("set reasoning effort for mode=pro: %w", err)
 		}
 	}
-	updated, err := sjson.DeleteBytes(updated, "reasoning.mode")
+	updated, err = sjson.DeleteBytes(updated, "reasoning.mode")
 	if err != nil {
 		return body, false, fmt.Errorf("delete unsupported reasoning.mode: %w", err)
 	}

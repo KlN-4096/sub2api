@@ -90,6 +90,7 @@ type codexOAuthTransformOptions struct {
 	IsCompact                           bool
 	SkipDefaultInstructions             bool
 	PreserveToolCallIDs                 bool
+	PreserveUpstreamCallIDs             bool
 	OmitPromotedSystemMessagesFromInput bool
 }
 
@@ -150,6 +151,7 @@ var openAIChatGPTInternalUnsupportedFields = []string{
 	"user",
 	"metadata",
 	"prompt_cache_retention",
+	"prompt_cache_options",
 	"safety_identifier",
 	"stream_options",
 	"truncation",
@@ -319,8 +321,9 @@ func applyCodexOAuthTransformWithOptions(reqBody map[string]any, opts codexOAuth
 			result.Modified = true
 		}
 		input = filterCodexInputWithOptions(input, codexInputFilterOptions{
-			PreserveReferences: needsToolContinuation,
-			PreserveCallIDs:    opts.PreserveToolCallIDs,
+			PreserveReferences:      needsToolContinuation,
+			PreserveCallIDs:         opts.PreserveToolCallIDs,
+			PreserveUpstreamCallIDs: opts.PreserveUpstreamCallIDs,
 		})
 		reqBody["input"] = input
 		result.Modified = true
@@ -1498,8 +1501,15 @@ func isInstructionsEmpty(reqBody map[string]any) bool {
 }
 
 type codexInputFilterOptions struct {
-	PreserveReferences bool
-	PreserveCallIDs    bool
+	PreserveReferences      bool
+	PreserveCallIDs         bool
+	PreserveUpstreamCallIDs bool
+}
+
+// preservesCallID：PreserveCallIDs 全留；PreserveUpstreamCallIDs 只留上游签发的 call_*
+// （真实 Codex 原样回放的形态），其余前缀照旧归一。
+func (o codexInputFilterOptions) preservesCallID(id string) bool {
+	return o.PreserveCallIDs || (o.PreserveUpstreamCallIDs && strings.HasPrefix(id, "call_"))
 }
 
 // filterCodexInput 按需过滤 item_reference 与 id。
@@ -1517,7 +1527,7 @@ func normalizeCodexFilterCallID(itemType, id string, preserve bool) string {
 	return normalizeCodexCallIDForItemType(itemType, id)
 }
 
-func codexItemReferenceIDMappings(input []any, preserveCallIDs bool) map[string]string {
+func codexItemReferenceIDMappings(input []any, opts codexInputFilterOptions) map[string]string {
 	mappings := make(map[string]string)
 	ambiguous := make(map[string]struct{})
 	for _, rawItem := range input {
@@ -1533,7 +1543,7 @@ func codexItemReferenceIDMappings(input []any, preserveCallIDs bool) map[string]
 		if rawCallID == "" {
 			continue
 		}
-		normalized := normalizeCodexFilterCallID(itemType, rawCallID, preserveCallIDs)
+		normalized := normalizeCodexFilterCallID(itemType, rawCallID, opts.preservesCallID(rawCallID))
 		if existing, exists := mappings[rawCallID]; exists && existing != normalized {
 			delete(mappings, rawCallID)
 			ambiguous[rawCallID] = struct{}{}
@@ -1578,7 +1588,7 @@ func codexInputCallIDs(input []any) map[string]struct{} {
 
 func filterCodexInputWithOptions(input []any, opts codexInputFilterOptions) []any {
 	filtered := make([]any, 0, len(input))
-	referenceIDMappings := codexItemReferenceIDMappings(input, opts.PreserveCallIDs)
+	referenceIDMappings := codexItemReferenceIDMappings(input, opts)
 	inputItemIDs := codexInputItemIDs(input)
 	inputCallIDs := codexInputCallIDs(input)
 	for _, item := range input {
@@ -1630,7 +1640,7 @@ func filterCodexInputWithOptions(input []any, opts codexInputFilterOptions) []an
 		// 仅修正真正的 tool/function call 标识，避免误改普通 message/reasoning id；
 		// 若 item_reference 指向 legacy call_* 标识，则仅修正该引用本身。
 		fixCallIDPrefix := func(id string) string {
-			return normalizeCodexFilterCallID(typ, id, opts.PreserveCallIDs)
+			return normalizeCodexFilterCallID(typ, id, opts.preservesCallID(id))
 		}
 
 		if typ == "item_reference" {

@@ -17,10 +17,10 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// astraProRequestBody is the inbound OpenAI Responses request that must survive
-// the account-switch loop unchanged: gpt-6-astra with the official top-level
-// reasoning.mode/effort preserved by the service guard
-// (normalizeOpenAIResponsesReasoningMode), never downgraded mode -> effort.
+// astraProRequestBody is the inbound OpenAI Responses request driven through the
+// account-switch loop: gpt-6-astra with top-level reasoning.mode/effort. The
+// service guard (normalizeOpenAIResponsesReasoningMode) drops mode on the wire,
+// like the real Codex client, and keeps effort=max.
 const astraProRequestBody = `{"model":"gpt-6-astra","stream":false,"input":"hello","reasoning":{"mode":"pro","effort":"max"}}`
 
 // astraProCodexURL is the OAuth codex Responses exit every forwarded attempt must hit.
@@ -115,7 +115,7 @@ func astra200() *http.Response {
 }
 
 // assertAstraProWire: every forwarded attempt must hit the codex responses URL and
-// keep model=gpt-6-astra + reasoning.mode=pro + effort=max (no silent downgrade).
+// keep model=gpt-6-astra + effort=max and drop reasoning.mode (real Codex never sends it).
 func assertAstraProWire(t *testing.T, urls []string, bodies [][]byte) {
 	t.Helper()
 	require.NotEmpty(t, urls, "failover loop must reach the upstream transport")
@@ -124,7 +124,7 @@ func assertAstraProWire(t *testing.T, urls []string, bodies [][]byte) {
 	}
 	for i, body := range bodies {
 		require.Equal(t, "gpt-6-astra", gjson.GetBytes(body, "model").String(), "attempt %d must keep model", i)
-		require.Equal(t, "pro", gjson.GetBytes(body, "reasoning.mode").String(), "attempt %d must keep mode=pro", i)
+		require.False(t, gjson.GetBytes(body, "reasoning.mode").Exists(), "attempt %d must drop reasoning.mode", i)
 		require.Equal(t, "max", gjson.GetBytes(body, "reasoning.effort").String(), "attempt %d must keep effort=max", i)
 	}
 }
@@ -137,7 +137,7 @@ func assertAstraProAccountSwitch(t *testing.T, accountIDs []int64) {
 	require.ElementsMatch(t, []int64{1, 2}, accountIDs, "both OAuth accounts must be reached")
 }
 
-// 403 then a second OAuth account succeeding: wire bodies keep pro+max/model and the
+// 403 then a second OAuth account succeeding: wire bodies keep max/model and the
 // winning account's structured reasoning.mode=pro reaches the client unchanged.
 func TestOpenAIGatewayHandlerResponses_AstraProFirst403SecondSucceeds(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -157,7 +157,7 @@ func TestOpenAIGatewayHandlerResponses_AstraProFirst403SecondSucceeds(t *testing
 	require.Equal(t, "max", gjson.GetBytes(rec.Body.Bytes(), "reasoning.effort").String())
 }
 
-// both OAuth accounts 403: exhausted keeps every wire body pro+max/model, is not 200,
+// both OAuth accounts 403: exhausted keeps every wire body max/model, is not 200,
 // and surfaces the existing-policy 502 upstream_error (unchanged 403-masking policy).
 func TestOpenAIGatewayHandlerResponses_AstraProBoth403NoDowngrade(t *testing.T) {
 	gin.SetMode(gin.TestMode)

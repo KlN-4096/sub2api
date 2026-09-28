@@ -84,6 +84,28 @@ func TestOpenAIReferralSend(t *testing.T) {
 	}
 }
 
+// 邀请走 Firefox 伪装客户端，Accept 用浏览器自己的；额度面给双开账号补的 */* 不能带过去。
+func TestOpenAIReferralKeepsBrowserAcceptForWireProfileAccount(t *testing.T) {
+	send, reward := 1, 1
+	client := &referralClientStub{eligibility: &OpenAIReferralEligibility{
+		ShouldShow: true, RemainingSendCapacity: &send, RemainingRewardCapacity: &reward,
+	}}
+	svc, repo := referralTestService(t, "plus", client)
+	repo.accounts[100].Extra = map[string]any{
+		codexFingerprintModeExtraKey:        "device",
+		codexFingerprintConvergenceExtraKey: true,
+	}
+	_, err := svc.QueryReferralEligibility(context.Background(), 100)
+	require.NoError(t, err)
+	require.Len(t, client.calls, 1)
+	headers := make(http.Header)
+	for key, value := range client.calls[0].Headers {
+		headers.Set(key, value)
+	}
+	require.Equal(t, "Bearer test-token", headers.Get("Authorization"))
+	require.Empty(t, headers.Get("Accept"), "referral must not carry the quota-surface Accept")
+}
+
 func TestOpenAIReferralSendGuards(t *testing.T) {
 	for _, tc := range []struct {
 		name, email, body, reason string
