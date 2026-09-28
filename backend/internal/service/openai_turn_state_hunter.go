@@ -2,6 +2,9 @@ package service
 
 // Turn-state 292 猎手。
 //
+// 已失效、已废弃（2026-09-23）：2026-09-21 起把 292 注入请求已经换不来正常服务，猎手的前提
+// 不存在了。只保留、不再扩展，计划在后续几个版本移除（连同 hold / recovery / 自动接管 / 手填覆写）。
+//
 // 背景（memory turn-state-block-count-cause / turn-state-remint-rules）：Codex 上游在每个
 // 新会话第一回合按「账号权重 × 当时出口 IP」铸一张 X-Codex-Turn-State，292 字符是正常
 // 路由、312 是降智路由；票只在铸造后 3600s 内有效，且只有自然铸造才反映权重。降智账号

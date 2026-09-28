@@ -36,6 +36,8 @@ type noAccountErrorClassification struct {
 
 var selectionModelRateLimitedPattern = regexp.MustCompile(`(?:model_rate_limited|rate_limited)=(\d+)`)
 
+// 已废弃（2026-09-23）：降智暂停随 292 猎手一起废弃，后续版本移除时这段分类一并删。
+//
 // selectionTurnStateHoldPattern 认出降智暂停造成的空池。它借 model_rate_limits 存放，但不是限流：
 // 回 429「所有账号都在限流」既说不清原因，又让 Codex 按限流硬重试（客户端只显示 "exceeded retry
 // limit, last status: 429"，正文被吞）。单独分类后与注入点的换号错误同口径回 503 + 说明。
