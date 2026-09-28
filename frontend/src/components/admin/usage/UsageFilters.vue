@@ -284,7 +284,8 @@ const requestTypeOptions = ref<SelectOption[]>([
   { value: 'live', label: t('usage.live') },
   { value: 'stream', label: t('usage.stream') },
   { value: 'sync', label: t('usage.sync') },
-  { value: 'cyber', label: t('usage.cyber') }
+  { value: 'cyber', label: t('usage.cyber') },
+  { value: 'probe', label: t('usage.probe') }
 ])
 
 const compactionOptions = ref<SelectOption[]>([

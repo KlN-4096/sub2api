@@ -267,12 +267,12 @@ type PlatformDashboardStats struct {
 	TodayActualCost float64 `json:"today_actual_cost"`
 }
 
-// TurnState 筛选取值。判据用字符长度而不是解密：292 字符 ↔ 密文 10 块是一一对应的
-// （实测 1300 条样本只见过 292/312 两种），SQL 里 char_length 能走，解 base64 不能。
+// TurnState 筛选取值。判据用字符长度而不是解密：individual 292 字符 ↔ 密文 10 块、team 332 ↔ 12 块
+// 一一对应（与 service 的 openAITurnStateShapes 同源），SQL 里 char_length 能走，解 base64 不能。
 const (
 	TurnStateFilterMinted    = "minted"     // 上游本次铸出了新 blob
-	TurnStateFilterHealthy   = "healthy"    // 铸出的是 292（密文 10 块）
-	TurnStateFilterSuspect   = "suspect"    // 铸出的不是 292 —— 疑似降智
+	TurnStateFilterHealthy   = "healthy"    // 铸出的是正常形态（292 / 332）
+	TurnStateFilterSuspect   = "suspect"    // 铸出的不是正常形态 —— 疑似降智
 	TurnStateFilterSent      = "sent"       // 本次出站带了 turn-state
 	TurnStateFilterInjected  = "injected"   // 本次注入了覆写值（手填或自动接管）
 	TurnStateFilterAuto      = "auto"       // 自动接管注入

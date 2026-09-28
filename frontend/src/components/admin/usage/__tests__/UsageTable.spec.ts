@@ -728,13 +728,31 @@ describe('admin UsageTable request ID column', () => {
     ['auto', 'BADGE-AUTO'],
     ['auto_stale', 'BADGE-AUTOSTALE'],
   ])('覆写来源 %s 渲染成本地化徽标而不是后端枚举', async (source, label) => {
-    const wrapper = mountTurnState({
-      turn_state: turnStateFixture(1789651097, 10),
-      turn_state_overridden: true,
-      turn_state_source: source,
+    // 来源徽标贴在出站列：它说的是出站那张票从哪来。贴在铸出列时「注入 292 后上游仍铸
+    // 312」会显示成「312 手填」，像是手填的就是 312。
+    const sent = turnStateFixture(1789651097, 10)
+    const minted = turnStateFixture(1789651098, 11)
+    const wrapper = mount(UsageTable, {
+      props: {
+        data: [{
+          ...baseImageRow,
+          request_id: '',
+          upstream_request_id: '',
+          turn_state: minted,
+          turn_state_sent: sent,
+          turn_state_overridden: true,
+          turn_state_source: source,
+        }],
+        loading: false,
+        columns: [{ key: 'turn_state', label: 'Turn-state' }, { key: 'turn_state_sent', label: 'Sent' }],
+      },
+      global: { stubs: { DataTable: DataTableStub, EmptyState: true, Icon: true, Teleport: true } },
     })
     expect(wrapper.text()).toContain(label)
     expect(wrapper.text()).not.toContain(source)
+    const badge = wrapper.findAll('span').find((n) => n.text() === label)!
+    expect(badge.element.parentElement?.textContent).toContain(sent)
+    expect(badge.element.parentElement?.textContent).not.toContain(minted)
   })
 
   it('copies the turn-state with its own toast', async () => {
@@ -744,14 +762,13 @@ describe('admin UsageTable request ID column', () => {
 
     const wrapper = mount(UsageTable, {
       props: {
-        data: [{ ...baseImageRow, request_id: '', upstream_request_id: '', turn_state: blob, turn_state_overridden: true }],
+        data: [{ ...baseImageRow, request_id: '', upstream_request_id: '', turn_state: blob }],
         loading: false,
         columns: [{ key: 'turn_state', label: 'Turn-state' }],
       },
       global: { stubs: { DataTable: DataTableStub, EmptyState: true, Icon: true, Teleport: true } },
     })
 
-    expect(wrapper.text()).toContain('OVR')
     const copyButtons = wrapper.findAll('button[title="Copy to clipboard"]')
     expect(copyButtons).toHaveLength(1)
     await copyButtons[0].trigger('click')

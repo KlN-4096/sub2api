@@ -541,48 +541,13 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		if codexResult.Modified {
 			markDecodedModified()
 		}
-		// 带真实 device_id 时补齐 client_metadata 安装标识，与真实 Codex 对齐（compact 形态不同，跳过）。
-		if !isCompactRequest && applyCodexClientMetadata(decoded, account) {
-			markDecodedModified()
-		}
+		// 原始 prompt_cache_key 要在账号命名空间改写之前读：改写后体内是账号域的值，
+		// 而头构造要用原值再派生一次（且只派生一次）。
 		if currentClientPromptCacheKey, ok := decoded["prompt_cache_key"].(string); ok {
 			clientPromptCacheKey = currentClientPromptCacheKey
 		}
-		// Account namespace is orthogonal to fingerprint convergence: preserve
-		// each client's identity cardinality, but never reuse it across OAuth
-		// credentials after scheduler failover.
-		// compact 形态只跳过请求体侧：真实 Codex 的 compact 请求体同样没有 client_metadata
-		// （codex-rs core/src/client.rs 的 compact 请求结构无该字段），但出站头照发
-		// x-codex-installation-id 与 session-id / thread-id（同文件 compact_conversation_history
-		// 的 extra_headers）。故头侧的 IDs 解析与暂存不能跟着体侧一起跳过，否则同一账号的
-		// compact 请求会带着另一套按客户端原值派生的设备身份出站。
-		var fpIDs *codexFingerprintIDs
-		if isCompactRequest {
-			fpIDs = resolveCodexFingerprintIDsFromRequest(c, account, nil)
-			if applyCodexCompactPromptCacheKey(c, account, decoded) {
-				markDecodedModified()
-			}
-		} else {
-			fpIDs = resolveCodexFingerprintIDsWithBody(c, account, nil, decoded["client_metadata"])
-		}
-		if !isCompactRequest && applyCodexAccountIdentityClientMetadataMap(decoded, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c)) {
+		if stageCodexOAuthIdentity(c, account, decoded, isCompactRequest) {
 			markDecodedModified()
-		}
-		// 指纹收敛：请求体和出站头共享同一份 IDs（保证 turn_id 等随机字段一致）。
-		if !isCompactRequest && fpIDs != nil {
-			if applyCodexFingerprintClientMetadata(decoded, fpIDs) {
-				markDecodedModified()
-			}
-		}
-		// 将 fpIDs 存入 gin context，供 buildUpstreamRequest 中头改写使用。
-		// 无条件覆写（含 nil）：failover 从收敛账号切到 off 账号时，上一
-		// 账号的 IDs 不得残留（stageCodexFingerprintIDs 注释）。
-		stageCodexFingerprintIDs(c, fpIDs)
-		if !isCompactRequest {
-			// klno 指纹收敛：暂存体内已派生的会话身份，供出站头在入站没有连字符会话头时
-			// 重建。排在指纹改写之后，否则 session/full 模式会存下一份过期的 session。
-			// compact 形态跳过：那时体内还是客户端原值，不能拿来当出站头。
-			stageCodexConvergenceBodyIdentityMap(c, codexAccountIdentitySource(c, account), decoded)
 		}
 		if codexResult.NormalizedModel != "" {
 			upstreamModel = codexResult.NormalizedModel
@@ -1518,6 +1483,9 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	// 剥离后再出站——异账号 blob 与本账号的（指纹收敛后）出站身份自相矛盾。
 	s.guardOpenAICodexTurnStateEcho(c, account, req.Header)
 	s.applyOpenAICodexTurnStateOverrideHeader(c, account, req.Header)
+	if err := openAITurnStateHoldError(c); err != nil {
+		return nil, err
+	}
 	if account.UsesOpenAICodexProtocol() {
 		// 桥的判定：/v1/messages 入口置位的上下文键，或请求体里的桥标记（两层 sub2api 串联时前一层的桥
 		// 请求直连到这里的 /v1/responses）。双开账号不按请求体嗅探：真客户端每条 /responses 都无条件带
