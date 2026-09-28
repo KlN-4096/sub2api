@@ -77,7 +77,7 @@ func shouldPreserveOpenAIResponsesNoneReasoningEffort(account *Account) bool {
 	if account.IsOpenAIPassthroughEnabled() {
 		return true
 	}
-	if account.IsOpenAIOAuthLike() {
+	if account.TargetsChatGPTCodexUpstream() {
 		return true
 	}
 	if !account.IsOpenAIApiKey() {
@@ -895,7 +895,7 @@ func normalizeOpenAIAPIKeyStoreFalseReasoningReplayDecoded(body []byte, knownSto
 }
 
 func normalizeOpenAICodexCompactReasoningEffortForAccount(c *gin.Context, account *Account, body []byte) ([]byte, bool, error) {
-	if account == nil || !account.IsOpenAIOAuthLike() || !isOpenAIResponsesCompactPath(c) {
+	if account == nil || !account.TargetsChatGPTCodexUpstream() || !isOpenAIResponsesCompactPath(c) {
 		return body, false, nil
 	}
 
@@ -1952,6 +1952,7 @@ func evaluateOpenAIFastPolicyWithSettings(settings *OpenAIFastPolicySettings, us
 	}
 	isOAuth := account != nil && account.IsOAuth()
 	isBedrock := account != nil && account.IsBedrock()
+	isCPR := account != nil && account.IsCPR()
 
 	// 用户专属规则先于全局规则。规则组内仍按配置顺序首条命中，允许
 	// 管理员为某位用户配置例外，而不被先出现的全局规则覆盖。
@@ -1960,7 +1961,7 @@ func evaluateOpenAIFastPolicyWithSettings(settings *OpenAIFastPolicySettings, us
 			if (len(rule.UserIDs) > 0) != userScoped || !openAIFastPolicyUserMatches(rule.UserIDs, userID) {
 				continue
 			}
-			if !betaPolicyScopeMatches(rule.Scope, isOAuth, isBedrock) {
+			if !betaPolicyScopeMatches(rule.Scope, isOAuth, isBedrock, isCPR) {
 				continue
 			}
 			ruleTier := strings.ToLower(strings.TrimSpace(rule.ServiceTier))
