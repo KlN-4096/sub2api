@@ -1538,11 +1538,20 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 		req.Header.Del("conversation_id")
 		req.Header.Del("session_id")
 
+		// 真 Codex 在 HTTP /responses 上从不发 OpenAI-Beta：rust-v0.156.1 里 OPENAI_BETA_HEADER 只写在
+		// client.rs:1320 的 build_websocket_headers（WS 握手）和 doctor.rs:2332（codex doctor 的 WS 探测），
+		// HTTP 与 WS 共用的 build_responses_headers 只写 x-codex-beta-features / x-codex-turn-state。
+		// 所以这条路整条删掉，不是只剥 legacy 值：openai-beta 进了非透传入站白名单之后，客户端给的任何
+		// 非 legacy 值（`responses_websockets=…`、`responses_multi_agent=…`）都会跟着出站，成为一条真
+		// 客户端不存在的指纹。api-key 账号不在这个分支里，调用方可控的语义保持不变。
+		//
+		// 范围只到这条路：`ensureCodexIdentityHeaders` 仍然无条件 `Set` 回 `responses=experimental`，
+		// 但它的调用方是 /v1/messages 兼容桥、live 探测与插件目录 —— 都不是 HTTP /responses，
+		// 而前者本来就不是真 Codex 客户端形态。别把这行读成「全站不再发这个头」。
+		req.Header.Del("OpenAI-Beta")
 		if compatMessagesBridge {
-			req.Header.Del("OpenAI-Beta")
 			req.Header.Del("originator")
 		} else {
-			stripOpenAILegacyResponsesBeta(req.Header)
 			req.Header.Set("originator", resolveOpenAIUpstreamOriginator(c, isCodexCLI))
 		}
 		apiKeyID := getAPIKeyIDFromContext(c)
