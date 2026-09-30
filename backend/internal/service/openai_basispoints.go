@@ -521,11 +521,15 @@ type openAIBasisPointsAttempt struct {
 	// 第一条），从发请求时刻算的话预算早被吃光，定时器会被设成 1ns 直接判超时 —— 那条路还会
 	// 调 HandleStreamTimeout 改账号状态，而 isOpenAIBasisPointsResponse 的闸门不在那上面。
 	acceptedAt time.Time
-	// requestStart 是出站请求发出的时刻。**TTFT 必须从这里算，不能从 acceptedAt 算**：
-	// peek 一直读到「第一个会到客户端的事件」为止，所以流处理器起跑时那条事件已经在缓冲里，
-	// 以 acceptedAt 为原点量出来的 firstTokenMs 恒等于 ~0 —— 而它有三个消费者
-	// （usage_logs.first_token_ms、ops 的 TTFT 读数、scheduler.ReportResult 的延迟分），
-	// 等于 BPS 账号在延迟维度上永远满分、真慢的号永远不被降权，而面板上 0 ms 看着还很好。
+	// requestStart 是出站请求发出的时刻。**TTFT 必须从这里算，不能从 acceptedAt 算**：peek 一直读到
+	// 「第一个会到客户端的事件」为止，那一段（发请求 → 首个可见事件，含上游排队与思考的前半段）在以
+	// acceptedAt 为原点时**整段丢掉**，而 firstTokenMs 有三个消费者（usage_logs.first_token_ms、
+	// ops 的 TTFT 读数、scheduler.ReportResult 的延迟分）—— 少算等于真慢的号在延迟维度上被系统性
+	// 高估，而面板上完全看不出来。
+	//
+	// 丢的**不是全部**：peek 的放行判据是「非元数据事件」，response.created / in_progress 不算，
+	// 所以它常常停在第一个推理摘要事件上，而 firstTokenMs 量的是第一个**文本** token —— 两者之间的
+	// 思考时间原来就在读数里。09-30 现网旧行（修复前）是 5463 ms 而不是 0，别把这条读成「原来恒 0」。
 	// 预算仍然用 acceptedAt（见上），两件事解耦。
 	requestStart time.Time
 }
@@ -830,8 +834,8 @@ func (s *OpenAIGatewayService) forwardOpenAIBasisPoints(ctx context.Context, c *
 		streamResult, err := s.handleStreamingResponseWithReasoning(ctx, resp, c, account, attempt.acceptedAt, attempt.requestedModel, attempt.upstreamModel, effortValue)
 		if streamResult != nil {
 			usage, firstTokenMs, responseID = streamResult.usage, streamResult.firstTokenMs, strings.TrimSpace(streamResult.responseID)
-			// 把 peek 吃掉的那段补回 TTFT：处理器是以 acceptedAt 为原点量的，而首输出事件在
-			// acceptedAt 时已经躺在缓冲里，它量出来的恒等于 ~0。理由见 attempt.requestStart。
+			// 把 peek 吃掉的那段补回 TTFT：处理器以 acceptedAt 为原点，而「发请求 → 首个客户端可见
+			// 事件」整段在它之前，原来整段不计入。理由与幅度见 attempt.requestStart。
 			firstTokenMs = offsetOpenAIBasisPointsFirstTokenMs(firstTokenMs, attempt.acceptedAt.Sub(attempt.requestStart))
 		}
 		if err != nil {
