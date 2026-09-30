@@ -11,6 +11,7 @@ import (
 	"io"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -43,8 +44,15 @@ type openAIBasisPointsBridge struct {
 	warnings        []string
 	tools           map[string]bpsTool
 	unsupported     map[string]bool
-	replay          *openAIBasisPointsReplayCache
-	scope           string
+	// droppedContent 记下被换成占位部件的内容类型，出站前汇总成一行运维日志。
+	// 没有它，改成占位符之后连 `input_content` 那个读数都没了，现场无从知道丢了什么。
+	droppedContent map[string]bool
+	// liveText / droppedText 只服务一道兜底：**占位符不许把整条请求的正文吃光**。
+	// 见 prepare 里那处判死。
+	liveText    int
+	droppedText int
+	replay      *openAIBasisPointsReplayCache
+	scope       string
 	// parallelToolCalls 是客户端自己请求的值（缺省 true，与 Responses API 同默认），
 	// 回写进转写后的 response，别让声明和实际补发的工具数自相矛盾。
 	parallelToolCalls bool
@@ -64,6 +72,7 @@ func newOpenAIBasisPointsBridge(scope string, replay *openAIBasisPointsReplayCac
 	return &openAIBasisPointsBridge{
 		tools:             map[string]bpsTool{},
 		unsupported:       map[string]bool{},
+		droppedContent:    map[string]bool{},
 		replay:            replay,
 		scope:             scope,
 		upload:            upload,
@@ -203,6 +212,33 @@ func (b *openAIBasisPointsBridge) prepare(raw []byte, upstreamModel string) ([]b
 	translated, err := b.translateHistory(input)
 	if err != nil {
 		return nil, err
+	}
+	// 换成占位符的内容类型汇总成一行运维日志。改成占位符之后请求是成功的，`input_content` 那个
+	// 落回读数就没了 —— 没有这一行，现场根本不知道客户端发来的哪一类被丢了（09-30 那次排查就是
+	// 因为 reason 只写 `input_content`、不记类型，只能靠抓包）。
+	//
+	// **这一行在 prepare 里 append、由调用方在发上游之前就打掉**（不是等 2xx 之后）：最需要它的
+	// 场景恰恰是「占位符/透传形状本身被上游拒了」，而那条路根本走不到成功分支。
+	if len(b.droppedContent) > 0 {
+		kinds := make([]string, 0, len(b.droppedContent))
+		for kind := range b.droppedContent {
+			kinds = append(kinds, kind)
+		}
+		sort.Strings(kinds)
+		// 一个请求里能造出任意多种类型名，日志行不设上限会被撑爆。
+		if len(kinds) > 16 {
+			kinds = append(kinds[:16], "…")
+		}
+		b.warnings = append(b.warnings, "Content parts replaced with a placeholder over this channel: "+strings.Join(kinds, ", "))
+	}
+	// **占位符不许把整条请求的正文吃光。** 占位符治的是「历史里有个形态递送不出去」，但如果
+	// 一条请求**所有**文本部件都变成了占位符，出站的就是一份「什么都被省略了」的上下文 ⇒
+	// 上游 200 + 模型盲答 + 照常计费，而客户端一点信号都没有。那比原来的 502 更糟：报错是可见的，
+	// 盲答不是。最现实的触发者是 Assistants API v2 那种**全部**文本部件都用嵌套形状的客户端
+	// （bpsPartText 已经接住了它的规范形状，这里兜的是它的变体和将来的未知形状）。
+	// 判据刻意收窄成「丢过正文**且**一个都没活下来」：纯图片请求（0 丢 0 活）不受影响。
+	if b.droppedText > 0 && b.liveText == 0 {
+		return nil, bpsNative("input_content")
 	}
 	prologue := make([]any, 0, 2)
 	// BPS 自己会把 instructions 换成 Excel 那套人格，客户端的系统提示只能降级成 developer 消息。
@@ -650,19 +686,30 @@ func (b *openAIBasisPointsBridge) translateHistory(input []any) ([]any, error) {
 			// `encrypted_content`（Codex 多智能体 v2 会挂在这儿）也带出去了。
 			openAIBasisPointsKeepItemKeys(item, "type", "role", "content", "id", "status")
 		default:
-			// 原来这里是 default 原样转发。BPS 的 item 级 schema 也是封闭的（实测 400
-			// "Unknown parameter: 'input[1].zzz_unknown_field'"），所以任何它不认的 item 类型
-			// 出站就是一条 400 —— 硬报错口径下那是客户端可见的失败，而且失败点在上游、
-			// 本层还白发一次 22.5K 提示词。与 context_management 同一个口径：不赌，发请求前判死。
+			// 本层自己会转译的 item 类型都在上面的 case 里。其余的分两条路：
+			// **实测过 BPS 收的按字段白名单原样透传，没实测过的换占位消息。**
 			//
-			// 判死的范围比「跑过原生 web_search / MCP / 生图的历史」更宽，写清楚免得下次误判：
-			// 本层只能中继 function_call / custom_tool_call 这一对（它们经 run_officejs 信封转译，
-			// 见上面的 case），而 isCodexToolCallItemType（openai_codex_transform.go:1738）里
-			// 另外六种一等 Codex 工具项 —— tool_call / local_shell_call / tool_search_call /
-			// mcp_tool_call 及其 output —— 在 BPS 上没有对应物，同样落到这里判死。
-			// **刻意不做「静默丢弃」**：丢掉一个 call 会让它的 output 变成孤儿，模型看到一个
-			// 没有来由的工具结果，比直接报错更糟。要中继它们得先有各自的信封映射。
-			return nil, bpsNative("input_content")
+			// 原来这里是 `bpsNative("input_content")` 判死。代价是实测出来的：2026-09-30 用户在
+			// 会话里用过一次联网搜索，历史里从此有一条 `web_search_call`，客户端每轮原样回放 ⇒
+			// 这个会话在开着开关的账号上每轮都 502、永不自愈（抓包实证：31 发请求体逐字节相同，
+			// 内容部件全在白名单内，唯一越界的就是这条 item）。用户 2026-09-30 拍板：会话要能继续。
+			//
+			// **但一律占位符也不对** —— 同日直连实测 `web_search_call`（三种形状）与 `mcp_call`
+			// 都是 HTTP 200，占位符会白丢用户真实的历史。所以先查透传白名单，落空才占位。
+			// 透传时**必须过字段白名单**：BPS 的 item 级字段也是封闭的（实测 400
+			// "Unknown parameter: 'input[1].author'"），客户端多带一个键就是整单 400 + 每轮回放。
+			//
+			// 占位消息角色用 developer：这是代理加的注解，不是用户说的也不是模型说的。文案里的
+			// 类型名是客户端可控字节，先过 sanitizeOpenAIBasisPointsPartKind。
+			// call 与 output 都会各自变占位消息，所以不存在「丢 call 留 output」的孤儿
+			// （那正是原来判死的理由）。
+			kind := bpsText(item["type"])
+			spec, passThrough := openAIBasisPointsPassThroughItems[kind]
+			if !passThrough || !spec.matches(item) {
+				result = append(result, b.droppedItem(kind))
+				continue
+			}
+			openAIBasisPointsKeepItemKeys(item, spec.keys...)
 		}
 		result = append(result, item)
 	}
@@ -722,6 +769,241 @@ func openAIBasisPointsFunctionItemID(callID string) string {
 // 英文：模型看到的上下文其余部分（含 BPS 自己那套 Excel 人格）也是英文。
 const openAIBasisPointsEncryptedContentNotice = "[omitted: an encrypted segment of this message could not be carried over this channel]"
 
+// openAIBasisPointsDroppedImageNotice 替换掉形态上递送不出去的图片部件。
+const openAIBasisPointsDroppedImageNotice = "[omitted: an image in this message could not be carried over this channel]"
+
+// openAIBasisPointsDroppedPartNotice 替换掉这条通道承载不了的内容部件。
+//
+// **用户 2026-09-30 拍板：占位符，不判死。** 出站体是封闭白名单，本层能发的部件就那几类；
+// 原来对其余一切（未知类型、非字符串正文、形态不对的图片）都是 `bpsNative("input_content")`
+// 硬 502，而失败在**出站之前** ⇒ 一个字节都没发、那套 lineage 自愈压根不触发 ⇒ 客户端每轮
+// 回放同一批历史 ⇒ 这个会话在开着开关的账号上**每轮都 502、永不自愈**。09-30 现网就撞上了
+// 一次（Codex Desktop，30 次全失败、body 恒 936500）。换成占位符，会话能继续，模型也知道
+// 少了一段 —— 与 encrypted_content 那条同一套处置。
+//
+// 类型名照抄进文案里，这样现场能定位是哪一类；但它是**客户端可控的字节**，所以先过
+// sanitizeOpenAIBasisPointsPartKind（口径与 openAIBasisPointsRejectReason 一致）。
+func openAIBasisPointsDroppedPartNotice(kind string) string {
+	return `[omitted: content part of type "` + kind + `" is not supported over this channel]`
+}
+
+// openAIBasisPointsDroppedItemNotice 替换掉这条通道承载不了的历史项（原生工具调用及其输出）。
+// 文案点明「不要假装用过它」——模型看到一条自己发起过的调用不见了，最常见的接续是编一个结果。
+func openAIBasisPointsDroppedItemNotice(kind string) string {
+	return `[omitted: an earlier ` + kind + ` item is not supported over this channel and was removed from this transcript. ` +
+		`Do not claim to have used it or invent its result.]`
+}
+
+// sanitizeOpenAIBasisPointsPartKind 把客户端给的部件类型收成安全的短标签：只留 [a-z0-9_]，
+// 截到 32 字符，空值给 "unknown"。
+func sanitizeOpenAIBasisPointsPartKind(kind string) string {
+	label := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		}
+		return -1
+	}, strings.TrimSpace(kind))
+	if len(label) > 32 {
+		label = label[:32]
+	}
+	if label == "" {
+		label = "unknown"
+	}
+	return label
+}
+
+// droppedPart 造一个带类型名的占位文本部件，并记下类型供出站前汇总成运维日志。
+func (b *openAIBasisPointsBridge) droppedPart(textKind, kind string) bpsObject {
+	label := sanitizeOpenAIBasisPointsPartKind(kind)
+	b.droppedContent[label] = true
+	return bpsObject{"type": textKind, "text": openAIBasisPointsDroppedPartNotice(label)}
+}
+
+// droppedImage 同上，图片专用文案（类型名固定，不必回显）。
+func (b *openAIBasisPointsBridge) droppedImage(textKind string) bpsObject {
+	b.droppedContent["input_image"] = true
+	return bpsObject{"type": textKind, "text": openAIBasisPointsDroppedImageNotice}
+}
+
+// openAIBasisPointsPassThroughItems：**直连实测过 BPS 收**的原生历史项 → 出站字段白名单。
+//
+// 这张表只许按实测扩，不许按上游的报错文案扩。2026-09-30 直连 bps.openai.com（pro1）的读数：
+//
+//	web_search_call        三种字段形状（全字段 / type+id+status / 只 type）全部 HTTP 200
+//	mcp_call               HTTP 200
+//	tool_search_call       400 Missing required parameter: 'input[1].arguments'（类型认，探针缺字段）
+//	image_generation_call  404 Item with id '…' not found. Items are not persisted when `store`
+//	                       is set to false. —— 类型认，但上游要按 id 回查这张图，而本层恒发
+//	                       store:false ⇒ Codex 侧铸的 id 必然查不到
+//	local_shell_call       三种形状全部 400 Invalid value: 'local_shell_call'
+//
+// **最后一条是这张表存在的理由**：同一条 400 的 "Supported values are: …" 名单里**列着**
+// `local_shell_call`（还有 `shell_call` / `program` / `multi_agent_call` / `agent_message` /
+// `apply_patch_call` / `computer_call` / `file_search_call` / `code_interpreter_call` /
+// `mcp_list_tools` / `mcp_approval_*` / `tool_search_output` 等共 32 种），却照样拒。
+// ⇒ 上游有两套 enum，报错打的是宽的那份，**那份名单不可信，不能当白名单用**。
+//
+// 表外一律走占位消息（`droppedItem`）：那条路最坏只是丢一段历史，而透传一个上游不收的类型是
+// 整单 400 + 客户端每轮回放 ⇒ 会话永久失败。要给某个类型加透传，先用
+// `/root/bps_item_shape.py` 打一发实测，把状态码抄进上面的读数里。
+//
+// 字段白名单取的就是实测过 200 的那几个键 —— BPS 的 item 级字段同样封闭（实测 400
+// "Unknown parameter: 'input[1].author'"），客户端多带一个键就是整单 400。
+var openAIBasisPointsPassThroughItems = map[string]openAIBasisPointsPassThroughSpec{
+	"web_search_call": {
+		keys: []string{"type", "id", "status", "action"},
+		// `action` 是嵌套对象，而 openAIBasisPointsKeepItemKeys 是浅的 —— 里面客户端塞什么就发
+		// 什么。实测只覆盖了 `action.type == "search"`；真实 action 还有 open_page / find_in_page
+		// 等形态，以及 action 内部的未知键，都是深一层的永久 400。所以只放行实测过的那一种。
+		actionTypes: []string{"search"},
+		statuses:    []string{"completed"},
+	},
+	"mcp_call": {
+		keys:     []string{"type", "id", "server_label", "name", "arguments", "output"},
+		statuses: []string{"completed"},
+	},
+	"mcp_list_tools": {keys: []string{"type", "id", "server_label", "tools"}},
+	"code_interpreter_call": {
+		keys:     []string{"type", "id", "status", "code", "container_id", "outputs"},
+		statuses: []string{"completed"},
+	},
+}
+
+// openAIBasisPointsPassThroughSpec 是一个原生项的**实测形状**：出站字段白名单，外加对
+// `status` / `action.type` 这两个取值域的约束。
+//
+// **为什么取值也要管**：`local_shell_call` 那条实测已经证明上游校验器比它自己宣称的 enum 严，
+// 而这条链路上「值不对」和「键不对」的后果一样 —— 整单 400 + 客户端每轮回放 ⇒ 会话永久失败。
+// 空 slice = 不约束（那一格没实测出限制）。
+type openAIBasisPointsPassThroughSpec struct {
+	keys        []string
+	statuses    []string
+	actionTypes []string
+}
+
+// matches 报告这个 item 是否落在实测过的形状里。**越界一律 false ⇒ 降级成占位消息**，
+// 这样才保住整套改动要的那个性质：永远不产生永久 400。
+func (spec openAIBasisPointsPassThroughSpec) matches(item bpsObject) bool {
+	allowed := make(map[string]bool, len(spec.keys))
+	for _, key := range spec.keys {
+		allowed[key] = true
+	}
+	// 白名单外的键不是「删掉就好」：出现未知键说明这是本层没见过的形状变体，把它删掉等于
+	// 赌剩下那部分上游还认（而且可能丢掉语义，比如 mcp_call 的 approval_request_id）。
+	for key := range item {
+		if !allowed[key] {
+			return false
+		}
+	}
+	if !openAIBasisPointsValueInSet(bpsText(item["status"]), spec.statuses) {
+		return false
+	}
+	if len(spec.actionTypes) > 0 {
+		action, ok := item["action"].(bpsObject)
+		if !ok || !openAIBasisPointsValueInSet(bpsText(action["type"]), spec.actionTypes) {
+			return false
+		}
+	}
+	return true
+}
+
+// openAIBasisPointsValueInSet：空集合 = 不约束；缺字段（空串）放过。
+func openAIBasisPointsValueInSet(value string, allowed []string) bool {
+	if len(allowed) == 0 || value == "" {
+		return true
+	}
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+// 下面这批「类型上游认、但字段 schema 和 Codex 不一样」的读数**没有**进上面那张透传表：抬上来
+// 要各写一层字段级翻译，每种都得再配一发实测。留着是为了下一轮不用重新打一遍。2026-09-30 直连读数：
+//
+//	shell_call            = Codex 的 local_shell_call，id 前缀要 `sh`，
+//	                        `action.command` 要改成 `action.commands`（复数）
+//	shell_call_output     id 前缀 `sho`，`output` 要**对象数组**不是字符串
+//	tool_search_call      id 前缀 `tsc`，`arguments` 要**对象**不是 JSON 字符串，不许带 `name`
+//	tool_search_output    `tools[].type` 必填
+//	apply_patch_call      id 前缀 `apc`，且同一请求里必须有配对的 output（"No tool output found"）
+//	apply_patch_call_output id 前缀 `apco`，`status` 必填
+//	computer_call         id 前缀 `cu`，`action` / `actions` 恰好给一个
+//	mcp_approval_request  id 前缀 `mcpr`，且必须有配对的 approval response
+//	agent_message         `author` 与 `recipient` 都必填
+//	program               `call_id` 与 `fingerprint` 都必填
+//	multi_agent_call      `action` 与 `arguments` 都必填
+//	file_search_call      404 Item not found —— 类型认，但要按 id 回查，本层恒发 store:false
+//	image_generation_call 同上
+//
+// **类型真不在上游 enum 里的**（报 `Invalid value: '<type>'`，且与那份宽名单矛盾）：
+// `local_shell_call(_output)`、`tool_call`、`mcp_tool_call(_output)`。
+// 这几个只能改名映射（前两项各自有对应物）或留占位符。
+
+// droppedItem 造一条占位 developer 消息，顶掉这条通道承载不了的历史项（原生工具调用及其输出）。
+func (b *openAIBasisPointsBridge) droppedItem(kind string) bpsObject {
+	label := sanitizeOpenAIBasisPointsPartKind(kind)
+	b.droppedContent["item:"+label] = true
+	return bpsMessage("developer", openAIBasisPointsDroppedItemNotice(label))
+}
+
+// openAIBasisPointsImageFaultIsClientShape 报告这个图片失败是不是**客户端给的形态**本身不行：
+// image_url 与 file_id 同时给、data: 解不开 / 声明的不是 image/* / 超上限。只有这一类换占位符 ——
+// 它在回放历史里每轮都在，判死等于会话永久失败，而内容确实递送不出去。
+//
+// 反过来，上传环节的失败（`image_upload` = 没配 uploader 或上游附件接口非 2xx、
+// `image_upload_transport` / `image_upload_timeout` = 代理/网络死了）**一律不换占位符**：
+// 图片本身没问题，换了等于因为一次代理抖动或通道被封就悄悄吃掉用户刚发的图，
+// 而且 image_upload_transport 那条要罚分摘池的信号也一起丢了。
+func openAIBasisPointsImageFaultIsClientShape(err error) bool {
+	return errors.Is(err, errOpenAIBasisPointsImageClientShape)
+}
+
+// errOpenAIBasisPointsImageClientShape 是「客户端给的图片形态本身递送不出去」的唯一哨兵。
+//
+// **用哨兵而不是比 reason 字符串**：判据与生产点原来隔着文件、只靠 `reason == "image_input"`
+// 连着，两个方向都会静默错 —— 将来拆出一个新的形态类 reason（比如 image_sniff）没有任何编译期
+// 联系、会静默退回硬报错；反过来把判据「简化」成 `reason != "image_upload_transport"`（看着很
+// 自然的重构）就把一次代理抖动变成静默吃掉用户刚发的图 + HTTP 200。现在形态出口全部返回这一个
+// 值，改判据必须同时改它，编译器帮着盯。
+var errOpenAIBasisPointsImageClientShape = bpsNative("image_input")
+
+// bpsPartText 从文本/refusal 部件的正文字段里取出字符串正文。第二个返回值 false = **取不到**，
+// 调用方该换占位部件。
+//
+// 三段分开，因为「丢掉用户真正的提问」和「一个本来就没内容的部件」代价差了一个数量级：
+//   - 缺字段 / 显式 null ⇒ `"", true`。那种部件本来就没有正文可丢，出空文本是对的
+//     （`"text":null` 是 Jackson / Newtonsoft 的默认序列化，很常见，判死或占位都是误伤）。
+//   - 字符串 ⇒ 原样。
+//   - **Assistants API v2 的嵌套形状** `{"value":"…","annotations":[…]}` ⇒ 取 `value`。
+//     这不是「替客户端猜格式」：它是 v2 published 的消息内容形状，也正是这一格注释里点名的那个
+//     生产者。不接住它的后果是那类客户端**每一条消息**都变成占位符 ⇒ HTTP 200 + 模型盲答。
+//   - 数字 / 布尔 ⇒ stringify。它们确实带着内容（`"text":123` 丢掉的就是「123」），
+//     而 json.Number 的字面量本来就是它的正文。
+//   - 其余（数组、没有 value 的对象、嵌套 value 不是字符串）⇒ `"", false` ⇒ 占位符。
+func bpsPartText(value any) (string, bool) {
+	switch v := value.(type) {
+	case nil:
+		return "", true
+	case string:
+		return v, true
+	case json.Number:
+		return v.String(), true
+	case bool:
+		return strconv.FormatBool(v), true
+	case map[string]any:
+		if nested, ok := v["value"].(string); ok {
+			return nested, true
+		}
+	}
+	return "", false
+}
+
 // openAIBasisPointsMessageTextKind 给出这条消息里文本部件该用的 type。
 // 两种本层都已经在原样转发（见 rewriteContent 的第一个 case），所以按角色选是安全的。
 func openAIBasisPointsMessageTextKind(role string) string {
@@ -739,7 +1021,18 @@ func (b *openAIBasisPointsBridge) rewriteContent(parts []any, uploadImages bool,
 	for _, raw := range parts {
 		part, ok := raw.(bpsObject)
 		if !ok {
-			return nil, bpsNative("input_content")
+			// 裸字符串元素（`content: ["hi"]`，SDK 的宽松写法）就是正文本身 —— 当文本发，
+			// 别换占位符：那会把用户真正说的话悄悄丢掉。其余非对象元素才是占位符。
+			if text, kept := bpsPartText(raw); kept {
+				if strings.TrimSpace(text) != "" {
+					b.liveText++
+				}
+				result = append(result, bpsObject{"type": textKind, "text": text})
+				continue
+			}
+			b.droppedText++
+			result = append(result, b.droppedPart(textKind, "non_object"))
+			continue
 		}
 		switch bpsText(part["type"]) {
 		case "input_text", "output_text", "text":
@@ -751,18 +1044,48 @@ func (b *openAIBasisPointsBridge) rewriteContent(parts []any, uploadImages bool,
 			// `prompt_cache_breakpoint` 的 input_text。这些都是常规客户端形态，而后果是上游 400 +
 			// 客户端每轮回放同一批 ⇒ 永久失败。重建只留 {type, text}，那就是这三类的完整形状。
 			//
-			// 顺带把 `"text"` 归一成 textKind：它不是 Responses 的 input 部件类型（闸门放它过是
-			// 因为确实有客户端这么发），原样出站等于赌上游认。
-			result = append(result, bpsObject{"type": textKind, "text": bpsText(part["text"])})
+			// 顺带把 `"text"` 归一成 textKind：它不是 Responses 的 input 部件类型（原来事前闸门
+			// 放它过是因为确实有客户端这么发），原样出站等于赌上游认。
+			//
+			// **正文必须是字符串。** bpsText 对非字符串返回 ""，模型会看到一个空文本部件 ——
+			// 正文一个字节都不出站、客户端零信号、日志零读数，整个 switch 里只有这一格会静默吞。
+			// 换占位部件把「静默」修掉了，但**占位符本身也可能吃掉用户真正的提问**：
+			// Assistants API v2 的消息形状 `{"type":"text","text":{"value":…,"annotations":[]}}`
+			// 是那类客户端**全部**文本部件的规范形状，整段变占位符 ⇒ HTTP 200 + 模型盲答 + 照计费，
+			// 客户端一点都看不出来。所以这一格按 bpsPartText 三段处理：能取到正文就发正文
+			// （含 v2 的嵌套 value 与数字/布尔标量），取不到才占位。
+			text, kept := bpsPartText(part["text"])
+			if !kept {
+				b.droppedText++
+				result = append(result, b.droppedPart(textKind, "text_not_a_string"))
+				continue
+			}
+			if strings.TrimSpace(text) != "" {
+				b.liveText++
+			}
+			result = append(result, bpsObject{"type": textKind, "text": text})
 		case "refusal":
-			// refusal 的文本在 `refusal` 字段上，不是 `text`。
-			result = append(result, bpsObject{"type": "refusal", "refusal": bpsText(part["refusal"])})
+			// refusal 的文本在 `refusal` 字段上，不是 `text`。同上。
+			text, kept := bpsPartText(part["refusal"])
+			if !kept {
+				b.droppedText++
+				result = append(result, b.droppedPart(textKind, "refusal_not_a_string"))
+				continue
+			}
+			result = append(result, bpsObject{"type": "refusal", "refusal": text})
 		case "input_image":
 			picture, err := b.rewriteImage(part, uploadImages)
-			if err != nil {
+			switch {
+			case err == nil:
+				result = append(result, picture)
+			case openAIBasisPointsImageFaultIsClientShape(err):
+				// 客户端给的形态本身递送不出去 ⇒ 占位符，会话能继续。
+				result = append(result, b.droppedImage(textKind))
+			default:
+				// 上传失败（没配 uploader / 附件接口非 2xx / 代理网络死了）：图片本身没问题，
+				// 必须原样透出去 —— 别让一次代理抖动把用户刚发的图悄悄吃掉。
 				return nil, err
 			}
-			result = append(result, picture)
 		case "encrypted_content":
 			// Codex 多智能体 v2 历史里的密文部件。**原样替换成一句明文说明，保留部件位置。**
 			//
@@ -774,7 +1097,9 @@ func (b *openAIBasisPointsBridge) rewriteContent(parts []any, uploadImages bool,
 			// 密文值本身一个字节都不带出去：它对 BPS 是垃圾 token，而且本层无从判断里面是什么。
 			result = append(result, bpsObject{"type": textKind, "text": openAIBasisPointsEncryptedContentNotice})
 		default:
-			return nil, bpsNative("input_content")
+			// 这条通道承载不了的部件类型（input_file / file / 音频 / 未来的新类型…）：占位符，
+			// 保留位置。理由见 openAIBasisPointsDroppedPartNotice。
+			result = append(result, b.droppedPart(textKind, bpsText(part["type"])))
 		}
 	}
 	return result, nil
@@ -797,7 +1122,7 @@ func (b *openAIBasisPointsBridge) rewriteImage(part bpsObject, upload bool) (bps
 	switch {
 	case url != "" && fileID != "":
 		// 两个都给了就判死，不替客户端挑一个：挑错的那一半是静默换掉了它要的那张图。
-		return nil, bpsNative("image_input")
+		return nil, errOpenAIBasisPointsImageClientShape
 	case fileID != "":
 		return bpsObject{"type": "input_image", "file_id": fileID}, nil
 	case strings.HasPrefix(url, "https://"):
@@ -812,7 +1137,7 @@ func (b *openAIBasisPointsBridge) rewriteImage(part bpsObject, upload bool) (bps
 		// 这套设计的口径是「封闭 schema，不赌，发请求前判死」，这里不该是唯一一处在赌的。
 		mediaType, data, ok := decodeOpenAIBasisPointsDataURL(url)
 		if !ok {
-			return nil, bpsNative("image_input")
+			return nil, errOpenAIBasisPointsImageClientShape
 		}
 		if !upload {
 			return bpsObject{"type": "input_image", "image_url": url, "detail": detail}, nil
@@ -831,7 +1156,7 @@ func (b *openAIBasisPointsBridge) rewriteImage(part bpsObject, upload bool) (bps
 		}
 		return bpsObject{"type": "input_image", "file_id": uploaded}, nil
 	default:
-		return nil, bpsNative("image_input")
+		return nil, errOpenAIBasisPointsImageClientShape
 	}
 }
 
@@ -842,7 +1167,11 @@ func rebuildOpenAIBasisPointsHistoryCall(item bpsObject) (bpsObject, error) {
 	if id == "" || strings.TrimSpace(id) != id || name == "" || strings.TrimSpace(name) != name {
 		return nil, bpsNative("tool_history")
 	}
-	if value, exists := item["namespace"]; exists {
+	// `namespace` 非字符串（最常见的是显式 null）**当没给**，不判死。这一格原来和 `"text":null`
+	// 那条自相矛盾：同一个 Jackson / Newtonsoft 默认序列化吐出的 null，文本部件专门破了例放过，
+	// 工具调用上却永久杀会话（它在回放历史里每轮都在）。带空格的串仍然判死 —— 那会拼出
+	// `"a b.tool"` 这种上游没见过的工具名。
+	if value, exists := item["namespace"]; exists && value != nil {
 		namespace, ok := value.(string)
 		if !ok || strings.TrimSpace(namespace) != namespace {
 			return nil, bpsNative("tool_history")
@@ -856,7 +1185,11 @@ func rebuildOpenAIBasisPointsHistoryCall(item bpsObject) (bpsObject, error) {
 	case "function_call":
 		arguments := item["arguments"]
 		if encoded, ok := arguments.(string); ok {
-			if bpsDecode([]byte(encoded), &arguments) != nil {
+			// **空串 / 空白当零参数**，不判死：`arguments: ""` 是零参数工具的常见产物，客户端会把它
+			// 原样存进历史、每轮回放 ⇒ 判死就是会话永久失败。解不开的非空串仍然判死（那是真畸形）。
+			if strings.TrimSpace(encoded) == "" {
+				arguments = bpsObject{}
+			} else if bpsDecode([]byte(encoded), &arguments) != nil {
 				return nil, bpsNative("tool_history")
 			}
 		}

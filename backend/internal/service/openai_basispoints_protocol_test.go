@@ -80,9 +80,12 @@ func TestOpenAIBasisPointsRouteReason(t *testing.T) {
 		{"https image ok", `{"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"https://x/y.png"}]}]}`, ""},
 		{"data image ok (uploaded later)", `{"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}]}`, ""},
 		{"file_id ok", `{"input":[{"type":"message","role":"user","content":[{"type":"input_image","file_id":"file_1"}]}]}`, ""},
-		{"http image", `{"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"http://x/y.png"}]}]}`, "image_input"},
-		{"unknown content part", `{"input":[{"type":"message","role":"user","content":[{"type":"input_file","file_id":"f"}]}]}`, "input_content"},
-		{"unknown part in tool output", `{"input":[{"type":"function_call_output","call_id":"c","output":[{"type":"input_audio"}]}]}`, "input_content"},
+		// 内容部件不再由这道事前闸门判死（2026-09-30 起换成占位部件，见 rewriteContent）：
+		// http 图、未知类型、非字符串正文、工具输出里的未知部件全部放行到 bridge。
+		{"http image goes to the bridge", `{"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"http://x/y.png"}]}]}`, ""},
+		{"unknown content part goes to the bridge", `{"input":[{"type":"message","role":"user","content":[{"type":"input_file","file_id":"f"}]}]}`, ""},
+		{"unknown part in tool output goes to the bridge", `{"input":[{"type":"function_call_output","call_id":"c","output":[{"type":"input_audio"}]}]}`, ""},
+		{"native tool call item goes to the bridge", `{"input":[{"type":"web_search_call","id":"ws_1","status":"completed"}]}`, ""},
 		{"invalid json", `{`, ""},
 	}
 	for _, tc := range cases {
@@ -320,9 +323,8 @@ func TestOpenAIBasisPointsPrepareShape(t *testing.T) {
 
 	// prepare 只保留它独有的拒绝：目录解不开、请求体形态不对。
 	rejected := map[string]string{
-		"tool_catalog":  `{"model":"m","input":"x","tools":[{"type":"function"}]}`,
-		"request_json":  `{"model":"m","input":5}`,
-		"input_content": `{"model":"m","input":[{"type":"tool_call","id":"tc_1"}]}`,
+		"tool_catalog": `{"model":"m","input":"x","tools":[{"type":"function"}]}`,
+		"request_json": `{"model":"m","input":5}`,
 	}
 	for want, raw := range rejected {
 		_, err := bridge.prepare([]byte(raw), "m")
@@ -330,6 +332,22 @@ func TestOpenAIBasisPointsPrepareShape(t *testing.T) {
 		require.True(t, native, want)
 		require.Equal(t, want, reason)
 	}
+
+	// 承载不了的原生工具项换成占位 developer 消息，**不判死**（2026-09-30）。
+	placeheld, err := bridge.prepare([]byte(`{"model":"m","input":[{"type":"tool_call","id":"tc_1"}]}`), "m")
+	require.NoError(t, err, "原生工具项不再判死")
+	items := gjson.GetBytes(placeheld, "input").Array()
+	last := items[len(items)-1]
+	require.Equal(t, "message", last.Get("type").String())
+	require.Equal(t, "developer", last.Get("role").String())
+	require.Equal(t, openAIBasisPointsDroppedItemNotice("tool_call"), last.Get("content.0.text").String())
+	// **断言结构，不要 NotContains 整个 body**：占位文案里本来就含 `tool_call`，那条只是因为
+	// droppedItemNotice 没给类型名加引号才过 —— 换个 fixture 类型或给文案加上引号都会让它变红，
+	// 而两次都不是行为回归。
+	gjson.GetBytes(placeheld, "input").ForEach(func(_, item gjson.Result) bool {
+		require.NotEqual(t, "tool_call", item.Get("type").String(), "原项不许出站")
+		return true
+	})
 }
 
 // 这些判定**只在 openAIBasisPointsRouteReason 里**（beginOpenAIBasisPoints 里先跑）。以前 prepare

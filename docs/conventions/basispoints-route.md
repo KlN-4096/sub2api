@@ -33,13 +33,127 @@
   - **刻意不做同路重试**。参考实现（[ranxi2001/sub2api](https://github.com/ranxi2001/sub2api) 的 `openai_excel_bps_encrypted.go`）当场剥掉不透明 reasoning 重发一次，对客户端零可见失败；这里先不发那第二次上游请求 —— BPS 通道并发打多了会被封（见 `sub2api-basispoints-route` 的现场结论），拿「少一次可见错误」换「每条失败请求都翻倍上游流量」不值。要改成重试就在这里加，判据和摘要收集都已经在手。
   - 另一类是 message / 工具结果的 `content[].type == "encrypted_content"` 部件（Codex 多智能体 v2 历史）：**替换成一句明文说明，保留部件位置**（`openAIBasisPointsEncryptedContentNotice`），不再判死。用户 2026-09-29 拍板「让模型知道少了一段」。
     原来是 `bpsNative("input_content")`，而这条**没有自愈路径**：失败发生在 `bridge.prepare`、出站之前，上面那套 lineage 压根不会被触发 —— 客户端每轮回放同一批，这个会话在开着开关的账号上**永久** `basispoints_input_content`，只能让用户关开关。取舍是「让模型知道少了一段」还是「整个会话永久报错」，那段密文在 BPS 上无论如何都递送不出去（出站体是严格白名单，这个部件类型本身不在其中）。
-    落地三处，缺一处替换就是死代码：①事前闸门 `bpsContentRoute` 要放它过（否则请求在进 bridge 之前就被判死）；②`rewriteContent` 里换成 `{type: <文本 kind>, text: <说明>}`；③文本 kind 按角色选 —— assistant 用 `output_text`、其余 `input_text`，**工具结果位置用 `input_text`**（那个位置是给模型的**输入**，官方 schema 在 `function_call_output.output` 上的联合类型是 `input_text|input_image|input_file`；这里原来写的是 `output_text`，代码也真的那么发了 —— 那是 `textKind` 从「只给这句说明用」扩到全部文本部件时的意外副作用，把本来原样转发的 `input_text` 换掉了。选错等于自己造一个上游没见过的形态，而这个文件的规矩是「换掉类型本身就是赌」）。
+    落地两处：①`rewriteContent` 里换成 `{type: <文本 kind>, text: <说明>}`；②文本 kind 按角色选 —— assistant 用 `output_text`、其余 `input_text`，**工具结果位置用 `input_text`**（那个位置是给模型的**输入**，官方 schema 在 `function_call_output.output` 上的联合类型是 `input_text|input_image|input_file`；这里原来写的是 `output_text`，代码也真的那么发了 —— 那是 `textKind` 从「只给这句说明用」扩到全部文本部件时的意外副作用，把本来原样转发的 `input_text` 换掉了。选错等于自己造一个上游没见过的形态，而这个文件的规矩是「换掉类型本身就是赌」）。
 
-- **事前闸门只扫真会出站的那几类项、且按项分字段**：`message` / `""` 只扫 `content`，`function_call_output` / `custom_tool_call_output` 只扫 `output`（item 级白名单也只送这两个字段，反过来扫就是同一个缺陷降到字段级 —— 那个字段一个字节都不会发，却能把整条请求判死）。`reasoning` / `compaction` / `compaction_summary` 是整项重建、`compaction_trigger` / `additional_tools` 是挪位或丢弃 —— 它们的 `content` 里有什么根本不会出站，扫它就是假阳性。原来对每个 item 无条件扫，于是一个带 `content:[{type:"reasoning_text",…}]` 的 `reasoning` 项（本仓库 apicompat 的 fixture 就是这个形状，`/v1/responses` 客户端回放历史时的常规形态）会撞上部件白名单、被判成 `input_content` 硬 502 —— **同一类的第三个实例**（前两个是 `encrypted_content` 部件与 `compaction` 项）。
+## 承载不了的形态 = 占位符，不是判死（2026-09-30）
+
+**用户拍板：会话必须能继续。** 原来「出站体是封闭白名单 ⇒ 白名单外一律判死」的口径在**历史回放**面前是个死局：客户端每一轮都原样回放同一批历史，所以任何在出站**之前**判死的分支 = 那个会话在开着开关的账号上每轮都 502、`bps:` lineage 自愈压根不触发（它只对上游拒绝生效）。第九到十三轮为此抓了 5 个实例、每次都是单点补白名单；09-30 现网又撞上第 6 个 —— 用户在会话里用过一次联网搜索，历史里从此有一条 `web_search_call`，31 发请求体逐字节相同、全部 502（抓包实证：内容部件全在白名单内，唯一越界的就是这条 item）。所以改成通用处置：
+
+| 形态 | 处置 |
+|---|---|
+| **item 级** 不在实测透传表里的原生项（`local_shell_call` / `tool_call` / `mcp_tool_call` / `tool_search_call` / `image_generation_call` / … 及其 output、以及将来任何新类型） | 换成一条 **`developer` 占位消息**（`openAIBasisPointsDroppedItemNotice`），原项字段一个字节都不出站 |
+| **item 级** 实测过 200 的原生项（`web_search_call` / `mcp_call` / `mcp_list_tools` / `code_interpreter_call`） | **原样透传**，但必须落在实测过的形状里（见下节），越界降级成占位消息 |
+| **部件级** 白名单外的类型（`input_file` / `file` / 音频 / 未来新类型） | 换成带类型名的占位文本部件（`openAIBasisPointsDroppedPartNotice`） |
+| 文本三类的 `text` / `refusal` 取不到字符串正文（数组、没有 `value` 的对象） | 同上，**不许静默变空串** |
+| **Assistants v2 的嵌套形状** `{"text":{"value":"…","annotations":[]}}`、数字、布尔 | **救回正文原样出站，不许占位**（见下面 B1） |
+| 缺字段 / 显式 `null` | 出空文本（本来就没正文可丢；`"text":null` 是 Jackson / Newtonsoft 默认序列化，很常见） |
+| **整条请求的文本部件全被占位吃光** | **判死** `input_content`（见下面 B1） |
+| `content` 数组里的**裸字符串**元素（SDK 宽松写法） | 当正文发，**不换占位符**（那会把用户真正说的话丢掉） |
+| `input_image` **客户端形态**不行（`image_url` 与 `file_id` 同时给 / `data:` 解不开 / 非 `image/*` / 超上限） | 换成图片专用占位文本（`openAIBasisPointsDroppedImageNotice`），原 data URL 一个字节都不出站 |
+| `input_image` **上传**失败（`image_upload` = **附件接口非 2xx**，外加一个只在单测出现的「没配 uploader」分支；`image_upload_transport` / `image_upload_timeout` = 代理/网络死了） | **仍然报错**。图片本身没问题，换占位符等于因为一次代理抖动或通道被封就悄悄吃掉用户刚发的图，而 `image_upload_transport` 那条要罚分摘池的信号也一起丢了 |
+
+判据是 `openAIBasisPointsImageFaultIsClientShape`，实现是 `errors.Is(err, errOpenAIBasisPointsImageClientShape)`
+—— **哨兵，不是比 reason 字符串**。原来判据与生产点隔着文件、只靠 `reason == "image_input"` 连着，两个方向
+都会静默错：将来拆出一个新的形态类 reason 没有任何编译期联系、会静默退回硬报错；反过来把判据「简化」成
+`reason != "image_upload_transport"`（看着很自然的重构）就把一次代理抖动变成静默吃掉用户刚发的图 + HTTP 200。
+**别改成「除了 transport 都占位」** —— 那正好把上面最后一行弄反。
+
+**未实测的一格**：附件接口对某张图稳定回 4xx（字节能识别但 BPS 不收、或账号附件配额）时，按现在的口径是
+硬报错 ⇒ 那张图在历史里就是「这个会话每轮 502」。要不要把 4xx 里除 401/403/429 之外归成形态类（走占位符），
+**得先拿到一次真实的 4xx 报文再定**，别按推测改。
+
+三条配套规矩：
+
+1. **类型名要回显进占位文案**（这样现场能定位是哪一类），但它是**客户端可控的字节** ⇒ 先过 `sanitizeOpenAIBasisPointsPartKind`（只留 `[a-z0-9_]`、截 32、空给 `unknown`，口径与 `openAIBasisPointsRejectReason` 一致）。
+2. **占位项的文案必须写「别假装用过它」**（`Do not claim to have used it or invent its result.`）：模型看到一条自己发起过的调用不见了，最常见的接续就是编一个结果。
+3. **必须留运维读数。** 改成占位符之后请求是成功的，`input_content` 那个落回读数就没了 —— 所以 `prepare` 在 `translateHistory` 之后把 `b.droppedContent` 汇总成一行 `warnings`（`Content parts replaced with a placeholder over this channel: …`，item 级前缀 `item:`）。09-30 那次排查就是因为 reason 只写 `input_content`、不记类型，只能靠 tcpdump 才定位到。
+
+**连带删掉事前闸门 `bpsContentRoute`**：部件级判死全部收进 `rewriteContent` 之后，它的所有返回值都成了 `""` —— 连同 `openAIBasisPointsRouteReason` 里 `message` / 工具结果那两个调用点一起删。单一来源，别再在两处各写一份部件白名单（那正是它反复出 bug 的形状）。
+
+### B1：占位符自己也会静默丢内容，两道闸挡住
+
+把判死改成占位符会**新开**一个更坏的失效面：占位符替掉的是「内容」，而客户端拿到的是 HTTP 200。
+Assistants API v2 的消息形状 `{"type":"text","text":{"value":…,"annotations":[]}}` 是那类客户端
+**全部**文本部件的规范形状 ⇒ 用户整句提问一个字节都不出站、模型盲答、照常计费、客户端零信号。
+**那比原来的 502 更糟：报错是可见的，盲答不是。** 两道闸：
+
+1. `bpsPartText` 先**救**再占位：字符串原样；v2 的嵌套 `value` 取出来（这不是猜格式，是 v2
+   published 的内容形状，也正是那一格注释里点名的生产者）；数字 / 布尔 stringify（`"text":123`
+   丢掉的就是「123」）；缺字段 / `null` 出空文本；只有数组和没有 `value` 的对象才占位。
+2. 兜底：`droppedText > 0 && liveText == 0` ⇒ 判死 `input_content`。判据刻意收窄成
+   「**丢过**正文且一个都没活下来」，纯图片请求（0 丢 0 活）不受影响。
+
+### 实测透传表：上游自己的 "Supported values" 名单**不可信**
+
+2026-09-30 直连 bps.openai.com（pro1，串行 50 发）逐类型打出来的读数。**加类型只许按实测扩**：
+
+| 历史项 | 读数 |
+|---|---|
+| `web_search_call` | **200**（全字段 / type+id+status / 只 type 三种形状都收） |
+| `mcp_call` | **200**（带 output 与不带 output 都收） |
+| `mcp_list_tools` | **200** |
+| `code_interpreter_call` | **200** |
+| `local_shell_call`(+`_output`) / `tool_call` / `mcp_tool_call`(+`_output`) | 400 `Invalid value: '<type>'` —— 类型真不在 enum 里 |
+| `shell_call` | 类型认（= Codex 的 `local_shell_call`），id 前缀要 `sh`，`action.command` 要改成 **`commands`**（复数） |
+| `shell_call_output` | id 前缀 `sho`，`output` 要**对象数组**不是字符串 |
+| `tool_search_call` | id 前缀 `tsc`，`arguments` 要**对象**不是 JSON 字符串，不许带 `name` |
+| `tool_search_output` | `tools[].type` 必填 |
+| `apply_patch_call` / `_output` | id 前缀 `apc` / `apco`，且同请求里必须有配对项 |
+| `computer_call` | id 前缀 `cu`，`action` / `actions` 恰好给一个 |
+| `mcp_approval_request` | id 前缀 `mcpr`，且必须有配对的 approval response |
+| `agent_message` | `author` **与** `recipient` 都必填 |
+| `program` | `call_id` **与** `fingerprint` 都必填 |
+| `multi_agent_call` | `action` **与** `arguments` 都必填 |
+| `file_search_call` / `image_generation_call` | 404 `Items are not persisted when store is false` —— 类型认，但要按 id 回查，本层恒发 `store:false` |
+
+**这张表存在的理由**：同一条 400 的 `"Supported values are: …"` 里**列着** `local_shell_call`
+（连同 `shell_call` / `program` / `multi_agent_call` / `agent_message` / `apply_patch_call` /
+`computer_call` / `file_search_call` / `code_interpreter_call` / `mcp_list_tools` /
+`mcp_approval_*` / `tool_search_output` 共 32 种），却照样拒 ⇒ **上游有两套 enum，报错打的是宽的
+那份**。所以白名单只能来自「我亲手打出 200 的那几个」，这是唯一没说谎的来源。
+
+**透传必须校验到实测过的形状**（`openAIBasisPointsPassThroughSpec.matches`）：`openAIBasisPointsKeepItemKeys`
+是**浅**的，`action` 里客户端塞什么就发什么 —— 实测只覆盖了 `action.type == "search"`，而
+`open_page` / `find_in_page` 以及 action 内部的未知键都是深一层的永久 400。所以键、`status`、
+`action.type` 三项任一越界就降级成占位消息。**取值也要管**：`local_shell_call` 那条已经证明上游
+校验器比它自己宣称的 enum 严，这条链路上「值不对」和「键不对」的后果一样。
+
+**下一步（未做）**：`local_shell_call`→`shell_call`、`mcp_tool_call`→`mcp_call`、`tool_search_*`
+都只差一层字段级翻译（改名 + id 前缀 + 字段形状），每种配一发实测就能从占位符抬成真透传。
+探针在线路机 `/root/bps_codex_items.py`、`/root/bps_item_mapping.py`、`/root/bps_item_shape.py`。
+
+### 运维读数在**发上游之前**打
+
+`prepare` 收集的 warning（换掉的托管工具声明、换成占位符的内容类型）由调用方在 `prepare` 返回后
+立刻打掉，**不等 2xx**。最需要它的场景恰恰是「占位符/透传形状本身被上游拒了」，而那条路走不到
+成功分支 —— 原来这行在 `resp.Body = rest` 之后，于是现场只看到 `status_400`，完全不知道这一发
+透传了什么、占位了什么。`prepare` 自己判死时同理（它已经 append 过才 return error）。
+类型名基数不设上限会撑爆日志行，截 16 种 + `…`。
+
+### 已知**未**关闭的「历史里每轮都死」出口
+
+上面那条通用规则（历史里会出现的形态 ⇒ 占位符）**还没覆盖完**，别把它读成已完成。这一轮顺手修了
+两条来源相同的（`namespace` 显式 `null`、`arguments` 空串/全空白 —— 都是 Jackson / Newtonsoft
+的默认序列化，和文本部件那边专门为 `"text":null` 破的例同一个来源，原来一边放过一边永久杀会话）。
+剩下的：
+
+| 位置 | 触发 | reason |
+|---|---|---|
+| `rebuildOpenAIBasisPointsHistoryCall` | 非空但解不开的 `arguments`、带空格的 `namespace` | `tool_history`（刻意保留：真畸形） |
+| `translateHistory` 工具结果分支 | 孤儿 `function_call_output`（前面没有配对 call 且回放缓存未命中） | `tool_history` |
+| `translateHistory` 入口 | `input` 数组里有非对象元素（`{"input":["hi"]}`） | `request_json` |
+| `translateHistory` | `item_reference` | `history_reference` |
+| `prepare` | 客户端非空 `context_management` 的非白名单形态 | `context_management` |
+
+回放缓存是进程内 LRU（1024 条 / 16 MB，scope `accountID|apiKeyID`），**重启或淘汰之后**任何自己
+裁剪历史的客户端（call 被裁掉、output 留着）每轮都撞 `tool_history`。要关就把孤儿 output 也换成
+占位消息。
+
+**没有变成占位符的**：请求级能力闸门（`web_search` / `image_generation` / `hosted_tool` / `tool_choice` / `prompt_template` / `history_reference` / `reasoning_configuration` / `context_management` / `output_format` / legacy compact 路径）照旧判死 —— 那些讲的是**这一轮要什么**，不是历史里躺着什么，改成占位符等于静默阉掉客户端明确要求的能力。
 - **部件级字段也是白名单**（不只 item 级）。文本三类（`input_text` / `output_text` / `text`）重建成 `{type, text}`、`refusal` 重建成 `{type, refusal}`，`"text"` 顺带归一成按位置算出的那个 kind。依据：上游对部件上多出来的字段同样是拒 —— `{"type":"input_image","file_id":…,"detail":"auto"}` 稳定 422、去掉 `detail` 就 200，而 `detail` 是完全合法的 Responses 字段。而 `output_text` 部件天生带 `annotations`（新版还带 `logprobs`），把 `response.output` 的 assistant 消息原样回放进下一轮 `input` 是官方的多轮写法；顶层 `messages` 那条 legacy 入站路径还会产出带 `prompt_cache_breakpoint` 的 `input_text`。都是常规形态，而后果同上：上游 400 + 每轮回放 ⇒ 永久失败。
-  - **重建的前提是正文真的是字符串。** `bpsText` 对非字符串返回 `""`，于是 `text` 是对象/数组时模型看到一个空文本部件、正文一个字节都不出站，客户端侧零信号、日志里零读数 —— 整个 switch 里只有这一格会静默吞（其它每个分支都是 `bpsNative` 判死）。最现实的生产者是 **Assistants API v2 的消息形状** `{"type":"text","text":{"value":…,"annotations":[]}}`，而 `text` 这个类型本来就是为「确实有客户端这么发」才放过的。所以事前闸门 `bpsContentRoute` 上加了类型检查：**有正文但不是字符串 ⇒ `input_content` 判死**（`refusal` 同理）；**缺字段不判死**（那种部件本来就没有正文可丢）。刻意**不**去读 `text.value` 兜底 —— 那是替客户端猜格式。用例 `…NonStringTextIsAHardErrorNotAnEmptyPart`。
+  - **重建的前提是正文真的是字符串。** `bpsText` 对非字符串返回 `""`，于是 `text` 是对象/数组时模型看到一个空文本部件、正文一个字节都不出站，客户端侧零信号、日志里零读数 —— 整个 switch 里只有这一格会静默吞。最现实的生产者是 **Assistants API v2 的消息形状** `{"type":"text","text":{"value":…,"annotations":[]}}`，而 `text` 这个类型本来就是为「确实有客户端这么发」才放过的。**有值但不是字符串 ⇒ 占位部件**（`refusal` 同理）；**缺字段 / 显式 null ⇒ 出空文本**（那种部件本来就没有正文可丢）。刻意**不**去读 `text.value` 兜底 —— 那是替客户端猜格式。用例 `…NonStringTextBecomesAPlaceholderNotAnEmptyPart`。
 
-- **这一类缺陷的通用形状，改代码前先按它自检**：客户端每一轮都原样回放同一批历史，所以任何「在出站**之前**判死某个形态」的分支 = 那个会话在开着开关的账号上每轮都硬报错，且 `bps:` lineage 自愈**压根不触发**（它只对上游拒绝生效）。第九、十两轮一共抓到三个实例，第十一轮第四个（见下面 compaction 那条：**不是判死，而是自愈路径断了** —— 同一个后果，入口不同）。新增任何 `bpsNative(...)` 出口都要先问：这个形态会不会出现在**历史**里？出口之外还要问第二句：这个形态被**上游**拒了之后，下一轮靠什么不再发它？**密文值一个字节都不出站**：它对 BPS 是垃圾 token，本层也无从判断里面是什么。用例 `TestOpenAIBasisPoints_EncryptedContentPartBecomesAPlainNotice` / `…NoticeUsesOutputTextForAssistant`。
+- **这一类缺陷的通用形状，改代码前先按它自检**：客户端每一轮都原样回放同一批历史，所以任何「在出站**之前**判死某个形态」的分支 = 那个会话在开着开关的账号上每轮都硬报错，且 `bps:` lineage 自愈**压根不触发**（它只对上游拒绝生效）。第九到十三轮一共抓到 5 个实例，09-30 现网第 6 个（`web_search_call`）—— 单点补白名单补不完，所以那一轮改成了上面那套通用占位符处置。**新增任何 `bpsNative(...)` 出口都要先问**：这个形态会不会出现在**历史**里？会 ⇒ 占位符，不是判死。出口之外还要问第二句：这个形态被**上游**拒了之后，下一轮靠什么不再发它？**密文值一个字节都不出站**：它对 BPS 是垃圾 token，本层也无从判断里面是什么。用例 `TestOpenAIBasisPoints_EncryptedContentPartBecomesAPlainNotice` / `…NoticeUsesOutputTextForAssistant` / `…NativeToolCallItemsBecomePlaceholders`。
 - 档位：max/ultra→xhigh，none/minimal→low，未知→medium。**不按模型钳档**：原来对 gpt-6-astra 把 low 钳到 medium（引「ghcp_proxy 实测」），2026-09-29 直连实测 astra@low 是 200，四家参考实现也都不钳 —— 钳掉等于白吃掉客户端更快更便宜的低档，已移除。
 - `parallel_tool_calls` 回写的是**这一轮实际发生了什么**（`b.parallelToolCalls || tools > 1`），不是客户端要求了什么。**刻意不因此报错**：这个字段不在出站白名单里，BPS 只从 developer 提示里看到一句软约束，拿一个从没转发出去的约束去判上游「协议违规」并杀掉整轮，结果是这轮零产出，而客户端对「声明 false 却来了两个调用」绝大多数照样逐个执行。翻译出的 function_call 带 `encrypted_function_args: []`（Codex 的协作工具靠「显式空列表 vs 字段缺失」区分明文与密文，缺了它客户端会把明文当 `encrypted_content` 塞给子 agent）；直接目录调用时原生项自带的该字段原样透传。
 - custom 工具的 `summary` 标记容忍近失（前后空白、大小写、标记与名字之间多一个空格）。**只放宽到能精确识别的近失，不猜**：summary 是别的内容时仍按 FUNCTION 信封解 `code`，解不开就报错 —— 目录里只有一个 custom 工具就拿原文兜底那种做法会把「模型写错了 FUNCTION 信封」也吞成 custom 调用。
@@ -51,9 +165,9 @@
 - 客户端画像头 16 个 = bridge 的 `_DEFAULT_CLIENT_HEADERS`（它抓不到真实 Excel 会话时的兜底集合），不是真实会话全集。真实全集（`_ALLOWED_CAPTURED_HEADERS`）另有 `x-openai-internal-basispoints-browser-{name,ua-brands,ua-mobile,ua-platform}` 和 `x-stainless-runtime-version`，**刻意不补**：没有任何参考实现公布过真实取值，`ua-brands` 这种结构化串猜错了比缺失更显眼。`x-openai-account-user-id` 在真实全集里，留着。
 - 客户端工具目录写成 developer 消息；模型只能调原生 `run_officejs`，其 `code` 是 JSON 信封 `{name, arguments}`（也认 `const x = {...};` 外壳，只取 JSON 不执行），翻成客户端的 function_call；客户端的 function_call_output 在下一轮翻回原生项（回放缓存作用域 `accountID|apiKeyID`，`bpsLRU` 1024 条 / 16 MB，丢了就按客户端历史重建）。输出项 id 一律 `fc_<call_id>`；对应原生 `update_plan` 的输出改成 `{"status":"ok"}`（Codex 的 "Plan updated" 会让模型重新规划）。
 - 用户消息里的 `data:` 图片先传 `/basispoints/api/attachments`（multipart `file` → `openai_file_id`），按账号 + sha256 缓存 256 条、30 分钟；工具输出里的图片原样内联（Excel 加载项自己就是内嵌发的）；单张上限 20 MB。
-  - **类型按字节定，不按客户端声明的串定，也绝不默认 png**（`bpsSniffImageMediaType` 走 `http.DetectContentType`，只认 png / jpeg / gif / webp）。BPS 只接受 `.jpeg/.jpg/.png/.gif/.webp`，别的格式或扩展名对不上字节（`.jfif`、无后缀）会让**整单** 400 `Expected image type to be a supported format … but got none`，而历史里一旦带上这张图，这个会话**每一轮回放都失败**（[cpa-plugin-oai-basispoints#15](https://github.com/JaxsonWang/cpa-plugin-oai-basispoints/issues/15) 的现场，维护者 v0.2.4 也改成了按字节识别）。猜成 png 的代价一样，而且客户端拿不到定位信息 —— 所以识别不出就判死成 `image_input`。
+  - **类型按字节定，不按客户端声明的串定，也绝不默认 png**（`bpsSniffImageMediaType` 走 `http.DetectContentType`，只认 png / jpeg / gif / webp）。BPS 只接受 `.jpeg/.jpg/.png/.gif/.webp`，别的格式或扩展名对不上字节（`.jfif`、无后缀）会让**整单** 400 `Expected image type to be a supported format … but got none`，而历史里一旦带上这张图，这个会话**每一轮回放都失败**（[cpa-plugin-oai-basispoints#15](https://github.com/JaxsonWang/cpa-plugin-oai-basispoints/issues/15) 的现场，维护者 v0.2.4 也改成了按字节识别）。猜成 png 的代价一样，而且客户端拿不到定位信息 —— 所以识别不出就算 `image_input`（2026-09-30 起这一类换成图片占位文本，不再判死；原 data URL 一个字节都不出站）。
   - 声明段仍过一遍 `mime.FormatMediaType`（畸形串含 CR/LF 一律拒）。类型按字节定之后，出站 multipart 的 Content-Type 与 `filename=` 全是本层字面量，**部件头注入面从根上没了**，原来那段「从客户端子类型推扩展名再消毒」连带删掉。
-  - **`input_image` 带 `file_id` 时只发 `{type, file_id}`，一个 `detail` 都不许多。** 同一张已上传的图、同一请求体，`{"type":"input_image","file_id":"…","detail":"auto"}` 稳定 422 `Invalid request body.`，去掉 `detail` 就 200（[#17](https://github.com/JaxsonWang/cpa-plugin-oai-basispoints/issues/17) 的 A/B 对照，v0.2.4 已按同样口径修）。`file_id` 与 `image_url` 同时出现判死，不替客户端挑一个。
+  - **`input_image` 带 `file_id` 时只发 `{type, file_id}`，一个 `detail` 都不许多。** 同一张已上传的图、同一请求体，`{"type":"input_image","file_id":"…","detail":"auto"}` 稳定 422 `Invalid request body.`，去掉 `detail` 就 200（[#17](https://github.com/JaxsonWang/cpa-plugin-oai-basispoints/issues/17) 的 A/B 对照，v0.2.4 已按同样口径修）。`file_id` 与 `image_url` 同时出现算 `image_input`，不替客户端挑一个（挑错的那一半是静默换掉了它要的那张图）—— 同样走占位文本。
 - **BPS 偶发只把正文放在终态项里，一条 `response.output_text.delta` 都不发** —— 只拼 delta 的客户端会拿到一条 HTTP 200 的**空回答**（[#12](https://github.com/JaxsonWang/cpa-plugin-oai-basispoints/issues/12)，issue 里点名了「把本插件响应转给下游的 sub2api」）。「200 但正文为空」不在硬报错口径的覆盖范围里，报错收口一条都拦不住，所以转写器在 `response.output_item.done` 之前按 `item.content[].output_text` 补发。**只在这一项一条 delta 都没发过时补**（`sawTextDelta`，上限 1024 条）：两边都发会让同时读 delta 和终态项的客户端看到双份正文。空文本 / refusal / reasoning 不补，`content_index` 按真实下标。
 
 ## 落回与错误
