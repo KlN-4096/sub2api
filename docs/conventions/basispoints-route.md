@@ -142,14 +142,67 @@ Assistants API v2 的消息形状 `{"type":"text","text":{"value":…,"annotatio
 | `rebuildOpenAIBasisPointsHistoryCall` | 非空但解不开的 `arguments`、带空格的 `namespace` | `tool_history`（刻意保留：真畸形） |
 | `translateHistory` 工具结果分支 | 孤儿 `function_call_output`（前面没有配对 call 且回放缓存未命中） | `tool_history` |
 | `translateHistory` 入口 | `input` 数组里有非对象元素（`{"input":["hi"]}`） | `request_json` |
-| `translateHistory` | `item_reference` | `history_reference` |
 | `prepare` | 客户端非空 `context_management` 的非白名单形态 | `context_management` |
 
 回放缓存是进程内 LRU（1024 条 / 16 MB，scope `accountID|apiKeyID`），**重启或淘汰之后**任何自己
 裁剪历史的客户端（call 被裁掉、output 留着）每轮都撞 `tool_history`。要关就把孤儿 output 也换成
 占位消息。
 
-**没有变成占位符的**：请求级能力闸门（`web_search` / `image_generation` / `hosted_tool` / `tool_choice` / `prompt_template` / `history_reference` / `reasoning_configuration` / `context_management` / `output_format` / legacy compact 路径）照旧判死 —— 那些讲的是**这一轮要什么**，不是历史里躺着什么，改成占位符等于静默阉掉客户端明确要求的能力。
+### 工具声明一律丢进目录说明，**不判死**
+
+原来请求级还有一道能力闸门：`web_search` / `image_generation` / `hosted_tool` / `tool_choice` 判死，
+理由写的是「那些讲的是这一轮要什么，改成占位符等于静默阉掉客户端明确要求的能力」。**这个理由是错的**，
+09-30 全部删掉，按参考实现 `cpa-plugin-oai-basispoints` v0.2.9 的口径来：它的 `iterToolValues`
+只收 `function` / `custom`，`web_search` / `image_generation` / `mcp` / `file_search` /
+`code_interpreter` 一律静默跳过，**全程没有任何工具类型的请求级拒收**。
+
+错在三处：
+
+1. **`web_search` 那条判据是反的。** 默认的 `external_web_access:false` 放过、**打开**才判死，
+   而这条通道自己带服务端搜索 —— 实测直连与经网关都会出 `response.web_search_call.{in_progress,
+   searching,completed}` 事件、`web_search_call` 项和带真实 openai.com 链接的 annotation。
+   净效果是「要搜索的请求被挡在门外、不要的反而搜得到」。提示里那三句「web search 不可用 / 去开
+   Codex 的 `--search`」同样是假话（`--search` 对这条通道毫无作用），一起改掉：现在明说
+   *声明本身*被省掉了、但**这条通道自带服务端搜索、该用就用**。
+2. **它们本来就已经有「丢+说明」的落点。** `collectTools` 早就把托管工具收进 `b.unsupported`，
+   提示里点名"These declarations were omitted. Do not claim to have used them"——
+   比参考实现多一句交代。判死只是让这条路永远走不到。
+3. **判死同样发生在出站之前。** 客户端每轮回放同一份 `tools` ⇒ 同一个缺陷形状，会话每轮都死。
+
+同时收掉的 `collectTools` 硬报错（`tool_catalog` 这个 reason 随之作废）：
+
+| 形态 | 原来 | 现在 |
+|---|---|---|
+| 托管工具（mcp / file_search / code_interpreter / image_generation / web_search…） | `hosted_tool` 判死 | 丢出目录 + 提示点名 |
+| `function` / `custom` 之外的类型（含 Codex 那个无 `name` 的 `{"type":"local_shell"}`） | `tool_catalog` 判死 | 同上 |
+| 非对象条目、无名 `namespace` | `tool_catalog` 判死 | 同上（记 `(malformed)` / `namespace`） |
+| 同名工具声明两次、定义不同 | `tool_catalog` 判死 | **后声明赢**（Codex 的 `additional_tools` 正是用后一份更新同名 schema），目录按名去重留最后一条 |
+| `tool_choice` 任何对象形态（连 `{type:function,name}` 这种正常的强制调用） | `tool_choice` 判死 | 渲染成一句人话写进目录说明 |
+| `item_reference` | 判死 | 占位项（参考实现 `translateInputItems` 是**静默丢弃**，占位符比它多一句交代） |
+| `tool_choice` **强制一个没声明的工具** | `tool_choice` 判死 | **照旧判死**（参考实现 `prepareResponsesBody` 同一条：`clientToolCallRequired && 选不出可调工具` ⇒ 400 `invalid_tool_choice`）|
+
+**去重必须留最后一条**：`b.tools[key]` 是后声明覆盖，留第一条会让目录文本描述旧 schema、而参数
+校验按新 schema 走 —— 模型照着目录填参数必被本层拒掉。
+
+`tool_choice` 只能写进提示：出站 schema 是封闭的，这个字段本身送不上去。提示里的名字**必须用与
+`collectTools` 同一把 key**（`namespace + "." + name`），否则模型照提示调一个目录里没有的名字。
+点名托管工具（`mcp` / `web_search` / `image_generation`…）时明说那个类型在这条通道上不可用 ——
+既不判死、也不能一个字都不提（客户端明说了只准调那一个，不提就等于给模型一份「随便挑」的目录）。
+
+**但「强制调一个没声明的工具」照旧请求级拒收**（reason 仍是 `tool_choice`）。这条不属于「历史回放
+每轮都死」那一类 —— `tool_choice` 是当轮意图，客户端改一下就好，可见失败正是对的；只写提示的话
+模型拿到的是「随便挑的目录」+「只准调 x」两句打架的话，要么拒答要么去调一个 `b.tools` 里不存在的
+名字，整轮照样报错。
+
+**`configuration_update` 不走占位符**：它是客户端在**这一轮**要求改推理配置，不是历史里躺着的内容。
+占位符等于把客户端明确要求的能力静默丢掉还返 200，而顶层 `reasoning.mode != "standard"` 走的是硬
+报错 `reasoning_configuration` —— 同一个意图两条入口两种处置就是漂移。这里与那条对齐。
+（参考实现没有这个分支，会原样透传去赌上游 400。）
+
+照旧判死的只剩「这一轮要什么、而且真的没有落点」那几条：`prompt_template` / `history_reference`
+（`previous_response_id` / `conversation`）/ `reasoning_configuration` / `context_management` /
+`output_format` / legacy compact 路径。其中 `output_format`（`text.format` 非 `text`）与
+`previous_response_id` 参考实现 v0.2.9 同样是 400 拒收，不是我们更严。
 - **部件级字段也是白名单**（不只 item 级）。文本三类（`input_text` / `output_text` / `text`）重建成 `{type, text}`、`refusal` 重建成 `{type, refusal}`，`"text"` 顺带归一成按位置算出的那个 kind。依据：上游对部件上多出来的字段同样是拒 —— `{"type":"input_image","file_id":…,"detail":"auto"}` 稳定 422、去掉 `detail` 就 200，而 `detail` 是完全合法的 Responses 字段。而 `output_text` 部件天生带 `annotations`（新版还带 `logprobs`），把 `response.output` 的 assistant 消息原样回放进下一轮 `input` 是官方的多轮写法；顶层 `messages` 那条 legacy 入站路径还会产出带 `prompt_cache_breakpoint` 的 `input_text`。都是常规形态，而后果同上：上游 400 + 每轮回放 ⇒ 永久失败。
   - **重建的前提是正文真的是字符串。** `bpsText` 对非字符串返回 `""`，于是 `text` 是对象/数组时模型看到一个空文本部件、正文一个字节都不出站，客户端侧零信号、日志里零读数 —— 整个 switch 里只有这一格会静默吞。最现实的生产者是 **Assistants API v2 的消息形状** `{"type":"text","text":{"value":…,"annotations":[]}}`，而 `text` 这个类型本来就是为「确实有客户端这么发」才放过的。**有值但不是字符串 ⇒ 占位部件**（`refusal` 同理）；**缺字段 / 显式 null ⇒ 出空文本**（那种部件本来就没有正文可丢）。刻意**不**去读 `text.value` 兜底 —— 那是替客户端猜格式。用例 `…NonStringTextBecomesAPlaceholderNotAnEmptyPart`。
 
@@ -188,7 +241,7 @@ Assistants API v2 的消息形状 `{"type":"text","text":{"value":…,"annotatio
 **过滤把候选清空时回退到不过滤**（第十一轮 blocker）：这一轮唯一的密文就是压缩摘要时它就是唯一可能的元凶（BPS 也会拒自己铸的 blob —— 过期、跨网关、或者这条会话换到了另一个同样开着开关的账号，A 号铸的密文拿 B 号的凭据去解），跳过它等于一个字节都不记 ⇒ 下一轮没东西可剥 ⇒ **会话从压缩那一刻起每轮硬错、永不自愈**。宁可剥掉压缩历史自愈一次（可见：模型丢上下文），也不要会话永久死。用例一对：`…ValidCompactionBlobSurvivesACodexBlobRejection`（混合场景不许连带丢）+ `…CompactionOnlyBlobRejectionStillSelfHeals`（只有压缩摘要时必须剥）。
 顺带收口了 **compact 兜底信号**（`asOpenAICompactFallbackSignal`）：它在压缩回合进 BPS 之后才变得可达，而那套「换个 compact 模型同号重试」的循环在 Codex 分支里、BPS 路上没有消费者，原样返回等于把上游原文的裸 error 丢给 handler。现在收口成 `basispoints_compact_model_unavailable`。
 
-- **终态错误**（`writeOpenAIBasisPointsUnavailable` / WS 桥用 `buildOpenAIBasisPointsUnavailableWSEvent`）：`{"error":{"type":"basispoints_unavailable","code":"basispoints_<reason>"}}`，WS 上是一条 `response.failed` 同码。**HTTP 状态码：上游自己回的 4xx/5xx 原样透出（含 `Retry-After`），本层判定的一律 502**（`openAIBasisPointsUnavailableStatus`）。触发集就是原来的落回集：发请求前判定（previous_response_id / item_reference、tool_choice、显式联网 `external_web_access != false`、生图（含**只按模型名**请求生图，见下）、结构化输出、reasoning 配置、不支持的内容块、图片上传失败、工具历史找不回、目录写不下、拿不到 account id / token、非 compaction 的 `context_management`、真 Fast 档）、传输错误、**任何非 2xx**（含 401 / 403 / 429 / `basispoints_model_access_changed`）、HTTP 200 里**首个事件**就是 error / response.failed / response.cancelled（`peekOpenAIBasisPointsFirstOutput`，最多等 `openAIBasisPointsPeekSilence` = 3 min；这段偷看不占客户端的首输出预算，accept 时间按 peek 结束后的 `acceptedAt` 算）。
+- **终态错误**（`writeOpenAIBasisPointsUnavailable` / WS 桥用 `buildOpenAIBasisPointsUnavailableWSEvent`）：`{"error":{"type":"basispoints_unavailable","code":"basispoints_<reason>"}}`，WS 上是一条 `response.failed` 同码。**HTTP 状态码：上游自己回的 4xx/5xx 原样透出（含 `Retry-After`），本层判定的一律 502**（`openAIBasisPointsUnavailableStatus`）。触发集就是原来的落回集：发请求前判定（`previous_response_id` / `conversation`、`prompt` 模板、**只按模型名**请求生图（见下）、结构化输出、reasoning 配置（含 input 里的 `configuration_update`）、`tool_choice` **强制一个没声明的工具**、图片上传失败、工具历史找不回、拿不到 account id / token、非 compaction 的 `context_management`、真 Fast 档）—— **不含任何工具类型的判定**，也不含 `item_reference`（占位项）与不支持的内容块（占位部件），见上文「工具声明一律丢进目录说明」、传输错误、**任何非 2xx**（含 401 / 403 / 429 / `basispoints_model_access_changed`）、HTTP 200 里**首个事件**就是 error / response.failed / response.cancelled（`peekOpenAIBasisPointsFirstOutput`，最多等 `openAIBasisPointsPeekSilence` = 3 min；这段偷看不占客户端的首输出预算，accept 时间按 peek 结束后的 `acceptedAt` 算）。
 - 错误刻意具备两条性质：**不是 `UpstreamFailoverError`**（换号会换到没开开关的账号 → 又走回 Codex → 掺杂原封不动地回来），**包着 `ErrOpenAIRawRelayNotAccountFault`**（BPS 承载不了某个请求形态不是账号的错，不该拖低它的调度分）。
 - **第二条性质有四个例外**（`openAIBasisPointsReasonIsAccountFault`）：`transport_error` / `image_upload_transport` / `missing_token` / `missing_account_id` 不是「承载不了这个形态」，是这个账号/代理本身发不出请求，所以照常罚分。口径与紧挨着的几行对齐 —— `resolveCredentialAccount` 失败、`GetAccessToken` 失败、`requireOpenAIProxyBinding` 失败返回的都是裸 error。豁免掉它们等于让调度器一直把请求塞给一个 100% 发不出去的账号，而硬报错口径下它又不会落回 Codex。
   - `transport_error` 另外按原路径同一口径**临时摘池** 10 分钟（`tempUnscheduleOpenAITransportError`，内存 block + 落库，到期自动恢复），判据是 `classifyUpstreamTransportError().Persistent`（只认 connection refused / no route to host / no such host / 代理鉴权失败这类**持久**原因，代理超时这种瞬时错误不摘）。
@@ -225,7 +278,10 @@ Assistants API v2 的消息形状 `{"type":"text","text":{"value":…,"annotatio
 - 同理，两处超时不能动 BPS 账号的状态：`openai_first_output_timeout.go` 和 `openai_gateway_response_handling.go` 的 `HandleStreamTimeout` 都加了 `!isOpenAIBasisPointsResponse(c)` 闸门。这条路上工具事件被扣到终态才补发，空闲窗口天然比 Codex 长，靠 `acceptedAt` + keepalive 只是缓解、不是闸门。
 - **`client_restriction` 的落回只在 HTTP 路径成立，WS 桥上不放行。** 放行的理由是「原路径会写自己那条规范的拒绝文案」，而 `detectCodexClientRestriction` 的调用点只有 `Forward` / chat-completions / raw_relay —— 桥上没有那次检查，放行的结果不是换一条更好的文案，而是由 Codex 正常服务，正好是要禁的掺杂。
 - Fast 策略（`openAIBasisPointsFastPolicyReason`）必须抢在 BPS 分派之前评估：原路径是在 `openai_gateway_passthrough.go:278` 才评估，排在分派点之后。不先评估就有两个后果 —— 管理员配的 `BetaPolicyActionBlock` 闸门被一个账号级实验开关绕过；强制 Fast 分组里的账号静默降级成标准档。两个易错点：①**策略白名单按上游 slug 配**，而分派点排在 `markPatchSet("model", upstreamModel)` 之前，所以这里要自己先 `resolveOpenAIForwardMappedModels` 一次，否则闸门照旧不命中；②**只有 `priority` / `ultrafast` 才算真 Fast 档** —— `normalizeOpenAIServiceTier` 把 `auto`/`default`/`flex`/`scale` 也当合法值留在体里（`flex` 反而更慢更便宜），按「字段存在」判会把它们一起打成硬 502，而出站白名单根本不带 `service_tier`，拦住它们保护不了任何东西。策略自己要拒时把 `OpenAIFastBlockedError` 包上 `ErrOpenAIRawRelayNotAccountFault` 并 `MarkResponseCommitted`（客户端策略拒绝不是账号的错，也不该在写完的 403 尾部再追一条 SSE）。
-- 生图闸门同样要在分派点判死：原路径的分组闸门（`imageIntent && !imageGenerationAllowed`）排在分派点之后，而 `openAIBasisPointsRouteReason` 只看 `tools` / `tool_choice` 里的 `image_generation` —— 光按模型名请求生图（`gpt-image-1` 之类）会既绕开分组闸门、又把模型名带着账号主人的 bearer token 发到 bps.openai.com。所以分派前跑一次 `IsImageGenerationIntent`，命中就报 `basispoints_image_generation`。
+- 生图**模型**要在分派点判死：原路径的分组闸门（`imageIntent && !imageGenerationAllowed`）排在分派点之后，光按模型名请求生图（`gpt-image-1` 之类）会既绕开分组闸门、又把模型名带着账号主人的 bearer token 发到 bps.openai.com。所以分派前按模型名判一次（`isOpenAIImageGenerationModel`），命中就报 `basispoints_image_generation`。
+  - **刻意不用 `IsImageGenerationIntent`**（原来用的是它，09-30 改掉）：那个谓词还会命中**声明** —— `tools:[{"type":"image_generation"}]`、**被动**的 `image_gen` namespace、以及 `additional_tools` 里的同款（Codex Lite 的签名形态）。声明是客户端每轮原样回放的 ⇒ 开着开关的账号上那个会话每轮 502、永不自愈，而且这是最容易被真实 Codex 客户端撞到的一个。`image_generation_intent.go` 自己也为「被动 namespace 不该强制要求原生能力」另建了 `IsExplicitImageGenerationIntent`，但**那个仍然命中前两种声明**，所以这里连它也不用。闸门注释原来给的理由（绕开分组闸门 + 模型名带 token 出站）只需要模型名那一半。
+  - 这个闸门只在 HTTP 路径上（WS 桥不跑它）。收窄成只按模型名之后，两条路对**声明**的处置一致了；模型名那一格 WS 上本来也没判过，不是这一轮引入的分叉。
+  - 用例 `TestOpenAIBasisPoints_ImageGenerationDeclarationsReachUpstream` 走的是 `Forward`（四种声明形态都必须真的发出去 + 生图模型一个字节都不许发）。**只调 `prepare` 的用例证明不了这一条** —— 那道闸门在 `Forward` 里，不在桥里。
 - 顶层 `messages` / `prompt` / `commands` 这类 legacy 入站形态在分派前先跑一次 `normalizeOpenAIResponsesLegacyIngress`（结果只给 BPS 用，走回原路径时 body 保持原样），否则会被判成 `prompt_template` / `request_json` 硬报错，而原路径本来能正常服务。
 - 不受影响、仍然走原路径的入口：`/v1/responses/<子路径>`（**`/compact` 除外，它判死**）、`/v1/messages`、chat-completions 桥、count_tokens、/models，以及 `/v1/alpha/search` 的 `forwardAlphaSearchViaResponsesWebSearch`（`openai_alpha_search.go`）—— **最后这条也是开着开关的账号仍会在 Codex 路径上跑真实回合的入口之一**。**原生 v2 压缩回合不在此列**（2026-09-29 起走 BPS，实测见上文「落回与错误」开头）：它是裸 `/responses` + input 末尾一个 `compaction_trigger`，`normalizeOpenAIResponsesCompactRequest` 不改路径，所以路径后缀判空挡不住，而分派条件里也**不再**有 `!HasCompactionTriggerInInput`。
 - **代价（记在这里，别忘）**：`tool_history`（回放缓存丢了，比如重启后正在进行的多轮工具会话）和 **png/jpeg/gif/webp 之外的图片**现在是硬错误而不是降级继续 —— 后者不是收紧，是纠正：那些格式上游本来就会整单 400，而且会让整个会话每轮回放都失败，在这里判死至少给出了原因。分组里混着开关开 / 关的账号时，选号随机 ⇒ 照样掺杂，这一层管不了；要彻底干净得让那个分组里的 oauth 账号全开（用户明确说不加分组级校验）。

@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/base64"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -22,9 +23,22 @@ func newBasisPointsTestBridge(t *testing.T, toolsJSON string) *openAIBasisPoints
 	bridge := newOpenAIBasisPointsBridge("scope", newOpenAIBasisPointsReplayCache(), nil)
 	var tools []any
 	require.NoError(t, json.Unmarshal([]byte(toolsJSON), &tools))
-	_, err := bridge.collectTools(tools, "")
-	require.NoError(t, err)
+	bridge.collectTools(tools, "")
 	return bridge
+}
+
+// bpsTestProtocolText 取出站体里那条协议 developer 消息的正文（不是 instructions 那条）。
+// 按内容认而不是按下标认：下标随出站形态变过一次，钉死下标的断言当时静默变成了空串比较。
+func bpsTestProtocolText(t *testing.T, body []byte) string {
+	t.Helper()
+	for _, item := range gjson.GetBytes(body, "input").Array() {
+		text := item.Get("content.0.text").String()
+		if strings.Contains(text, "This request comes from an external Responses client") {
+			return text
+		}
+	}
+	require.Fail(t, "出站体里找不到协议 developer 消息")
+	return ""
 }
 
 func bpsTestNativeCall(t *testing.T, callID string, arguments map[string]any) bpsObject {
@@ -58,25 +72,29 @@ func TestOpenAIBasisPointsRouteReason(t *testing.T) {
 	}{
 		{"plain", `{"model":"m","input":"hi"}`, ""},
 		{"cached web search stays", `{"tools":[{"type":"web_search","external_web_access":false}],"input":"hi"}`, ""},
-		{"live web search", `{"tools":[{"type":"web_search","external_web_access":true}],"input":"hi"}`, "web_search"},
-		{"web search without flag", `{"tools":[{"type":"web_search_preview"}],"input":"hi"}`, "web_search"},
-		{"web search nested in namespace", `{"tools":[{"type":"namespace","name":"n","tools":[{"type":"web_search"}]}],"input":"hi"}`, "web_search"},
-		{"web search in additional_tools", `{"input":[{"type":"additional_tools","tools":[{"type":"web_search"}]}]}`, "web_search"},
-		{"image generation tool", `{"tools":[{"type":"image_generation"}],"input":"hi"}`, "image_generation"},
+		{"live web search goes to the bridge", `{"tools":[{"type":"web_search","external_web_access":true}],"input":"hi"}`, ""},
+		{"web search without flag goes to the bridge", `{"tools":[{"type":"web_search_preview"}],"input":"hi"}`, ""},
+		{"web search nested in namespace goes to the bridge", `{"tools":[{"type":"namespace","name":"n","tools":[{"type":"web_search"}]}],"input":"hi"}`, ""},
+		{"web search in additional_tools goes to the bridge", `{"input":[{"type":"additional_tools","tools":[{"type":"web_search"}]}]}`, ""},
 		{"tool_choice auto", `{"tool_choice":"auto","input":"hi"}`, ""},
 		{"tool_choice none", `{"tool_choice":"none","input":"hi"}`, ""},
-		{"tool_choice required", `{"tool_choice":"required","input":"hi"}`, "tool_choice"},
-		{"tool_choice forced function", `{"tool_choice":{"type":"function","name":"x"},"input":"hi"}`, "tool_choice"},
-		{"tool_choice web search", `{"tool_choice":{"type":"web_search_preview"},"input":"hi"}`, "web_search"},
 		{"json_schema output", `{"text":{"format":{"type":"json_schema"}},"input":"hi"}`, "output_format"},
 		{"text output ok", `{"text":{"format":{"type":"text"}},"input":"hi"}`, ""},
 		{"previous_response_id", `{"previous_response_id":"resp_1","input":"hi"}`, "history_reference"},
-		{"item_reference", `{"input":[{"type":"item_reference","id":"msg_1"}]}`, "history_reference"},
 		{"conversation reference", `{"conversation":"conv_1","input":"hi"}`, "history_reference"},
 		{"prompt template", `{"prompt":{"id":"p_1"},"input":"hi"}`, "prompt_template"},
-		{"mcp hosted tool", `{"tools":[{"type":"mcp","server_label":"x"}],"input":"hi"}`, "hosted_tool"},
-		{"code interpreter in namespace", `{"tools":[{"type":"namespace","name":"n","tools":[{"type":"code_interpreter"}]}],"input":"hi"}`, "hosted_tool"},
-		{"configuration_update", `{"input":[{"type":"configuration_update"}]}`, "reasoning_configuration"},
+		// 工具声明与 tool_choice 不再由这道闸门判死（参考实现 v0.2.9 的口径：认不出的工具类型
+		// 静默跳过，全程没有任何工具类型的请求级拒收）。它们走 collectTools 的 b.unsupported
+		// + 提示说明；item_reference / configuration_update 走 translateHistory 的占位项。
+		{"tool_choice required goes to the bridge", `{"tool_choice":"required","input":"hi"}`, ""},
+		{"tool_choice forced function goes to the bridge", `{"tool_choice":{"type":"function","name":"x"},"input":"hi"}`, ""},
+		{"tool_choice web search goes to the bridge", `{"tool_choice":{"type":"web_search_preview"},"input":"hi"}`, ""},
+		{"image_generation goes to the bridge", `{"tools":[{"type":"image_generation"}],"input":"hi"}`, ""},
+		{"mcp hosted tool goes to the bridge", `{"tools":[{"type":"mcp","server_label":"x"}],"input":"hi"}`, ""},
+		{"code interpreter in namespace goes to the bridge", `{"tools":[{"type":"namespace","name":"n","tools":[{"type":"code_interpreter"}]}],"input":"hi"}`, ""},
+		{"additional_tools hosted goes to the bridge", `{"input":[{"type":"additional_tools","tools":[{"type":"mcp"}]}]}`, ""},
+		{"item_reference goes to the bridge", `{"input":[{"type":"item_reference","id":"msg_1"}]}`, ""},
+		{"configuration_update goes to the bridge", `{"input":[{"type":"configuration_update"}]}`, ""},
 		{"https image ok", `{"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"https://x/y.png"}]}]}`, ""},
 		{"data image ok (uploaded later)", `{"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}]}`, ""},
 		{"file_id ok", `{"input":[{"type":"message","role":"user","content":[{"type":"input_image","file_id":"file_1"}]}]}`, ""},
@@ -321,17 +339,23 @@ func TestOpenAIBasisPointsPrepareShape(t *testing.T) {
 	require.False(t, gjson.GetBytes(body, "metadata.x").Exists(), "只发 BPS 认的 metadata")
 	require.NotContains(t, string(body), `\u003c`, "不做 HTML 转义")
 
-	// prepare 只保留它独有的拒绝：目录解不开、请求体形态不对。
-	rejected := map[string]string{
-		"tool_catalog": `{"model":"m","input":"x","tools":[{"type":"function"}]}`,
+	// prepare 只保留它独有的拒绝：请求体形态不对。目录解不开已经不再判死（认不出的条目丢进
+	// b.unsupported，见 collectTools），tool_catalog 这个原因随之作废。
+	for want, raw := range map[string]string{
 		"request_json": `{"model":"m","input":5}`,
-	}
-	for want, raw := range rejected {
+	} {
 		_, err := bridge.prepare([]byte(raw), "m")
 		reason, native := openAIBasisPointsNativeReason(err)
 		require.True(t, native, want)
 		require.Equal(t, want, reason)
 	}
+	// 无名 function 声明：丢出目录 + 在提示里点名，**不判死**。
+	// 独立 bridge：顶上那个跨多次 prepare 复用，b.unsupported 会累积，而下面钉的是排序后首项。
+	noName, err := newBasisPointsTestBridge(t, "[]").prepare([]byte(`{"model":"m","input":"x","tools":[{"type":"function"}]}`), "m")
+	require.NoError(t, err, "认不出的工具声明不再判死")
+	require.Contains(t, bpsTestProtocolText(t, noName),
+		"Hosted tools unavailable through this channel: function",
+		"被丢掉的声明必须在提示里点名，否则模型会声称用过")
 
 	// 承载不了的原生工具项换成占位 developer 消息，**不判死**（2026-09-30）。
 	placeheld, err := bridge.prepare([]byte(`{"model":"m","input":[{"type":"tool_call","id":"tc_1"}]}`), "m")
@@ -356,17 +380,20 @@ func TestOpenAIBasisPointsPrepareShape(t *testing.T) {
 func TestOpenAIBasisPointsRouteReasonIsTheSingleSourceOfPreflightRejects(t *testing.T) {
 	for want, raw := range map[string]string{
 		"history_reference":       `{"model":"m","input":"x","previous_response_id":"r"}`,
-		"tool_choice":             `{"model":"m","input":"x","tool_choice":"required"}`,
 		"output_format":           `{"model":"m","input":"x","text":{"format":{"type":"json_object"}}}`,
 		"reasoning_configuration": `{"model":"m","input":"x","reasoning":{"effort":"high","mode":"persistent"}}`,
 		"prompt_template":         `{"model":"m","input":"x","prompt":{"id":"p"}}`,
 	} {
 		require.Equal(t, want, openAIBasisPointsRouteReason([]byte(raw)), want)
 	}
-	// 能走到 prepare 的 tool_choice 取值只剩 auto / none / 缺失；none 时不写目录。
+	// tool_choice 已经完全不判死：none 不写目录，其余取值写进目录说明由模型遵守。
 	for _, raw := range []string{
 		`{"model":"m","input":"x","tool_choice":"auto"}`,
 		`{"model":"m","input":"x","tool_choice":"none"}`,
+		// tool_choice 的**类型**不再判死；「强制一个没声明的工具」那条判在 prepare（它要先建目录
+		// 才知道声明了什么，routeReason 建不了），用例见 …ForcedUndeclaredToolIsRejected。
+		// 所以这里只放不会触发那条的取值。
+		`{"model":"m","input":"x","tool_choice":{"type":"web_search"}}`,
 		`{"model":"m","input":"x","reasoning":{"effort":"high","mode":"standard"}}`,
 		`{"model":"m","input":"x","text":{"format":{"type":"text"}}}`,
 	} {
@@ -377,9 +404,11 @@ func TestOpenAIBasisPointsRouteReasonIsTheSingleSourceOfPreflightRejects(t *test
 	// prepare 里不许再有第二份判定把它们拦下来。
 	for _, raw := range []string{
 		`{"model":"m","input":"x","previous_response_id":"r"}`,
-		`{"model":"m","input":"x","tool_choice":"required"}`,
 		`{"model":"m","input":"x","text":{"format":{"type":"json_object"}}}`,
 		`{"model":"m","input":"x","reasoning":{"effort":"high","mode":"persistent"}}`,
+		// tool_choice 的**类型**同样不许在 prepare 里判（原来两处都判）。「强制一个没声明的工具」
+		// 是另一回事：那条只能判在 prepare（要先建目录），routeReason 里没有它，不构成两份判定。
+		`{"model":"m","input":"x","tool_choice":{"type":"web_search"}}`,
 	} {
 		_, err := newOpenAIBasisPointsBridge("scope", newOpenAIBasisPointsReplayCache(), nil).
 			prepare([]byte(raw), "m")
@@ -493,4 +522,217 @@ func TestOpenAIBasisPointsHistoryRewritesNativePlanOutputAndItemIDs(t *testing.T
 	require.Equal(t, "function_call_output", bpsText(patchOutput["type"]))
 	require.Equal(t, "fc_call_patch", bpsText(patchOutput["id"]), "ctco_ 前缀 BPS 不认")
 	require.Equal(t, openAIBasisPointsEmptyOutput, bpsText(patchOutput["output"]))
+}
+
+// 认不出的工具声明一律丢进目录说明、绝不判死（参考实现 cpa-plugin-oai-basispoints v0.2.9 的口径）。
+// 判死发生在出站之前 ⇒ 客户端每轮回放同一份 tools ⇒ 开着开关的账号上这个会话每轮都 502、永不自愈。
+func TestOpenAIBasisPoints_UnknownToolDeclarationsAreDroppedNotFatal(t *testing.T) {
+	cases := []struct {
+		name  string
+		tools string
+		noted string
+	}{
+		{"托管 mcp", `[{"type":"mcp","server_label":"x"}]`, "mcp"},
+		{"生图", `[{"type":"image_generation"}]`, "image_generation"},
+		{"Codex 无 name 的 local_shell", `[{"type":"local_shell"}]`, "local_shell"},
+		{"未来类型", `[{"type":"zzz_future_tool","name":"f"}]`, "zzz_future_tool"},
+		{"无 name 的 function", `[{"type":"function"}]`, "function"},
+		{"非对象条目", `["nope"]`, "(malformed)"},
+		{"无名 namespace", `[{"type":"namespace","tools":[{"type":"function","name":"f"}]}]`, "namespace"},
+		{"namespace 里的托管工具", `[{"type":"namespace","name":"n","tools":[{"type":"code_interpreter"}]}]`, "code_interpreter"},
+	}
+	for _, tc := range cases {
+		bridge := newBasisPointsTestBridge(t, "[]")
+		body, err := bridge.prepare([]byte(`{"model":"m","input":"hi","tools":`+tc.tools+`}`), "m")
+		require.NoError(t, err, tc.name)
+		protocol := bpsTestProtocolText(t, body)
+		require.Contains(t, protocol, "Hosted tools unavailable through this channel: "+tc.noted, tc.name)
+		require.Contains(t, protocol, "Do not claim to have used them", tc.name)
+		require.False(t, gjson.GetBytes(body, "tools").Exists(), tc.name+"：出站不带 tools")
+	}
+}
+
+// 同名工具声明两次、定义不同：后一条赢（Codex 的 additional_tools 正是用后一份更新同名 schema），
+// 且目录文本里只能出现一次 —— 留旧 schema 会让模型照着目录填参数、再被本层的参数校验拒掉。
+func TestOpenAIBasisPoints_RedeclaredToolKeepsTheLastDefinition(t *testing.T) {
+	bridge := newBasisPointsTestBridge(t, "[]")
+	raw := `{"model":"m","input":[{"type":"additional_tools","tools":[` +
+		`{"type":"function","name":"f","description":"description-last","parameters":{"type":"object","properties":{"b":{"type":"string"}}}}]},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],` +
+		`"tools":[{"type":"function","name":"f","description":"description-first","parameters":{"type":"object","properties":{"a":{"type":"string"}}}}]}`
+	body, err := bridge.prepare([]byte(raw), "m")
+	require.NoError(t, err, "重复声明不再判死")
+	protocol := bpsTestProtocolText(t, body)
+	// 不要断言裸 "new"/"old"：固定文案里有 "newline"，那条正例靠 boilerplate 就能过。
+	require.Contains(t, protocol, "description-last", "目录要描述最后那份定义")
+	require.NotContains(t, protocol, "description-first", "旧定义必须从目录里去掉")
+	require.Equal(t, 1, strings.Count(protocol, `Client tool "f"`), "同名工具只能出现一次")
+	// definition 是指纹哈希，认不出文本；参数 schema 才是模型填参数时要对上的那份。
+	properties, _ := bridge.tools["f"].parameters["properties"].(bpsObject)
+	require.Contains(t, properties, "b", "参数校验必须按最后那份 schema 走")
+	require.NotContains(t, properties, "a")
+}
+
+// tool_choice 不再判死，改成写进目录说明由模型遵守（出站 schema 封闭，这个字段送不上去）。
+func TestOpenAIBasisPoints_ToolChoiceIsDescribedInTheCatalog(t *testing.T) {
+	cases := []struct {
+		name, choice, want string
+	}{
+		{"required", `"required"`, "requires exactly one client tool call"},
+		{"强制点名", `{"type":"function","name":"exec_command"}`, `call the client tool "exec_command" and no other`},
+		{"allowed_tools auto", `{"type":"allowed_tools","tools":[{"type":"function","name":"exec_command"}]}`, `may only call`},
+		{"allowed_tools required", `{"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"exec_command"}]}`, `must call one of`},
+	}
+	for _, tc := range cases {
+		bridge := newBasisPointsTestBridge(t, "[]")
+		body, err := bridge.prepare([]byte(`{"model":"m","input":"hi","tool_choice":`+tc.choice+
+			`,"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{}}}]}`), "m")
+		require.NoError(t, err, tc.name)
+		require.Contains(t, bpsTestProtocolText(t, body), tc.want, tc.name)
+	}
+	// auto / 认不出的形态：不提约束，宁可不提也别把猜错的约束塞给模型。
+	for _, choice := range []string{`"auto"`, `{"type":"web_search"}`, `{"type":"allowed_tools","tools":[]}`} {
+		bridge := newBasisPointsTestBridge(t, "[]")
+		body, err := bridge.prepare([]byte(`{"model":"m","input":"hi","tool_choice":`+choice+`}`), "m")
+		require.NoError(t, err, choice)
+		protocol := bpsTestProtocolText(t, body)
+		require.NotContains(t, protocol, "The client requires", choice)
+		require.NotContains(t, protocol, "The client restricts", choice)
+	}
+	// none：连目录都不写。
+	bridge := newBasisPointsTestBridge(t, "[]")
+	body, err := bridge.prepare([]byte(`{"model":"m","input":"hi","tool_choice":"none",`+
+		`"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{}}}]}`), "m")
+	require.NoError(t, err)
+	protocol := bpsTestProtocolText(t, body)
+	require.NotContains(t, protocol, "exec_command", "none 时不写目录")
+	require.NotContains(t, protocol, "The client requires")
+}
+
+// item_reference / configuration_update 展不开，但也不许判死：落到占位项，会话能往下走。
+func TestOpenAIBasisPoints_UnexpandableItemsBecomePlaceholders(t *testing.T) {
+	// configuration_update **不**在这里：它是客户端在这一轮要求改推理配置，不是历史里躺着的内容，
+	// 换占位符等于静默丢掉客户端明确要求的能力还返 200。与顶层 reasoning.mode 对齐硬报错。
+	_, err := newBasisPointsTestBridge(t, "[]").prepare([]byte(
+		`{"model":"m","input":[{"type":"configuration_update"},`+
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`), "m")
+	reason, native := openAIBasisPointsNativeReason(err)
+	require.True(t, native, "configuration_update 要硬报错")
+	require.Equal(t, "reasoning_configuration", reason, "与顶层 reasoning.mode 同一个原因")
+
+	for _, kind := range []string{"item_reference"} {
+		bridge := newBasisPointsTestBridge(t, "[]")
+		body, err := bridge.prepare([]byte(`{"model":"m","input":[{"type":"`+kind+`","id":"x"},`+
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`), "m")
+		require.NoError(t, err, kind)
+		require.Contains(t, string(body), "an earlier "+kind+" item is not supported over this channel", kind)
+		require.Contains(t, string(body), "Do not claim to have used it or invent its result", kind)
+		// 断言结构，不要 NotContains 整个 body（同文件上面那段注释警告过：给文案加上引号
+		// 或换 fixture 类型都会让它假红/假绿）。
+		for _, item := range gjson.GetBytes(body, "input").Array() {
+			require.NotEqual(t, kind, item.Get("type").String(), kind+" 原样项不能送上游")
+		}
+	}
+}
+
+// S1：强制调一个没声明的工具 ⇒ 请求级拒收（参考实现 prepareResponsesBody 同一条）。
+// 不能只写进提示：那样模型拿到「随便挑的目录」+「只准调 x」两句打架的话，整轮照样烧掉。
+func TestOpenAIBasisPoints_ForcedUndeclaredToolIsRejected(t *testing.T) {
+	declared := `"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{}}}]`
+	rejected := map[string]string{
+		"required 但没声明任何工具":           `{"model":"m","input":"hi","tool_choice":"required"}`,
+		"点名一个不存在的工具":                  `{"model":"m","input":"hi","tool_choice":{"type":"function","name":"nope"},` + declared + `}`,
+		"点名的 namespace 对不上":           `{"model":"m","input":"hi","tool_choice":{"type":"function","name":"exec_command","namespace":"a"},` + declared + `}`,
+		"allowed_tools required 全不存在": `{"model":"m","input":"hi","tool_choice":{"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"nope"}]},` + declared + `}`,
+	}
+	for name, raw := range rejected {
+		_, err := newBasisPointsTestBridge(t, "[]").prepare([]byte(raw), "m")
+		reason, native := openAIBasisPointsNativeReason(err)
+		require.True(t, native, name)
+		require.Equal(t, "tool_choice", reason, name)
+	}
+	accepted := map[string]string{
+		"required + 有声明":                 `{"model":"m","input":"hi","tool_choice":"required",` + declared + `}`,
+		"点名一个真声明了的":                      `{"model":"m","input":"hi","tool_choice":{"type":"function","name":"exec_command"},` + declared + `}`,
+		"Chat 风格 function.name":          `{"model":"m","input":"hi","tool_choice":{"type":"function","function":{"name":"exec_command"}},` + declared + `}`,
+		"allowed_tools auto 不算 required": `{"model":"m","input":"hi","tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"nope"}]},` + declared + `}`,
+		"托管工具不算 required":                `{"model":"m","input":"hi","tool_choice":{"type":"web_search"},` + declared + `}`,
+		"none":                           `{"model":"m","input":"hi","tool_choice":"none",` + declared + `}`,
+	}
+	for name, raw := range accepted {
+		_, err := newBasisPointsTestBridge(t, "[]").prepare([]byte(raw), "m")
+		require.NoError(t, err, name)
+	}
+	// namespace 化的工具：提示里的名字必须是目录 key（带 namespace），不是裸 name。
+	body, err := newBasisPointsTestBridge(t, "[]").prepare([]byte(
+		`{"model":"m","input":"hi","tool_choice":{"type":"function","name":"f","namespace":"a"},`+
+			`"tools":[{"type":"namespace","name":"a","tools":[{"type":"function","name":"f","parameters":{"type":"object","properties":{}}}]}]}`), "m")
+	require.NoError(t, err)
+	require.Contains(t, bpsTestProtocolText(t, body), `call the client tool "a.f"`, "提示里的名字要与目录 key 一致")
+
+	// 点名一个托管工具：既不判死，也要明说它不可用（否则模型看着一份"随便挑"的目录）。
+	hosted, err := newBasisPointsTestBridge(t, "[]").prepare([]byte(
+		`{"model":"m","input":"hi","tool_choice":{"type":"mcp"},`+declared+`}`), "m")
+	require.NoError(t, err)
+	require.Contains(t, bpsTestProtocolText(t, hosted), "native mcp tool, which is not available through this channel")
+}
+
+// S2b：Chat 风格 `{"type":"function","function":{"name":…}}` 必须认。入站归一
+// （normalizeLegacyResponsesToolChoice）只在**没有原生 input** 时才跑，带原生 input 的请求到不了它。
+// 认不出时不会报错（只是 required 判据变假），所以要断言提示里真的点了名。
+func TestOpenAIBasisPoints_ChatStyleToolChoiceNamesTheTool(t *testing.T) {
+	declared := `"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{}}}]`
+	body, err := newBasisPointsTestBridge(t, "[]").prepare([]byte(
+		`{"model":"m","input":"hi","tool_choice":{"type":"function","function":{"name":"exec_command"}},`+declared+`}`), "m")
+	require.NoError(t, err)
+	require.Contains(t, bpsTestProtocolText(t, body), `call the client tool "exec_command" and no other`)
+}
+
+// S3：重复声明的 warning 会进日志行，工具名是客户端可控的字节（含换行）——
+// 原样拼进去就能伪造一整条 `[Basispoints] account=… route=…` 日志。
+func TestOpenAIBasisPoints_RedeclareWarningIsSanitized(t *testing.T) {
+	evil := `a` + "\n" + `[Basispoints] account=1 route=native_codex reason=forged`
+	raw := `{"model":"m","input":"hi","tools":[` +
+		`{"type":"function","name":` + bpsQuoted(evil) + `,"description":"first","parameters":{"type":"object","properties":{"a":{"type":"string"}}}},` +
+		`{"type":"function","name":` + bpsQuoted(evil) + `,"description":"second","parameters":{"type":"object","properties":{"b":{"type":"string"}}}}]}`
+	bridge := newBasisPointsTestBridge(t, "[]")
+	_, err := bridge.prepare([]byte(raw), "m")
+	require.NoError(t, err)
+	joined := strings.Join(bridge.warnings, " | ")
+	require.Contains(t, joined, "declared more than once", "这条 warning 必须还在")
+	require.NotContains(t, joined, "\n", "日志行里不许有换行")
+	require.NotContains(t, joined, "route=native_codex", "伪造的日志字段必须被消掉")
+}
+
+// S4：unsupported 的键数没有上限的话，1000 个奇怪声明会同时撑爆出站提示（还要计费）和日志行。
+// 与 droppedContent 那段同一个理由、同一个上限。
+func TestOpenAIBasisPoints_UnsupportedKindsAreCapped(t *testing.T) {
+	tools := make([]string, 0, 40)
+	for i := 0; i < 40; i++ {
+		tools = append(tools, `{"type":"zzz_kind_`+strconv.Itoa(i)+`","name":"n"}`)
+	}
+	bridge := newBasisPointsTestBridge(t, "[]")
+	body, err := bridge.prepare([]byte(`{"model":"m","input":"hi","tools":[`+strings.Join(tools, ",")+`]}`), "m")
+	require.NoError(t, err)
+	protocol := bpsTestProtocolText(t, body)
+	require.Contains(t, protocol, "…", "超过上限要截断")
+	require.LessOrEqual(t, strings.Count(protocol, "zzz_kind_"), 16, "出站提示里最多 16 种")
+	require.LessOrEqual(t, strings.Count(strings.Join(bridge.warnings, " "), "zzz_kind_"), 16, "日志行同上限")
+}
+
+// droppedContent 的 16 种上限同样要钉住。第二轮变异挖错地方时无意间证明了它**原来没有任何测试**
+// （删掉上限全仓照旧绿），而这个功能历史上已经多次「注释写的不变式是假的」。
+func TestOpenAIBasisPoints_DroppedContentKindsAreCapped(t *testing.T) {
+	parts := make([]string, 0, 40)
+	for i := 0; i < 40; i++ {
+		parts = append(parts, `{"type":"zzz_part_`+strconv.Itoa(i)+`"}`)
+	}
+	bridge := newBasisPointsTestBridge(t, "[]")
+	_, err := bridge.prepare([]byte(`{"model":"m","input":[{"type":"message","role":"user","content":[`+
+		`{"type":"input_text","text":"hi"},`+strings.Join(parts, ",")+`]}]}`), "m")
+	require.NoError(t, err)
+	joined := strings.Join(bridge.warnings, " | ")
+	require.Contains(t, joined, "Content parts replaced with a placeholder over this channel")
+	require.Contains(t, joined, "…", "超过上限要截断")
+	require.LessOrEqual(t, strings.Count(joined, "zzz_part_"), 16, "运维日志行里最多 16 种")
 }

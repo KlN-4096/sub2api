@@ -107,11 +107,18 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		if len(patchedBody) > 0 {
 			bpsBody = patchedBody
 		}
-		// 生图意图同样要在这里判死。原路径的分组闸门（下面 imageIntent && !imageGenerationAllowed）
-		// 排在分派点之后，而 openAIBasisPointsRouteReason 只看 tools / tool_choice 里的
-		// image_generation —— 光按模型名请求生图（gpt-image-1 之类）会既绕开分组闸门、又把模型名
-		// 带着账号主人的 bearer token 发到 bps.openai.com。BPS 本来就做不了生图，判死即可。
-		if reason == "" && IsImageGenerationIntent(openAIResponsesEndpoint, gjson.GetBytes(bpsBody, "model").String(), bpsBody) {
+		// 生图**模型**要在这里判死：原路径的分组闸门（下面 imageIntent && !imageGenerationAllowed）
+		// 排在分派点之后，光按模型名请求生图（gpt-image-1 之类）会既绕开分组闸门、又把模型名带着
+		// 账号主人的 bearer token 发到 bps.openai.com。BPS 做不了生图，判死即可。
+		//
+		// **只按模型名判，不用 IsImageGenerationIntent。** 那个谓词还会命中声明：
+		// `tools:[{"type":"image_generation"}]`、**被动**的 `image_gen` namespace、以及
+		// `additional_tools` 里的同款（Codex Lite 的签名形态）。声明是客户端每轮原样回放的，
+		// 判死在出站之前 ⇒ 开着开关的账号上那个会话每轮 502、永不自愈，而且这是最容易被真实
+		// Codex 客户端撞到的一个。image_generation_intent.go:85 自己也为「被动 namespace 不该
+		// 强制要求原生能力」另建了 IsExplicitImageGenerationIntent —— 但那个仍然命中前两种声明，
+		// 所以这里连它也不用。声明本身由 collectTools 丢出目录并在提示里点名。
+		if reason == "" && isOpenAIImageGenerationModel(gjson.GetBytes(bpsBody, "model").String()) {
 			reason = "image_generation"
 		}
 		if reason != "" {

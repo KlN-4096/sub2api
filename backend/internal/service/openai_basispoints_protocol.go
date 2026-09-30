@@ -44,6 +44,10 @@ type openAIBasisPointsBridge struct {
 	warnings        []string
 	tools           map[string]bpsTool
 	unsupported     map[string]bool
+	// toolChoice 是客户端的 tool_choice 渲染成的一句人话。出站 schema 封闭、这个字段送不上去，
+	// 只能写进目录说明由模型自己遵守。"none" 的情形连目录都不写，所以这里永远不会是 none。
+	// **点名一个目录里没有的工具是请求级拒收**，不靠这句提示兜（见 prepare 里那处）。
+	toolChoice string
 	// droppedContent 记下被换成占位部件的内容类型，出站前汇总成一行运维日志。
 	// 没有它，改成占位符之后连 `input_content` 那个读数都没了，现场无从知道丢了什么。
 	droppedContent map[string]bool
@@ -159,22 +163,28 @@ func (b *openAIBasisPointsBridge) prepare(raw []byte, upstreamModel string) ([]b
 		return nil, bpsNative("request_json")
 	}
 	var catalog []bpsObject
-	// tool_choice 的**拒绝**判定在 openAIBasisPointsRouteReason；这里只用它的 "none" 做行为判断
-	// （客户端说了别调工具，就别把目录写进提示）。能走到这里的取值只剩 auto / none / 缺失。
+	// tool_choice 按**类型**已经不再判死（见 openAIBasisPointsRouteReason 里那段）。"none" = 客户端
+	// 说了别调工具，目录就不写进提示；其余取值写进目录说明由模型遵守 —— 出站 schema 是封闭的，
+	// tool_choice 这个字段本身送不上去。
 	if bpsText(source["tool_choice"]) != "none" {
-		var err error
-		if catalog, err = b.collectTools(source["tools"], ""); err != nil {
-			return nil, err
-		}
+		catalog = b.collectTools(source["tools"], "")
 		for _, raw := range input {
 			if item, ok := raw.(bpsObject); ok && bpsText(item["type"]) == "additional_tools" {
-				additional, err := b.collectTools(item["tools"], "")
-				if err != nil {
-					return nil, err
-				}
-				catalog = append(catalog, additional...)
+				catalog = append(catalog, b.collectTools(item["tools"], "")...)
 			}
 		}
+		catalog = dedupeOpenAIBasisPointsCatalog(catalog)
+		// **强制调一个目录里没有的工具 ⇒ 请求级拒收**（参考实现 prepareResponsesBody 同一条：
+		// clientToolCallRequired && 选不出任何可调工具 ⇒ 400 invalid_tool_choice）。不写成
+		// 「只提示不强制」：那样模型拿到的是一份"随便挑"的目录 + 一句"只准调 x"，两句打架，
+		// 要么拒答要么去调一个 b.tools 里不存在的名字、整轮照样报错，白烧一轮。
+		// 这条**不属于**「历史回放每轮都死」那一类：tool_choice 是当轮意图，客户端改一下就好，
+		// 可见失败正是对的。
+		if openAIBasisPointsToolCallRequired(source["tool_choice"]) &&
+			!b.toolChoiceSelectsDeclaredTool(source["tool_choice"]) {
+			return nil, bpsNative("tool_choice")
+		}
+		b.toolChoice = describeOpenAIBasisPointsToolChoice(source["tool_choice"])
 	}
 	// 回合身份在改写 input 之前算：图片换成 file_id 之后再算，重传（缓存过期 / 重启）会让同一回合中途换 turn_id。
 	cacheKey := bpsText(source["prompt_cache_key"])
@@ -363,8 +373,9 @@ func normalizeOpenAIBasisPointsContextManagement(management []any) ([]any, error
 	return []any{bpsObject{"type": "compaction", "compact_threshold": threshold}}, nil
 }
 
-// isOpenAIBasisPointsHostedTool：BPS 上转发不了的托管工具。auto 模式下略过并在提示里说明；
-// 显式点名（tool_choice / external_web_access）的在入口就落回原路径。
+// isOpenAIBasisPointsHostedTool：BPS 上转发不了的托管工具 —— 一律丢出目录并在提示里点名。
+// **没有任何"显式点名就判死"的入口了**（原来 external_web_access 打开才判死，判据是反的：
+// 这条通道自己带服务端搜索）。函数留着只为让提示里的类型名用它们的规范拼写。
 func isOpenAIBasisPointsHostedTool(kind string) bool {
 	switch kind {
 	case "web_search", "web_search_preview", "web_search_preview_2025_03_11", "web_search_2025_08_26",
@@ -375,28 +386,29 @@ func isOpenAIBasisPointsHostedTool(kind string) bool {
 	}
 }
 
-func (b *openAIBasisPointsBridge) collectTools(value any, namespace string) ([]bpsObject, error) {
+// collectTools 不会失败：认不出的条目一律丢进 b.unsupported（提示里点名），不判死。
+func (b *openAIBasisPointsBridge) collectTools(value any, namespace string) []bpsObject {
 	var catalog []bpsObject
 	items, _ := value.([]any)
 	for _, raw := range items {
 		item, ok := raw.(bpsObject)
 		if !ok {
-			return nil, bpsNative("tool_catalog")
+			// 参考实现 iterToolValues 对非对象条目直接 continue。判死在出站之前 ⇒ 客户端每轮
+			// 回放同一份 tools ⇒ 会话每轮都死，所以这里也只跳过。
+			b.unsupported["(malformed)"] = true
+			continue
 		}
 		kind, name := bpsText(item["type"]), bpsText(item["name"])
 		if kind == "namespace" {
 			if name == "" {
-				return nil, bpsNative("tool_catalog")
+				b.unsupported["namespace"] = true
+				continue
 			}
 			nested := name
 			if namespace != "" {
 				nested = namespace + "." + name
 			}
-			entries, err := b.collectTools(item["tools"], nested)
-			if err != nil {
-				return nil, err
-			}
-			catalog = append(catalog, entries...)
+			catalog = append(catalog, b.collectTools(item["tools"], nested)...)
 			continue
 		}
 		if isOpenAIBasisPointsHostedTool(kind) {
@@ -404,12 +416,14 @@ func (b *openAIBasisPointsBridge) collectTools(value any, namespace string) ([]b
 			continue
 		}
 		if (kind != "function" && kind != "custom") || name == "" {
-			return nil, bpsNative("tool_catalog")
+			// function / custom 之外的一切（含 Codex 那个无 name 的 {"type":"local_shell"}）都
+			// 走托管工具同一条路：丢出目录、在提示里点名。参考实现同样只收 function / custom。
+			b.unsupported[sanitizeOpenAIBasisPointsPartKind(kind)] = true
+			continue
 		}
 		// key 就是模型看到的名字（namespace 用点拼）。客户端同时声明顶层 function `a.f` 和
-		// namespace `a` 里的 `f` 时两者扁平后同名、定义不同 ⇒ 判目录冲突、硬报错。**这是刻意的**：
-		// 模型在线上只能说出 `a.f` 这一个名字，没有任何线上表示能区分这两者，把两条都收进目录
-		// 只会把「发请求前可判的歧义」推迟成「模型调用时无法解析」。
+		// namespace `a` 里的 `f` 时两者扁平后同名、定义不同 —— 模型在线上只能说出 `a.f` 这一个
+		// 名字，没有任何线上表示能区分这两者。**后声明赢**（见下面那段），不再判死。
 		key := name
 		if namespace != "" {
 			key = namespace + "." + name
@@ -428,20 +442,151 @@ func (b *openAIBasisPointsBridge) collectTools(value any, namespace string) ([]b
 		}
 		definition := bpsFingerprint(item)
 		if previous, exists := b.tools[key]; exists {
-			if previous.definition != definition || previous.namespace != namespace || previous.name != name {
-				return nil, bpsNative("tool_catalog")
+			if previous.definition == definition && previous.namespace == namespace && previous.name == name {
+				continue
 			}
-			continue
+			// 参考实现的 add 是写 map：后声明覆盖同名工具（Codex 的 additional_tools 正是用后一份
+			// 更新同名工具的 schema）。原来这里判死 ⇒ 客户端每轮回放同一份 tools ⇒ 会话每轮都死。
+			// 覆盖之后 b.tools[key] 与目录文本必须一致，所以调用方要按 name 去重、保留最后一条。
+			// key 是客户端可控的字节（含换行）。这条 warning 会进 logger.LegacyPrintf 的日志行，
+			// 原样拼进去就能伪造出一整条 `[Basispoints] account=… route=…` 日志。走与
+			// droppedPart / droppedItem 同一个消毒器。
+			b.warnings = append(b.warnings,
+				"A client tool was declared more than once with different definitions; the last declaration wins: "+
+					sanitizeOpenAIBasisPointsPartKind(key))
 		}
 		parameters, _ := entry["parameters"].(bpsObject)
 		b.tools[key] = bpsTool{name: name, namespace: namespace, kind: kind, definition: definition, parameters: parameters}
 		catalog = append(catalog, entry)
 	}
-	return catalog, nil
+	return catalog
+}
+
+// openAIBasisPointsToolChoiceKey：tool_choice 里点名的工具在目录里的 key。**必须与 collectTools
+// 的拼法一致**（`namespace + "." + name`），否则提示说的名字与目录里的对不上，模型照着提示调
+// 一个目录里没有的名字。参考实现的 clientToolCallName 同样显式读 namespace。
+// Chat 风格的 `{"type":"function","function":{"name":…}}` 也认：入站归一
+// （normalizeLegacyResponsesToolChoice）只在**没有原生 input** 时才跑。
+func openAIBasisPointsToolChoiceKey(choice bpsObject) string {
+	name := bpsText(choice["name"])
+	if name == "" {
+		if nested, ok := choice["function"].(bpsObject); ok {
+			name = bpsText(nested["name"])
+		}
+	}
+	if name == "" {
+		return ""
+	}
+	if namespace := bpsText(choice["namespace"]); namespace != "" {
+		return namespace + "." + name
+	}
+	return name
+}
+
+// openAIBasisPointsToolCallRequired：客户端是不是要求这一轮**必须**调一个工具。
+// 与参考实现 clientToolCallRequired 对齐。
+func openAIBasisPointsToolCallRequired(value any) bool {
+	switch choice := value.(type) {
+	case string:
+		return choice == "required"
+	case bpsObject:
+		switch bpsText(choice["type"]) {
+		case "function", "custom", "":
+			return openAIBasisPointsToolChoiceKey(choice) != ""
+		case "allowed_tools":
+			return bpsText(choice["mode"]) == "required"
+		}
+	}
+	return false
+}
+
+// toolChoiceSelectsDeclaredTool：tool_choice 点名的工具里至少有一个真在目录里。
+// "required"（不点名任何具体工具）只要目录非空就算选到了。
+func (b *openAIBasisPointsBridge) toolChoiceSelectsDeclaredTool(value any) bool {
+	switch choice := value.(type) {
+	case string:
+		return len(b.tools) > 0
+	case bpsObject:
+		if bpsText(choice["type"]) == "allowed_tools" {
+			list, _ := choice["tools"].([]any)
+			for _, raw := range list {
+				if tool, ok := raw.(bpsObject); ok {
+					if _, declared := b.tools[openAIBasisPointsToolChoiceKey(tool)]; declared {
+						return true
+					}
+				}
+			}
+			return false
+		}
+		_, declared := b.tools[openAIBasisPointsToolChoiceKey(choice)]
+		return declared
+	}
+	return false
+}
+
+// describeOpenAIBasisPointsToolChoice：把 tool_choice 说成一句模型能照做的话。认不出的形态返回
+// 空串（宁可不提，也不要把猜错的约束塞给模型）。
+func describeOpenAIBasisPointsToolChoice(value any) string {
+	switch choice := value.(type) {
+	case string:
+		if choice == "required" {
+			return "The client requires exactly one client tool call in this response."
+		}
+	case bpsObject:
+		switch bpsText(choice["type"]) {
+		case "function", "custom", "":
+			if key := openAIBasisPointsToolChoiceKey(choice); key != "" {
+				return "The client requires this response to call the client tool " + bpsQuoted(key) + " and no other."
+			}
+		case "allowed_tools":
+			names := make([]string, 0, 4)
+			list, _ := choice["tools"].([]any)
+			for _, raw := range list {
+				if tool, ok := raw.(bpsObject); ok {
+					if key := openAIBasisPointsToolChoiceKey(tool); key != "" {
+						names = append(names, bpsQuoted(key))
+					}
+				}
+			}
+			if len(names) == 0 {
+				return ""
+			}
+			verb := "may only call"
+			if bpsText(choice["mode"]) == "required" {
+				verb = "must call one of"
+			}
+			return "The client restricts this response: it " + verb + " these client tools: " + strings.Join(names, ", ") + "."
+		default:
+			// 客户端点名了一个托管工具（mcp / web_search / image_generation…）。既不报错也不提，
+			// 模型就会看着一份"随便挑"的目录 —— 而客户端明说了只准调那一个。
+			return "The client asked this response to use a native " + sanitizeOpenAIBasisPointsPartKind(bpsText(choice["type"])) +
+				" tool, which is not available through this channel. Do not claim to have used it."
+		}
+	}
+	return ""
+}
+
+// dedupeOpenAIBasisPointsCatalog：同名工具只留最后一条，与 b.tools 的「后声明覆盖」保持一致。
+// 留第一条会让目录文本描述旧 schema、而参数校验按新 schema 走 —— 模型照着目录填参数必被拒。
+func dedupeOpenAIBasisPointsCatalog(catalog []bpsObject) []bpsObject {
+	last := make(map[string]int, len(catalog))
+	for i, entry := range catalog {
+		last[bpsText(entry["name"])] = i
+	}
+	if len(last) == len(catalog) {
+		return catalog
+	}
+	result := make([]bpsObject, 0, len(last))
+	for i, entry := range catalog {
+		if last[bpsText(entry["name"])] == i {
+			result = append(result, entry)
+		}
+	}
+	return result
 }
 
 func (b *openAIBasisPointsBridge) protocolInstructions(catalog []bpsObject) string {
-	protocol := "This request comes from an external Responses client. Return assistant text. Do not call Excel, Office, workbook, connector, list_skills or native web-search tools."
+	protocol := "This request comes from an external Responses client. Return assistant text. Do not call Excel, Office, workbook, connector or list_skills tools."
 	if len(catalog) > 0 {
 		protocol = "This request comes from an external Responses client. Use only the client tools in the catalog below. " +
 			"There is no live Excel workbook for this request. The proxy intercepts run_officejs as a transport and never executes Office code. " +
@@ -454,7 +599,7 @@ func (b *openAIBasisPointsBridge) protocolInstructions(catalog []bpsObject) stri
 			"Call one client tool at a time, including update_plan through this transport. After receiving its result continue the task; do not repeat completed calls. " +
 			"Tool results replayed under run_officejs are the named client tool's results. When a tool is needed, emit its call in this response instead of only announcing it. " +
 			"Do not call other native tools or claim that shell, filesystem or workspace access is unavailable when a suitable catalog tool exists. " +
-			"Other native server-injected Excel, Office, connector, workbook, list_skills and web-search tools are unavailable here; calling one fails the whole turn. " +
+			"Other native server-injected Excel, Office, connector, workbook and list_skills tools are unavailable here; calling one fails the whole turn. " +
 			"If no tool is needed, answer as assistant text. Client tool catalog:\n" + describeOpenAIBasisPointsCatalog(catalog) +
 			"\nEnd of catalog. Invoke native run_officejs once. FUNCTION uses a JSON envelope in code. CUSTOM uses the exact " + openAIBasisPointsCustomMarker + "CATALOG_NAME summary marker and raw input in code. No Office code is executed by the proxy."
 	}
@@ -464,15 +609,27 @@ func (b *openAIBasisPointsBridge) protocolInstructions(catalog []bpsObject) stri
 			kinds = append(kinds, kind)
 		}
 		sort.Strings(kinds)
+		// 与 droppedContent 那段同一个理由：一个请求里能声明任意多种类型名，不设上限会同时撑爆
+		// 出站提示（还要计费）和日志行。截 16 种 + `…`。
+		if len(kinds) > 16 {
+			kinds = append(kinds[:16], "…")
+		}
 		warning := "Hosted tools unavailable through this channel: " + strings.Join(kinds, ", ")
 		b.warnings = append(b.warnings, warning)
 		protocol += "\n" + warning + ". These declarations were omitted. Do not claim to have used them. If the task requires one, explain the limitation or use a suitable declared client tool."
 		for kind := range b.unsupported {
 			if strings.HasPrefix(kind, "web_search") {
-				protocol += " If the user needs current web information, say that web search is off on this channel and that enabling Codex live web search (for example the --search flag or web_search = \"live\") turns it on."
+				// **别说"搜索关掉了"** —— 这条通道自己带服务端搜索，实测直连与经网关都会出
+				// response.web_search_call.{in_progress,searching,completed} 事件、web_search_call
+				// 项和带真实 openai.com 链接的 annotation。原来那句让模型对一个它实际有的能力
+				// 撒谎、并劝用户去开 Codex 的 --search（对这条通道毫无作用）。
+				protocol += " The client's own web-search declaration is what was omitted; this channel still has its own server-side web search. Use it when the task needs current information, and cite what it returns."
 				break
 			}
 		}
+	}
+	if b.toolChoice != "" {
+		protocol += "\n" + b.toolChoice
 	}
 	return protocol
 }
@@ -575,8 +732,15 @@ func (b *openAIBasisPointsBridge) translateHistory(input []any) ([]any, error) {
 		switch bpsText(item["type"]) {
 		case "additional_tools":
 			continue
-		case "item_reference":
-			return nil, bpsNative("history_reference")
+		// item_reference（引用上一次响应里的某个 item）展不开：正文只在上游那边。原来硬报错 ——
+		// 客户端每轮回放同一批历史 ⇒ 会话每轮都死。落到下面的 default 占位项：上下文少一块，但
+		// 会话能往下走，且提示明说"别声称用过、别编结果"。参考实现是**静默丢弃**
+		// （translateInputItems 里直接 continue），占位符比它多一句交代。
+		//
+		// configuration_update **不**走占位符：它是客户端在**这一轮**要求改推理配置，不是历史里
+		// 躺着的内容。换成占位符等于把客户端明确要求的能力静默丢掉还返 200，而顶层
+		// `reasoning.mode != "standard"` 走的是硬报错 reasoning_configuration —— 同一个意图两条
+		// 入口两种处置就是漂移。这里与那条对齐。（参考实现没有这个分支，会原样透传去赌上游 400。）
 		case "configuration_update":
 			return nil, bpsNative("reasoning_configuration")
 		case "compaction_trigger":

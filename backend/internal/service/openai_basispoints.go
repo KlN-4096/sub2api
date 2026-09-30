@@ -275,8 +275,8 @@ func (a *Account) UsesOpenAIBasisPoints() bool {
 }
 
 // openAIBasisPointsRouteReason 发请求前就能判定的「BPS 承载不了」原因；"" 表示可以走 BPS。
-// 托管搜索只在客户端显式要求联网时算数：Codex CLI 默认 cached 声明（external_web_access=false）
-// 没有联网意图，留在 BPS 并在提示里告诉模型怎么开。
+// **工具声明与 tool_choice 的类型不在这里判**（09-30 全部删掉，见下面那段）。剩下的都是
+// 「这一轮要什么、而且封闭的出站 schema 里真的没有落点」。
 func openAIBasisPointsRouteReason(body []byte) string {
 	if !gjson.ValidBytes(body) {
 		return ""
@@ -293,78 +293,27 @@ func openAIBasisPointsRouteReason(body []byte) string {
 	if mode := strings.TrimSpace(gjson.GetBytes(body, "reasoning.mode").String()); mode != "" && mode != "standard" {
 		return "reasoning_configuration"
 	}
-	if reason := bpsToolChoiceRoute(gjson.GetBytes(body, "tool_choice")); reason != "" {
-		return reason
-	}
-	if reason := bpsDeclaredToolsRoute(gjson.GetBytes(body, "tools")); reason != "" {
-		return reason
-	}
-	if input := gjson.GetBytes(body, "input"); input.IsArray() {
-		for _, item := range input.Array() {
-			switch item.Get("type").String() {
-			case "additional_tools":
-				if reason := bpsDeclaredToolsRoute(item.Get("tools")); reason != "" {
-					return reason
-				}
-			case "item_reference":
-				return "history_reference"
-			case "configuration_update":
-				return "reasoning_configuration"
-			}
-			// **内容部件不在这里判死。** 原来这里按部件白名单扫 message 的 `content` 与工具结果的
-			// `output`，任何白名单外的部件（未知类型、非字符串正文、形态不对的图片）整条请求判死成
-			// input_content 硬 502 —— 失败在出站之前 ⇒ 客户端每轮回放同一批历史 ⇒ 这个会话在开着
-			// 开关的账号上每轮都 502、永不自愈（09-30 现网撞了一次）。用户 2026-09-30 拍板改成
-			// 占位部件，处置全部收到 rewriteContent 一处（见 openAIBasisPointsDroppedPartNotice），
-			// 这道事前闸门连同 bpsContentRoute 一起删掉。
-		}
-	}
+	// **工具声明与 input 项都不在这里判死。**
+	//
+	// 内容部件那道闸门 09-30 已经删过一次（klno.2）：任何白名单外的部件整条请求判死成
+	// input_content 硬 502 —— 失败在出站之前 ⇒ 客户端每轮回放同一批历史 ⇒ 这个会话在开着
+	// 开关的账号上每轮都 502、永不自愈（现网撞了一次）。处置收到 rewriteContent 一处。
+	//
+	// 这一版把同一类缺陷的剩下三个出口一起关掉（参考 cpa-plugin-oai-basispoints v0.2.9 的
+	// 口径：它的 iterToolValues 只收 function / custom，web_search / image_generation / mcp /
+	// file_search / code_interpreter 一律静默跳过，**全程没有任何工具类型的请求级拒收**）：
+	//   - tool_choice          原 bpsToolChoiceRoute：任何对象形态都判死，连 {type:function,name}
+	//                          这种正常的强制调用也算 ⇒ 改成写进目录说明（protocolInstructions）
+	//   - tools/additional_tools 原 bpsDeclaredToolsRoute：托管工具判死 ⇒ 改成 collectTools 里
+	//                          丢进 b.unsupported，提示里点名说"这些声明被省掉了、别声称用过"
+	//   - item_reference / configuration_update  ⇒ 改成 translateHistory 的占位项
+	//
+	// web_search 这条尤其要命：默认的 external_web_access=false 放过、**打开**才判死，
+	// 而 BPS 自己注入的服务端搜索本来就在跑（实测直连与经网关都出 web_search_call 事件 +
+	// 真实 openai.com 注脚），等于"要搜索的请求被挡在门外、不要的反而搜得到"。
 	for _, path := range []string{"text.format.type", "response_format.type"} {
 		if kind := strings.TrimSpace(gjson.GetBytes(body, path).String()); kind != "" && kind != "text" {
 			return "output_format"
-		}
-	}
-	return ""
-}
-
-func bpsToolChoiceRoute(choice gjson.Result) string {
-	switch choice.Type {
-	case gjson.String:
-		switch strings.TrimSpace(choice.String()) {
-		case "", "auto", "none":
-			return ""
-		}
-		return "tool_choice"
-	case gjson.JSON:
-		kind := strings.TrimSpace(choice.Get("type").String())
-		switch {
-		case strings.HasPrefix(kind, "web_search"):
-			return "web_search"
-		case kind == "image_generation":
-			return "image_generation"
-		}
-		return "tool_choice"
-	}
-	return ""
-}
-
-func bpsDeclaredToolsRoute(tools gjson.Result) string {
-	for _, tool := range tools.Array() {
-		kind := strings.TrimSpace(tool.Get("type").String())
-		switch {
-		case kind == "namespace":
-			if reason := bpsDeclaredToolsRoute(tool.Get("tools")); reason != "" {
-				return reason
-			}
-		case strings.HasPrefix(kind, "web_search"):
-			if tool.Get("external_web_access").Type != gjson.False {
-				return "web_search"
-			}
-		case kind == "image_generation":
-			return "image_generation"
-		case isOpenAIBasisPointsHostedTool(kind):
-			// mcp / file_search / code_interpreter 之类只有原生后端才跑得了，不能静默丢掉。
-			return "hosted_tool"
 		}
 	}
 	return ""

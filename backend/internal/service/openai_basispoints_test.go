@@ -396,14 +396,15 @@ func TestOpenAIBasisPointsUnavailableStatus(t *testing.T) {
 	for reason, want := range map[string]int{
 		"status_403_usage_policy": http.StatusForbidden,
 		"status_429":              http.StatusTooManyRequests,
-		"status_500":              http.StatusInternalServerError,
-		"status_502_stream":       http.StatusBadGateway,
-		"status_504_stream":       http.StatusGatewayTimeout,
-		"tool_choice":             http.StatusBadGateway,
-		"service_tier":            http.StatusBadGateway,
-		"stream_incomplete":       http.StatusBadGateway,
-		"status_999":              http.StatusBadGateway,
-		"status_abc":              http.StatusBadGateway,
+		// tool_choice 点名了一个没声明的工具（客户端自己的请求错，改一下就好）。
+		"tool_choice":       http.StatusBadGateway,
+		"status_500":        http.StatusInternalServerError,
+		"status_502_stream": http.StatusBadGateway,
+		"status_504_stream": http.StatusGatewayTimeout,
+		"service_tier":      http.StatusBadGateway,
+		"stream_incomplete": http.StatusBadGateway,
+		"status_999":        http.StatusBadGateway,
+		"status_abc":        http.StatusBadGateway,
 		// 401 / 407 刻意不透：客户端会把它们当成自己的凭据失效去清 token、要求重登，
 		// 而实际是本站这个账号打 BPS 被拒。
 		"status_401_invalid_api_key": http.StatusBadGateway,
@@ -455,18 +456,30 @@ func TestOpenAIBasisPoints_OrphanToolOutputIsAHardError(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "basispoints_tool_history")
 }
 
-func TestOpenAIBasisPoints_ExplicitWebSearchIsAHardError(t *testing.T) {
-	account := newBasisPointsTestAccount(9105)
-	c, rec := newBasisPointsTestContext(t)
-	upstream := &httpUpstreamRecorder{responses: []*http.Response{bpsTestResponse(http.StatusOK, "text/event-stream", bpsTestCompletedSSE(bpsTestMessageItem))}}
-	body := strings.Replace(bpsTestClientBody, `"external_web_access":false`, `"external_web_access":true`, 1)
-	result, err := (&OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}).Forward(context.Background(), c, account, []byte(body))
-	require.Nil(t, result)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "web_search")
-	require.Empty(t, upstream.requests)
-	require.Equal(t, http.StatusBadGateway, rec.Code)
-	require.Contains(t, rec.Body.String(), "basispoints_web_search")
+// 原来这个测试钉的是「打开 external_web_access 就判死」。**那条闸门是反的**：默认的 false 放过、
+// 打开才判死，而这条通道自己带服务端搜索（实测直连与经网关都出 web_search_call 事件 + 真实
+// openai.com 注脚）⇒ 要搜索的请求被挡在门外、不要的反而搜得到。现在两种声明都放行，声明本身
+// 丢出目录并在提示里点名，且**不许**再告诉模型"搜索关掉了"。
+func TestOpenAIBasisPoints_DeclaredWebSearchIsDroppedNotRejected(t *testing.T) {
+	for _, access := range []string{"false", "true"} {
+		account := newBasisPointsTestAccount(9105)
+		c, rec := newBasisPointsTestContext(t)
+		upstream := &httpUpstreamRecorder{responses: []*http.Response{bpsTestResponse(http.StatusOK, "text/event-stream", bpsTestCompletedSSE(bpsTestMessageItem))}}
+		body := strings.Replace(bpsTestClientBody, `"external_web_access":false`, `"external_web_access":`+access, 1)
+		result, err := (&OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}).Forward(context.Background(), c, account, []byte(body))
+		require.NoError(t, err, access)
+		require.NotNil(t, result, access)
+		require.Equal(t, http.StatusOK, rec.Code, access)
+		require.Len(t, upstream.requests, 1, "必须真的发出去，external_web_access="+access)
+
+		sent := upstream.bodies[0]
+		require.False(t, gjson.GetBytes(sent, "tools").Exists(), "出站不带 tools 字段")
+		protocol := bpsTestProtocolText(t, sent)
+		require.Contains(t, protocol, "Hosted tools unavailable through this channel: web_search", access)
+		require.Contains(t, protocol, "this channel still has its own server-side web search", access)
+		require.NotContains(t, protocol, "web search is off on this channel", "别对一个实际有的能力撒谎")
+		require.NotContains(t, protocol, "--search", "别劝用户去开对这条通道无效的 Codex 开关")
+	}
 }
 
 func TestOpenAIBasisPoints_ModelAccessChangedIsAHardError(t *testing.T) {
@@ -2433,4 +2446,44 @@ func TestOpenAIBasisPoints_ToolHistoryTolerateNullNamespaceAndEmptyArguments(t *
 	_, err = (&OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: up2}).Forward(context.Background(), c2, account, []byte(body))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "tool_history")
+}
+
+// B1：生图**声明**必须能发出去，只有生图**模型**判死。原来 Forward 里那道
+// IsImageGenerationIntent 会把 `tools:[{"type":"image_generation"}]`、**被动**的 image_gen
+// namespace、以及 additional_tools 里的同款（Codex Lite 的签名形态）全算成生图意图 ⇒ 客户端每轮
+// 回放同一份声明 ⇒ 开着开关的账号上每轮 502。这个用例必须走 Forward，只调 prepare 证明不了。
+func TestOpenAIBasisPoints_ImageGenerationDeclarationsReachUpstream(t *testing.T) {
+	declarations := map[string]string{
+		"原生 image_generation 工具": `"tools":[{"type":"image_generation"}],`,
+		"被动 image_gen namespace": `"tools":[{"type":"namespace","name":"image_gen","tools":[{"type":"function","name":"g","parameters":{"type":"object","properties":{}}}]}],`,
+		"additional_tools 里的同款":  `"input":[{"type":"additional_tools","tools":[{"type":"namespace","name":"image_gen","tools":[{"type":"function","name":"g","parameters":{"type":"object","properties":{}}}]}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],`,
+		"tool_choice 点名生图":       `"tool_choice":{"type":"image_generation"},`,
+	}
+	for name, fragment := range declarations {
+		account := newBasisPointsTestAccount(9106)
+		c, rec := newBasisPointsTestContext(t)
+		upstream := &httpUpstreamRecorder{responses: []*http.Response{bpsTestResponse(http.StatusOK, "text/event-stream", bpsTestCompletedSSE(bpsTestMessageItem))}}
+		body := `{"model":"gpt-6-astra","stream":true,` + fragment + `"instructions":"base prompt"`
+		if !strings.Contains(fragment, `"input"`) {
+			body += `,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]`
+		}
+		body += `}`
+		result, err := (&OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}).Forward(context.Background(), c, account, []byte(body))
+		require.NoError(t, err, name)
+		require.NotNil(t, result, name)
+		require.Equal(t, http.StatusOK, rec.Code, name)
+		require.Len(t, upstream.requests, 1, name+"：声明不该拦住请求")
+		require.Equal(t, openAIBasisPointsResponsesURL, upstream.requests[0].URL.String(), name)
+	}
+	// 生图**模型**照旧判死：会绕开分组闸门、还把模型名带着 bearer token 发到 bps.openai.com。
+	account := newBasisPointsTestAccount(9107)
+	c, rec := newBasisPointsTestContext(t)
+	upstream := &httpUpstreamRecorder{}
+	_, err := (&OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}).Forward(
+		context.Background(), c, account,
+		[]byte(`{"model":"gpt-image-1","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`))
+	require.Error(t, err)
+	require.Empty(t, upstream.requests, "生图模型一个字节都不许发到 BPS")
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Contains(t, rec.Body.String(), "basispoints_image_generation")
 }
