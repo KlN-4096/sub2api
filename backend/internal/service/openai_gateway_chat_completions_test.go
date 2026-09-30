@@ -1296,7 +1296,13 @@ func TestGPT61SolMappedReasoningModeAndSampling(t *testing.T) {
 	body := []byte(`{"model":"public","reasoning":{"mode":"pro","effort":"max"},"temperature":0.5,"top_p":0.9,"logprobs":true,"top_logprobs":2,"include":["message.output_text.logprobs","reasoning.encrypted_content"]}`)
 	out, _, err := normalizeOpenAIResponsesReasoningMode(body, "gpt-6.1-sol")
 	require.NoError(t, err)
-	require.Equal(t, "pro", gjson.GetBytes(out, "reasoning.mode").String())
+	// **klno 刻意与上游不一致**：上游这条原来断言 gpt-6.1-sol 保留 `reasoning.mode":"pro"`。
+	// 真实 Codex 客户端对**任何**模型都不发 reasoning.mode —— 源码核实 rust-v0.156.1 /
+	// 0.158.0-alpha.7 / 2026-09-30 main（b412ff32c）三处一致，`codex-api/src/common.rs` 的
+	// Reasoning 结构体只有 effort / summary / context。出站带一个真客户端永不出现的字段就是
+	// 侧信道指纹。mode 一律删，mode=pro 且没给 effort 时换算成 Codex 最高档 max
+	// （normalizeOpenAIResponsesReasoningMode 的注释与 …AstraAlignsWithCodex 用例）。
+	require.False(t, gjson.GetBytes(out, "reasoning.mode").Exists(), "出站不许带 reasoning.mode")
 	require.Equal(t, "max", gjson.GetBytes(out, "reasoning.effort").String())
 	for _, field := range []string{"temperature", "top_p", "logprobs", "top_logprobs"} {
 		require.False(t, gjson.GetBytes(out, field).Exists(), field)
