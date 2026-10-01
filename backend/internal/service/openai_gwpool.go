@@ -952,16 +952,12 @@ func (s *openAICodexCookieStore) gatewayPoolRenew(ctx context.Context, account *
 	if !applied.Renewing || applied.AccountID != account.ID || applied.Version == "" {
 		return
 	}
-	// 必须是**完整的一组新两件**。缺哪一件都不续：
-	//   · 没有新 __cflb ⇒ 这一发没续到（回传旧的会让池子以为续上了）；
-	//   · 没有新 __oailb ⇒ 凑不出一张完整的票，而「新 __cflb + 旧 __oailb」混着用是刻意不做的。
-	// 两种情况下手里那张都还能用（它并没死，只是没刷新），所以缓存也不动。
 	renewed := openAICodexRoutePairFromSetCookie(upstream)
-	if routePairItem(renewed, openAICodexRouteCFLBCookie) == "" ||
-		routePairItem(renewed, openAICodexRouteOAILBCookie) == "" {
-		return
-	}
-	identity, err := s.gatewayPoolIdentity(ctx, account)
+	// 自带 ctx：业务响应一返回业务 ctx 就会被取消，而下面每一件事都不能让用户等。
+	// 身份解析也必须用它——影子行要读一次 repo，用业务 ctx 解会在客户端刚好断开的那一瞬失败，
+	// 于是落点闸也跟着不跑了（票留在缓存、真实落点不进账本）。
+	detached := context.WithoutCancel(ctx)
+	identity, err := s.gatewayPoolIdentity(detached, account)
 	if err != nil {
 		return
 	}
@@ -975,13 +971,29 @@ func (s *openAICodexCookieStore) gatewayPoolRenew(ctx context.Context, account *
 	// 并且必须把**真实落点**记进本地 4h 账本：实烧的是 126，账本里却只有交付时记的 142 ⇒
 	// 这个号以后会向池子要一张 126 的票、以为自己没碰过，拿到的是降智票。
 	// 落点解析复用徽标那条路上同一个函数，不写第二份。
-	if landed := openAICodexRouteGateway(renewed); landed != applied.Gateway {
-		s.gatewayPoolDropPair(identity, applied.Version)
-		if landed != "" { // 解不出落点时别拿空网关名去污染账本的复合键
-			s.gatewayPoolMarkUsed(identity, landed)
+	//
+	// **这一闸必须排在下面的完整性闸之前**：新 __oailb 在手就意味着落点**可读**，而「落点不符」
+	// 是比「两件齐不齐」更强的信号 —— 两种报文形状正好绕过完整性闸（只补新 __oailb 没有新
+	// __cflb；以及 `__cflb=; Max-Age=0` 清掉亲和 cookie，routePairOf 跳过空值项 ⇒ 等于没有
+	// __cflb），排在后面的话这两格都会在完整性闸提前返回，自相矛盾的缓存照样留下来。
+	if routePairItem(renewed, openAICodexRouteOAILBCookie) != "" {
+		if landed := openAICodexRouteGateway(renewed); landed != applied.Gateway {
+			s.gatewayPoolDropPair(identity, applied.Version)
+			if landed != "" { // 解不出落点（畸形 JWT）同样丢票，但别拿空网关名污染账本的复合键
+				s.gatewayPoolMarkUsed(identity, landed)
+			}
+			slog.Warn("gwpool_pair_rerouted", "account_id", account.ID,
+				"promised", applied.Gateway, "landed", landed)
+			return
 		}
-		slog.Warn("gwpool_pair_rerouted", "account_id", account.ID,
-			"promised", applied.Gateway, "landed", landed)
+	}
+	// 落点对上了，再看这组够不够完整。缺哪一件都不续：
+	//   · 没有新 __cflb ⇒ 这一发没续到（回传旧的会让池子以为续上了）；
+	//   · 没有新 __oailb ⇒ 上游什么路由都没下发（那是两件齐发时的常态），而「新 __cflb +
+	//     旧 __oailb」混着用是刻意不做的。
+	// 走到这里说明落点没变（或上游没报落点）⇒ 手里那张还能用，缓存不动。
+	if routePairItem(renewed, openAICodexRouteCFLBCookie) == "" ||
+		routePairItem(renewed, openAICodexRouteOAILBCookie) == "" {
 		return
 	}
 	pool, err := s.poolClient(account)
@@ -990,8 +1002,6 @@ func (s *openAICodexCookieStore) gatewayPoolRenew(ctx context.Context, account *
 	}
 	timeout := account.gatewayPoolFetchTimeout()
 	version := applied.Version
-	// 自带 ctx：业务响应一返回业务 ctx 就会被取消，而回传绝不能让用户等（失败只记日志）。
-	detached := context.WithoutCancel(ctx)
 	go func() {
 		callCtx, cancel := context.WithTimeout(detached, timeout)
 		defer cancel()
