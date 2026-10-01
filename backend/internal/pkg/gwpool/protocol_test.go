@@ -401,7 +401,9 @@ func TestRenewPostsNewPair(t *testing.T) {
 		gotContentType = r.Header.Get("Content-Type")
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<10))
 		gotBody = string(body)
-		_, _ = io.WriteString(w, `{"ok":true,"cookie_version":"tkt-8","valid_for_s":3600}`)
+		// 真池子回的票号是 sha256(cookie) 的前 12 位（契约里确定性可复算），这里照做。
+		_, _ = io.WriteString(w, `{"ok":true,"cookie_version":"`+
+			cookieVersionOf("__cflb=new-lb; __oailb=new-jwt")+`","valid_for_s":3600}`)
 	}))
 	defer srv.Close()
 
@@ -410,7 +412,7 @@ func TestRenewPostsNewPair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("续期应成功: %v", err)
 	}
-	if next != "tkt-8" {
+	if next != cookieVersionOf("__cflb=new-lb; __oailb=new-jwt") {
 		t.Fatalf("新票号没收上来: %q", next)
 	}
 	if gotPath != "/pair/renew" {
@@ -455,11 +457,30 @@ func TestRenewRefusalShapes(t *testing.T) {
 		t.Fatalf("ok=false 应是失败: %v", err)
 	}
 
+	// 票号是**信任边界**：它是之后还票 / 弃票用的身份，池子回一个属于别人那张在用票的票号，
+	// 两个动作就全打在别人头上。复算 sha256(cookie)[:12] 对不上 ⇒ 当池子没换票号（留用旧的），
+	// 不是整次失败（续期本身已经生效了）。
+	reply = func(w http.ResponseWriter) {
+		_, _ = io.WriteString(w, `{"ok":true,"cookie_version":"deadbeef1234"}`)
+	}
+	next, err := client.Renew(context.Background(), "tkt-7", "__cflb=a; __oailb=b")
+	if err != nil || next != "" {
+		t.Fatalf("票号对不上应当当没换（空串、不报错），实际 %q %v", next, err)
+	}
+	// 大小写不敏感：同一串十六进制。
+	reply = func(w http.ResponseWriter) {
+		_, _ = io.WriteString(w, `{"ok":true,"cookie_version":"`+
+			strings.ToUpper(cookieVersionOf("__cflb=a; __oailb=b"))+`"}`)
+	}
+	if next, err = client.Renew(context.Background(), "tkt-7", "__cflb=a; __oailb=b"); err != nil || next == "" {
+		t.Fatalf("大写的同一串应当认下来，实际 %q %v", next, err)
+	}
+
 	reply = func(w http.ResponseWriter) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = io.WriteString(w, `{"error":{"code":"consumer_rejected","retry_after_seconds":300}}`)
 	}
-	_, err := client.Renew(context.Background(), "tkt-7", "__cflb=a; __oailb=b")
+	_, err = client.Renew(context.Background(), "tkt-7", "__cflb=a; __oailb=b")
 	var poolErr *PoolError
 	if !errors.As(err, &poolErr) {
 		t.Fatalf("非 200 应是 *PoolError: %v", err)

@@ -873,15 +873,7 @@ func (s *openAICodexCookieStore) gatewayPoolRelease(
 		if err != nil {
 			return
 		}
-		// 按**票号**认而不是按整个结构体比：取了票之后缓存里那张还会被原地改（抢走续期名额
-		// 会翻 renewPending），拿旧值做 CompareAndDelete 会对不上 ⇒ 票还给了池子、本地却还留着
-		// 它，下一发继续拿一张池子已经转给别人的 pair 出站。票号唯一标识一张票，换过票就不是
-		// 这一张了（此时不该删）。
-		if value, ok := s.poolPairs.Load(identity); ok {
-			if cached, isPair := value.(openAIGatewayPoolPair); isPair && cached.version == pair.version {
-				s.poolPairs.CompareAndDelete(identity, cached)
-			}
-		}
+		s.gatewayPoolDropPair(identity, pair.version)
 		// 自带 ctx：这个闭包正是在「业务 ctx 已经死了」的路径上被调的。
 		ctx, cancel := context.WithTimeout(context.Background(), account.gatewayPoolFetchTimeout())
 		defer cancel()
@@ -922,6 +914,22 @@ func (s *openAICodexCookieStore) cachedPoolPair(identity string) (openAIGatewayP
 	return pair, openAIGatewayPoolPairLive
 }
 
+// gatewayPoolDropPair 按**票号**删掉缓存里那张票。
+//
+// 不按整个结构体比（CompareAndDelete(identity, 手上那份副本)）：取了票之后缓存里那张还会被原地
+// 改（抢走续期名额会翻 renewPending、续期成功会换 cookie），拿旧副本去比会对不上 ⇒ 该删的没删
+// （还票时票已经还了、本地却还拿着它继续出站）。票号唯一标识一张票，对不上说明缓存里已经是
+// 另一张了 —— 那张不该删。
+func (s *openAICodexCookieStore) gatewayPoolDropPair(identity, version string) {
+	value, ok := s.poolPairs.Load(identity)
+	if !ok {
+		return
+	}
+	if cached, isPair := value.(openAIGatewayPoolPair); isPair && cached.version == version {
+		s.poolPairs.CompareAndDelete(identity, cached)
+	}
+}
+
 // gatewayPoolClaimRenew 把这张票的续期名额收掉（CAS ⇒ 并发时只有一个人拿到）。
 // 缓存里已经不是这张票了就返回 false：那说明票已经换过，没必要再续手上这张。
 func (s *openAICodexCookieStore) gatewayPoolClaimRenew(identity string, pair openAIGatewayPoolPair) bool {
@@ -953,6 +961,29 @@ func (s *openAICodexCookieStore) gatewayPoolRenew(ctx context.Context, account *
 		routePairItem(renewed, openAICodexRouteOAILBCookie) == "" {
 		return
 	}
+	identity, err := s.gatewayPoolIdentity(ctx, account)
+	if err != nil {
+		return
+	}
+	// 落点闸。续期那一发刻意只送 __cflb ⇒ 上游**必然**回一张新 __oailb，里面就是真实落点。
+	// __cflb 被上游无视时（亲和目标被摘、票已到点）它会按地理重新分配 ⇒ 落点和交付时说的不是
+	// 同一个网关。这时候三件事都不能做：
+	//   · 不回传（池子自己有完整性闸，交回去必然被拒 —— 白跑一趟）；
+	//   · 不换缓存里的 cookie（换了就成了「gateway=142 而 cookie 落 126」的自相矛盾状态，
+	//     满血窗口内后续每一发都继续按 126 出站）；
+	//   · 反而要**删掉**缓存里那张（下一发重新取票）。
+	// 并且必须把**真实落点**记进本地 4h 账本：实烧的是 126，账本里却只有交付时记的 142 ⇒
+	// 这个号以后会向池子要一张 126 的票、以为自己没碰过，拿到的是降智票。
+	// 落点解析复用徽标那条路上同一个函数，不写第二份。
+	if landed := openAICodexRouteGateway(renewed); landed != applied.Gateway {
+		s.gatewayPoolDropPair(identity, applied.Version)
+		if landed != "" { // 解不出落点时别拿空网关名去污染账本的复合键
+			s.gatewayPoolMarkUsed(identity, landed)
+		}
+		slog.Warn("gwpool_pair_rerouted", "account_id", account.ID,
+			"promised", applied.Gateway, "landed", landed)
+		return
+	}
 	pool, err := s.poolClient(account)
 	if err != nil {
 		return
@@ -964,10 +995,6 @@ func (s *openAICodexCookieStore) gatewayPoolRenew(ctx context.Context, account *
 	go func() {
 		callCtx, cancel := context.WithTimeout(detached, timeout)
 		defer cancel()
-		identity, err := s.gatewayPoolIdentity(callCtx, account)
-		if err != nil {
-			return
-		}
 		next, renewErr := pool.Renew(callCtx, version, renewed)
 		// 池子收不收，本地都换成这组新的两件：新 __cflb 是上游刚发的、比手里那张新，而混着送
 		// （新 __cflb + 旧 __oailb）是刻意不做的。池子收下了就连票号一起换成新的。

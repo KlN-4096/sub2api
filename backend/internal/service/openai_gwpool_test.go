@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -188,7 +190,14 @@ func newGwpoolFakePool(t *testing.T, cookie string, validForS int) *gwpoolFakePo
 				w.WriteHeader(fake.renewStatus)
 				return
 			}
-			_, _ = io.WriteString(w, `{"ok":true,"cookie_version":"tkt-renewed","valid_for_s":3600}`)
+			// 真池子回的票号是 sha256(cookie) 的前 12 位，而消费端会复算比对（信任边界），
+			// 所以假池子也必须照算 —— 回一个 "tkt-renewed" 这种串会被正确地当成「没换票号」。
+			var renewed struct {
+				Cookie string `json:"cookie"`
+			}
+			_ = json.Unmarshal(body, &renewed)
+			_, _ = io.WriteString(w, `{"ok":true,"cookie_version":"`+
+				gwpoolCookieVersion(renewed.Cookie)+`","valid_for_s":3600}`)
 		default:
 			// 池子只有 /cookie、/gateways、/release 和 /pair/renew。任何别的路径（历史上的 /touch 就在这里）
 			// 都算越界 —— 尤其是任何形式的「回报满血/降智」，那是刻意没有的东西。
@@ -274,6 +283,12 @@ func (f *gwpoolFakePool) nextRelease(t *testing.T) string {
 		t.Fatal("没有还票")
 		return ""
 	}
+}
+
+// gwpoolCookieVersion 复算票号：和池子契约（SPEC 第 10 节）同一个算法，sha256(cookie) 前 12 位。
+func gwpoolCookieVersion(cookie string) string {
+	sum := sha256.Sum256([]byte(cookie))
+	return hex.EncodeToString(sum[:])[:12]
 }
 
 // nextRenew 取下一次 POST /pair/renew 的请求体（续期是异步的，这里顺带当同步点用）。

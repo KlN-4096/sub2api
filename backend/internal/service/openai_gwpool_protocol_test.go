@@ -648,7 +648,8 @@ func TestGatewayPoolRenewsOnlyOnFirstRequestAfterTaking(t *testing.T) {
 	cached, _ := store.cachedPoolPair(gwpoolTestIdentity)
 	require.WithinDuration(t, before.Add(150*time.Second), cached.until, 2*time.Second,
 		"续期延长的是路由寿命，不是满血窗口：到点仍只来自交付时的 valid_for_s")
-	require.Equal(t, "tkt-renewed", cached.version, "池子换了票号就跟着换（还票/exclude 要用它）")
+	require.Equal(t, gwpoolCookieVersion(cflb+"; "+oailb), cached.version,
+		"池子换了票号就跟着换（还票/exclude 要用它）；票号 = sha256(cookie)[:12]，消费端复算过")
 	require.False(t, cached.renewPending, "名额已经用掉了")
 
 	// 第二发：两件齐发（和真实客户端一致）、不再回传。
@@ -714,6 +715,11 @@ func TestGatewayPoolRearmsRenewForEveryNewTicket(t *testing.T) {
 	require.Contains(t, fake.nextRenew(t), `"cookie_version":"tkt-1"`)
 
 	time.Sleep(1100 * time.Millisecond) // 过 valid_for_s ⇒ 换票
+
+	// 第二张票落在另一个网关上 ⇒ 上游补发的 __oailb 也指向那个网关（落点闸要的就是这个一致性，
+	// 见 gatewayPoolRenew：解出来的落点和交付时说的不一样就不续）。
+	cflb84, oailb84 := gwpoolRenewedPair(t, "unified-84")
+	upstream.setCookie = http.Header{"Set-Cookie": []string{cflb84 + "; Path=/", oailb84 + "; Path=/"}}
 
 	require.True(t, gwpoolDoUpstream(t, svc, acct).Renewing, "新票要重新置位续期名额")
 	require.NotContains(t, upstream.sentCookies[1], "__oailb=", "新票的第一发同样摘掉 __oailb")
@@ -784,35 +790,62 @@ func TestGatewayPoolRenewFailureStillSwapsLocalPair(t *testing.T) {
 	require.EqualValues(t, 1, fake.renewHits.Load(), "失败不重试：重试不会让上游再发一张新的")
 }
 
-// 续期那一发摘掉了 __oailb ⇒ 上游会补发一张 ⇒ 用量侧**有** Set-Cookie 了。
-// 徽标三格：没有 Set-Cookie / 有新 __oailb 且落点相同 / 有新 __oailb 且落点不同。
-// 第二格就是续期那一发的常态，按「有 Set-Cookie 就是被改派」的老判据会被误读成漂移。
-func TestRoutePairInUseJudgesRenewedPairByLandingGateway(t *testing.T) {
+// 落点闸：`__cflb` 被上游无视时（亲和目标被摘 / 票已到点）它按地理重新分配 ⇒ 新 __oailb 里是
+// 另一个网关。这时候**三件事**都要对：不回传（池子的完整性闸必然拒）、把缓存里那张删掉
+// （留着就是「gateway=142 而 cookie 落 126」的自相矛盾状态，窗口内后续每一发都按 126 出站）、
+// 把**真实落点**记进本地 4h 账本（实烧的是 126，不记的话这个号以后会要一张 126 的票、
+// 以为自己没碰过，拿到的是降智票）。
+func TestGatewayPoolRerouteSkipsRenewAndBooksRealGateway(t *testing.T) {
+	poolCookie := gwpoolTestPairCookie(t, "unified-142")
+	fake := newGwpoolFakePool(t, poolCookie, 150)
+	fake.pairRemainingS = 600
+	// 上游无视了 __cflb：新 __oailb 指向 126。
+	stray := "__oailb=" + routeCookieTestOailb(t, "chat.gateway.unified-126.api.openai.com")
+	svc := &OpenAIGatewayService{httpUpstream: &cookieRecordingUpstream{setCookie: http.Header{
+		"Set-Cookie": []string{"__cflb=stray-lb; Path=/", stray + "; Path=/"},
+	}}}
+	acct := fake.account(1)
+
+	require.True(t, gwpoolDoUpstream(t, svc, acct).Renewing, "名额照样消耗掉（这一发已经摘了）")
+
+	require.Never(t, func() bool { return fake.renewHits.Load() > 0 },
+		300*time.Millisecond, 20*time.Millisecond, "落点不对 ⇒ 不回传（池子必然拒）")
+	_, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
+	require.Equal(t, openAIGatewayPoolPairNone, state, "被改派的票不许留在缓存里继续出站")
+	require.Contains(t, svc.codexCookies.gatewayPoolBurnedGateways(gwpoolTestIdentity, time.Hour, 8),
+		"unified-126", "真实落点必须进本地账本：那个槽位是实烧的")
+}
+
+// 续期那一发摘掉了 __oailb ⇒ 上游会补发一组 ⇒ 用量侧**有** Set-Cookie 了。那一发的用量行要记
+// **上游新下发的那组**（= 真实路由），不是 applied.Cookie（池子交付时那组）。
+func TestRoutePairInUseRecordsFreshPairOnRenewal(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	acct := codexCookieTestAccount(1, AccountTypeOAuth)
 	applied := OpenAIGatewayPoolApplied{
 		AccountID: acct.ID, Cookie: gwpoolTestPairCookie(t, "unified-142"),
 		Gateway: "unified-142", Version: "tkt-1",
 	}
-	landed := func(t *testing.T, upstream http.Header) (string, string) {
-		t.Helper()
-		pair, fromPool, poolGateway, _ := svc.routePairInUse(acct, upstream, applied)
-		require.True(t, fromPool)
-		return openAICodexRouteGateway(pair), poolGateway
-	}
 
-	// 1) 没有 Set-Cookie（同一张票的后续请求、两件齐发时的常态）⇒ 落点 = 交付的网关 ⇒ 已覆写。
-	gateway, promised := landed(t, http.Header{})
-	require.Equal(t, promised, gateway)
+	// 1) 没有 Set-Cookie（两件齐发时的常态）⇒ 记池子那组，网关/票号原样传下去。
+	pair, fromPool, promised, version := svc.routePairInUse(acct, http.Header{}, applied)
+	require.True(t, fromPool)
+	require.Equal(t, applied.Cookie, pair)
+	require.Equal(t, "unified-142", promised)
+	require.Equal(t, "tkt-1", version)
 
-	// 2) 续期那一发：新 __oailb 解出来还是交付的那个网关 ⇒ 仍然是已覆写，不是被改派。
+	// 2) 续期那一发：记的是上游新下发的那组（落点仍是 142 ⇒ 徽标仍是「已覆写」）。
 	cflb, oailb := gwpoolRenewedPair(t, "unified-142")
-	gateway, promised = landed(t, http.Header{"Set-Cookie": []string{cflb + "; Path=/", oailb + "; Path=/"}})
-	require.Equal(t, promised, gateway, "落点没变 ⇒ 注入生效，徽标不能说「被改派」")
+	pair, fromPool, promised, _ = svc.routePairInUse(acct,
+		http.Header{"Set-Cookie": []string{cflb + "; Path=/", oailb + "; Path=/"}}, applied)
+	require.True(t, fromPool)
+	require.Equal(t, cflb+"; "+oailb, pair, "用量行要记上游新下发的那组，不是交付时那组")
+	require.Equal(t, promised, openAICodexRouteGateway(pair), "落点没变 ⇒ 不是被改派")
 
-	// 3) 真漂移：新 __oailb 指向别的网关 ⇒ 被改派。
+	// 3) 真漂移：新 __oailb 指向别的网关 ⇒ 落点 != 交付的网关 ⇒ 被改派。
 	strayOailb := "__oailb=" + routeCookieTestOailb(t, "chat.gateway.unified-126.api.openai.com")
-	gateway, promised = landed(t, http.Header{"Set-Cookie": []string{"__cflb=stray; Path=/", strayOailb + "; Path=/"}})
-	require.NotEqual(t, promised, gateway)
-	require.Equal(t, "unified-126", gateway)
+	pair, _, promised, _ = svc.routePairInUse(acct,
+		http.Header{"Set-Cookie": []string{"__cflb=stray; Path=/", strayOailb + "; Path=/"}}, applied)
+	require.Equal(t, "__cflb=stray; "+strayOailb, pair)
+	require.Equal(t, "unified-126", openAICodexRouteGateway(pair))
+	require.NotEqual(t, promised, openAICodexRouteGateway(pair))
 }
