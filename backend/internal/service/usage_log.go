@@ -217,6 +217,15 @@ type UsageLog struct {
 	// 网关段从 __oailb 的 JWT 载荷解出，整串留着以便原样复现。两者都只作观测，不作判据。
 	RouteGateway *string
 	RoutePair    *string
+	// RoutePairOverridden 表示这一发出站的路由对由网关池下发（openai_gwpool.go），
+	// 而不是账号罐里回放的那一组。nil 表示账号类型不适用（非 Codex 上游）。
+	RoutePairOverridden *bool
+	// RoutePairPoolGateway 是池子交付 pair 时说的那个网关。与 RouteGateway 不一致 = 上游下发了
+	// 新的 __oailb 把这一发改派走了（注入被拒）。没走池子时为 nil。
+	RoutePairPoolGateway *string
+	// RoutePairPoolVersion 是池子给这张票的身份（cookie_version），用来和池子侧的交付/验证
+	// 日志对上账。不是 cookie 本体。没走池子 / 池子没报时为 nil。
+	RoutePairPoolVersion *string
 
 	// Cache TTL Override 标记（管理员强制替换了缓存 TTL 计费）
 	CacheTTLOverridden bool

@@ -2594,10 +2594,14 @@
                 v-model="openAIGwpoolBaseURL"
                 type="url"
                 inputmode="url"
-                placeholder="http://127.0.0.1:8099"
+                placeholder="https://pool.0102400.xyz"
                 class="input text-xs"
                 data-testid="edit-openai-gwpool-base-url"
               />
+              <!-- 用户踩过的坑：填了池子给的 /a/xxxx 个人页面地址，而网关要的是根地址。 -->
+              <p class="input-hint" data-testid="edit-openai-gwpool-base-url-hint">
+                {{ t('admin.accounts.openai.gwpoolBaseUrlDesc') }}
+              </p>
             </div>
             <div>
               <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolConsumerKey') }}</label>
@@ -2614,6 +2618,81 @@
                 data-testid="edit-openai-gwpool-consumer-key"
               />
               <p class="input-hint">{{ t('admin.accounts.openai.gwpoolConsumerKeyDesc') }}</p>
+            </div>
+            <div class="flex items-center justify-between gap-4">
+              <div class="min-w-0">
+                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolAllModels') }}</label>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.accounts.openai.gwpoolAllModelsDesc') }}
+                </p>
+              </div>
+              <input
+                v-model="openAIGwpoolAllModels"
+                data-testid="edit-openai-gwpool-all-models"
+                type="checkbox"
+                class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+              />
+            </div>
+            <div class="flex items-center justify-between gap-4">
+              <div class="min-w-0">
+                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolSteering') }}</label>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.accounts.openai.gwpoolSteeringDesc') }}
+                </p>
+              </div>
+              <input
+                v-model="openAIGwpoolSteering"
+                data-testid="edit-openai-gwpool-steering"
+                type="checkbox"
+                class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+              />
+            </div>
+            <div>
+              <p class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolAdvanced') }}</p>
+              <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div>
+                  <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolGatewayWindow') }}</label>
+                  <input
+                    v-model.number="openAIGwpoolGatewayWindow"
+                    type="number"
+                    min="1"
+                    max="86400"
+                    step="1"
+                    placeholder="14400"
+                    class="input text-xs"
+                    data-testid="edit-openai-gwpool-gateway-window"
+                    :title="t('admin.accounts.openai.gwpoolGatewayWindowDesc')"
+                  />
+                </div>
+                <div>
+                  <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolFetchTimeout') }}</label>
+                  <input
+                    v-model.number="openAIGwpoolFetchTimeout"
+                    type="number"
+                    min="1"
+                    max="86400"
+                    step="1"
+                    placeholder="8"
+                    class="input text-xs"
+                    data-testid="edit-openai-gwpool-fetch-timeout"
+                    :title="t('admin.accounts.openai.gwpoolFetchTimeoutDesc')"
+                  />
+                </div>
+                <div>
+                  <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolListTimeout') }}</label>
+                  <input
+                    v-model.number="openAIGwpoolListTimeout"
+                    type="number"
+                    min="1"
+                    max="86400"
+                    step="1"
+                    placeholder="2"
+                    class="input text-xs"
+                    data-testid="edit-openai-gwpool-list-timeout"
+                    :title="t('admin.accounts.openai.gwpoolListTimeoutDesc')"
+                  />
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -3974,6 +4053,15 @@ const openAIGwpoolBaseURL = ref('')
 // 输入框恒为空：后端把已存的 key 脱敏成 true，页面从不回显原值。留空 = 不修改。
 const openAIGwpoolConsumerKey = ref('')
 const openAIGwpoolConsumerKeySaved = ref(false)
+const openAIGwpoolAllModels = ref(false)
+// 缺省即开，与后端 gatewayPoolSteering 同口径（只有显式 false 才关）。
+const openAIGwpoolSteering = ref(true)
+// 三个「秒」旋钮：null = 留空 = 用后端默认值（4h / 8s / 2s），不往 extra 里写键。
+const openAIGwpoolGatewayWindow = ref<number | null>(null)
+const openAIGwpoolFetchTimeout = ref<number | null>(null)
+const openAIGwpoolListTimeout = ref<number | null>(null)
+const readGwpoolSeconds = (value: unknown): number | null =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
 
 const turnStateProbeEfforts = ['minimal', 'low', 'medium', 'high', 'xhigh']
 // 只有最终落到 ChatGPT Codex 后端的账号才做恢复探测：apikey 走的是别的上游，
@@ -4523,6 +4611,12 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	// 后端脱敏成 true = 配过；原值不会下发，所以输入框一律从空开始。
 	openAIGwpoolConsumerKeySaved.value = extra?.openai_gwpool_consumer_key === true
 	openAIGwpoolConsumerKey.value = ''
+	openAIGwpoolAllModels.value = extra?.openai_gwpool_all_models === true
+	// 自己挑落点缺省即开：只有显式 false 才算关（与后端同口径）。
+	openAIGwpoolSteering.value = extra?.openai_gwpool_steering !== false
+	openAIGwpoolGatewayWindow.value = readGwpoolSeconds(extra?.openai_gwpool_gateway_window_s)
+	openAIGwpoolFetchTimeout.value = readGwpoolSeconds(extra?.openai_gwpool_fetch_timeout_s)
+	openAIGwpoolListTimeout.value = readGwpoolSeconds(extra?.openai_gwpool_list_timeout_s)
 	openAIImagesUrlToB64JsonEnabled.value = extra?.images_url_to_b64_json === true
 	autoPause5hThreshold.value = typeof extra?.auto_pause_5h_threshold === 'number' ? extra.auto_pause_5h_threshold * 100 : null
 	autoPause7dThreshold.value = typeof extra?.auto_pause_7d_threshold === 'number' ? extra.auto_pause_7d_threshold * 100 : null
@@ -6127,6 +6221,29 @@ const handleSubmit = async () => {
         if (gwpoolConsumerKey) {
           newExtra.openai_gwpool_consumer_key = gwpoolConsumerKey
         }
+        if (openAIGwpoolAllModels.value) {
+          newExtra.openai_gwpool_all_models = true
+        } else {
+          delete newExtra.openai_gwpool_all_models
+        }
+        // 自己挑落点缺省即开：只有关掉时才落键，省得 extra 里堆默认项（后端也只认显式 false）。
+        if (openAIGwpoolSteering.value) {
+          delete newExtra.openai_gwpool_steering
+        } else {
+          newExtra.openai_gwpool_steering = false
+        }
+        // 三个「秒」旋钮：留空 / 非正数 = 用后端默认值，所以不落键。
+        for (const [key, value] of [
+          ['openai_gwpool_gateway_window_s', openAIGwpoolGatewayWindow.value],
+          ['openai_gwpool_fetch_timeout_s', openAIGwpoolFetchTimeout.value],
+          ['openai_gwpool_list_timeout_s', openAIGwpoolListTimeout.value]
+        ] as const) {
+          if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+            newExtra[key] = Math.floor(value)
+          } else {
+            delete newExtra[key]
+          }
+        }
       }
       if (isSparkShadow.value) {
         delete newExtra.openai_long_context_billing_enabled
@@ -6337,7 +6454,16 @@ const handleSubmit = async () => {
 
     await submitUpdateAccount(accountID, updatePayload)
   } catch (error: any) {
-    appStore.showError(error.message || t('admin.accounts.failedToUpdate'))
+    // 后端带稳定 reason code 的配置错误（网关池那几条）按 i18n 命名空间取文案，
+    // 其余照旧回落后端原串。
+    appStore.showError(
+      extractI18nErrorMessage(
+        error,
+        t,
+        'admin.accounts.openai.gwpoolErrors',
+        error?.message || t('admin.accounts.failedToUpdate')
+      )
+    )
   }
 }
 

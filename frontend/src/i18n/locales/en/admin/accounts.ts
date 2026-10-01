@@ -726,13 +726,36 @@ export default {
         codexImageToolBadgeBlock: 'Client image tools stripped',
         gwpool: 'Take Codex route cookies from the gateway pool',
         gwpoolDesc:
-          "When enabled, this account stops replaying the __cflb / __oailb pair the upstream last handed it and asks the gateway pool for a live pair instead. Replay is what pins an account to whichever gateway it last landed on. If the pool has no full-strength slot the request fails outright rather than falling back to the degraded replayed route. Mutually exclusive with the Responses WebSocket v2 upstream: a WebSocket connection is reused for up to 60 minutes while a full-strength window lasts only about 150 seconds.",
+          "When enabled, this account stops replaying the __cflb / __oailb pair the upstream last handed it and asks the gateway pool for a live pair instead. Replay is what pins an account to whichever gateway it last landed on. If the pool has no full-strength slot the request fails outright rather than falling back to the degraded replayed route. Requests that would have used the Responses WebSocket v2 upstream are served over HTTP/SSE instead: a WebSocket connection is reused for up to 60 minutes while a full-strength window lasts only about 150 seconds.",
         gwpoolBaseUrl: 'Gateway pool URL',
+        gwpoolBaseUrlDesc:
+          'The root address of the pool, e.g. https://pool.0102400.xyz — not the /a/xxxx page you were given to watch your own uploads. The gateway calls <root>/cookie and <root>/gateways.',
         gwpoolConsumerKey: 'Consumer key',
         gwpoolConsumerKeyPlaceholder: 'The key the pool issued for this account',
         gwpoolConsumerKeyKeep: 'Saved — leave blank to keep it',
         gwpoolConsumerKeyDesc:
           'The pool issues one key per account, so it lives on the account rather than on the instance. Treated like an access token: it is never echoed back after saving and never returned in list or detail responses.',
+        gwpoolAllModels: 'Override every chatgpt.com request',
+        gwpoolAllModelsDesc:
+          'Scope is decided by the request path. Off (default): only the Codex inference endpoint (/backend-api/codex/responses) gets a pooled pair. Side calls and the /codex/alpha/search, /codex/realtime/calls, /codex/images/* endpoints also hit chatgpt.com but are not inference turns, and a pair spent on them burns one (account x gateway) unit for nothing. Note that alpha search has a fallback that posts to the inference endpoint itself, so that one does take a pair even while this is off - it really is one /responses call. On: every chatgpt.com request on this account is overridden.',
+        gwpoolAdvanced: 'Advanced (blank = default)',
+        gwpoolGatewayWindow: 'Local ledger window (s)',
+        gwpoolGatewayWindowDesc:
+          'How long this account treats a gateway it already touched as burnt when picking a landing spot. Default 14400 (4h). The pool keeps its own book per consumer key, which cannot see one Codex credential sitting on several account rows.',
+        gwpoolFetchTimeout: 'Pair fetch timeout (s)',
+        gwpoolFetchTimeoutDesc: 'Caps one /cookie call. Default 8.',
+        gwpoolListTimeout: 'Gateway list timeout (s)',
+        gwpoolListTimeoutDesc:
+          'Caps the /gateways call used to pick a landing spot. Default 2 — it is an optimisation and must never eat into the fetch budget; on timeout the pool picks for you.',
+        gwpoolSteering: 'Pick the landing gateway myself',
+        gwpoolSteeringDesc:
+          'On (default): list the gateways first and name one this account has not burnt in the ledger window. Off: let the pool schedule it.',
+        gwpoolErrors: {
+          GWPOOL_BASE_URL_INVALID:
+            'The gateway pool URL must be an absolute http(s) address, e.g. https://pool.0102400.xyz. Fill in the pool root, not the /a/xxxx page.',
+          GWPOOL_CONSUMER_KEY_REQUIRED:
+            'The gateway pool is enabled on this account, so the consumer key is required. Paste the key the pool issued for this account.'
+        },
         turnStateHunterEffort: 'Probe reasoning effort',
         turnStateHunterUsageKey: 'Usage API key ID (blank = no usage log)',
         turnStateHunterUsageKeyDesc:

@@ -32,9 +32,13 @@ type openAICodexCookieStore struct {
 	identity  openAICodexCredentialIdentity
 	poolPairs sync.Map // 凭证域身份 → openAIGatewayPoolPair
 	poolFetch singleflight.Group
-	// poolUsed 是「这个凭证域身份最近碰过哪些网关」的本地账本，用来挑一个没烧过的落点。
+	// poolUsed 是「这个凭证域身份最近碰过哪些网关」的本地账本，用来挑一个没烧过的落点，
+	// 并作为 /cookie 的 exclude 带给池子（裸取时也能避开烧过的落点）。
 	// 池子按它发的 consumer key 记账，认不出同一份凭据挂在多个账号行上（见 gatewayPoolLedgerKey）。
 	poolUsed sync.Map // 凭证域身份 + "\x00" + 网关名 → time.Time
+	// poolBackoff 是「池子让这个身份先别取票」的到点（见 gatewayPoolBackoff）。
+	// 按**上游账号**记而不是按请求：退避只对本次请求生效的话，重试环照旧每轮都去敲池子。
+	poolBackoff sync.Map // 账本身份（上游账号粒度）→ time.Time
 }
 
 // openAICodexCookieJarKey：本地行 ID + 凭证域身份。同一行重新授权成另一个 ChatGPT 身份时

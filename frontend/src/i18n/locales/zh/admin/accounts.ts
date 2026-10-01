@@ -833,13 +833,36 @@ export default {
         codexImageToolBadgeBlock: '客户端图片工具已移除',
         gwpool: 'Codex 路由 cookie 由网关池下发',
         gwpoolDesc:
-          '开启后这个账号的 __cflb / __oailb 不再按账号回放上游上次下发的那一对，而是每次向网关池要一张活的路由对。回放的已知毛病正是把账号钉死在它上次落到的那个网关上。池子没有满血槽位时该账号的请求直接失败，不会退回回放后的降级路由。与 Responses WebSocket v2 上游互斥：WS 连接复用最长 60 分钟，而满血窗口只有约 150 秒。',
+          '开启后这个账号的 __cflb / __oailb 不再按账号回放上游上次下发的那一对，而是每次向网关池要一张活的路由对。回放的已知毛病正是把账号钉死在它上次落到的那个网关上。池子没有满血槽位时该账号的请求直接失败，不会退回回放后的降级路由。本该走 Responses WebSocket v2 上游的请求会自动改走 HTTP/SSE：WS 连接复用最长 60 分钟，而满血窗口只有约 150 秒。',
         gwpoolBaseUrl: '网关池地址',
+        gwpoolBaseUrlDesc:
+          '填池子的根地址，例如 https://pool.0102400.xyz，不是给你看自己上传量的 /a/xxxx 个人页面。网关实际调用的是 <根地址>/cookie 与 <根地址>/gateways。',
         gwpoolConsumerKey: '消费端凭据（Consumer Key）',
         gwpoolConsumerKeyPlaceholder: '池子发给这个账号的 key',
         gwpoolConsumerKeyKeep: '已保存，留空不修改',
         gwpoolConsumerKeyDesc:
           '池子按账号发 key，所以它配在账号上而不是实例上。与 access_token 同级：保存后页面不再回显，列表与详情里也不返回。',
+        gwpoolAllModels: '所有 chatgpt.com 请求都覆写',
+        gwpoolAllModelsDesc:
+          '范围按**请求路径**算。关（默认）：只有 Codex 推理面（/backend-api/codex/responses）取票覆写；侧信道与 /codex/alpha/search、/codex/realtime/calls、/codex/images/* 这些端点也打在 chatgpt.com 上，但它们不是推理轮次，给它们取一张票等于白烧一个 (账号 × 网关) 单位。注意 alpha 搜索还有一条兜底是直接打推理面的，那一条开关关着也会取票 —— 它确实是一发 /responses。开：这个账号打到 chatgpt.com 的每一个请求都覆写。',
+        gwpoolAdvanced: '高级（留空即默认值）',
+        gwpoolGatewayWindow: '本地账本窗口（秒）',
+        gwpoolGatewayWindowDesc:
+          '挑落点时，这个账号把碰过的网关当作「烧过」的时长。默认 14400（4 小时）。池子按它发的 consumer key 自己记一本账，认不出「同一份 Codex 凭据挂在多个账号行上」。',
+        gwpoolFetchTimeout: '取票超时（秒）',
+        gwpoolFetchTimeoutDesc: '兜住一次 /cookie 调用。默认 8。',
+        gwpoolListTimeout: '网关清单超时（秒）',
+        gwpoolListTimeoutDesc:
+          '兜住挑落点用的那次 /gateways。默认 2——它只是优化，绝不能吃掉取票的预算；超时就退回「由池子自己挑」。',
+        gwpoolSteering: '自己挑落点网关',
+        gwpoolSteeringDesc:
+          '开（默认）：先列网关，再点名一个本地账本窗口内没烧过的。关：交给池子按它的调度选。',
+        gwpoolErrors: {
+          GWPOOL_BASE_URL_INVALID:
+            '网关池地址必须是绝对的 http(s) 地址，例如 https://pool.0102400.xyz。填池子的根地址，不是 /a/xxxx 个人页面。',
+          GWPOOL_CONSUMER_KEY_REQUIRED:
+            '这个账号开着网关池，必须填消费端凭据（Consumer Key）：粘贴池子发给这个账号的那把 key。'
+        },
         turnStateHunterEffort: '探测思考强度',
         turnStateHunterUsageKey: '记账 API Key ID（留空不记）',
         turnStateHunterUsageKeyDesc:

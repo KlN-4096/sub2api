@@ -19,7 +19,16 @@ import (
 )
 
 // Forward forwards request to OpenAI API
-func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+func (s *OpenAIGatewayService) Forward(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+) (result *OpenAIForwardResult, err error) {
+	// 网关池的 per-request 标记（openai_gwpool.go）：AttachRoute 往 sink 写，这里 publish 到结果上。
+	// 新增一条能打到 chatgpt.com 的转发入口时要照抄这两行。
+	ctx, gwpoolSink := withOpenAIGatewayPoolSink(ctx)
+	defer func() { gwpoolSink.publish(result) }()
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
 	if account.UsesOpenAIRawRelay() {
@@ -123,6 +132,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
 	// 仅允许 WS 入站请求走 WS 上游，避免出现 HTTP -> WS 协议混用。
 	wsDecision = resolveOpenAIWSDecisionByClientTransport(wsDecision, GetOpenAIClientTransport(c))
+	// 网关池接管的账号不走 WS 上游：连接复用 60 分钟而满血窗口约 150 秒（openai_gwpool.go）。
+	wsDecision = resolveOpenAIWSDecisionByGatewayPool(wsDecision, account)
 	passthroughEnabled := account.IsOpenAIPassthroughEnabled()
 	compactPath := isOpenAIResponsesCompactPath(c)
 	if shouldFlattenOpenAIResponsesNamespaces(account, wsDecision.Transport, passthroughEnabled, compactPath) {

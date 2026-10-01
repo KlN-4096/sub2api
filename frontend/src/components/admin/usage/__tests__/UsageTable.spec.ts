@@ -29,6 +29,11 @@ const messages: Record<string, string> = {
   'admin.usage.turnStateSourceLong.auto_stale': 'long.auto_stale',
   'admin.usage.userDeletedBadge': 'Deleted',
   'admin.usage.turnStateOverriddenShort': 'OVR',
+  'admin.usage.routePairOverriddenShort': 'POOL',
+  'admin.usage.routePairOverridden': 'Pair came from the gateway pool',
+  'admin.usage.routePairReroutedShort': 'REROUTED',
+  'admin.usage.routePairRerouted': 'Pool promised {promised}, upstream landed {landed}',
+  'admin.usage.routePairPoolVersion': 'Pool ticket id',
   'admin.usage.turnStateOverridden': 'Override active',
   'admin.usage.turnStateCopied': 'Turn-state copied',
   'usage.costDetails': 'Cost Breakdown',
@@ -112,6 +117,7 @@ const DataTableStub = {
         <slot name="cell-request_id" :row="row" />
         <slot name="cell-upstream_request_id" :row="row" />
         <slot name="cell-turn_state" :row="row" />
+        <slot name="cell-route_gateway" :row="row" />
       </div>
     </div>
   `,
@@ -996,5 +1002,59 @@ describe('admin UsageTable deleted-user badge', () => {
     expect(wrapper.find('[data-testid="safety-buffering-marker"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('gpt-5.6-luna')
     expect(wrapper.text()).not.toContain('enabled=')
+  })
+  // 网关池覆写徽标：挂在默认可见的模型列（route_gateway 列默认隐藏），只给网关名与状态，
+  // cookie 本体仍只在 route_gateway 列的复制按钮里。
+  const mountGwpoolRow = (row: Record<string, unknown>) =>
+    mount(UsageTable, {
+      props: {
+        data: [{ request_id: 'req-gwpool', model: 'gpt-6-astra', ...row }],
+        loading: false,
+        columns: [{ key: 'model', label: 'Model' }],
+      },
+      global: { stubs: { DataTable: DataTableStub, EmptyState: true, Icon: true, Teleport: true } },
+    })
+
+  it('marks the row as applied when the pool gateway equals the landing gateway', () => {
+    const wrapper = mountGwpoolRow({
+      route_gateway: 'unified-142',
+      route_pair: '__cflb=lb-pool; __oailb=jwt-pool',
+      route_pair_overridden: true,
+      route_pair_pool_gateway: 'unified-142',
+      route_pair_pool_version: 'tkt-7',
+    })
+    const badge = wrapper.get('[data-testid="route-pair-overridden-marker"]')
+    expect(badge.attributes('data-state')).toBe('applied')
+    expect(badge.text()).toContain('POOL')
+    expect(badge.text()).toContain('unified-142')
+    expect(wrapper.text()).not.toContain('__oailb')
+    // 票号只进 tooltip：它是和池子日志对账的键，不是读表时要扫的列。
+    const title = badge.get('span').attributes('title') || ''
+    expect(title).toContain('Pool ticket id: tkt-7')
+    expect(badge.text()).not.toContain('tkt-7')
+  })
+
+  // 注入 142 落 84：上游下发了新的 __oailb，徽标必须说「被改派」而不是「已覆写」。
+  it('marks the row as rerouted when the upstream landed it on another gateway', () => {
+    const wrapper = mountGwpoolRow({
+      route_gateway: 'unified-84',
+      route_pair: '__cflb=lb-fresh; __oailb=jwt-fresh',
+      route_pair_overridden: true,
+      route_pair_pool_gateway: 'unified-142',
+    })
+    const badge = wrapper.get('[data-testid="route-pair-overridden-marker"]')
+    expect(badge.attributes('data-state')).toBe('rerouted')
+    expect(badge.text()).toContain('REROUTED')
+    expect(badge.text()).toContain('unified-142 → unified-84')
+    expect(badge.html()).toContain('rose')
+  })
+
+  it('leaves the override badge off when the pair came from the account cookie jar', () => {
+    const wrapper = mountGwpoolRow({
+      route_gateway: 'unified-126',
+      route_pair: '__cflb=lb-jar; __oailb=jwt-jar',
+      route_pair_overridden: false,
+    })
+    expect(wrapper.find('[data-testid="route-pair-overridden-marker"]').exists()).toBe(false)
   })
 })

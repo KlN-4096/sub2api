@@ -2,15 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 
-const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.hoisted(() => ({
+const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode, showErrorMock } = vi.hoisted(() => ({
   updateAccountMock: vi.fn(),
   checkMixedChannelRiskMock: vi.fn(),
-  authIsSimpleMode: { value: true }
+  authIsSimpleMode: { value: true },
+  showErrorMock: vi.fn()
 }))
 
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
-    showError: vi.fn(),
+    showError: showErrorMock,
     showSuccess: vi.fn(),
     showInfo: vi.fn()
   })
@@ -1003,6 +1004,133 @@ describe('EditAccountModal', () => {
   it('hides the gateway pool section for OpenAI API key accounts', async () => {
     const wrapper = mountModal(buildAccount()) // apikey
     expect(wrapper.find('[data-testid="edit-openai-gwpool-section"]').exists()).toBe(false)
+  })
+
+  // 四个旋钮：留空 = 用后端默认值，所以默认形态下一个键都不该落（避免 extra 堆默认项）。
+  it('writes the gateway pool knobs only when they differ from the defaults', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+    await wrapper.get('[data-testid="edit-openai-gwpool-enabled"]').setValue(true)
+    await wrapper.get('[data-testid="edit-openai-gwpool-base-url"]').setValue('https://pool.0102400.xyz')
+    await wrapper.get('[data-testid="edit-openai-gwpool-consumer-key"]').setValue('ck-fresh')
+    // 「填到 sub2api 里的 base_url」提示：用户踩过 /a/xxxx 个人页面那个坑。
+    expect(wrapper.get('[data-testid="edit-openai-gwpool-base-url-hint"]').text()).toBe(
+      'admin.accounts.openai.gwpoolBaseUrlDesc'
+    )
+    expect(
+      (wrapper.get('[data-testid="edit-openai-gwpool-steering"]').element as HTMLInputElement).checked
+    ).toBe(true)
+    // 三个「秒」旋钮都要有上限：后端的 time.Duration 在 1e10 秒量级会乘溢出成负数，
+    // 本地账本会整体静默失效（与「窗口越大越严」正好相反），取票超时同量级则全量取不到票。
+    for (const testid of [
+      'edit-openai-gwpool-gateway-window',
+      'edit-openai-gwpool-fetch-timeout',
+      'edit-openai-gwpool-list-timeout'
+    ]) {
+      const input = wrapper.get<HTMLInputElement>(`[data-testid="${testid}"]`)
+      expect(input.attributes('min')).toBe('1')
+      expect(input.attributes('max')).toBe('86400')
+    }
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    let extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra?.openai_gwpool_base_url).toBe('https://pool.0102400.xyz')
+    for (const key of [
+      'openai_gwpool_all_models',
+      'openai_gwpool_steering',
+      'openai_gwpool_gateway_window_s',
+      'openai_gwpool_fetch_timeout_s',
+      'openai_gwpool_list_timeout_s'
+    ]) {
+      expect(extra).not.toHaveProperty(key)
+    }
+
+    // 改过的才落键。
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    await wrapper.get('[data-testid="edit-openai-gwpool-all-models"]').setValue(true)
+    await wrapper.get('[data-testid="edit-openai-gwpool-steering"]').setValue(false)
+    await wrapper.get('[data-testid="edit-openai-gwpool-gateway-window"]').setValue('7200')
+    await wrapper.get('[data-testid="edit-openai-gwpool-fetch-timeout"]').setValue('20')
+    await wrapper.get('[data-testid="edit-openai-gwpool-list-timeout"]').setValue('5')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra?.openai_gwpool_all_models).toBe(true)
+    expect(extra?.openai_gwpool_steering).toBe(false)
+    expect(extra?.openai_gwpool_gateway_window_s).toBe(7200)
+    expect(extra?.openai_gwpool_fetch_timeout_s).toBe(20)
+    expect(extra?.openai_gwpool_list_timeout_s).toBe(5)
+  })
+
+  // 已存的旋钮要回显；清空输入框 = 回到默认值 = 把键删掉。
+  it('loads stored gateway pool knobs and drops them when cleared', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.extra = {
+      openai_gwpool: true,
+      openai_gwpool_base_url: 'https://pool.0102400.xyz',
+      openai_gwpool_all_models: true,
+      openai_gwpool_steering: false,
+      openai_gwpool_gateway_window_s: 3600,
+      openai_gwpool_fetch_timeout_s: 15,
+      openai_gwpool_list_timeout_s: 3
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+    expect(
+      (wrapper.get('[data-testid="edit-openai-gwpool-all-models"]').element as HTMLInputElement).checked
+    ).toBe(true)
+    expect(
+      (wrapper.get('[data-testid="edit-openai-gwpool-steering"]').element as HTMLInputElement).checked
+    ).toBe(false)
+    expect(
+      (wrapper.get('[data-testid="edit-openai-gwpool-gateway-window"]').element as HTMLInputElement).value
+    ).toBe('3600')
+    expect(
+      (wrapper.get('[data-testid="edit-openai-gwpool-fetch-timeout"]').element as HTMLInputElement).value
+    ).toBe('15')
+    expect(
+      (wrapper.get('[data-testid="edit-openai-gwpool-list-timeout"]').element as HTMLInputElement).value
+    ).toBe('3')
+
+    await wrapper.get('[data-testid="edit-openai-gwpool-gateway-window"]').setValue('')
+    await wrapper.get('[data-testid="edit-openai-gwpool-fetch-timeout"]').setValue('')
+    await wrapper.get('[data-testid="edit-openai-gwpool-list-timeout"]').setValue('')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra).not.toHaveProperty('openai_gwpool_gateway_window_s')
+    expect(extra).not.toHaveProperty('openai_gwpool_fetch_timeout_s')
+    expect(extra).not.toHaveProperty('openai_gwpool_list_timeout_s')
+  })
+
+  // 配置错误的报错走 reason code → i18n 命名空间（文案本体由 gwpoolLocales.spec.ts 钉）。
+  // 这个 spec 的 t 桩把任何 key 原样回传，所以这里只能钉「没有映射时仍回落后端原串」，
+  // 也就是接 i18n 之前的行为不许丢。
+  it('keeps the backend message when no localized gateway pool mapping resolves', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockReset().mockRejectedValue({
+      reason: 'GWPOOL_CONSUMER_KEY_REQUIRED',
+      message: 'account 1 enables openai_gwpool so openai_gwpool_consumer_key must be set'
+    })
+
+    const wrapper = mountModal(account)
+    await wrapper.get('[data-testid="edit-openai-gwpool-enabled"]').setValue(true)
+    await wrapper.get('[data-testid="edit-openai-gwpool-base-url"]').setValue('https://pool.0102400.xyz')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(showErrorMock).toHaveBeenCalledWith(
+      'account 1 enables openai_gwpool so openai_gwpool_consumer_key must be set'
+    )
   })
 
   // turn-state 的接管/覆写界面已删（2026-09-21 起手段全灭），只剩读数。
