@@ -795,25 +795,97 @@ func TestGatewayPoolRenewFailureStillSwapsLocalPair(t *testing.T) {
 // （留着就是「gateway=142 而 cookie 落 126」的自相矛盾状态，窗口内后续每一发都按 126 出站）、
 // 把**真实落点**记进本地 4h 账本（实烧的是 126，不记的话这个号以后会要一张 126 的票、
 // 以为自己没碰过，拿到的是降智票）。
+// 三种报文形状都要丢票：后两种**绕过了完整性闸**（没有新 __cflb），所以落点闸必须排在它前面
+// —— 新 __oailb 在手就意味着落点可读，「落点不符」比「两件齐不齐」是更强的信号。
 func TestGatewayPoolRerouteSkipsRenewAndBooksRealGateway(t *testing.T) {
-	poolCookie := gwpoolTestPairCookie(t, "unified-142")
-	fake := newGwpoolFakePool(t, poolCookie, 150)
-	fake.pairRemainingS = 600
-	// 上游无视了 __cflb：新 __oailb 指向 126。
 	stray := "__oailb=" + routeCookieTestOailb(t, "chat.gateway.unified-126.api.openai.com")
-	svc := &OpenAIGatewayService{httpUpstream: &cookieRecordingUpstream{setCookie: http.Header{
-		"Set-Cookie": []string{"__cflb=stray-lb; Path=/", stray + "; Path=/"},
-	}}}
+	for _, tc := range []struct {
+		name   string
+		header http.Header
+	}{
+		{name: "完整的一组但落在别的网关", header: http.Header{"Set-Cookie": []string{
+			"__cflb=stray-lb; Path=/", stray + "; Path=/",
+		}}},
+		{name: "只补新 __oailb", header: http.Header{"Set-Cookie": []string{stray + "; Path=/"}}},
+		// 亲和 cookie 被**清掉**（Max-Age=0）正是「亲和目标被摘」那一格：routePairOf 跳过空值项
+		// ⇒ 等于没有新 __cflb。
+		{name: "__cflb 被清掉 + 新 __oailb", header: http.Header{"Set-Cookie": []string{
+			"__cflb=; Max-Age=0; Path=/", stray + "; Path=/",
+		}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			poolCookie := gwpoolTestPairCookie(t, "unified-142")
+			fake := newGwpoolFakePool(t, poolCookie, 150)
+			fake.pairRemainingS = 600
+			svc := &OpenAIGatewayService{httpUpstream: &cookieRecordingUpstream{setCookie: tc.header}}
+			acct := fake.account(1)
+
+			require.True(t, gwpoolDoUpstream(t, svc, acct).Renewing, "名额照样消耗掉（这一发已经摘了）")
+
+			require.Never(t, func() bool { return fake.renewHits.Load() > 0 },
+				300*time.Millisecond, 20*time.Millisecond, "落点不对 ⇒ 不回传（池子必然拒）")
+			_, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
+			require.Equal(t, openAIGatewayPoolPairNone, state, "被改派的票不许留在缓存里继续出站")
+			require.Contains(t, svc.codexCookies.gatewayPoolBurnedGateways(gwpoolTestIdentity, time.Hour, 8),
+				"unified-126", "真实落点必须进本地账本：那个槽位是实烧的")
+		})
+	}
+}
+
+// gwpoolCancelingUpstream 在响应到达之前把业务 ctx 取消掉（客户端刚好在这一瞬断开）。
+type gwpoolCancelingUpstream struct {
+	cancel    func()
+	setCookie http.Header
+}
+
+func (u *gwpoolCancelingUpstream) Do(*http.Request, string, int64, int) (*http.Response, error) {
+	u.cancel()
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody}
+	for k, v := range u.setCookie {
+		resp.Header[k] = append([]string(nil), v...)
+	}
+	return resp, nil
+}
+
+func (u *gwpoolCancelingUpstream) DoWithTLS(
+	req *http.Request, proxyURL string, id int64, c int, _ *tlsfingerprint.Profile,
+) (*http.Response, error) {
+	return u.Do(req, proxyURL, id, c)
+}
+
+// 身份解析必须用 detached ctx：影子行要读一次 repo（resolveCredentialAccount），用业务 ctx 解会在
+// 客户端刚好断开的那一瞬失败 ⇒ 整个续期在**落点闸之前**就返回 ⇒ 被改派的票留在缓存里、真实落点
+// 也不进账本。窗口窄（响应头已到、客户端刚断），但那是纯状态损坏。
+func TestGatewayPoolRenewResolvesIdentityOnDetachedContext(t *testing.T) {
+	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	fake.pairRemainingS = 600
+	stray := "__oailb=" + routeCookieTestOailb(t, "chat.gateway.unified-126.api.openai.com")
+	svc := &OpenAIGatewayService{}
+	store := &svc.codexCookies
+	// 影子行那条路的替身：业务 ctx 死了就解不出身份。
+	store.identity = func(ctx context.Context, _ *Account) (string, error) {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		return gwpoolTestIdentity, nil
+	}
 	acct := fake.account(1)
 
-	require.True(t, gwpoolDoUpstream(t, svc, acct).Renewing, "名额照样消耗掉（这一发已经摘了）")
+	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	ctx, _ = withOpenAIGatewayPoolSink(ctx)
+	svc.httpUpstream = &gwpoolCancelingUpstream{cancel: cancel, setCookie: http.Header{
+		"Set-Cookie": []string{"__cflb=stray-lb; Path=/", stray + "; Path=/"},
+	}}
+	resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", acct)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
 
-	require.Never(t, func() bool { return fake.renewHits.Load() > 0 },
-		300*time.Millisecond, 20*time.Millisecond, "落点不对 ⇒ 不回传（池子必然拒）")
-	_, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
-	require.Equal(t, openAIGatewayPoolPairNone, state, "被改派的票不许留在缓存里继续出站")
-	require.Contains(t, svc.codexCookies.gatewayPoolBurnedGateways(gwpoolTestIdentity, time.Hour, 8),
-		"unified-126", "真实落点必须进本地账本：那个槽位是实烧的")
+	_, state := store.cachedPoolPair(gwpoolTestIdentity)
+	require.Equal(t, openAIGatewayPoolPairNone, state, "客户端断开不该让被改派的票留在缓存里")
+	require.Contains(t, store.gatewayPoolBurnedGateways(gwpoolTestIdentity, time.Hour, 8), "unified-126")
 }
 
 // 续期那一发摘掉了 __oailb ⇒ 上游会补发一组 ⇒ 用量侧**有** Set-Cookie 了。那一发的用量行要记

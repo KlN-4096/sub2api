@@ -401,9 +401,11 @@ func TestRenewPostsNewPair(t *testing.T) {
 		gotContentType = r.Header.Get("Content-Type")
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<10))
 		gotBody = string(body)
-		// 真池子回的票号是 sha256(cookie) 的前 12 位（契约里确定性可复算），这里照做。
-		_, _ = io.WriteString(w, `{"ok":true,"cookie_version":"`+
-			cookieVersionOf("__cflb=new-lb; __oailb=new-jwt")+`","valid_for_s":3600}`)
+		// 真池子回的票号是 sha256(cookie) 的前 12 位（契约里确定性可复算）。
+		// **写死字面量**：两边都调 cookieVersionOf 的话，那个相等在它的任何实现下都成立
+		// （把前缀改成 16 位本包照样全绿）—— 算法本身就没人钉了。
+		// echo -n '__cflb=new-lb; __oailb=new-jwt' | sha256sum ⇒ ec9d5e27e35f…
+		_, _ = io.WriteString(w, `{"ok":true,"cookie_version":"ec9d5e27e35f","valid_for_s":3600}`)
 	}))
 	defer srv.Close()
 
@@ -412,7 +414,7 @@ func TestRenewPostsNewPair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("续期应成功: %v", err)
 	}
-	if next != cookieVersionOf("__cflb=new-lb; __oailb=new-jwt") {
+	if next != "ec9d5e27e35f" {
 		t.Fatalf("新票号没收上来: %q", next)
 	}
 	if gotPath != "/pair/renew" {
@@ -467,10 +469,9 @@ func TestRenewRefusalShapes(t *testing.T) {
 	if err != nil || next != "" {
 		t.Fatalf("票号对不上应当当没换（空串、不报错），实际 %q %v", next, err)
 	}
-	// 大小写不敏感：同一串十六进制。
+	// 大小写不敏感：同一串十六进制。字面量同样写死（sha256('__cflb=a; __oailb=b') 前 12 位）。
 	reply = func(w http.ResponseWriter) {
-		_, _ = io.WriteString(w, `{"ok":true,"cookie_version":"`+
-			strings.ToUpper(cookieVersionOf("__cflb=a; __oailb=b"))+`"}`)
+		_, _ = io.WriteString(w, `{"ok":true,"cookie_version":"`+strings.ToUpper("f4b7fc260a1f")+`"}`)
 	}
 	if next, err = client.Renew(context.Background(), "tkt-7", "__cflb=a; __oailb=b"); err != nil || next == "" {
 		t.Fatalf("大写的同一串应当认下来，实际 %q %v", next, err)
