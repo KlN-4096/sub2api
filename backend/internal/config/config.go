@@ -106,7 +106,6 @@ type Config struct {
 	BatchImage              BatchImageConfig              `mapstructure:"batch_image"`
 	ImageStorage            ImageStorageConfig            `mapstructure:"image_storage"`
 	Plugins                 PluginConfig                  `mapstructure:"plugins"`
-	Gwpool                  GwpoolConfig                  `mapstructure:"gwpool"`
 
 	// Enforce only API-key spending windows in simple mode.
 	SimpleModeKeyRateLimitEnabled bool `mapstructure:"simple_mode_key_rate_limit_enabled" yaml:"simple_mode_key_rate_limit_enabled"`
@@ -126,18 +125,6 @@ type PluginConfig struct {
 	MaxUploadBytes       int64             `mapstructure:"max_upload_bytes"`
 	MaxUncompressedBytes int64             `mapstructure:"max_uncompressed_bytes"`
 	StartTimeoutSeconds  int               `mapstructure:"start_timeout_seconds"`
-}
-
-// GwpoolConfig 控制与网关池（gwpool）的对接：开启后 Codex 推理面的路由 cookie 由池子下发，
-// 顶掉按账号罐回放的那套（见 service/openai_codex_cookies.go）。
-//
-// 全局开关默认关；关着时整条链路与接入前逐字节一致。还要账号级 extra 开关一起开才生效，
-// 粒度与 extra.images_url_to_b64_json 那类账号特性开关一致。
-type GwpoolConfig struct {
-	Enabled bool   `mapstructure:"enabled"`
-	BaseURL string `mapstructure:"base_url"`
-	// ConsumerKey 是池子的消费端凭据。**不得进日志、页面或任何 API 响应。**
-	ConsumerKey string `mapstructure:"consumer_key"`
 }
 
 type LogConfig struct {
@@ -2368,11 +2355,6 @@ func setDefaults() {
 	viper.SetDefault("plugins.max_uncompressed_bytes", int64(256*1024*1024))
 	viper.SetDefault("plugins.start_timeout_seconds", 15)
 
-	// 网关池对接。默认关：关着时 Codex 路由 cookie 维持按账号罐回放的既有行为。
-	viper.SetDefault("gwpool.enabled", false)
-	viper.SetDefault("gwpool.base_url", "")
-	viper.SetDefault("gwpool.consumer_key", "")
-
 	// Timezone (default to Asia/Shanghai for Chinese users)
 	viper.SetDefault("timezone", "Asia/Shanghai")
 
@@ -2740,16 +2722,6 @@ func (c *Config) Validate() error {
 	}
 	if c.Plugins.StartTimeoutSeconds < 1 || c.Plugins.StartTimeoutSeconds > 120 {
 		return fmt.Errorf("plugins.start_timeout_seconds must be between 1 and 120")
-	}
-	// 网关池开着就必须配得全：缺地址或缺凭据时启动即拒。不能让它在运行期静默退回
-	// cookie 回放——那正是要修掉的「把账号钉死在坏网关上」的行为。
-	if c.Gwpool.Enabled {
-		if err := ValidateAbsoluteHTTPURL(c.Gwpool.BaseURL); err != nil {
-			return fmt.Errorf("gwpool.base_url: %w", err)
-		}
-		if strings.TrimSpace(c.Gwpool.ConsumerKey) == "" {
-			return fmt.Errorf("gwpool.consumer_key must be set when gwpool.enabled is true")
-		}
 	}
 	if c.Server.ReadHeaderTimeout < 1 || c.Server.ReadHeaderTimeout > 60 {
 		return fmt.Errorf("server.read_header_timeout must be between 1 and 60 seconds")

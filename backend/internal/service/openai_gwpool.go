@@ -11,13 +11,14 @@ package service
 //     klno.5（2026-09-25）那套按账号罐回放。那套回放的已知毛病正是把账号钉死在一个网关上——
 //     罐里存着上游上次下发的 __oailb，下一发又把它带回去，于是 pro1 被钉在 unified-126、
 //     pro3 被钉在 unified-121。
-//   - 回：**取到 pair 的那一刻就回报** `(上游账号, 池子说的那个网关, 判定)`。刻意不挂在计费
-//     落库那条路上：那里的网关是事后从响应/罐里重新推导的（借来的健康 pair 恰恰是「上游不下发
-//     Set-Cookie」那一类，推导会读回罐里钉死的旧网关），而且预热、dial 失败、4xx/5xx、传输错误
-//     都不落 usage ⇒ 整批触碰漏报。取 pair ⇒ 必然触碰，这个时点才是完整的。
+//   - 回：**不回报**。池子在交付那一刻就记了 LastTouch 和 LastVerdict，verdict 还是它自己用
+//     state-echo 验出来的；而转发路径上一个可用判据都不剩（见 openAIGatewayPoolExtraKey 附近
+//     的说明），回报只能填 "unknown"，等于把池子刚验出来的 "full" 覆盖掉，让刚验过满血的槽位
+//     提前被拿去烧。「这张票坏了」这个信息由取 pair 时的 force=1 承载，不需要另一条回报。
 //
-// 两道开关都必须开：全局 cfg.Gwpool.Enabled（决定有没有客户端）+ 账号级 extra 开关。
-// 任何一道关着，整条链路与接入前逐字节一致（走原来的 Attach）。
+// 配置**全在账号 extra 上**：池子发的 consumer key 是按账号发的，放实例级等于一个 sub2api 实例
+// 里所有账号共用同一个池子身份。开关关着（或缺地址）时整条链路与接入前逐字节一致（走原来的
+// Attach）。
 //
 // 池子没有满血槽位时回 503 ⇒ 这里把错误原样抛给调用方走既有失败路径，**绝不退回 cookie 回放**
 // （用户原则：宁可 503 也不放降智）。
@@ -48,16 +49,16 @@ const (
 	// openAIGatewayPoolExtraKey 是账号级开关键，默认缺省即关。写成字符串 "true" 时
 	// getExtraBool 返回 false、开关静默失效，只能是 bool（与 extra 里其它账号特性开关同口径）。
 	openAIGatewayPoolExtraKey = "openai_gwpool"
+	// openAIGatewayPoolBaseURLExtraKey 是该账号要问的池子地址，形如 http://127.0.0.1:8099。
+	// 合法性在管理端写入时按 config.ValidateAbsoluteHTTPURL 校验。
+	openAIGatewayPoolBaseURLExtraKey = "openai_gwpool_base_url"
+	// OpenAIGatewayPoolConsumerKeyExtraKey 是池子发给**这个账号**的消费端凭据。
+	//
+	// 与 access_token 同级：不进日志、不进任何 API 响应（dto.redactAccountManagedExtra 把它
+	// 脱敏成 bool），管理端写入按「只有非空字符串才算改动」合并（见 admin_account.go）。
+	OpenAIGatewayPoolConsumerKeyExtraKey = "openai_gwpool_consumer_key"
 	// openAIGatewayPoolFetchTimeout 兜住一次取 pair。不跟随业务 ctx 的取消（见 gatewayPoolPair）。
 	openAIGatewayPoolFetchTimeout = 8 * time.Second
-	// openAIGatewayPoolTouchTimeout 兜住回报。回报是账本，不能拖业务请求。
-	openAIGatewayPoolTouchTimeout = 3 * time.Second
-	// openAIGatewayPoolVerdictUnknown：转发路径上没有可用的降智判据。
-	//
-	// 2026-09-23 起模型标签会说谎、turn-state 一律 780、x-codex-safety-buffering-* 健康账号也带
-	// （codex-full-strength-tickets.md 第二节「已证伪」清单），仓库里能在一次真实转发上直接读出
-	// 的判据一个都不剩。**刻意不为回报新造判据**——池子自己用 state-echo 验。
-	openAIGatewayPoolVerdictUnknown = "unknown"
 )
 
 // ErrGatewayPoolWSIncompatible 是运行期的互斥闸：这个账号开着网关池，不能走 WS 上游。
@@ -67,16 +68,48 @@ var ErrGatewayPoolWSIncompatible = errors.New(
 	"openai gateway pool is enabled on this account: the WebSocket upstream reuses one connection for " +
 		"up to 60 minutes while a full-strength route pair lasts ~150s, so the two cannot be combined")
 
-// newOpenAIGatewayPoolClient 按配置建客户端；全局开关关着（或没配地址）就返回 nil = 不接管。
-// 配置的合法性在 config.Validate 里已经拦过，这里只做最后一道空值判断。
-func newOpenAIGatewayPoolClient(cfg *config.Config) *gwpool.Client {
-	if cfg == nil || !cfg.Gwpool.Enabled {
-		return nil
+// gatewayPoolBaseURL / gatewayPoolConsumerKey 读账号级配置。非字符串值读成空串 ⇒ 开关开着时
+// 直接被 poolClient 判成配错而 fail closed，不会静默退回罐回放。
+func (a *Account) gatewayPoolBaseURL() string {
+	return strings.TrimSpace(a.getExtraString(openAIGatewayPoolBaseURLExtraKey))
+}
+
+func (a *Account) gatewayPoolConsumerKey() string {
+	return strings.TrimSpace(a.getExtraString(OpenAIGatewayPoolConsumerKeyExtraKey))
+}
+
+// poolClient 取该账号的池子客户端，按 (base_url, consumer key) 缓存。
+//
+// 必须缓存：gwpool.New 每次都自带一个 *http.Transport，每请求新建等于每请求一个独立连接池，
+// 连接永不复用、fd 一路涨。
+//
+// 开关开着但地址缺失/解不开 ⇒ 返回包着 gwpool.ErrPool 的错误让这一发失败（配错是池子侧的问题，
+// ErrPool 保证它不会被 classifyUpstreamTransportError 当成上游故障把真账号停调度 10 分钟）。
+// 刻意不退回罐回放：那正是要修掉的「把账号钉死在坏网关上」。
+func (s *openAICodexCookieStore) poolClient(account *Account) (*gwpool.Client, error) {
+	baseURL := account.gatewayPoolBaseURL()
+	if baseURL == "" {
+		return nil, fmt.Errorf("%w: account %d enables %s without %s",
+			gwpool.ErrPool, account.ID, openAIGatewayPoolExtraKey, openAIGatewayPoolBaseURLExtraKey)
 	}
-	if strings.TrimSpace(cfg.Gwpool.BaseURL) == "" {
-		return nil
+	consumerKey := account.gatewayPoolConsumerKey()
+	// \x00 当分隔符：base_url 过了 URL 校验，不可能含 NUL，拼不出歧义键。
+	cacheKey := baseURL + "\x00" + consumerKey
+	if cached, ok := s.poolClients.Load(cacheKey); ok {
+		if client, ok := cached.(*gwpool.Client); ok {
+			return client, nil
+		}
 	}
-	return gwpool.New(cfg.Gwpool.BaseURL, cfg.Gwpool.ConsumerKey)
+	client := gwpool.New(baseURL, consumerKey)
+	if client == nil {
+		return nil, fmt.Errorf("%w: account %d has an unusable %s",
+			gwpool.ErrPool, account.ID, openAIGatewayPoolBaseURLExtraKey)
+	}
+	actual, _ := s.poolClients.LoadOrStore(cacheKey, client)
+	if client, ok := actual.(*gwpool.Client); ok {
+		return client, nil
+	}
+	return nil, fmt.Errorf("%w: account %d gateway pool client cache is corrupt", gwpool.ErrPool, account.ID)
 }
 
 // UsesGatewayPool 报告这个账号的 Codex 路由 cookie 由网关池下发。
@@ -87,10 +120,12 @@ func (a *Account) UsesGatewayPool() bool {
 	return a != nil && a.IsOpenAIOAuthLike() && a.getExtraBool(openAIGatewayPoolExtraKey)
 }
 
-// openAIGatewayPoolExclusivityExtraKeys 是会改变「网关池 ↔ WS 上游」这对互斥关系的 extra 键。
+// openAIGatewayPoolConfigExtraKeys 是会改变网关池配置或「网关池 ↔ WS 上游」互斥关系的 extra 键。
 // 部分更新（UpdateAccountExtra / 批量）只在碰到它们时才去加载账号做合并校验。
-var openAIGatewayPoolExclusivityExtraKeys = []string{
+var openAIGatewayPoolConfigExtraKeys = []string{
 	openAIGatewayPoolExtraKey,
+	openAIGatewayPoolBaseURLExtraKey,
+	OpenAIGatewayPoolConsumerKeyExtraKey,
 	"openai_oauth_responses_websockets_v2_enabled",
 	"openai_apikey_responses_websockets_v2_enabled",
 	"responses_websockets_v2_enabled",
@@ -98,9 +133,9 @@ var openAIGatewayPoolExclusivityExtraKeys = []string{
 	"openai_ws_force_http",
 }
 
-// touchesOpenAIGatewayPoolExclusivity 报告这份 extra 更新碰到了互斥关系里的任一边。
-func touchesOpenAIGatewayPoolExclusivity(extra map[string]any) bool {
-	for _, key := range openAIGatewayPoolExclusivityExtraKeys {
+// touchesOpenAIGatewayPoolConfig 报告这份 extra 更新碰到了网关池配置或互斥关系里的任一边。
+func touchesOpenAIGatewayPoolConfig(extra map[string]any) bool {
+	for _, key := range openAIGatewayPoolConfigExtraKeys {
 		if _, ok := extra[key]; ok {
 			return true
 		}
@@ -108,8 +143,8 @@ func touchesOpenAIGatewayPoolExclusivity(extra map[string]any) bool {
 	return false
 }
 
-// validateOpenAIGatewayPoolAccountExtra 拦住「网关池 + WS 上游」这个组合（见文件头）。
-// extra 必须是**合并后**的最终形态，否则部分更新会从另一半绕过去。
+// validateOpenAIGatewayPoolAccountExtra 校验账号级网关池配置：开关开着就必须配齐地址与凭据，
+// 且不能同时开 WS 上游（见文件头）。extra 必须是**合并后**的最终形态，否则部分更新会从另一半绕过去。
 func validateOpenAIGatewayPoolAccountExtra(account *Account, extra map[string]any) error {
 	if account == nil {
 		return nil
@@ -118,9 +153,23 @@ func validateOpenAIGatewayPoolAccountExtra(account *Account, extra map[string]an
 		ID: account.ID, Platform: account.Platform, Type: account.Type,
 		ParentAccountID: account.ParentAccountID, Credentials: account.Credentials, Extra: extra,
 	}
+	if !probe.UsesGatewayPool() {
+		return nil
+	}
+	// 地址与凭据在**写入时**拦（配置已不在实例级，没有启动期可拦）。缺了就只能在转发时 fail
+	// closed，让账号带着一个必然失败的配置落库等于埋雷。
+	if err := config.ValidateAbsoluteHTTPURL(probe.gatewayPoolBaseURL()); err != nil {
+		return infraerrors.Newf(http.StatusBadRequest, "GWPOOL_BASE_URL_INVALID",
+			"account %d enables %s so %s must be an absolute http(s) url: %v",
+			account.ID, openAIGatewayPoolExtraKey, openAIGatewayPoolBaseURLExtraKey, err)
+	}
+	if probe.gatewayPoolConsumerKey() == "" {
+		return infraerrors.Newf(http.StatusBadRequest, "GWPOOL_CONSUMER_KEY_REQUIRED",
+			"account %d enables %s so %s must be set",
+			account.ID, openAIGatewayPoolExtraKey, OpenAIGatewayPoolConsumerKeyExtraKey)
+	}
 	// force_http 的账号永远不会拨 WS，不算冲突。
-	if !probe.UsesGatewayPool() || !probe.IsOpenAIResponsesWebSocketV2Enabled() ||
-		probe.IsOpenAIWSForceHTTPEnabled() {
+	if !probe.IsOpenAIResponsesWebSocketV2Enabled() || probe.IsOpenAIWSForceHTTPEnabled() {
 		return nil
 	}
 	return infraerrors.Newf(http.StatusBadRequest, "GWPOOL_WS_UPSTREAM_CONFLICT",
@@ -128,6 +177,30 @@ func validateOpenAIGatewayPoolAccountExtra(account *Account, extra map[string]an
 			"connection is reused for up to 60 minutes while a full-strength route pair lasts ~150s, "+
 			"so every reused turn would ride a burnt gateway. Turn one of them off.",
 		account.ID, openAIGatewayPoolExtraKey)
+}
+
+// mergeOpenAIGatewayPoolConsumerKey 把提交上来的 consumer key 并进 incoming。
+//
+// 页面从不回显原值（dto 把它脱敏成 bool），所以 incoming 里**只有非空字符串**才算「要改成这个」，
+// 空串 / 原样提交回来的 bool 都是「别动」：剔掉该项，再从 existing 续上原值。
+// 没有这一道，每次保存账号都会把凭据抹掉。
+//
+// existing 传 nil 用于**部分更新**（jsonb 合并）：剔掉就天然不动库里那份，不能从某个账号的
+// existing 里回填——批量更新共用一份 input.Extra，回填会把一个账号的凭据写进其它账号。
+//
+// 清除凭据刻意没有入口：误抹凭据比少一个清除按钮代价大，关开关即可停用。
+func mergeOpenAIGatewayPoolConsumerKey(existing, incoming map[string]any) {
+	if incoming == nil {
+		return
+	}
+	if value, ok := incoming[OpenAIGatewayPoolConsumerKeyExtraKey].(string); ok &&
+		strings.TrimSpace(value) != "" {
+		return
+	}
+	delete(incoming, OpenAIGatewayPoolConsumerKeyExtraKey)
+	if kept, ok := existing[OpenAIGatewayPoolConsumerKeyExtraKey]; ok {
+		incoming[OpenAIGatewayPoolConsumerKeyExtraKey] = kept
+	}
 }
 
 // openAIGatewayPoolPair 是缓存住的一张 pair。until 是**满血窗口**的到点（池子的 valid_for_s），
@@ -175,7 +248,7 @@ func openAIGatewayPoolAccountKey(account *Account) string {
 
 // gatewayPoolTakeover 报告这一发该由池子出 cookie。
 func (s *openAICodexCookieStore) gatewayPoolTakeover(account *Account) bool {
-	return s != nil && s.pool != nil && account.UsesGatewayPool()
+	return s != nil && account.UsesGatewayPool()
 }
 
 // gatewayPoolIdentity 取缓存键 / 回报用的凭证域身份。没注入解析器（裸结构体单测）时退回按本地行算。
@@ -196,6 +269,10 @@ func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *A
 	if state == openAIGatewayPoolPairLive {
 		return pair, nil
 	}
+	pool, err := s.poolClient(account)
+	if err != nil {
+		return openAIGatewayPoolPair{}, err
+	}
 	// 租着的那张过了建议窗口 ⇒ 要一张**不同的**网关（force=1）。池子的 valid_for_s 只是建议值
 	// （ttl_is_advisory），换不换由这边判；不带 force 的话池子可能把同一张再发回来。
 	force := state == openAIGatewayPoolPairStale
@@ -208,7 +285,7 @@ func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *A
 		callCtx, cancel := context.WithTimeout(fetchCtx, openAIGatewayPoolFetchTimeout)
 		defer cancel()
 		// gateway 留空 = 由池子按调度选（它知道每个槽位歇了多久，这里不替它决定）。
-		got, err := s.pool.Cookie(callCtx, "", force)
+		got, err := pool.Cookie(callCtx, "", force)
 		if err != nil {
 			// 刻意**不删**缓存里那张过期的：它是「别再给我这一个」的依据，删掉之后下一发会走
 			// 不带 force 的 /cookie，池子可能原样把烧过的那张发回来。force 的 503 不在这里重试。
@@ -301,33 +378,6 @@ func (s *openAICodexCookieStore) gatewayPoolPairInUse(ctx context.Context, accou
 	return pair.cookie, true
 }
 
-// reportGatewayPoolTouch 回报一次触碰：取到 pair ⇒ 这一发必然碰到那个网关。
-//
-// 每一次注入都报，不只是新取那一次：窗口内复用 150 秒期间这个槽位一直在被碰，只报取用那一刻
-// 会让池子以为它多歇了 150 秒，而「取歇得最久的」正是它的调度依据。
-//
-// 异步 + 独立超时：账本不准不该让业务请求变慢，ctx 在响应写完后随时会被取消。
-func (s *openAICodexCookieStore) reportGatewayPoolTouch(ctx context.Context, accountID int64, identity string, pair openAIGatewayPoolPair) {
-	if s == nil || s.pool == nil || identity == "" || pair.gateway == "" {
-		return
-	}
-	pool := s.pool
-	touch := gwpool.Touch{
-		AccountID: identity,
-		Gateway:   pair.gateway,
-		At:        time.Now(),
-		Verdict:   openAIGatewayPoolVerdictUnknown,
-	}
-	bgCtx := context.WithoutCancel(ctx)
-	go func() {
-		reportCtx, cancel := context.WithTimeout(bgCtx, openAIGatewayPoolTouchTimeout)
-		defer cancel()
-		if err := pool.Touch(reportCtx, touch); err != nil {
-			slog.Warn("gwpool_touch_failed", "account_id", accountID, "gateway", touch.Gateway, "error", err)
-		}
-	}()
-}
-
 // AttachRoute 是出站挂 Cookie 的唯一入口：池子接管时 __cflb / __oailb 用池子那张，否则原样走
 // 罐回放。三个出站挂钩点（HTTP 主咽喉 doOpenAIUpstream、WS 连接池 dialConn、WS 透传适配器）
 // 都经这里，所以「钉死在坏网关」在三条路上一起修掉。
@@ -376,7 +426,6 @@ func (s *openAICodexCookieStore) AttachRoute(
 		}
 	}
 	headers.Set("Cookie", strings.Join(append(parts, pair.cookie), "; "))
-	s.reportGatewayPoolTouch(ctx, account.ID, identity, pair)
 	return nil
 }
 

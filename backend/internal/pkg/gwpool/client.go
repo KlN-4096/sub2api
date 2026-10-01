@@ -1,14 +1,18 @@
 // Package gwpool 是网关池（E:/Project/GO/gwpool，SPEC.md 第 10 节）的消费端 HTTP 客户端。
 //
-// 池子负责发现 Codex 后端网关、维护活的路由 pair（__cflb + __oailb）并下发。本包只做两件事：
-// 取一张 pair（GET /cookie）、回报一次触碰（POST /touch）。调度、满血验证、续期全在池子那边，
-// 这里不复制任何判据。
+// 池子负责发现 Codex 后端网关、维护活的路由 pair（__cflb + __oailb）并下发。本包只做一件事：
+// 取一张 pair（GET /cookie）。调度、满血验证、续期全在池子那边，这里不复制任何判据。
+//
+// 刻意**没有触碰回报**：票是池子发的、满血也是池子验的——交付那一刻它自己就写了槽位的
+// last_touch，验证时写了 last_verdict。转发路径上一个降智判据都不剩（模型标签会说谎、
+// turn-state 一律 780、safety-buffering 头健康账号也带），消费端能回报的只有 "unknown"，
+// 而 unknown 回报过去只会覆盖掉池子的真判定，让刚验过满血的槽位提前被拿去烧。
+// 「这张票坏了」由取 pair 时的 force=1 承载。
 //
 // 红线：consumer key 只进 Authorization 头，不进日志、不进错误串；cookie 全文同样不进日志。
 package gwpool
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -53,16 +57,6 @@ type Pair struct {
 	// TTLIsAdvisory：池子声明 valid_for_s 只是建议值，换不换 pair 由消费端自己判。
 	// 纯读数——消费端的逻辑本来就是「自己判这张不行了就 force 换一张」，不按这个字段分流。
 	TTLIsAdvisory bool
-}
-
-// Touch 是一次触碰回报。AccountID 是**上游**账号标识（同一个 ChatGPT 账号的多个本地行算一个），
-// 池子按 (account, gateway) 记槽位。
-type Touch struct {
-	AccountID string
-	Gateway   string
-	At        time.Time
-	// Verdict 取 "full" / "degraded" / "unknown"。没有可用判据就填 unknown，池子自己会验。
-	Verdict string
 }
 
 // Client 是一个池子实例的客户端。并发安全。
@@ -170,41 +164,6 @@ func (c *Client) Cookie(ctx context.Context, gateway string, force bool) (Pair, 
 		VerifiedFull:  payload.VerifiedFull,
 		TTLIsAdvisory: payload.TTLIsAdvisory,
 	}, nil
-}
-
-// Touch 回报一次触碰。失败只返回错误给调用方记日志——账本不准不该影响业务请求。
-func (c *Client) Touch(ctx context.Context, touch Touch) error {
-	if c == nil {
-		return fmt.Errorf("%w: client is nil", ErrPool)
-	}
-	verdict := strings.TrimSpace(touch.Verdict)
-	if verdict == "" {
-		verdict = "unknown"
-	}
-	body, err := json.Marshal(map[string]any{
-		"account_id": touch.AccountID,
-		"gateway":    touch.Gateway,
-		"ts":         touch.At.Unix(),
-		"verdict":    verdict,
-	})
-	if err != nil {
-		return fmt.Errorf("%w: encode touch: %w", ErrPool, err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint("touch"), bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("%w: build touch request: %w", ErrPool, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.do(req)
-	if err != nil {
-		return err
-	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBytes))
-	_ = resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("%w: touch request returned HTTP %d", ErrPool, resp.StatusCode)
-	}
-	return nil
 }
 
 // do 挂上 consumer key 并发请求。consumer key 只在这里出现一次，且只进 Authorization 头：

@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/chatgptcookies"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -25,9 +24,10 @@ import (
 type openAICodexCookieStore struct {
 	jars sync.Map // openAICodexCookieJarKey(account) → *chatgptcookies.Jar
 
-	// 网关池接管（openai_gwpool.go）。pool 为 nil = 全局开关关 = 只走上面那只罐。
-	pool *gwpool.Client
-	// identity 解析凭证域身份（影子行按母账号算），是 pair 缓存键与池子侧 account_id。
+	// 网关池接管（openai_gwpool.go）。配置全在账号 extra 上，客户端按 (base_url, consumer key)
+	// 缓存——每请求新建 gwpool.New 会各带一个 http.Transport，连接池永不复用。
+	poolClients sync.Map // base_url + "\x00" + consumer key → *gwpool.Client
+	// identity 解析凭证域身份（影子行按母账号算），是 pair 缓存键。
 	// 由构造器注入；裸结构体（单元测试）里为 nil，退回按本地行算。
 	identity  openAICodexCredentialIdentity
 	poolPairs sync.Map // 凭证域身份 → openAIGatewayPoolPair

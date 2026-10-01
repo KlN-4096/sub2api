@@ -1297,14 +1297,3 @@ image_storage:
   presign_expiry_hours: 24
   # 当上游返回的是图片 url 时，下载该图片再转存的字节上限（默认 32MB）
   max_download_bytes: 33554432
-
-# 网关池（gwpool）对接。开启后 Codex 推理面的路由 cookie（__cflb + __oailb）由池子下发，
-# 顶掉网关自己按账号罐回放的那一套（那套会把账号钉死在它上次落到的网关上）。
-# 还要在账号的 extra 里单独开 openai_gwpool: true 才对该账号生效；两道开关默认都关。
-# 池子没有满血槽位时该账号的请求直接失败，不会退回回放后的降级路由。
-gwpool:
-  enabled: false
-  # 池子地址，形如 http://127.0.0.1:8099
-  base_url: ""
-  # 消费端凭据，进 Authorization 头。不要贴进日志或工单
-  consumer_key: ""

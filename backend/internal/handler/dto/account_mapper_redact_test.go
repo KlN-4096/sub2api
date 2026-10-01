@@ -93,6 +93,36 @@ func TestAccountFromServiceShallow_RedactsOllamaCloudManagedExtra(t *testing.T) 
 	require.Contains(t, src.Extra, service.OllamaCloudUsageSessionExtraKey)
 }
 
+// 网关池 consumer key 与 access_token 同级：原值绝不出响应，只回「配过没有」。
+func TestAccountFromServiceShallow_RedactsGatewayPoolConsumerKey(t *testing.T) {
+	src := &service.Account{
+		ID: 11, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
+		Extra: map[string]any{
+			"openai_gwpool":          true,
+			"openai_gwpool_base_url": "http://127.0.0.1:8099",
+			service.OpenAIGatewayPoolConsumerKeyExtraKey: "gwpool-consumer-secret",
+		},
+	}
+
+	got := AccountFromServiceShallow(src)
+	// 开关与地址不是凭据，照常回显。
+	require.Equal(t, true, got.Extra["openai_gwpool"])
+	require.Equal(t, "http://127.0.0.1:8099", got.Extra["openai_gwpool_base_url"])
+	// key 只剩「已配置」这一个 bool。
+	require.Equal(t, true, got.Extra[service.OpenAIGatewayPoolConsumerKeyExtraKey])
+
+	raw, err := json.Marshal(got)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "gwpool-consumer-secret")
+	// 原始 service.Account 不许被改动（它随后还要写回库）。
+	require.Equal(t, "gwpool-consumer-secret", src.Extra[service.OpenAIGatewayPoolConsumerKeyExtraKey])
+
+	// 没配过就连「已配置」都不回，页面据此区分「留空不修改」与「还没配」。
+	blank := &service.Account{ID: 12, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
+		Extra: map[string]any{service.OpenAIGatewayPoolConsumerKeyExtraKey: "   "}}
+	require.NotContains(t, AccountFromServiceShallow(blank).Extra, service.OpenAIGatewayPoolConsumerKeyExtraKey)
+}
+
 func TestAccountFromServiceShallow_NilCredentialsOmitsStatus(t *testing.T) {
 	src := &service.Account{ID: 1, Name: "n", Platform: "anthropic", Type: "oauth"}
 	got := AccountFromServiceShallow(src)
