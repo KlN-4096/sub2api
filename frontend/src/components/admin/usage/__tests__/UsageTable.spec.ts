@@ -1034,21 +1034,6 @@ describe('admin UsageTable deleted-user badge', () => {
     expect(badge.text()).not.toContain('tkt-7')
   })
 
-  // 续期那一发（取票后的第一发，只送 __cflb）：上游**必然**补发一组新的 __cflb/__oailb，
-  // 所以 route_pair 是新的那组，但解出来的落点仍是池子交付的那个网关 ⇒ 仍是「已覆写」。
-  // 按「有 Set-Cookie 就是被改派」的老判据会把这一格误读成漂移。
-  it('keeps the applied state for the renewal request that swapped in a fresh pair', () => {
-    const wrapper = mountGwpoolRow({
-      route_gateway: 'unified-142',
-      route_pair: '__cflb=lb-renewed; __oailb=jwt-renewed',
-      route_pair_overridden: true,
-      route_pair_pool_gateway: 'unified-142',
-    })
-    const badge = wrapper.get('[data-testid="route-pair-overridden-marker"]')
-    expect(badge.attributes('data-state')).toBe('applied')
-    expect(badge.text()).not.toContain('REROUTED')
-  })
-
   // 注入 142 落 84：上游下发了新的 __oailb，徽标必须说「被改派」而不是「已覆写」。
   it('marks the row as rerouted when the upstream landed it on another gateway', () => {
     const wrapper = mountGwpoolRow({

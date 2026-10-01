@@ -17,10 +17,13 @@ package gwpool
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -487,7 +490,26 @@ func (c *Client) Renew(ctx context.Context, version, cookie string) (string, err
 	if !payload.OK {
 		return "", fmt.Errorf("%w: renew was not accepted", ErrPool)
 	}
-	return sanitizeOpaque(payload.CookieVersion, maxVersionLen), nil
+	// **信任边界**：票号是我们之后用来还票（/release）和弃票（exclude_versions）的身份，而响应
+	// 是外部输入 —— 池子（或冒充它的东西）回一个属于**别人那张在用票**的票号，之后两个动作就全
+	// 打在别人头上了。票号按契约是 sha256(cookie) 的前 12 位十六进制、确定性可本地复算
+	// （SPEC 第 10 节），所以这里直接复算比对。
+	// 不符就**当池子没换票号**（留用旧的）而不是整次失败：续期本身已经生效了，而旧票号至少
+	// 还是我们自己那张票的身份。池子那边若对 cookie 做了归一化（空格/顺序），这条也会退到这个
+	// 安全方向上。
+	next := sanitizeOpaque(payload.CookieVersion, maxVersionLen)
+	if next != "" && !strings.EqualFold(next, cookieVersionOf(cookie)) {
+		// 票号与 cookie 本体同级：一个字都不进日志。
+		slog.Warn("gwpool_renew_version_mismatch")
+		return "", nil
+	}
+	return next, nil
+}
+
+// cookieVersionOf 按契约复算票号：sha256(cookie) 的前 12 位十六进制。
+func cookieVersionOf(cookie string) string {
+	sum := sha256.Sum256([]byte(cookie))
+	return hex.EncodeToString(sum[:])[:12]
 }
 
 // refusal 把非 200 的响应读成 *PoolError。
