@@ -447,6 +447,9 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 	}
 	// 预计算固定时间重置的下次重置时间
 	if account.Extra != nil {
+		if err := validateOpenAIGatewayPoolAccountExtra(account, account.Extra); err != nil {
+			return nil, err
+		}
 		if err := ValidateQuotaResetConfig(account.Extra); err != nil {
 			return nil, err
 		}
@@ -753,6 +756,10 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			delete(account.Extra, modelRateLimitsKey)
 			delete(account.Extra, "antigravity_credits_overages") // 清理旧版 overages 运行态
 		}
+		// 网关池与 WS 上游互斥（openai_gwpool.go）：按合并后的最终 extra 判，否则改一半就绕过去了。
+		if err := validateOpenAIGatewayPoolAccountExtra(account, account.Extra); err != nil {
+			return nil, err
+		}
 		// 校验并预计算固定时间重置的下次重置时间
 		if err := ValidateQuotaResetConfig(account.Extra); err != nil {
 			return nil, err
@@ -983,6 +990,17 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 			return err
 		}
 	}
+	// 网关池与 WS 上游互斥（openai_gwpool.go）。这是部分更新，要按「现有 extra + 本次更新」的
+	// 合并结果判：只写一边也能把两个开关凑齐。
+	if touchesOpenAIGatewayPoolExclusivity(updates) {
+		account, err := s.accountRepo.GetByID(ctx, id)
+		if err != nil {
+			return err
+		}
+		if err := validateOpenAIGatewayPoolAccountExtra(account, mergeMap(account.Extra, updates)); err != nil {
+			return err
+		}
+	}
 	if len(updates) == 0 {
 		return nil
 	}
@@ -1065,7 +1083,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 
 	// 预取所有目标账号，供凭据守卫/代理守卫/混合渠道检查共用，避免多次 DB 查询。
 	var cachedTargets []*Account
-	if len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil {
+	if len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil || touchesOpenAIGatewayPoolExclusivity(input.Extra) {
 		loaded, err := s.accountRepo.GetByIDs(ctx, input.AccountIDs)
 		if err != nil {
 			return nil, err
@@ -1096,6 +1114,16 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 			}
 		}
 	}
+	// 网关池与 WS 上游互斥（openai_gwpool.go）：批量把 gwpool 打开时，目标里任何一个已经开着
+	// WS 上游的账号都要整体拒绝——漏过去的那个账号每条 WS 请求都会被运行期闸门拒掉。
+	if touchesOpenAIGatewayPoolExclusivity(input.Extra) {
+		for _, acc := range cachedTargets {
+			if err := validateOpenAIGatewayPoolAccountExtra(acc, mergeMap(acc.Extra, input.Extra)); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	// 影子账号绝不持有凭据:批量更新携带凭据时,目标中不得含影子(外审 G5,与单账号
 	// UpdateAccount 守卫对齐)。覆盖显式 IDs 与 filter 解析出的 IDs(此处 AccountIDs 已解析完成)。
 	if len(input.Credentials) > 0 {

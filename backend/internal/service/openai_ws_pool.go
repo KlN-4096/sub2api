@@ -2194,7 +2194,9 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 		if headers == nil {
 			headers = http.Header{}
 		}
-		p.cookies.Attach(req.Account, req.WSURL, headers)
+		if err := p.cookies.AttachRoute(ctx, req.Account, req.WSURL, headers); err != nil {
+			return nil, err
+		}
 	}
 	conn, status, handshakeHeaders, err := p.clientDialer.Dial(ctx, req.WSURL, headers, req.ProxyURL)
 	if p.cookies != nil {
