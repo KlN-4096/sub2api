@@ -150,49 +150,6 @@ func TestClientCookieRejectsUnusablePayloads(t *testing.T) {
 	}
 }
 
-func TestClientTouchPostsReport(t *testing.T) {
-	var got map[string]any
-	var gotAuth, gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth, gotPath = r.Header.Get("Authorization"), r.URL.Path
-		_ = json.NewDecoder(r.Body).Decode(&got)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer srv.Close()
-
-	at := time.Unix(1790000000, 0)
-	err := New(srv.URL, "ck").Touch(context.Background(), Touch{
-		AccountID: "chatgpt:acc-a:user:user-a", Gateway: "unified-142", At: at,
-	})
-	if err != nil {
-		t.Fatalf("touch: %v", err)
-	}
-	if gotPath != "/touch" || gotAuth != "Bearer ck" {
-		t.Fatalf("path=%q auth=%q", gotPath, gotAuth)
-	}
-	if got["account_id"] != "chatgpt:acc-a:user:user-a" || got["gateway"] != "unified-142" {
-		t.Fatalf("body = %+v", got)
-	}
-	if ts, ok := got["ts"].(float64); !ok || int64(ts) != at.Unix() {
-		t.Fatalf("ts = %v", got["ts"])
-	}
-	// 空 verdict 要落成 unknown，不能发空串让池子猜。
-	if got["verdict"] != "unknown" {
-		t.Fatalf("verdict = %v", got["verdict"])
-	}
-}
-
-func TestClientTouchReportsFailure(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	if err := New(srv.URL, "k").Touch(context.Background(), Touch{Gateway: "unified-1"}); err == nil {
-		t.Fatal("want error")
-	}
-}
-
 // 端点一律 JoinPath 拼：base_url 带 query / 缺结尾斜杠时字符串拼接会把路径拼坏。
 func TestClientJoinsEndpointPath(t *testing.T) {
 	paths := make(chan string, 2)
@@ -208,12 +165,6 @@ func TestClientJoinsEndpointPath(t *testing.T) {
 	}
 	if got := <-paths; got != "/pool/cookie?" {
 		t.Fatalf("cookie endpoint = %q", got)
-	}
-	if err := client.Touch(context.Background(), Touch{Gateway: "unified-1"}); err != nil {
-		t.Fatalf("touch: %v", err)
-	}
-	if got := <-paths; got != "/pool/touch?" {
-		t.Fatalf("touch endpoint = %q", got)
 	}
 }
 
@@ -251,20 +202,13 @@ func TestClientCookieRejectsControlCharacters(t *testing.T) {
 // 池子侧的每一个错误都要包着 ErrPool：消费端据此把它和真实代理故障分开，不然重启池子会把
 // 一批真账号按「代理持久故障」停调度 10 分钟。
 func TestClientErrorsWrapErrPool(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/cookie" {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusBadRequest)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	client := New(srv.URL, "k")
 	_, err := client.Cookie(context.Background(), "", false)
 	if !errors.Is(err, ErrPool) {
 		t.Fatalf("cookie HTTP 500 must wrap ErrPool: %v", err)
-	}
-	if err := client.Touch(context.Background(), Touch{Gateway: "unified-1"}); !errors.Is(err, ErrPool) {
-		t.Fatalf("touch HTTP 400 must wrap ErrPool: %v", err)
 	}
 	if !errors.Is(ErrNoSlot, ErrPool) {
 		t.Fatal("ErrNoSlot must wrap ErrPool")
@@ -297,11 +241,6 @@ func TestClientErrorsCarryNoConsumerKey(t *testing.T) {
 		t.Fatal("want transport error")
 	}
 	if strings.Contains(err.Error(), key) {
-		t.Fatalf("error string leaked the consumer key: %v", err)
-	}
-	if err := client.Touch(context.Background(), Touch{Gateway: "unified-1"}); err == nil {
-		t.Fatal("want transport error")
-	} else if strings.Contains(err.Error(), key) {
 		t.Fatalf("error string leaked the consumer key: %v", err)
 	}
 }
