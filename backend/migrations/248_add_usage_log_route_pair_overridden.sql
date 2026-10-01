@@ -8,8 +8,9 @@
 -- （route_gateway，247）比对：
 --   一致   ⇒ 注入的 pair 生效了
 --   不一致 ⇒ 上游下发了新的 __oailb，把这一发改派走了 = 注入被拒
--- 判据依据：健康的借来 pair 的特征是上游**不下发** Set-Cookie（docs/tasks/gateway-pool.md 第二节
--- 的三路对照：裸打下发新 __oailb、借来的 pair 不下发、坏 pair 下发）。只有 route_pair_overridden
+-- 判据只比**落点**，不看「上游有没有下发 Set-Cookie」：没下发（两件齐发时的常态）与下发了但落点
+-- 相同（续期那一发只送 __cflb，上游必然补发一套，见 openai_gwpool.go 的 gatewayPoolRenew）都是
+-- 注入生效。只有 route_pair_overridden
 -- 一列的话，「注入 142 实际落 126」这种被拒在页面上看不出来——而那正是这个功能唯一要回答的问题。
 --
 -- 第三列 route_pair_pool_version 是池子给**这一张具体的票**的身份（cookie_version），只为和池子

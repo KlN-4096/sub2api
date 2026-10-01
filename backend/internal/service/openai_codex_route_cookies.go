@@ -24,7 +24,15 @@ const (
 	maxUsageRoutePairVersionLen = 128
 )
 
-var openAICodexRouteCookieNames = [...]string{"__cflb", "__oailb"}
+const (
+	// openAICodexRouteCFLBCookie 是真正钉住路由的那一项（Cloudflare 负载均衡的不透明短串）。
+	// openAICodexRouteOAILBCookie 只是让响应**暴露落点**的那张 JWT。
+	openAICodexRouteCFLBCookie  = "__cflb"
+	openAICodexRouteOAILBCookie = "__oailb"
+)
+
+// 顺序即 routePairOf 的输出顺序，改了会让同一组路由对在不同请求里落库成不同字符串。
+var openAICodexRouteCookieNames = [...]string{openAICodexRouteCFLBCookie, openAICodexRouteOAILBCookie}
 
 // routePairOf 从一组 "name=value" 候选里挑出这两个名字，拼成稳定顺序的 "name=value; name=value"。
 func routePairOf(candidates []string) string {
@@ -50,6 +58,17 @@ func routePairOf(candidates []string) string {
 		}
 	}
 	return strings.Join(out, "; ")
+}
+
+// routePairItem 从 routePairOf 的产物里取出一项（"name=value"，没有这一项就返回空串）。
+func routePairItem(pair, name string) string {
+	for _, item := range strings.Split(pair, ";") {
+		item = strings.TrimSpace(item)
+		if itemName, _, _ := strings.Cut(item, "="); itemName == name {
+			return item
+		}
+	}
+	return ""
 }
 
 // Set-Cookie 一行一对，属性段（Path/Max-Age/...）在第一个 ";" 之后，丢掉。
@@ -81,8 +100,14 @@ func openAICodexRoutePairFromCookie(h http.Header) string {
 //	poolGateway == 实际落点 ⇒ 注入生效
 //	poolGateway != 实际落点 ⇒ 上游下发了新的 __oailb，这一发被改派走了 = 注入被拒
 //
-// 判据依据：健康的借来 pair 的特征是上游**不下发** Set-Cookie（docs/tasks/gateway-pool.md
-// 第二节的三路对照：裸打下发新 __oailb、借来的 pair 不下发、签名改坏的 pair 下发）。
+// 判据只比**落点**，不看「上游有没有下发 Set-Cookie」—— 三格都是已知常态：
+//
+//	没有 Set-Cookie                  ⇒ 已覆写（两件齐发时的常态：借来的活票上游什么都不回）
+//	有新 __oailb，落点 == 交付的网关  ⇒ 已覆写（续期那一发的常态：它刻意只送 __cflb，
+//	                                  上游必然补发一套，但路由没变 —— 见 gatewayPoolRenew）
+//	有新 __oailb，落点 != 交付的网关  ⇒ 被改派（真漂移 = 注入被拒）
+//
+// 「有 Set-Cookie 就是被改派」是 2026-10-02 续期上线前的老判据，会把第二格误读成漂移。
 // 第四个返回值是池子给这张票的身份（cookie_version），落库只为**和池子的日志对上账**：
 // 徽标说「被改派」时，拿它去池子那边看这张票的交付与验证记录。它不是 cookie 本体。
 func (s *OpenAIGatewayService) routePairInUse(

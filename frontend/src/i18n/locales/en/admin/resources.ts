@@ -535,7 +535,7 @@ export default {
       routePairPoolVersion: 'Pool ticket id',
       routePairReroutedShort: 'REROUTED',
       routePairRerouted:
-        'The pool handed out a pair for {promised} but the upstream issued a new __oailb and re-dispatched this request to {landed}: a healthy borrowed pair draws no Set-Cookie, so the injection was rejected',
+        'The pool handed out a pair for {promised} but the new __oailb from the upstream re-dispatched this request to {landed}, so the injection was rejected. A new __oailb that decodes to the same gateway is not a re-dispatch (the renewal request swaps in a fresh pair without changing the route)',
       turnStateHint: '{chars} chars (ciphertext {blocks} blocks); under PKCS#7 the plaintext falls in {min}–{max} bytes. Baseline is 292 chars (332 on team accounts). Block count only brackets the plaintext to a 16-byte window, so this is a suspicion, not proof. Minted {minted}',
       turnStateUndecodable: 'Not a parsable Fernet envelope; falling back to char length {n}',
       turnStateUnknownShape: 'Yellow: not a known shape (healthy 292/332, degraded 312/356), so degradation cannot be judged.',
