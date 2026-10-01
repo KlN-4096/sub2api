@@ -834,9 +834,9 @@ func TestMergeOpenAIGatewayPoolConsumerKeyPreservesStoredValue(t *testing.T) {
 
 	for name, submitted := range map[string]any{
 		"脱敏回显的 bool": true,
-		"空串":          "",
-		"只有空白":        "   ",
-		"类型不对":        42,
+		"空串":         "",
+		"只有空白":       "   ",
+		"类型不对":       42,
 	} {
 		incoming := map[string]any{OpenAIGatewayPoolConsumerKeyExtraKey: submitted}
 		mergeOpenAIGatewayPoolConsumerKey(existing, incoming)

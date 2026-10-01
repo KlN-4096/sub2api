@@ -98,8 +98,8 @@ func TestAccountFromServiceShallow_RedactsGatewayPoolConsumerKey(t *testing.T) {
 	src := &service.Account{
 		ID: 11, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
 		Extra: map[string]any{
-			"openai_gwpool":          true,
-			"openai_gwpool_base_url": "http://127.0.0.1:8099",
+			"openai_gwpool":                              true,
+			"openai_gwpool_base_url":                     "http://127.0.0.1:8099",
 			service.OpenAIGatewayPoolConsumerKeyExtraKey: "gwpool-consumer-secret",
 		},
 	}
