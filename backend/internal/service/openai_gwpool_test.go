@@ -83,6 +83,12 @@ type gwpoolFakePool struct {
 	releaseHits   atomic.Int64
 	releaseBodies chan string
 	releaseStatus int // 非 0 时 /release 回这个状态码（默认 204）
+	// pairRemainingS 是 /cookie 回的 pair_remaining_s（这张 pair 自己的剩余寿命）。
+	// 0 = 不报这个字段（老池子）⇒ 消费端不续期。renew* 记 POST /pair/renew。
+	pairRemainingS int
+	renewHits      atomic.Int64
+	renewBodies    chan string
+	renewStatus    int // 非 0 时 /pair/renew 回这个状态码（默认 200 + ok:true）
 	// omitVersion 模拟不报 cookie_version 的老池子；onCookie 在 /cookie 被打到时回调
 	// （用来复现「取到票之后、发送之前客户端就走了」）。
 	omitVersion bool
@@ -94,7 +100,8 @@ func newGwpoolFakePool(t *testing.T, cookie string, validForS int) *gwpoolFakePo
 	fake := &gwpoolFakePool{
 		queries: make(chan string, 16), strayPaths: make(chan string, 16),
 		listQueries: make(chan string, 16), releaseBodies: make(chan string, 16),
-		cookie: cookie, validForS: validForS,
+		renewBodies: make(chan string, 16),
+		cookie:      cookie, validForS: validForS,
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -131,9 +138,15 @@ func newGwpoolFakePool(t *testing.T, cookie string, validForS int) *gwpoolFakePo
 			if fake.omitVersion {
 				version = ""
 			}
+			// pair_remaining_s 只在显式配了的用例里出现：默认不报 = 老池子 = 不续期，
+			// 这样既有用例的行为一个字都不变。
+			remaining := ""
+			if fake.pairRemainingS != 0 {
+				remaining = `,"pair_remaining_s":` + strconv.Itoa(fake.pairRemainingS)
+			}
 			_, _ = io.WriteString(w, `{"gateway":"`+gateway+`","cookie":"`+cookie+
 				`","valid_for_s":`+strconv.Itoa(fake.validForS)+`,"verified_full":true,"ttl_is_advisory":true`+
-				version+`}`)
+				version+remaining+`}`)
 			if fake.onCookie != nil {
 				fake.onCookie()
 			}
@@ -164,8 +177,20 @@ func newGwpoolFakePool(t *testing.T, cookie string, validForS int) *gwpoolFakePo
 			default:
 			}
 			w.WriteHeader(http.StatusNoContent)
+		case "/pair/renew":
+			fake.renewHits.Add(1)
+			body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<10))
+			select {
+			case fake.renewBodies <- strings.TrimSpace(string(body)):
+			default:
+			}
+			if fake.renewStatus != 0 {
+				w.WriteHeader(fake.renewStatus)
+				return
+			}
+			_, _ = io.WriteString(w, `{"ok":true,"cookie_version":"tkt-renewed","valid_for_s":3600}`)
 		default:
-			// 池子只有 /cookie、/gateways 和 /release。任何别的路径（历史上的 /touch 就在这里）
+			// 池子只有 /cookie、/gateways、/release 和 /pair/renew。任何别的路径（历史上的 /touch 就在这里）
 			// 都算越界 —— 尤其是任何形式的「回报满血/降智」，那是刻意没有的东西。
 			fake.strays.Add(1)
 			select {
@@ -247,6 +272,18 @@ func (f *gwpoolFakePool) nextRelease(t *testing.T) string {
 		return body
 	case <-time.After(3 * time.Second):
 		t.Fatal("没有还票")
+		return ""
+	}
+}
+
+// nextRenew 取下一次 POST /pair/renew 的请求体（续期是异步的，这里顺带当同步点用）。
+func (f *gwpoolFakePool) nextRenew(t *testing.T) string {
+	t.Helper()
+	select {
+	case body := <-f.renewBodies:
+		return body
+	case <-time.After(3 * time.Second):
+		t.Fatal("没有回传续期")
 		return ""
 	}
 }

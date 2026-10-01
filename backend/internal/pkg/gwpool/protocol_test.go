@@ -116,13 +116,21 @@ func TestCookieWaitIsClampedToCallBudget(t *testing.T) {
 		_, _ = io.WriteString(w, `{"gateway":"g","cookie":"__cflb=a; __oailb=b","valid_for_s":150}`)
 	}))
 	defer srv.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// 这一段只钉一件事：**钳位接在了 Cookie() 这条真实路径上**，不是只在 query() 里。
+	// 精确秒数由上面两段钉（它们传的是确定的 budget，不含时序）。别再往这里塞边界值：
+	// query() 里是**截断**，而「设死线」到「算 budget」之间必然过掉几微秒 ⇒ 掐着边界写的
+	// 断言只在够快的机器上绿（CI 上就红过）。
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if _, err := New(srv.URL, "k", 0).Cookie(ctx, CookieRequest{Wait: 30 * time.Second}); err != nil {
 		t.Fatalf("取票失败: %v", err)
 	}
-	if gotWait != "1" {
-		t.Fatalf("死线 2s 时出站 wait 应为 1，实际 %q", gotWait)
+	w, err := strconv.Atoi(gotWait)
+	if err != nil {
+		t.Fatalf("出站 wait 解不开: %q", gotWait)
+	}
+	if w <= 0 || w > 9 {
+		t.Fatalf("死线 10s 时出站 wait 应落在 (0, 9]（预算内、且留了写回余量），实际 %d", w)
 	}
 }
 
@@ -348,5 +356,115 @@ func TestTransportErrorDropsQuery(t *testing.T) {
 	}
 	if transport.URL != "http://127.0.0.1:1/cookie" {
 		t.Fatalf("URL 应只剩路径: %q", transport.URL)
+	}
+}
+
+// pair_remaining_s 是续期闸的唯一判据（消费端的 openAIGatewayPoolRenewBelow），所以缺失必须是 0
+// （= 不续），畸形值要么是 0 要么远在阈值之上，不能变成一个「刚好低于阈值」的值。
+func TestCookieReadsPairRemaining(t *testing.T) {
+	for _, tc := range []struct {
+		field string
+		want  time.Duration
+	}{
+		{field: `,"pair_remaining_s":3000`, want: 3000 * time.Second},
+		{field: `,"pair_remaining_s":600`, want: 600 * time.Second},
+		{field: "", want: 0},                                     // 老池子没这个字段
+		{field: `,"pair_remaining_s":-5`, want: 0},               // 负数 ⇒ 不续
+		{field: `,"pair_remaining_s":999999`, want: maxValidFor}, // 钳到物理上限，仍远在阈值之上
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, `{"gateway":"g","cookie":"__cflb=a; __oailb=b","valid_for_s":150`+
+				tc.field+`}`)
+		}))
+		pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{})
+		srv.Close()
+		if err != nil {
+			t.Fatalf("%q 不该整票作废: %v", tc.field, err)
+		}
+		if pair.PairRemaining != tc.want {
+			t.Fatalf("%q ⇒ PairRemaining=%v，想要 %v", tc.field, pair.PairRemaining, tc.want)
+		}
+		if pair.ValidFor != 150*time.Second {
+			t.Fatalf("%q 不该动满血窗口: %v", tc.field, pair.ValidFor)
+		}
+	}
+}
+
+// POST /pair/renew：回传的是**事实**（一串 cookie）+ 这张票的票号，一个判断字段都没有。
+// 认证与 /cookie 同一把 consumer key。
+func TestRenewPostsNewPair(t *testing.T) {
+	var hits int
+	var gotPath, gotAuth, gotBody, gotContentType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
+		gotContentType = r.Header.Get("Content-Type")
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<10))
+		gotBody = string(body)
+		_, _ = io.WriteString(w, `{"ok":true,"cookie_version":"tkt-8","valid_for_s":3600}`)
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "ck-secret-value", 0)
+	next, err := client.Renew(context.Background(), "tkt-7", "__cflb=new-lb; __oailb=new-jwt")
+	if err != nil {
+		t.Fatalf("续期应成功: %v", err)
+	}
+	if next != "tkt-8" {
+		t.Fatalf("新票号没收上来: %q", next)
+	}
+	if gotPath != "/pair/renew" {
+		t.Fatalf("path=%q", gotPath)
+	}
+	if gotAuth == "" {
+		t.Fatal("续期的认证必须与 /cookie 一致（带 consumer key）")
+	}
+	if gotContentType != "application/json" {
+		t.Fatalf("content-type=%q", gotContentType)
+	}
+	// 字段只有这两个：带任何满血/降智/质量字段都是越界（/touch 10-01 就是因此被删的）。
+	if gotBody != `{"cookie":"__cflb=new-lb; __oailb=new-jwt","cookie_version":"tkt-7"}` {
+		t.Fatalf("body=%q", gotBody)
+	}
+
+	// 票号或 cookie 缺一个就不发请求（没什么可指认 / 没什么可续），且不算错误。
+	for _, tc := range [][2]string{{"", "__cflb=a"}, {"tkt-7", "   "}} {
+		if next, err := client.Renew(context.Background(), tc[0], tc[1]); err != nil || next != "" {
+			t.Fatalf("Renew(%q,%q) 应是空操作: %q %v", tc[0], tc[1], next, err)
+		}
+	}
+	if hits != 1 {
+		t.Fatalf("空参数不该发请求，实际打了 %d 次", hits)
+	}
+}
+
+// 200 但 ok=false 是池子明说「没续上」⇒ 当失败，不能把一个没生效的续期记成成功（那会让本地
+// 以为这张票的寿命已经拉满、不再有人去救它）。非 200 走统一错误体 ⇒ *PoolError + 闭集码。
+func TestRenewRefusalShapes(t *testing.T) {
+	var reply func(w http.ResponseWriter)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reply(w)
+	}))
+	defer srv.Close()
+	client := New(srv.URL, "k", 0)
+
+	reply = func(w http.ResponseWriter) {
+		_, _ = io.WriteString(w, `{"ok":false}`)
+	}
+	if _, err := client.Renew(context.Background(), "tkt-7", "__cflb=a; __oailb=b"); !errors.Is(err, ErrPool) {
+		t.Fatalf("ok=false 应是失败: %v", err)
+	}
+
+	reply = func(w http.ResponseWriter) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"code":"consumer_rejected","retry_after_seconds":300}}`)
+	}
+	_, err := client.Renew(context.Background(), "tkt-7", "__cflb=a; __oailb=b")
+	var poolErr *PoolError
+	if !errors.As(err, &poolErr) {
+		t.Fatalf("非 200 应是 *PoolError: %v", err)
+	}
+	if poolErr.Code != CodeConsumerRejected || poolErr.RetryAfter != 300*time.Second {
+		t.Fatalf("错误码/退避没收上来: %+v", poolErr)
 	}
 }

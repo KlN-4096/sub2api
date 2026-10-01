@@ -39,6 +39,9 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 	resp, err := s.doOpenAIUpstreamRoundTrip(request, proxyURL, account)
 	if err == nil && resp != nil {
 		s.codexCookies.Store(account, rawURL, resp.Header)
+		// 取票后的第一发（且票临期）会摘掉 __oailb 出站，换回来的那张新 __cflb 要回传池子续寿命。
+		// 异步 + 自带 ctx，绝不拖业务响应；没抢到名额 / 上游没下发新两件时它什么都不做。
+		s.codexCookies.gatewayPoolRenew(request.Context(), account, resp.Header)
 		return resp, nil
 	}
 	if gatewayPoolReleasesUnsent(resp, err) {
