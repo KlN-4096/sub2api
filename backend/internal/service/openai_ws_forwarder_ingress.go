@@ -118,8 +118,12 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 
 	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
+	// 第三项是网关池接管（openai_gwpool.go）：WS 入站照常服务，这一轮桥到 HTTP/SSE 上游，
+	// 而不是打成 "websocket ingress requires ws_v2 transport"。这是 WS 入站这一侧的选路降级点，
+	// 所以必须先于下面按 ingressMode 分流。
 	forceHTTPBridge := account.Platform == PlatformGrok ||
-		(s.pluginManager != nil && s.pluginManager.ShouldRouteOpenAIOAuth(account))
+		(s.pluginManager != nil && s.pluginManager.ShouldRouteOpenAIOAuth(account)) ||
+		gatewayPoolDowngradesWSUpstream(wsDecision, account)
 	modeRouterV2Enabled := s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.ModeRouterV2Enabled
 	ingressMode := OpenAIWSIngressModeCtxPool
 	if modeRouterV2Enabled && !forceHTTPBridge {

@@ -25,7 +25,7 @@ func TestClientCookieReturnsPair(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	pair, err := New(srv.URL+"/", "ck-secret").Cookie(context.Background(), "", "", false)
+	pair, err := New(srv.URL+"/", "ck-secret", 0).Cookie(context.Background(), CookieRequest{})
 	if err != nil {
 		t.Fatalf("cookie: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestClientGatewaysListsCandidates(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	gateways, err := New(srv.URL, "ck-secret").Gateways(context.Background(), "acc-a")
+	gateways, err := New(srv.URL, "ck-secret", 0).Gateways(context.Background(), "acc-a")
 	if err != nil {
 		t.Fatalf("gateways: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestClientGatewaysAnonymousCarriesAccount(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := New(srv.URL, "").Gateways(context.Background(), "acc a/b"); err != nil {
+	if _, err := New(srv.URL, "", 0).Gateways(context.Background(), "acc a/b"); err != nil {
 		t.Fatalf("gateways: %v", err)
 	}
 	if gotAuth != "" {
@@ -121,7 +121,7 @@ func TestClientGatewaysRejectsAnswerForAnotherAccount(t *testing.T) {
 		_, _ = io.WriteString(w, body)
 	}))
 	defer srv.Close()
-	client := New(srv.URL, "k")
+	client := New(srv.URL, "k", 0)
 
 	body = `{"account":"acc-uploader","gateways":[{"name":"unified-167","pair_ready":true}]}`
 	if _, err := client.Gateways(context.Background(), "acc-a"); !errors.Is(err, ErrPool) {
@@ -149,7 +149,7 @@ func TestClientCookieCarriesAccount(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	pair, err := New(srv.URL, "k").Cookie(context.Background(), "acc-a", "unified-167", true)
+	pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{Account: "acc-a", Gateway: "unified-167", Force: true})
 	if err != nil {
 		t.Fatalf("cookie: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestClientGatewaysErrorsWrapErrPool(t *testing.T) {
 				_, _ = io.WriteString(w, body)
 			}))
 			defer srv.Close()
-			if _, err := New(srv.URL, "k").Gateways(context.Background(), "acc"); !errors.Is(err, ErrPool) {
+			if _, err := New(srv.URL, "k", 0).Gateways(context.Background(), "acc"); !errors.Is(err, ErrPool) {
 				t.Fatalf("want ErrPool, got %v", err)
 			}
 		})
@@ -189,7 +189,7 @@ func TestClientGatewaysErrorsWrapErrPool(t *testing.T) {
 	const key = "super-secret-consumer-key"
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	srv.Close()
-	_, err := New(srv.URL, key).Gateways(context.Background(), "acc")
+	_, err := New(srv.URL, key, 0).Gateways(context.Background(), "acc")
 	if !errors.Is(err, ErrPool) {
 		t.Fatalf("transport error must wrap ErrPool: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestClientGatewaysToleratesUnparsableLastUsedAt(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	gateways, err := New(srv.URL, "k").Gateways(context.Background(), "acc")
+	gateways, err := New(srv.URL, "k", 0).Gateways(context.Background(), "acc")
 	if err != nil {
 		t.Fatalf("gateways: %v", err)
 	}
@@ -223,21 +223,21 @@ func TestClientCookieForcesRotation(t *testing.T) {
 		_, _ = io.WriteString(w, `{"gateway":"unified-84","cookie":"__cflb=a","valid_for_s":150}`)
 	}))
 	defer srv.Close()
-	client := New(srv.URL, "k")
+	client := New(srv.URL, "k", 0)
 
-	if _, err := client.Cookie(context.Background(), "", "", false); err != nil {
+	if _, err := client.Cookie(context.Background(), CookieRequest{}); err != nil {
 		t.Fatalf("cookie: %v", err)
 	}
 	if got := <-queries; got != "" {
 		t.Fatalf("正常路径不该带 force: %q", got)
 	}
-	if _, err := client.Cookie(context.Background(), "", "", true); err != nil {
+	if _, err := client.Cookie(context.Background(), CookieRequest{Force: true}); err != nil {
 		t.Fatalf("cookie force: %v", err)
 	}
 	if got := <-queries; got != "force=1" {
 		t.Fatalf("force 查询串 = %q", got)
 	}
-	if _, err := client.Cookie(context.Background(), "", "unified-84", true); err != nil {
+	if _, err := client.Cookie(context.Background(), CookieRequest{Gateway: "unified-84", Force: true}); err != nil {
 		t.Fatalf("cookie force+gateway: %v", err)
 	}
 	if got := <-queries; got != "force=1&gateway=unified-84" {
@@ -255,7 +255,7 @@ func TestClientCookieForceNoSlot(t *testing.T) {
 		_, _ = io.WriteString(w, `{"gateway":"unified-84","cookie":"__cflb=a","valid_for_s":150}`)
 	}))
 	defer srv.Close()
-	if _, err := New(srv.URL, "k").Cookie(context.Background(), "", "", true); !errors.Is(err, ErrNoSlot) {
+	if _, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{Force: true}); !errors.Is(err, ErrNoSlot) {
 		t.Fatalf("want ErrNoSlot, got %v", err)
 	}
 }
@@ -268,7 +268,7 @@ func TestClientCookiePassesGateway(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := New(srv.URL, "k").Cookie(context.Background(), "", "unified-84", false); err != nil {
+	if _, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{Gateway: "unified-84"}); err != nil {
 		t.Fatalf("cookie: %v", err)
 	}
 	if gotQuery != "gateway=unified-84" {
@@ -283,7 +283,7 @@ func TestClientCookieNoSlot(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New(srv.URL, "k").Cookie(context.Background(), "", "", false)
+	_, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{})
 	if !errors.Is(err, ErrNoSlot) {
 		t.Fatalf("want ErrNoSlot, got %v", err)
 	}
@@ -306,7 +306,7 @@ func TestClientCookieRejectsUnusablePayloads(t *testing.T) {
 				_, _ = io.WriteString(w, tc.body)
 			}))
 			defer srv.Close()
-			if _, err := New(srv.URL, "k").Cookie(context.Background(), "", "", false); err == nil {
+			if _, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{}); err == nil {
 				t.Fatal("want error")
 			}
 		})
@@ -322,8 +322,8 @@ func TestClientJoinsEndpointPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := New(srv.URL+"/pool?x=1", "k")
-	if _, err := client.Cookie(context.Background(), "", "", false); err != nil {
+	client := New(srv.URL+"/pool?x=1", "k", 0)
+	if _, err := client.Cookie(context.Background(), CookieRequest{}); err != nil {
 		t.Fatalf("cookie: %v", err)
 	}
 	if got := <-paths; got != "/pool/cookie?" {
@@ -353,7 +353,7 @@ func TestClientCookieRejectsControlCharacters(t *testing.T) {
 		t.Fatalf("解码后的 cookie 必须带控制字符: %q", probe.Cookie)
 	}
 
-	_, err := New(srv.URL, "k").Cookie(context.Background(), "", "", false)
+	_, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{})
 	if err == nil {
 		t.Fatal("want error")
 	}
@@ -368,8 +368,8 @@ func TestClientErrorsWrapErrPool(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	client := New(srv.URL, "k")
-	_, err := client.Cookie(context.Background(), "", "", false)
+	client := New(srv.URL, "k", 0)
+	_, err := client.Cookie(context.Background(), CookieRequest{})
 	if !errors.Is(err, ErrPool) {
 		t.Fatalf("cookie HTTP 500 must wrap ErrPool: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestClientErrorsWrapErrPool(t *testing.T) {
 	}
 	srv.Close()
 	// 传输错误（池子没起/换了端口）同样要带标记，它正是会被误判成代理故障的那一类。
-	if _, err := client.Cookie(context.Background(), "", "", false); !errors.Is(err, ErrPool) {
+	if _, err := client.Cookie(context.Background(), CookieRequest{}); !errors.Is(err, ErrPool) {
 		t.Fatalf("transport error must wrap ErrPool: %v", err)
 	}
 }
@@ -386,7 +386,7 @@ func TestClientErrorsWrapErrPool(t *testing.T) {
 // 错误串不得带 consumer key。
 func TestNewRejectsUnusableBaseURL(t *testing.T) {
 	for _, bad := range []string{"", "   ", "://nope"} {
-		if New(bad, "k") != nil {
+		if New(bad, "k", 0) != nil {
 			t.Fatalf("%q should not build a client", bad)
 		}
 	}
@@ -398,12 +398,40 @@ func TestClientErrorsCarryNoConsumerKey(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	srv.Close() // 关掉：逼出传输错误
-	client := New(srv.URL, key)
-	_, err := client.Cookie(context.Background(), "", "", false)
+	client := New(srv.URL, key, 0)
+	_, err := client.Cookie(context.Background(), CookieRequest{})
 	if err == nil {
 		t.Fatal("want transport error")
 	}
 	if strings.Contains(err.Error(), key) {
 		t.Fatalf("error string leaked the consumer key: %v", err)
+	}
+}
+
+// 单次调用的上限必须跟着参数走，不能被包里那个写死的 5s 盖住：http.Client.Timeout 与 ctx
+// deadline 取较小者，所以消费端把账号配的「取票超时」调到 5s 以上时，必须由这个参数放开。
+// 白盒读 http.Timeout（省掉一个 5 秒级的等待），再用一对快测证明「它就是单次调用的闸」。
+func TestNewAppliesCallTimeout(t *testing.T) {
+	const url = "http://127.0.0.1:1/"
+	if got := New(url, "k", 8*time.Second).http.Timeout; got != 8*time.Second {
+		t.Fatalf("单次调用上限应为 8s，实际 %v", got)
+	}
+	for _, zero := range []time.Duration{0, -1} {
+		if got := New(url, "k", zero).http.Timeout; got != defaultRequestTimeout {
+			t.Fatalf("超时给 %v 时应取包默认 %v，实际 %v", zero, defaultRequestTimeout, got)
+		}
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		_, _ = io.WriteString(w, `{"gateway":"unified-1","cookie":"__cflb=a; __oailb=b","valid_for_s":150}`)
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL, "k", 100*time.Millisecond).Cookie(context.Background(), CookieRequest{}); err == nil {
+		t.Fatal("上限 100ms 时这次 300ms 的调用必须超时")
+	}
+	if _, err := New(srv.URL, "k", 3*time.Second).Cookie(context.Background(), CookieRequest{}); err != nil {
+		t.Fatalf("上限 3s 时这次 300ms 的调用不该失败: %v", err)
 	}
 }

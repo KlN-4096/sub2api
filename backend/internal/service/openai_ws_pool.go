@@ -2194,7 +2194,9 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 		if headers == nil {
 			headers = http.Header{}
 		}
-		if err := p.cookies.AttachRoute(ctx, req.Account, req.WSURL, headers); err != nil {
+		// 还票闭包恒为 nil：网关池账号的 WS 在 AttachRoute 取票**之前**就被兜底闸拒掉
+		// （ErrGatewayPoolWSIncompatible），这条路上永远没有票可还。
+		if _, err := p.cookies.AttachRoute(ctx, req.Account, req.WSURL, headers); err != nil {
 			return nil, err
 		}
 	}

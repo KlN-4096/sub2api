@@ -889,7 +889,8 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			return fmt.Errorf("refresh ws authentication headers: %w", err)
 		}
 		// 透传适配器不经连接池，cookie 回放在这里挂钩（池的对应点在 dialConn）。
-		if err := s.codexCookies.AttachRoute(ctx, account, wsURL, headers); err != nil {
+		// 还票闭包恒为 nil：网关池账号走不到这里（选路层已降级成 HTTP/SSE，兜底闸也在取票之前）。
+		if _, err := s.codexCookies.AttachRoute(ctx, account, wsURL, headers); err != nil {
 			return fmt.Errorf("attach ws route cookies: %w", err)
 		}
 		dialCtx, cancelDial := context.WithTimeout(ctx, s.openAIWSDialTimeout())
