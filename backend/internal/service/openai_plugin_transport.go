@@ -14,11 +14,15 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 	}
 	// ChatGPT cookie 回放（openai_codex_cookies.go）：出站前带上该账号罐里的 cookie，拿到响应
 	// 后收 Set-Cookie。插件路径与直连路径都经过这里，两条路一致。
+	// 网关池接管时这里换成池子下发的 pair（openai_gwpool.go）；池子没有满血槽位就报错，
+	// 由调用方走既有失败路径，不回落罐回放。
 	rawURL := ""
 	if request != nil && request.URL != nil {
 		rawURL = request.URL.String()
 	}
-	s.codexCookies.Attach(account, rawURL, request.Header)
+	if err := s.codexCookies.AttachRoute(request.Context(), account, rawURL, request.Header); err != nil {
+		return nil, err
+	}
 	resp, err := s.doOpenAIUpstreamRoundTrip(request, proxyURL, account)
 	if err == nil && resp != nil {
 		s.codexCookies.Store(account, rawURL, resp.Header)
