@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import AccountGatewayCell from '../AccountGatewayCell.vue'
 import type { Account } from '@/types'
-import { formatRelativeTime } from '@/utils/format'
 
 // 只替 useI18n，其余保留真实导出：src/utils/format.ts 会 import src/i18n/index.ts，
 // 整个模块被 mock 掉的话 createI18n 就没了。
@@ -251,21 +250,26 @@ describe('AccountGatewayCell', () => {
     expect(cell(w, 'east-asia').attributes('title')).toContain('gatewayHistory.verdicts.none')
   })
 
-  // tooltip 固定五段：区域-网关名-满血时间-状态-判定，例 `美东-149-45 分钟前-冷却中-降智`。
+  // tooltip 固定五段：区域-网关名-满血时长-状态-判定，例 `美东-149-180s-冷却中-降智`。
   //
-  // 段位固定（没有就写「未满血 / 没判过」）是刻意的 —— 运营方竖着扫一列格子看，段数会变
-  // 的话每一行都得重新找「满血时间」在哪儿。每段只放**值**、不带标签，同一个理由。
+  // 段位固定（没有就写「未计时 / 没判过」）是刻意的 —— 运营方竖着扫一列格子看，段数会变
+  // 的话每一行都得重新找「满血时长」在哪儿。每段只放**值**、不带标签，同一个理由。
   //
   // 这里断言整串 toBe 而不是切开数段数：分隔符是 `-`，而 i18n 桩回的是带 `-` 的 key
   // （`regions.east-asia`），切出来的段数没有意义。整串比对连「段里混进标签」也一起钉住。
-  it('tooltip 恒为五段：区域-网关-满血时间-状态-判定', () => {
+  it('tooltip 恒为五段：区域-网关-满血时长-状态-判定', () => {
     const base = 'admin.accounts.openai.gatewayHistory'
-    const fullAt = isoAgo(60)
     const w = render(
       account({
         current: 'unified-73',
         seen: {
-          'unified-73': { at: isoAgo(60), region: 'east-asia', verdict: 'full', full_at: fullAt },
+          // 窗口已经收尾（判成降智）：满血从 240 秒前持续到 60 秒前 ⇒ 180s。
+          'unified-73': {
+            at: isoAgo(60),
+            region: 'east-asia',
+            verdict: 'degraded',
+            full_at: isoAgo(240)
+          },
           'unified-95': { at: isoAgo(180), region: 'us-east' }
         },
         updated_at: isoAgo(60)
@@ -275,22 +279,42 @@ describe('AccountGatewayCell', () => {
       [
         `${base}.regions.east-asia`,
         '73', // `unified-` 前缀在这一列里是恒定的，省掉才塞得下
-        formatRelativeTime(fullAt), // 相对时长，不是绝对时刻
+        '180s', // 满血持续了多久，不是它发生在什么时候
         `${base}.regionHot`,
-        `${base}.verdicts.full`
+        `${base}.verdicts.degraded`
       ].join('-')
     )
 
-    // 从没判过满血的那一格段数一样，第三段写「未满血」而不是整段消失。
+    // 从没验出过满血的那一格段数一样，第三段写「未计时」而不是整段消失。
     expect(cell(w, 'us-east').attributes('title')).toBe(
       [
         `${base}.regions.us-east`,
         '95',
-        `${base}.fullNever`,
+        `${base}.fullUntimed`,
         `${base}.regionHot`,
         `${base}.verdicts.none`
       ].join('-')
     )
+  })
+
+  // 窗口还在跑的时候**不许**报时长：这时候算出来的是「到目前为止」，而它会被当成
+  // 「这个落点只给了这么多」。判成降智那一刻才有收尾时刻，才算得出长度。
+  it('满血窗口没收尾时第三段写「未计时」，不报一个半截的数', () => {
+    const base = 'admin.accounts.openai.gatewayHistory'
+    const w = render(
+      account({
+        current: 'unified-73',
+        seen: {
+          // 仍判满血 = 窗口正在跑。
+          'unified-73': { at: isoAgo(10), region: 'east-asia', verdict: 'full', full_at: isoAgo(70) },
+          // 判了降智但从没验出过满血：没有起点，同样算不出长度。
+          'unified-95': { at: isoAgo(30), region: 'us-east', verdict: 'degraded' }
+        },
+        updated_at: isoAgo(10)
+      })
+    )
+    expect(cell(w, 'east-asia').attributes('title')).toContain(`-${base}.fullUntimed-`)
+    expect(cell(w, 'us-east').attributes('title')).toContain(`-${base}.fullUntimed-`)
   })
 
   // 满血分钟预测：单位是 (账号 × 网关)，**一个网关名就是一个单位**，而且算**下界**。

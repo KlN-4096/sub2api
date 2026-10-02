@@ -808,10 +808,12 @@ export default {
           regionHot: 'cooling',
           regionCooled: 'usable',
           regionIdle: 'never used',
-          // No fullAt key: segment 3 is a relative duration (formatRelativeTime). The window
-          // is only 183s, so "how long ago" is the number you can act on, and an absolute
-          // timestamp would blow the line width.
-          fullNever: 'never full',
+          // Segment 3 is how LONG full strength held (full verdict → degraded verdict),
+          // rendered straight as `180s` with no i18n key. This one is the placeholder when
+          // there is no duration to show: window still running, never verified full, or both
+          // readings landed in one write so the length cannot be measured — same thing to the
+          // reader, so one label.
+          fullUntimed: 'not timed',
           legend:
             '✓ verified full (inside the 183s window) · ! used inside the window, degraded right now · grey window elapsed, usable again',
           // Full-strength minutes forecast for the next hour, deliberately a LOWER bound.

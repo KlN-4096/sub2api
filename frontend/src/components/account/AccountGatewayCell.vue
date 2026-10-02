@@ -383,20 +383,38 @@ function regionLabel(key: string): string {
  * 看的，段数会变的话每一行都得重新找「满血时间」在哪儿。同理每段只放值、不带标签——
  * 一列里每行都重复一遍「满血于」「上次判定：」，真正要比的那几个值反而被推到行尾对不齐。
  *
- * 满血时间是**判成满血的那一刻**，不是「最近用过」那一刻 —— verdict 在后端是粘滞的
- * （没判据的那些发只刷新 at、判定原样留着），不写时间的话一条 3 小时前的满血判定读起来
- * 和刚验出来的一样。写相对时长而不是绝对时刻：满血窗口只有 183 秒，「多久以前」才是能
- * 直接判断的那个量，而绝对时刻有 19 个字符、一行里会把别的段挤出视野。
+ * 满血时间是**这一格的满血窗口持续了多久**，不是它发生在什么时候：窗口的长度才是运营方
+ * 要横着比的那个量（「这个落点只给了我 40 秒」对「给了 180 秒」）。
  */
 const TITLE_SEP = '-'
 
+/**
+ * 满血时长：从判成满血（fullAt）到判成降智（at）的那一段，只有**窗口已经结束**才有数。
+ *
+ * 两头都是后端已经落下的读数，不用新字段：verdict 变成 degraded 必须穿过 5 分钟节流
+ * （noteOpenAIGatewayUse 的注释），所以降智那一刻的 at 就是窗口的收尾时刻。
+ *
+ * 回「未计时」的三种情况合成一个标签，因为它们对读者是同一件事——**这一格没有时长读数**：
+ *   - verdict 还是 full：窗口正在跑，这时候报的任何数都只是「到目前为止」，会被当成结果；
+ *   - 从没验出过满血：窗口压根没开过，没有起点；
+ *   - 算出来不是正数：两条读数来自同一次写入（判满血和判降智挤在一次节流里），测不出长度。
+ */
+function fullHeldOf(item: GatewayItem): string {
+  const base = 'admin.accounts.openai.gatewayHistory'
+  if (item.verdict !== 'degraded' || !item.fullAt || !item.at) return t(`${base}.fullUntimed`)
+  const held = new Date(item.at).getTime() - new Date(item.fullAt).getTime()
+  if (!(held > 0)) return t(`${base}.fullUntimed`)
+  return `${Math.round(held / 1000)}s`
+}
+
 function titleOf(item: GatewayItem): string {
   const base = 'admin.accounts.openai.gatewayHistory'
-  const full = item.fullAt ? formatRelativeTime(item.fullAt) : t(`${base}.fullNever`)
   const state = t(isHot(item.at) ? `${base}.regionHot` : `${base}.regionCooled`)
   const verdict = item.verdict
     ? t(`${base}.verdicts.${item.verdict}`)
     : t(`${base}.verdicts.none`)
-  return [regionLabel(item.region), shortName(item.name), full, state, verdict].join(TITLE_SEP)
+  return [regionLabel(item.region), shortName(item.name), fullHeldOf(item), state, verdict].join(
+    TITLE_SEP
+  )
 }
 </script>
