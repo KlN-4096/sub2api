@@ -411,6 +411,7 @@ export default {
     cyber: '安全策略',
     live: 'Live',
     probe: '猎手探测',
+    gwpoolDegraded: '降智丢弃',
     unknown: '未知',
     in: '输入',
     out: '输出',

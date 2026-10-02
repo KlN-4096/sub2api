@@ -35,7 +35,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 ) (forwarded *OpenAIForwardResult, err error) {
 	// 网关池的 per-request 标记（openai_gwpool.go）：AttachRoute 往 sink 写，这里 publish 到结果上。
 	// 新增一条能打到 chatgpt.com 的转发入口时要照抄这两行。
-	ctx, gwpoolSink := withOpenAIGatewayPoolSink(ctx)
+	ctx, gwpoolSink := withOpenAIGatewayPoolSink(ctx, c)
 	defer func() { gwpoolSink.publish(forwarded) }()
 	// 工具 Schema 清洗必须先于所有分流：下游每条路径（原生 Anthropic 直通、
 	// Chat Completions 转换、Responses 转换）都会把 tools 原样带给上游，而

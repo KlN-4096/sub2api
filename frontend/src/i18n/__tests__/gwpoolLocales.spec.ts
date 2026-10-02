@@ -46,7 +46,11 @@ describe('gateway pool locale keys', () => {
       'gwpoolListTimeout',
       'gwpoolListTimeoutDesc',
       'gwpoolSteering',
-      'gwpoolSteeringDesc'
+      'gwpoolSteeringDesc',
+      'gwpoolStateEcho',
+      'gwpoolStateEchoDesc',
+      'gwpoolDegradedRetry',
+      'gwpoolDegradedRetryDesc'
     ]) {
       expect(typeof openai[key], key).toBe('string')
     }
@@ -92,5 +96,15 @@ describe('gateway pool locale keys', () => {
     // 卡片只给网关名与状态，不许把 cookie 本体写进文案。
     expect(usage.routePairOverridden).not.toContain('=')
     expect(usage.routePairRerouted).not.toContain('=')
+  })
+
+  it.each([
+    ['zh', zh],
+    ['en', en]
+  ] as const)('%s labels the state-echo degraded request type', (_locale, messages) => {
+    // request_type=gwpool_degraded 的用量行（被判降智后整发丢掉的那一次上游尝试）要有标签，
+    // 否则筛选下拉里会出现一个空选项。
+    expect(typeof (messages as any).usage.gwpoolDegraded).toBe('string')
+    expect((messages as any).usage.gwpoolDegraded.length).toBeGreaterThan(0)
   })
 })

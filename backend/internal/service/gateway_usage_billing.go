@@ -241,6 +241,13 @@ func isForcedUsageBillingRequestID(requestID string) bool {
 	return strings.HasPrefix(id, "web_search:") ||
 		strings.HasPrefix(id, "grok-video:") ||
 		strings.HasPrefix(id, "grok_audio:") ||
+		// 网关池 state-echo 判降智后被整发丢弃的那几次尝试。**必须压过 ctx 的 id**：
+		// 丢弃行和随后重试成功那一行属于同一次客户端请求，不 forced 的话两者算出同一个
+		// (request_id, api_key_id) ⇒ 丢弃行先落库抢占 usage_billing_dedup ⇒ 成功那一发
+		// 的 claim 命中已存在行、Applied=false ⇒ 余额/配额/限流/account_stats 全不走，
+		// 而 usage_logs 的插入又被 ON CONFLICT 吃掉 ⇒ 真实那一行连日志都没有，零报错。
+		// 2026-10-02 审计用探针坐实过这条。
+		strings.HasPrefix(id, "gwpool_degraded:") ||
 		strings.HasPrefix(id, "grok_realtime:")
 }
 

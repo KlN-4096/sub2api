@@ -703,8 +703,22 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					return fmt.Errorf("resolve Grok websocket cache identity: %w", err)
 				}
 			}
+			// 网关池的 per-request 标记：AttachRoute 往 sink 写，下面 publish 到这一轮的结果上。
+			// **每一轮一个 sink**：WS 这条路上一轮就是一发真实上游请求，和 HTTP 入口那五处
+			// 「一次请求一个 sink」是同一回事。
+			//
+			// 漏了这一行的后果不是「少记一笔」：sink 为 nil 时 gatewayPoolRouteDegraded 的第一道
+			// 闸（applied.Cookie == ""）直接放行 ⇒ **state-echo 在这条路上永远不跑**，判到降智的
+			// 答案会原样流给客户端，而这正是这个功能唯一的承诺；gatewayPoolRenew 同样恒早退；
+			// 用量行则因 routePairInUse 判 fromPool=false 掉进「回读罐」的兜底，把**罐里那张旧
+			// pair 的网关**写进 route_gateway —— 这一发实际走的是池子的网关，页面显示的是另一个，
+			// 徽标还说「没覆写」。那张卡片唯一要回答的问题被答反了。
+			//
+			// 走到这里的是被网关池强制降级下来的 WS 上游（gatewayPoolTakesOverWSUpstream），
+			// 降级本身是对的 —— AttachRoute 照常注入池子那张 pair，缺的只是这一侧的读数。
+			turnCtx, gwpoolSink := withOpenAIGatewayPoolSink(ctx, c)
 			result, bridgeErr := s.proxyOpenAIWSHTTPBridgeTurn(
-				ctx,
+				turnCtx,
 				c,
 				account,
 				token,
@@ -718,6 +732,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				turn,
 				writeClientMessage,
 			)
+			// publish 必须排在 AfterTurn **之前**：用量就是在那个钩子里落的。
+			gwpoolSink.publish(result)
 			if bridgeErr != nil && isOpenAIWSSessionPreempted(ctx) {
 				return errOpenAIWSSessionPreempted
 			}

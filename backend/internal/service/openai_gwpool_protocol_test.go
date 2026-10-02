@@ -63,8 +63,11 @@ func TestGatewayPoolExcludesRecentlyBurntGateways(t *testing.T) {
 // 2. 按错误码分流
 // ---------------------------------------------------------------------------
 
-// all_cooling / rate_limited / no_exit / upstream_rejected 要按身份退避：退避期内**一个池子请求
+// all_cooling / no_exit / upstream_rejected 要按身份退避：退避期内**一个池子请求
 // 都不发**（原先一视同仁 ⇒ 客户端的重试环每轮都在池子侧触发一次发现铸票）。
+//
+// rate_limited **不在这一组**：它讲的是池子的铸票预算，不是「有没有票给我」，
+// 见 TestGatewayPoolRateLimitedNeverBlocksBusinessRequests。
 func TestGatewayPoolBacksOffByErrorCode(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -72,8 +75,8 @@ func TestGatewayPoolBacksOffByErrorCode(t *testing.T) {
 		retryAfter  int
 		wantBackoff time.Duration
 	}{
-		{"冷却按池子给的时长", gwpool.CodeAllCooling, 900, 15 * time.Minute},
-		{"限流", gwpool.CodeRateLimited, 0, openAIGatewayPoolDefaultBackoff},
+		// all_cooling 不在这一组，它有自己的封顶，见 TestGatewayPoolCapsAllCoolingBackoff。
+		{"冷却", gwpool.CodeAllCooling, 0, openAIGatewayPoolDefaultBackoff},
 		{"出口全熔断", gwpool.CodeNoExit, 0, openAIGatewayPoolDefaultBackoff},
 		{"上游否决池子的号", gwpool.CodeUpstreamRejected, 0, openAIGatewayPoolDefaultBackoff},
 		// consumer key 配错 / 被吊销：重试一万次也是这个结果，池子按契约给 300s。
@@ -81,7 +84,7 @@ func TestGatewayPoolBacksOffByErrorCode(t *testing.T) {
 		// 出站参数不合法 = 我们这边的 bug/配置错。池子刻意不给 retry_after ⇒ 时长必须本地兜，
 		// 不然这个码就退化成一个纯热循环。
 		{"我们的请求不合法", gwpool.CodeBadRequest, 0, openAIGatewayPoolBadRequestBackoff},
-		{"退避时长钳上限", gwpool.CodeAllCooling, int((10 * gwpool.MaxRetryAfter).Seconds()), gwpool.MaxRetryAfter},
+		{"退避时长钳上限", gwpool.CodeNoExit, int((10 * gwpool.MaxRetryAfter).Seconds()), gwpool.MaxRetryAfter},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -107,6 +110,76 @@ func TestGatewayPoolBacksOffByErrorCode(t *testing.T) {
 			require.Greater(t, remaining, tc.wantBackoff-10*time.Second)
 		})
 	}
+}
+
+// rate_limited 管的是池子的**铸票**预算（按「铸票账号 × 区域」6 发/小时，铸票与 state-echo
+// 共用），不是「池子有没有票给我」：池子只在一张活票都没有时才铸，而别的账号铸出的票、
+// 别的区域的票、续期续活的票在它说的那一小时里全都是可交付的。
+//
+// 采信那个 retry_after 就是拿池子内部某个号的配额停掉**我们所有业务请求**，最长一小时，
+// 期间每一发聊天直接 502。所以这个码一秒都不许退避——下一发请求照样去问。
+func TestGatewayPoolRateLimitedNeverBlocksBusinessRequests(t *testing.T) {
+	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	fake.refuseStatus = http.StatusServiceUnavailable
+	fake.refuseCode = gwpool.CodeRateLimited
+	fake.refuseRetryAfter = int(time.Hour.Seconds()) // 池子给的是满格一小时
+	store := &openAICodexCookieStore{}
+	acct := fake.account(1)
+
+	err := attachRoute(context.Background(), store, acct, gwpoolTestURL, http.Header{})
+	require.ErrorIs(t, err, gwpool.ErrNoSlot)
+	require.EqualValues(t, 1, fake.hits.Load())
+
+	require.Zero(t, store.gatewayPoolBackoffFor(gwpoolTestIdentity),
+		"rate_limited 不许记退避：它说的是池子铸不动，不是池子没票")
+
+	// 池子补上票之后，**下一发业务请求立刻就能拿到**——退避会把这一段整个吃掉。
+	fake.refuseCode, fake.refuseStatus, fake.refuseRetryAfter = "", 0, 0
+	headers := http.Header{}
+	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, headers))
+	require.EqualValues(t, 2, fake.hits.Load(), "第二发必须真的去问了池子")
+	require.Contains(t, headers.Get("Cookie"), "__cflb=")
+}
+
+// all_cooling 的 retry_after **只对「刚才那批候选网关」成立**，不能当成全局静默期：
+// 池子算它用的是 `slot_cooldown`（管理页可配，默认 4h）减去那一行在那批网关上的已歇时长，
+// 而候选集随时会变——新账号上传、发现新网关、保温补票。
+//
+// 2026-10-02 现场：池子回了 all_cooling + retry_after≈3h47m，sub2api 据此静默到 06:28；
+// 22 分钟后池子已经有 3 个这个号从没碰过、且带着活票的网关，它却连问都不问，
+// 期间每一发业务请求都因「没有满血槽位」直接 502（设计上绝不回落降智路由）。
+func TestGatewayPoolCapsAllCoolingBackoff(t *testing.T) {
+	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	fake.refuseStatus = http.StatusServiceUnavailable
+	fake.refuseCode = gwpool.CodeAllCooling
+	fake.refuseRetryAfter = int((4 * time.Hour).Seconds())
+	store := &openAICodexCookieStore{}
+	acct := fake.account(1)
+
+	require.ErrorIs(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, http.Header{}),
+		gwpool.ErrNoSlot)
+
+	// 期望值写成独立字面量，不引用生产常量：引用它的话把常量改成 4h 这条用例照样绿。
+	require.LessOrEqual(t, store.gatewayPoolBackoffFor(gwpoolTestIdentity), time.Minute,
+		"all_cooling 的 retry_after 只对当时那批网关成立，不能拿来静默数小时")
+}
+
+// 反向：别为了封顶把「池子说更短」也盖掉——那会让一次运气不好变成整整一分钟不干活。
+func TestGatewayPoolHonorsShortAllCoolingRetryAfter(t *testing.T) {
+	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	fake.refuseStatus = http.StatusServiceUnavailable
+	fake.refuseCode = gwpool.CodeAllCooling
+	fake.refuseRetryAfter = 12
+	store := &openAICodexCookieStore{}
+	acct := fake.account(1)
+
+	require.ErrorIs(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, http.Header{}),
+		gwpool.ErrNoSlot)
+
+	remaining := store.gatewayPoolBackoffFor(gwpoolTestIdentity)
+	require.Positive(t, remaining)
+	require.LessOrEqual(t, remaining, 12*time.Second)
+	require.Greater(t, remaining, 2*time.Second)
 }
 
 // 可等待 / 一次性的码不退避：no_live_pair、no_gateway 这些交给 wait 与既有的一次裸取重试，
@@ -560,7 +633,7 @@ func TestGatewayPoolAppliedMarkerIsPerRequest(t *testing.T) {
 	refusing.refuseCode = gwpool.CodeNoLivePair
 	noSlotStore := &openAICodexCookieStore{}
 	noSlotAcct := refusing.account(2)
-	ctx, sink := withOpenAIGatewayPoolSink(context.Background())
+	ctx, sink := withOpenAIGatewayPoolSink(context.Background(), nil)
 	_, err := noSlotStore.AttachRoute(ctx, noSlotAcct, gwpoolTestURL, http.Header{})
 	require.ErrorIs(t, err, gwpool.ErrNoSlot)
 	result := &OpenAIForwardResult{}
@@ -601,7 +674,7 @@ func gwpoolDoUpstream(t *testing.T, svc *OpenAIGatewayService, acct *Account) Op
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 	require.NoError(t, err)
-	ctx, sink := withOpenAIGatewayPoolSink(req.Context())
+	ctx, sink := withOpenAIGatewayPoolSink(req.Context(), nil)
 	resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", acct)
 	require.NoError(t, err)
 	_ = resp.Body.Close()
@@ -630,7 +703,7 @@ func TestGatewayPoolRenewsOnlyOnFirstRequestAfterTaking(t *testing.T) {
 	}}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	store := &svc.codexCookies
-	acct := fake.account(1)
+	acct := fake.renewingAccount(1)
 
 	before := time.Now()
 	applied := gwpoolDoUpstream(t, svc, acct)
@@ -709,7 +782,7 @@ func TestGatewayPoolRearmsRenewForEveryNewTicket(t *testing.T) {
 		cflb + "; Path=/", oailb + "; Path=/",
 	}}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
-	acct := fake.account(1)
+	acct := fake.renewingAccount(1)
 
 	require.True(t, gwpoolDoUpstream(t, svc, acct).Renewing, "第一张票的第一发")
 	require.Contains(t, fake.nextRenew(t), `"cookie_version":"tkt-1"`)
@@ -746,7 +819,7 @@ func TestGatewayPoolDoesNotRenewWithoutCompleteFreshPair(t *testing.T) {
 			fake.pairRemainingS = 600
 			upstream := &cookieRecordingUpstream{setCookie: tc.header}
 			svc := &OpenAIGatewayService{httpUpstream: upstream}
-			acct := fake.account(1)
+			acct := fake.renewingAccount(1)
 
 			require.True(t, gwpoolDoUpstream(t, svc, acct).Renewing, "名额照样消耗掉（这一发已经摘了）")
 			require.Never(t, func() bool { return fake.renewHits.Load() > 0 },
@@ -772,7 +845,7 @@ func TestGatewayPoolRenewFailureStillSwapsLocalPair(t *testing.T) {
 		cflb + "; Path=/", oailb + "; Path=/",
 	}}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
-	acct := fake.account(1)
+	acct := fake.renewingAccount(1)
 
 	require.True(t, gwpoolDoUpstream(t, svc, acct).Renewing)
 	_ = fake.nextRenew(t)
@@ -818,7 +891,7 @@ func TestGatewayPoolRerouteSkipsRenewAndBooksRealGateway(t *testing.T) {
 			fake := newGwpoolFakePool(t, poolCookie, 150)
 			fake.pairRemainingS = 600
 			svc := &OpenAIGatewayService{httpUpstream: &cookieRecordingUpstream{setCookie: tc.header}}
-			acct := fake.account(1)
+			acct := fake.renewingAccount(1)
 
 			require.True(t, gwpoolDoUpstream(t, svc, acct).Renewing, "名额照样消耗掉（这一发已经摘了）")
 
@@ -869,13 +942,13 @@ func TestGatewayPoolRenewResolvesIdentityOnDetachedContext(t *testing.T) {
 		}
 		return gwpoolTestIdentity, nil
 	}
-	acct := fake.account(1)
+	acct := fake.renewingAccount(1)
 
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(req.Context())
 	defer cancel()
-	ctx, _ = withOpenAIGatewayPoolSink(ctx)
+	ctx, _ = withOpenAIGatewayPoolSink(ctx, nil)
 	svc.httpUpstream = &gwpoolCancelingUpstream{cancel: cancel, setCookie: http.Header{
 		"Set-Cookie": []string{"__cflb=stray-lb; Path=/", stray + "; Path=/"},
 	}}
@@ -920,4 +993,31 @@ func TestRoutePairInUseRecordsFreshPairOnRenewal(t *testing.T) {
 	require.Equal(t, "__cflb=stray; "+strayOailb, pair)
 	require.Equal(t, "unified-126", openAICodexRouteGateway(pair))
 	require.NotEqual(t, promised, openAICodexRouteGateway(pair))
+}
+
+// 续期**缺省是关的**：摘掉 __oailb 那一发偏离真实 Codex 客户端的报文形状
+// （codex-real-client-wire-shape.md 写的是两件齐发），而那个偏离从没单独实测过 ——
+// 安全性是从「路由由 __cflb 钉死」推出来的，不是测出来的。没有开关的话，怀疑它出问题时
+// 运维只能改代码重新发布。
+func TestGatewayPoolDoesNotRenewUnlessTheAccountAsksFor(t *testing.T) {
+	poolCookie := gwpoolTestPairCookie(t, "unified-142")
+	fake := newGwpoolFakePool(t, poolCookie, 150)
+	fake.pairRemainingS = 600 // 临期：开了开关的话这一发就该续
+	cflb, oailb := gwpoolRenewedPair(t, "unified-142")
+	upstream := &cookieRecordingUpstream{setCookie: http.Header{"Set-Cookie": []string{
+		cflb + "; Path=/", oailb + "; Path=/",
+	}}}
+	svc := &OpenAIGatewayService{httpUpstream: upstream}
+	acct := fake.account(1) // 没开 openai_gwpool_renew
+
+	applied := gwpoolDoUpstream(t, svc, acct)
+	require.False(t, applied.Renewing, "开关没开就一张都不许续")
+	require.Contains(t, upstream.sentCookies[0], "__oailb=",
+		"不续期就按真实客户端的形状两件齐发")
+
+	// 同一个池子、同一张临期票，显式打开开关之后必须续得起来 —— 否则这条测的就不是开关。
+	svc2 := &OpenAIGatewayService{httpUpstream: &cookieRecordingUpstream{setCookie: http.Header{
+		"Set-Cookie": []string{cflb + "; Path=/", oailb + "; Path=/"},
+	}}}
+	require.True(t, gwpoolDoUpstream(t, svc2, fake.renewingAccount(1)).Renewing)
 }

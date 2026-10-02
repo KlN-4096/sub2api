@@ -229,6 +229,15 @@ func (f *gwpoolFakePool) account(id int64) *Account {
 	return acct
 }
 
+// renewingAccount 是**显式开了续期**的账号。续期缺省是关的
+// （openAIGatewayPoolRenewExtraKey：摘 __oailb 那一发偏离真实 Codex 报文形状，而那个偏离
+// 从没单独实测过），所以每个要测续期的用例都得自己把它打开 —— 这正是「默认关」该有的样子。
+func (f *gwpoolFakePool) renewingAccount(id int64) *Account {
+	acct := f.account(id)
+	acct.Extra[openAIGatewayPoolRenewExtraKey] = true
+	return acct
+}
+
 // nextQuery 取下一次 /cookie 的查询串，**剔掉 min_remaining 与 wait**：这两项每发都带，
 // 而 wait 的值按剩余预算算（见 gwpool.CookieRequest.query），钉它等于钉时序。
 // 这两项自己由 TestGatewayPoolAsksForUsableLifetimeAndWait 钉。
@@ -326,7 +335,7 @@ func attachRouteApplied(
 	headers http.Header,
 ) OpenAIGatewayPoolApplied {
 	t.Helper()
-	ctx, sink := withOpenAIGatewayPoolSink(context.Background())
+	ctx, sink := withOpenAIGatewayPoolSink(context.Background(), nil)
 	_, err := store.AttachRoute(ctx, account, rawURL, headers)
 	require.NoError(t, err)
 	result := &OpenAIForwardResult{}
