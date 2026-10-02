@@ -124,7 +124,7 @@ var errOpenAIGatewayPoolRouteDegraded = fmt.Errorf("%s: %w", gatewayPoolDegraded
 // gatewayPoolRouteDegraded 跑 state-echo 判据。只读**响应头**，一个字节的响应体都不碰。
 //
 // 第一道闸是「这一发到底有没有注入池子那张 pair」（per-request 标记，不是回读 pair 缓存）：
-// 没注入就没有「当前网关」可换，判出来也没有动作可做 —— 默认 all_models=false 时非推理面的请求
+// 没注入就没有「当前网关」可换，判出来也没有动作可做 —— 非推理面的请求
 // 落回罐回放，回读缓存会把它们也算进来。账号必须对得上：故障转移在同一个 ctx 里换号重试，
 // 标记留的是前一个号的（与 routePairInUse / gatewayPoolRenew 同一条校验）。
 func (s *OpenAIGatewayService) gatewayPoolRouteDegraded(
@@ -159,8 +159,7 @@ func (s *OpenAIGatewayService) gatewayPoolRouteDegraded(
 // /cookie，池子可能原样把这张烧过的再发回来。标 Stale 保留票号 ⇒ cachedPoolPair 读成
 // openAIGatewayPoolPairStale ⇒ 取票时 force=1 + exclude_versions=<这张> ⇒ 必定换一个网关。
 //
-// 票号对不上就什么都不做：那说明缓存里已经是另一张票了（并发换过、还过）。renewPending 一并
-// 清掉 —— 一张判了降智的票不值得再花一次「摘 __oailb 偏离真客户端报文形状」的代价去续寿命。
+// 票号对不上就什么都不做：那说明缓存里已经是另一张票了（并发换过、还过）。
 func (s *openAICodexCookieStore) gatewayPoolMarkStale(identity, version, gateway string) {
 	if s == nil || identity == "" {
 		return
@@ -186,7 +185,6 @@ func (s *openAICodexCookieStore) gatewayPoolMarkStale(identity, version, gateway
 	}
 	next := cached
 	next.until = time.Time{} // 零值早于任何时刻 ⇒ cachedPoolPair 判 Stale。
-	next.renewPending = false
 	s.poolPairs.CompareAndSwap(identity, cached, next)
 }
 

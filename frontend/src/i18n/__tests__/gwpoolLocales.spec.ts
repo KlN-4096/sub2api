@@ -36,8 +36,6 @@ describe('gateway pool locale keys', () => {
       'gwpoolBaseUrlDesc',
       'gwpoolConsumerKey',
       'gwpoolConsumerKeyDesc',
-      'gwpoolAllModels',
-      'gwpoolAllModelsDesc',
       'gwpoolAdvanced',
       'gwpoolGatewayWindow',
       'gwpoolGatewayWindowDesc',

@@ -75,20 +75,6 @@ const (
 	// 与 access_token 同级：不进日志、不进任何 API 响应（dto.redactAccountManagedExtra 把它
 	// 脱敏成 bool），管理端写入按「只有非空字符串才算改动」合并（见 admin_account.go）。
 	OpenAIGatewayPoolConsumerKeyExtraKey = "openai_gwpool_consumer_key"
-	// openAIGatewayPoolAllModelsExtraKey 决定覆写范围是**整个 chatgpt.com**还是只有 Codex 推理面。
-	//
-	// 开关出现之前恒为「整个 chatgpt.com」，于是侧信道（openai_codex_side_calls.go 的
-	// settings/user 之类装饰性 GET）、/codex/alpha/search 的 alpha 端点、/codex/realtime/calls、
-	// /codex/images/* 这些**不是推理轮次**的调用也会取票，一张票就这么没了（供给是个位数张/小时）。
-	// 默认关 = 只有推理面取票；开 = 回到那个行为。
-	//
-	// 范围按**路径**算，所以要按路径读，不能按功能名读：alpha 搜索还有一条兜底
-	// （buildOpenAIAlphaSearchResponsesWebSearchRequest，openai_alpha_search.go）打的就是
-	// chatgptCodexURL = 推理面本身，那一条**开关关着也会取票**，而且这是对的——它确实是一发
-	// /responses。开关关着时不取票的是「打在别的路径上」的那些。
-	// 按模型筛做不到也没有意义：
-	// AttachRoute 在出站挂钩点上，手里只有 URL，没有模型名（见 AttachRoute）。
-	openAIGatewayPoolAllModelsExtraKey = "openai_gwpool_all_models"
 	// openAIGatewayPoolInferencePath 是 Codex 推理面的路径。chatgptCodexURL（HTTP 出口）与
 	// buildOpenAIResponsesWSURL（WS 握手）用的是同一条；那两个是整串 URL，这里只能另抄一份路径，
 	// 由 TestGatewayPoolInferencePathMatchesCodexURL 钉住不漂。
@@ -157,30 +143,6 @@ const (
 	// 退 300s 不会损失任何本来会成功的请求（请求不改，下一发同样不合法），而且能把这个 bug
 	// 变响，不至于静默刷日志。
 	openAIGatewayPoolBadRequestBackoff = 5 * time.Minute
-	// openAIGatewayPoolRenewExtraKey 是账号级续期开关。**缺省即关**。
-	//
-	// 续期那一发要摘掉 __oailb 出站（只送 __cflb 上游才肯补发），这是对真实 Codex 客户端
-	// 报文形状的刻意偏离（codex-real-client-wire-shape.md：两件齐发），而这个偏离
-	// **从没单独实测过**——安全性是从「路由由 __cflb 钉死」推出来的，不是测出来的。
-	// 一个没实测过的出站形状偏离不该没有开关：怀疑它引起问题时，运维必须能当场关掉，
-	// 而不是改代码重新发布。默认关也和池子自己那侧的 renew_pairs 默认值一致。
-	// 读法与 openAIGatewayPoolStateEchoExtraKey 相反：这个要「显式写 true 才开」。
-	openAIGatewayPoolRenewExtraKey = "openai_gwpool_renew"
-	// openAIGatewayPoolRenewBelow 是续期闸：只有池子报的 pair_remaining_s **低于**它，取票后的
-	// 第一发业务请求才去续（摘 __oailb、抓新 __cflb、回传池子，见 gatewayPoolRenew）。
-	//
-	// 为什么不是每张票都续：续一次就把 __cflb 的 3600s 重新拉满，而常态下池子刚铸的票还剩
-	// 50 多分钟，续了没有任何增量；代价是每一发摘 __oailb 都偏离真实 Codex 客户端的报文形状
-	// （docs/conventions/codex-real-client-wire-shape.md：两件齐发）。常态零续期就是这个闸的
-	// 全部理由，只有临期票才值得拿形状换寿命。
-	//
-	// **必须大于池子的 DeliverFloor（300s）**：池子在 pair 剩余低于 floor 时就不再交付这张票，
-	// 阈值取得比它小会留出一段「池子还肯发、我们已经不续」的空档，临期票就再没人救得回来。
-	// 12 分钟留出约一倍余量（够覆盖 floor 加上一个交付周期）。
-	//
-	// 判据只能用 pair_remaining_s，**不能用 valid_for_s**：后者是 min(满血窗口剩余, pair 剩余)，
-	// 绝大多数时候等于那 183 秒的窗口，分不出 pair 还剩 50 分钟还是 8 分钟。
-	openAIGatewayPoolRenewBelow = 12 * time.Minute
 	// openAIGatewayPoolMaxSeconds 是所有「秒」旋钮的上限（1 天）。超了回默认值，
 	// 见 gatewayPoolSeconds。
 	openAIGatewayPoolMaxSeconds = 86400
@@ -234,16 +196,6 @@ func (a *Account) gatewayPoolSeconds(key string, fallback time.Duration) time.Du
 		return time.Duration(seconds) * time.Second
 	}
 	return fallback
-}
-
-// gatewayPoolRenew 报告这个账号要不要给临期票续期（摘 __oailb 那一发）。缺省即关。
-func (a *Account) gatewayPoolRenew() bool {
-	return a.getExtraBool(openAIGatewayPoolRenewExtraKey)
-}
-
-// gatewayPoolAllModels 报告这个账号要不要给**所有**打到 chatgpt.com 的请求覆写 pair。
-func (a *Account) gatewayPoolAllModels() bool {
-	return a != nil && a.getExtraBool(openAIGatewayPoolAllModelsExtraKey)
 }
 
 // gatewayPoolSteering 报告要不要自己挑落点。缺省 / 非 bool = 开（接这个键之前的写死行为），
@@ -498,11 +450,6 @@ type openAIGatewayPoolPair struct {
 	gateway string
 	version string
 	until   time.Time
-	// renewPending：这张票刚取回来、且**临期**（pair_remaining_s < openAIGatewayPoolRenewBelow），
-	// 还没被续过。只有取票后紧接着的**第一发**业务请求会摘掉 __oailb 去换一张新 __cflb 回传池子
-	// （见 AttachRoute / gatewayPoolRenew），那一发做完就翻掉，同一张票后续所有请求两件照旧齐发。
-	// 跟着这张 pair 存而不是记全局：取到新票就自然重新置位，换票时也不会把上一张的状态带过来。
-	renewPending bool
 }
 
 // openAICodexCredentialIdentity 解析「凭证域身份」：影子行自己不持凭据，必须按母账号算。
@@ -906,12 +853,6 @@ func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *A
 			gateway: gateway,
 			version: got.Version,
 			until:   time.Now().Add(got.ValidFor),
-			// 临期票才置位。池子没报 pair_remaining_s（旧版池子）⇒ 0 ⇒ 不续：少续一张只是回到
-			// 接这个字段之前的行为，而错续会在还没必要的时候改报文形状。
-			// 开关关着就一张都不续（openAIGatewayPoolRenewExtraKey，缺省即关）：闸在这里
-			// 而不是在出站那一步，这样 gatewayPoolRenew 的回传、CAS 抢名额整条链路一起停。
-			renewPending: account.gatewayPoolRenew() &&
-				got.PairRemaining > 0 && got.PairRemaining < openAIGatewayPoolRenewBelow,
 		}
 		took = true
 		s.poolPairs.Store(identity, pair)
@@ -1017,9 +958,8 @@ func (s *openAICodexCookieStore) cachedPoolPair(identity string) (openAIGatewayP
 // gatewayPoolDropPair 按**票号**删掉缓存里那张票。
 //
 // 不按整个结构体比（CompareAndDelete(identity, 手上那份副本)）：取了票之后缓存里那张还会被原地
-// 改（抢走续期名额会翻 renewPending、续期成功会换 cookie），拿旧副本去比会对不上 ⇒ 该删的没删
-// （还票时票已经还了、本地却还拿着它继续出站）。票号唯一标识一张票，对不上说明缓存里已经是
-// 另一张了 —— 那张不该删。
+// 改（判了降智会标 Stale），拿旧副本去比会对不上 ⇒ 该删的没删（还票时票已经还了、本地却还
+// 拿着它继续出站）。票号唯一标识一张票，对不上说明缓存里已经是另一张了 —— 那张不该删。
 func (s *openAICodexCookieStore) gatewayPoolDropPair(identity, version string) {
 	value, ok := s.poolPairs.Load(identity)
 	if !ok {
@@ -1030,124 +970,12 @@ func (s *openAICodexCookieStore) gatewayPoolDropPair(identity, version string) {
 	}
 }
 
-// gatewayPoolClaimRenew 把这张票的续期名额收掉（CAS ⇒ 并发时只有一个人拿到）。
-// 缓存里已经不是这张票了就返回 false：那说明票已经换过，没必要再续手上这张。
-func (s *openAICodexCookieStore) gatewayPoolClaimRenew(identity string, pair openAIGatewayPoolPair) bool {
-	next := pair
-	next.renewPending = false
-	return s.poolPairs.CompareAndSwap(identity, pair, next)
-}
-
-// gatewayPoolRenew 把上游在这一发里新下发的路由对回传池子，续上这张 pair 的寿命。
-//
-// 在 doOpenAIUpstream 拿到响应之后调（罐的 Store 之后）。只有抢到续期名额的那一发会真的做事，
-// 其余的全部在头两道闸上返回 —— 包括没挂 sink 的路径（那种路径本来也取不到票的读数）。
-func (s *openAICodexCookieStore) gatewayPoolRenew(ctx context.Context, account *Account, upstream http.Header) {
-	if s == nil || !s.gatewayPoolTakeover(account) {
-		return
-	}
-	applied := openAIGatewayPoolSinkFrom(ctx).snapshot()
-	// 账号必须对得上：故障转移在同一个 ctx 里换号重试，标记留的是前一个号的
-	// （见 OpenAIGatewayPoolApplied）。票号为空 ⇒ 池子认不出要续哪张。
-	if !applied.Renewing || applied.AccountID != account.ID || applied.Version == "" {
-		return
-	}
-	renewed := openAICodexRoutePairFromSetCookie(upstream)
-	// 自带 ctx：业务响应一返回业务 ctx 就会被取消，而下面每一件事都不能让用户等。
-	// 身份解析也必须用它——影子行要读一次 repo，用业务 ctx 解会在客户端刚好断开的那一瞬失败，
-	// 于是落点闸也跟着不跑了（票留在缓存、真实落点不进账本）。
-	detached := context.WithoutCancel(ctx)
-	identity, err := s.gatewayPoolIdentity(detached, account)
-	if err != nil {
-		return
-	}
-	// 落点闸。续期那一发刻意只送 __cflb ⇒ 上游**必然**回一张新 __oailb，里面就是真实落点。
-	// __cflb 被上游无视时（亲和目标被摘、票已到点）它会按地理重新分配 ⇒ 落点和交付时说的不是
-	// 同一个网关。这时候三件事都不能做：
-	//   · 不回传（池子自己有完整性闸，交回去必然被拒 —— 白跑一趟）；
-	//   · 不换缓存里的 cookie（换了就成了「gateway=142 而 cookie 落 126」的自相矛盾状态，
-	//     满血窗口内后续每一发都继续按 126 出站）；
-	//   · 反而要**删掉**缓存里那张（下一发重新取票）。
-	// 并且必须把**真实落点**记进本地 4h 账本：实烧的是 126，账本里却只有交付时记的 142 ⇒
-	// 这个号以后会向池子要一张 126 的票、以为自己没碰过，拿到的是降智票。
-	// 落点解析复用徽标那条路上同一个函数，不写第二份。
-	//
-	// **这一闸必须排在下面的完整性闸之前**：新 __oailb 在手就意味着落点**可读**，而「落点不符」
-	// 是比「两件齐不齐」更强的信号 —— 两种报文形状正好绕过完整性闸（只补新 __oailb 没有新
-	// __cflb；以及 `__cflb=; Max-Age=0` 清掉亲和 cookie，routePairOf 跳过空值项 ⇒ 等于没有
-	// __cflb），排在后面的话这两格都会在完整性闸提前返回，自相矛盾的缓存照样留下来。
-	if routePairItem(renewed, openAICodexRouteOAILBCookie) != "" {
-		if landed := openAICodexRouteGateway(renewed); landed != applied.Gateway {
-			s.gatewayPoolDropPair(identity, applied.Version)
-			if landed != "" { // 解不出落点（畸形 JWT）同样丢票，但别拿空网关名污染账本的复合键
-				s.gatewayPoolMarkUsed(identity, landed)
-			}
-			slog.Warn("gwpool_pair_rerouted", "account_id", account.ID,
-				"promised", applied.Gateway, "landed", landed)
-			return
-		}
-	}
-	// 落点对上了，再看这组够不够完整。缺哪一件都不续：
-	//   · 没有新 __cflb ⇒ 这一发没续到（回传旧的会让池子以为续上了）；
-	//   · 没有新 __oailb ⇒ 上游什么路由都没下发（那是两件齐发时的常态），而「新 __cflb +
-	//     旧 __oailb」混着用是刻意不做的。
-	// 走到这里说明落点没变（或上游没报落点）⇒ 手里那张还能用，缓存不动。
-	if routePairItem(renewed, openAICodexRouteCFLBCookie) == "" ||
-		routePairItem(renewed, openAICodexRouteOAILBCookie) == "" {
-		return
-	}
-	pool, err := s.poolClient(account)
-	if err != nil {
-		return
-	}
-	timeout := account.gatewayPoolFetchTimeout()
-	version := applied.Version
-	go func() {
-		callCtx, cancel := context.WithTimeout(detached, timeout)
-		defer cancel()
-		next, renewErr := pool.Renew(callCtx, version, renewed)
-		// 池子收不收，本地都换成这组新的两件：新 __cflb 是上游刚发的、比手里那张新，而混着送
-		// （新 __cflb + 旧 __oailb）是刻意不做的。池子收下了就连票号一起换成新的。
-		s.gatewayPoolSwapPair(identity, version, renewed, next)
-		if renewErr != nil {
-			slog.Debug("gwpool_renew_failed", "account_id", account.ID, "gateway", applied.Gateway,
-				"error", renewErr)
-			return
-		}
-		slog.Info("gwpool_pair_renewed", "account_id", account.ID, "gateway", applied.Gateway)
-	}()
-}
-
-// gatewayPoolSwapPair 把缓存里那张票的 cookie 本体换成新的两件（票号非空时一并换）。
-//
-// **until 刻意不动**：续期延长的是「路由钉死」的寿命，不是满血窗口。满血窗口的唯一来源仍然是
-// 池子交付时给的 valid_for_s（见 openAIGatewayPoolPair.until）—— 跟着延长等于让这张票在满血
-// 窗口过了之后继续出站，整个功能的目的就被抵消。
-//
-// 票号对不上就什么都不做：那说明缓存里已经是另一张票了（过期换票 / 还票删掉）。
-func (s *openAICodexCookieStore) gatewayPoolSwapPair(identity, version, cookie, newVersion string) {
-	value, ok := s.poolPairs.Load(identity)
-	if !ok {
-		return
-	}
-	cached, ok := value.(openAIGatewayPoolPair)
-	if !ok || cached.version != version {
-		return
-	}
-	next := cached
-	next.cookie = cookie
-	if newVersion != "" {
-		next.version = newVersion
-	}
-	s.poolPairs.CompareAndSwap(identity, cached, next)
-}
-
 // OpenAIGatewayPoolApplied 是「这一发**真的**把池子那张 pair 注入了出站头」的 per-request 读数，
 // usage_logs 的「已覆写 / 被改派」徽标只认它。
 //
 // 为什么不能回读 pair 缓存（2026-10-02 前就是那样，是个会说假话的实现）：回读只能查「接管开着 +
-// 缓存里有票」，**手上没有 URL** ⇒ 认不出这一发是不是推理面。而默认 all_models=false 时非推理面
-// 的请求落回罐回放（见 AttachRoute），缓存里那张 stale 票又永不删 ⇒ 账号取过一次票之后，每一发
+// 缓存里有票」，**手上没有 URL** ⇒ 认不出这一发是不是推理面。而非推理面的请求落回罐回放
+// （见 AttachRoute），缓存里那张 stale 票又永不删 ⇒ 账号取过一次票之后，每一发
 // 非推理面且记用量的请求（/codex/alpha/search、/codex/images/* 这些）都会落库成「已覆写 + 池子的
 // 网关 + 池子的 cookie」，而出站实际带的是罐里那组。那正好把这张卡片唯一要回答的问题反过来答了。
 //
@@ -1158,9 +986,6 @@ type OpenAIGatewayPoolApplied struct {
 	Cookie    string
 	Gateway   string
 	Version   string
-	// Renewing：这一发抢到了这张票的续期名额 ⇒ 出站只带了 __cflb，响应回来要把上游新发的那组
-	// 回传池子（gatewayPoolRenew）。只在取票后的第一发、且票临期时为 true。
-	Renewing bool
 }
 
 // openAIGatewayPoolSink 是 ctx 里承载的那个指针。
@@ -1321,11 +1146,12 @@ func (s *openAICodexCookieStore) AttachRoute(
 	if isWebSocketURL(rawURL) {
 		return nil, ErrGatewayPoolWSIncompatible
 	}
-	// 覆写范围：默认只给 Codex 推理面取票。侧信道（装饰性 GET）、/codex/alpha/search、
+	// 覆写范围**只有 Codex 推理面**，没有开关。侧信道（装饰性 GET）、/codex/alpha/search、
 	// /codex/realtime/calls 这些也打在 chatgpt.com 上，但它们不是推理轮次——给它们取一张票
-	// 等于白烧一个 (上游账号 × 网关) 单位，而供给是个位数张/小时。要回到「所有请求都覆写」
-	// 就开 openai_gwpool_all_models。落回罐回放（而不是不挂 cookie）：这些调用本来就靠罐。
-	if u.Path != openAIGatewayPoolInferencePath && !account.gatewayPoolAllModels() {
+	// 等于白烧一个 (上游账号 × 网关) 单位，而供给是个位数张/小时。
+	// （2026-10-02 删掉了 openai_gwpool_all_models 那个开关：它唯一的用法是把这笔浪费打开。）
+	// 落回罐回放（而不是不挂 cookie）：这些调用本来就靠罐。
+	if u.Path != openAIGatewayPoolInferencePath {
 		s.Attach(account, rawURL, headers)
 		return nil, nil
 	}
@@ -1342,27 +1168,7 @@ func (s *openAICodexCookieStore) AttachRoute(
 	if fresh {
 		release = s.gatewayPoolRelease(account, identity, pair)
 	}
-	// 续期名额：一张临期票只续一次，由**取票后的第一发**业务请求去续。CAS 抢名额 ⇒ 并发时
-	// 只有一个人摘 __oailb，其余照常两件齐发。抢到之后这一发若死在发送前，这张票就不续了
-	// （它的槽位会被还回池子，缓存也会被删，见 gatewayPoolRelease）。
-	renewing := pair.renewPending && s.gatewayPoolClaimRenew(identity, pair)
 	outbound := pair.cookie
-	if renewing {
-		// 这一发**只送 __cflb**：两件齐发时上游什么都不回（2026-10-02 实测 F 组），摘掉 __oailb
-		// 上游才会补发一张新 __cflb（E 组），寿命重新拉满 3600s —— 那是池子自己拿不到、只有业务
-		// 请求能刷出来的东西，所以换回来之后要回传（gatewayPoolRenew）。
-		//
-		// 代价（刻意承担，且**没有单独实测过**）：真实 Codex 客户端是两件齐发
-		// （docs/conventions/codex-real-client-wire-shape.md），这一发的报文形状和它不一样。
-		// 判断安全的依据：路由由 __cflb 钉死，__oailb 只决定响应是否暴露落点
-		// （docs/conventions/codex-full-strength-tickets.md:458-472）；cookie 回放本身与降智
-		// 无关已有约 3k 样本。再加上这里的闸——只有临期票、且只有第一发 ⇒ 常态零偏离。
-		if cflb := routePairItem(pair.cookie, openAICodexRouteCFLBCookie); cflb != "" {
-			outbound = cflb
-		} else {
-			renewing = false // 这张票没有 __cflb：摘了等于裸打（落点不可控），也没什么可续。
-		}
-	}
 	// 只替换这两项：__cf_bm / cf_clearance / _cfuvid 是**本出口自己**拿到的 Cloudflare 令牌，
 	// 丢掉会让 CF 重新发挑战（这和「跨出口回放 __cf_bm 自相矛盾」不是一回事——那说的是别人出口
 	// 铸的值，这里是本出口自己的）。始终 Set：入站客户端的 Cookie 不能漏到出站。
@@ -1375,12 +1181,9 @@ func (s *openAICodexCookieStore) AttachRoute(
 	}
 	headers.Set("Cookie", strings.Join(append(parts, outbound), "; "))
 	// 写完头**之后**才记标记：使用记录那张卡片据此断言「这一发真的注入了」。
-	// Cookie 记的是**这张票的两件**而不是 outbound：续期那一发出站只带了 __cflb，但用量侧要的是
-	// 「这一发用的是哪张票」（而且那一发必有 Set-Cookie ⇒ route_pair 落的是上游新发的那组，
-	// 不会拿这个字段去充数，见 routePairInUse）。
 	openAIGatewayPoolSinkFrom(ctx).mark(OpenAIGatewayPoolApplied{
 		AccountID: account.ID, Cookie: pair.cookie, Gateway: pair.gateway,
-		Version: pair.version, Renewing: renewing,
+		Version: pair.version,
 	})
 	return release, nil
 }

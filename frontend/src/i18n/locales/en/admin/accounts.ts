@@ -735,9 +735,6 @@ export default {
         gwpoolConsumerKeyKeep: 'Saved — leave blank to keep it',
         gwpoolConsumerKeyDesc:
           'The pool issues one key per account, so it lives on the account rather than on the instance. Treated like an access token: it is never echoed back after saving and never returned in list or detail responses.',
-        gwpoolAllModels: 'Override every chatgpt.com request',
-        gwpoolAllModelsDesc:
-          'Scope is decided by the request path. Off (default): only the Codex inference endpoint (/backend-api/codex/responses) gets a pooled pair. Side calls and the /codex/alpha/search, /codex/realtime/calls, /codex/images/* endpoints also hit chatgpt.com but are not inference turns, and a pair spent on them burns one (account x gateway) unit for nothing. Note that alpha search has a fallback that posts to the inference endpoint itself, so that one does take a pair even while this is off - it really is one /responses call. On: every chatgpt.com request on this account is overridden.',
         gwpoolAdvanced: 'Advanced (blank = default)',
         gwpoolGatewayWindow: 'Local ledger window (s)',
         gwpoolGatewayWindowDesc:
@@ -751,13 +748,10 @@ export default {
         gwpoolSteering: 'Pick the landing gateway myself',
         gwpoolSteeringDesc:
           'On (default): list the gateways first and name one this account has not burnt in the ledger window. Off: let the pool schedule it.',
-        gwpoolRenew: 'Renew near-expiry pairs',
-        gwpoolRenewDesc:
-          'Off (default): when on, if a freshly taken pair has under 12 minutes of life left, the first business request after taking it sends only __cflb and drops __oailb so the upstream issues a replacement, resetting route life to 3600s. This extends route life only, never the full-strength window. The cost: a real Codex client always sends both items, so dropping one deviates from its wire shape, and that deviation has never been measured on its own (its safety is inferred from the route being pinned by __cflb). Only near-expiry pairs and only the first request do this, so the steady state is zero deviation. Turn it off if you suspect it causes trouble.',
-        gwpoolStateEcho: 'Judge degradation inline (state-echo)',
+        gwpoolStateEcho: 'Degradation check',
         gwpoolStateEchoDesc:
           'On (default): when a request carried a live turn-state and the upstream answered with a different fresh one, the route is judged degraded and the current gateway is marked for rotation. Response headers only, and only on HTTP 200 - a fresh ticket on a 429/5xx is rate limiting or a fault, not evidence of degradation. This test has false negatives but no false positives: a full-strength verdict is trustworthy, a degraded verdict is occasionally wrong, so it will sometimes rotate a gateway and burn a slot for nothing - and supply is single digits of pairs per hour. Turn it off if the rotation rate becomes too expensive; with it off the behaviour is byte-for-byte what it was before this feature.',
-        gwpoolDegradedRetry: 'Swap pairs and retry once when degraded',
+        gwpoolDegradedRetry: 'Degradation retry',
         gwpoolDegradedRetryDesc:
           'On (default): take a fresh pair (a different gateway) and replay the same request once, so the client never notices; if the replay is judged degraded too it is not retried again and the request fails. Off: truncate only and return a clean error for the client to retry itself. The cap is hard-wired at one and cannot be raised - the test misjudges sometimes, and every retry is a real upstream request that burns one (account x gateway) unit. Both attempts get a usage row: the dropped one is tagged as degraded-dropped and its tokens and cost are always zero (nothing of the response body is read at the truncation point, so usage simply cannot be observed, and it is deliberately not estimated).',
         gwpoolErrors: {

@@ -2570,7 +2570,7 @@
              配置全在账号级：池子的 consumer key 是按账号发的。 -->
         <div
           v-if="accountSupportsGatewayPool"
-          class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600"
+          class="space-y-3 rounded-lg border border-gray-200 p-4 dark:border-dark-600"
           data-testid="edit-openai-gwpool-section"
         >
           <div class="flex items-center justify-between gap-4">
@@ -2621,20 +2621,6 @@
             </div>
             <div class="flex items-center justify-between gap-4">
               <div class="min-w-0">
-                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolAllModels') }}</label>
-                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  {{ t('admin.accounts.openai.gwpoolAllModelsDesc') }}
-                </p>
-              </div>
-              <input
-                v-model="openAIGwpoolAllModels"
-                data-testid="edit-openai-gwpool-all-models"
-                type="checkbox"
-                class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-              />
-            </div>
-            <div class="flex items-center justify-between gap-4">
-              <div class="min-w-0">
                 <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolSteering') }}</label>
                 <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                   {{ t('admin.accounts.openai.gwpoolSteeringDesc') }}
@@ -2657,20 +2643,6 @@
               <input
                 v-model="openAIGwpoolStateEcho"
                 data-testid="edit-openai-gwpool-state-echo"
-                type="checkbox"
-                class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-              />
-            </div>
-            <div class="flex items-center justify-between gap-4">
-              <div class="min-w-0">
-                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolRenew') }}</label>
-                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  {{ t('admin.accounts.openai.gwpoolRenewDesc') }}
-                </p>
-              </div>
-              <input
-                v-model="openAIGwpoolRenew"
-                data-testid="edit-openai-gwpool-renew"
                 type="checkbox"
                 class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
               />
@@ -4095,7 +4067,6 @@ const openAIGwpoolBaseURL = ref('')
 // 输入框恒为空：后端把已存的 key 脱敏成 true，页面从不回显原值。留空 = 不修改。
 const openAIGwpoolConsumerKey = ref('')
 const openAIGwpoolConsumerKeySaved = ref(false)
-const openAIGwpoolAllModels = ref(false)
 // 缺省即开，与后端 gatewayPoolSteering 同口径（只有显式 false 才关）。
 const openAIGwpoolSteering = ref(true)
 // 两个开关都是「缺省即开」：后端只认显式 false / 显式数字 0，所以存的时候只写关掉那一侧。
@@ -4103,7 +4074,6 @@ const openAIGwpoolSteering = ref(true)
 const openAIGwpoolStateEcho = ref(true)
 const openAIGwpoolDegradedRetry = ref(true)
 // 续期缺省即关：那一发要摘掉 __oailb 出站，是对真实 Codex 报文形状的偏离，而且从没单独实测过。
-const openAIGwpoolRenew = ref(false)
 // 三个「秒」旋钮：null = 留空 = 用后端默认值（4h / 8s / 2s），不往 extra 里写键。
 const openAIGwpoolGatewayWindow = ref<number | null>(null)
 const openAIGwpoolFetchTimeout = ref<number | null>(null)
@@ -4659,13 +4629,11 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	// 后端脱敏成 true = 配过；原值不会下发，所以输入框一律从空开始。
 	openAIGwpoolConsumerKeySaved.value = extra?.openai_gwpool_consumer_key === true
 	openAIGwpoolConsumerKey.value = ''
-	openAIGwpoolAllModels.value = extra?.openai_gwpool_all_models === true
 	// 自己挑落点缺省即开：只有显式 false 才算关（与后端同口径）。
 	openAIGwpoolSteering.value = extra?.openai_gwpool_steering !== false
 	openAIGwpoolStateEcho.value = extra?.openai_gwpool_state_echo !== false
 	openAIGwpoolDegradedRetry.value = extra?.openai_gwpool_degraded_retries !== 0
 	// 续期缺省即关：只有显式 true 才算开（与后端 gatewayPoolRenew 同口径）。
-	openAIGwpoolRenew.value = extra?.openai_gwpool_renew === true
 	openAIGwpoolGatewayWindow.value = readGwpoolSeconds(extra?.openai_gwpool_gateway_window_s)
 	openAIGwpoolFetchTimeout.value = readGwpoolSeconds(extra?.openai_gwpool_fetch_timeout_s)
 	openAIGwpoolListTimeout.value = readGwpoolSeconds(extra?.openai_gwpool_list_timeout_s)
@@ -6273,11 +6241,10 @@ const handleSubmit = async () => {
         if (gwpoolConsumerKey) {
           newExtra.openai_gwpool_consumer_key = gwpoolConsumerKey
         }
-        if (openAIGwpoolAllModels.value) {
-          newExtra.openai_gwpool_all_models = true
-        } else {
-          delete newExtra.openai_gwpool_all_models
-        }
+        // 这两个键 2026-10-02 删掉了（覆写范围恒为推理面；续期只会把票换到同大区的另一个
+        // 网关）。保存时顺手清掉老账号 extra 里的残留，别让一个没人读的键留在库里。
+        delete newExtra.openai_gwpool_all_models
+        delete newExtra.openai_gwpool_renew
         // 自己挑落点缺省即开：只有关掉时才落键，省得 extra 里堆默认项（后端也只认显式 false）。
         if (openAIGwpoolSteering.value) {
           delete newExtra.openai_gwpool_steering
@@ -6293,12 +6260,6 @@ const handleSubmit = async () => {
           delete newExtra.openai_gwpool_degraded_retries
         } else {
           newExtra.openai_gwpool_degraded_retries = 0
-        }
-        // 续期缺省即关：只有打开时才落键（后端只认显式 true）。
-        if (openAIGwpoolRenew.value) {
-          newExtra.openai_gwpool_renew = true
-        } else {
-          delete newExtra.openai_gwpool_renew
         }
         // 三个「秒」旋钮：留空 / 非正数 = 用后端默认值，所以不落键。
         for (const [key, value] of [

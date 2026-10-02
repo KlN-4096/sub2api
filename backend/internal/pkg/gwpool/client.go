@@ -17,13 +17,10 @@ package gwpool
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -157,7 +154,7 @@ type Pair struct {
 	// PairRemaining 是**这张 pair 自己**的剩余寿命（池子的 pair_remaining_s = __cflb 的死期
 	// 减现在）。和 ValidFor 是两根轴：ValidFor = min(满血窗口剩余, pair 剩余)，绝大多数时候
 	// 等于那 183 秒的窗口，分不出 pair 还剩 50 分钟还是 8 分钟 ⇒ 判「这张要不要续」只能用这个。
-	// 0 = 池子没报（还没升级）：消费端按**不续**处理（见 openAIGatewayPoolRenewBelow）。
+	// 0 = 池子没报（还没升级）。消费端目前只读它做日志口径，不据此做任何动作。
 	PairRemaining time.Duration
 	// VerifiedFull 是池子交付前自己验过满血。只做读数，消费端不拿它当闸门。
 	VerifiedFull bool
@@ -435,81 +432,6 @@ func (c *Client) Release(ctx context.Context, version string) error {
 		return fmt.Errorf("%w: release returned HTTP %d", ErrPool, resp.StatusCode)
 	}
 	return nil
-}
-
-// Renew 把这一发从上游换回来的**新路由对**回传池子，让它续上这张 pair 的寿命。
-//
-// 为什么只有消费端能做这件事：__cflb 的 3600s 寿命只有**业务请求**能刷新，而刷新的前提是这一发
-// 不带 __oailb（两件齐发时上游什么都不回 —— 2026-10-02 实测 F 组）。池子自己手上没有业务请求，
-// 刷不出来。
-//
-// 回传的是**事实**（一串 cookie），不是判断。别往这个 body 里加满血/降智/质量字段：转发路径上
-// 没有可信的降智判据，带这类字段的 /touch 端点 10-01 就是因为这个被删掉的。
-//
-// 返回池子给**续期后那张票**的新 cookie_version（池子没换票号时为空串，调用方留用旧的）。
-// 调用方把它当**尽力而为**：失败只记日志，不影响业务请求。
-func (c *Client) Renew(ctx context.Context, version, cookie string) (string, error) {
-	if c == nil {
-		return "", fmt.Errorf("%w: client is nil", ErrPool)
-	}
-	version = sanitizeOpaque(version, maxVersionLen)
-	cookie = strings.TrimSpace(cookie)
-	if version == "" || cookie == "" {
-		return "", nil // 没有票号就没法指认续的是哪张；没有新 cookie 就没什么可续。
-	}
-	body, err := json.Marshal(map[string]string{"cookie_version": version, "cookie": cookie})
-	if err != nil {
-		return "", fmt.Errorf("%w: build renew request: %w", ErrPool, err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint("pair/renew"), bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("%w: build renew request: %w", ErrPool, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.do(req)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
-	if resp.StatusCode != http.StatusOK {
-		return "", refusal(resp)
-	}
-	var payload struct {
-		OK            bool   `json:"ok"`
-		CookieVersion string `json:"cookie_version"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&payload); err != nil {
-		return "", fmt.Errorf("%w: decode renew response: %w", ErrPool, err)
-	}
-	// 200 但 ok=false 是池子明说「没续上」：当失败处理，别把一个没生效的续期记成成功。
-	// valid_for_s 刻意不读：续期延长的是**路由钉死**的寿命，不是满血窗口，而本地到点只能来自
-	// 交付时的 valid_for_s（见消费端 openAIGatewayPoolPair.until）。
-	if !payload.OK {
-		return "", fmt.Errorf("%w: renew was not accepted", ErrPool)
-	}
-	// **信任边界**：票号是我们之后用来还票（/release）和弃票（exclude_versions）的身份，而响应
-	// 是外部输入 —— 池子（或冒充它的东西）回一个属于**别人那张在用票**的票号，之后两个动作就全
-	// 打在别人头上了。票号按契约是 sha256(cookie) 的前 12 位十六进制、确定性可本地复算
-	// （SPEC 第 10 节），所以这里直接复算比对。
-	// 不符就**当池子没换票号**（留用旧的）而不是整次失败：续期本身已经生效了，而旧票号至少
-	// 还是我们自己那张票的身份。池子那边若对 cookie 做了归一化（空格/顺序），这条也会退到这个
-	// 安全方向上。
-	next := sanitizeOpaque(payload.CookieVersion, maxVersionLen)
-	if next != "" && !strings.EqualFold(next, cookieVersionOf(cookie)) {
-		// 票号与 cookie 本体同级：一个字都不进日志。
-		slog.Warn("gwpool_renew_version_mismatch")
-		return "", nil
-	}
-	return next, nil
-}
-
-// cookieVersionOf 按契约复算票号：sha256(cookie) 的前 12 位十六进制。
-func cookieVersionOf(cookie string) string {
-	sum := sha256.Sum256([]byte(cookie))
-	return hex.EncodeToString(sum[:])[:12]
 }
 
 // refusal 把非 200 的响应读成 *PoolError。
