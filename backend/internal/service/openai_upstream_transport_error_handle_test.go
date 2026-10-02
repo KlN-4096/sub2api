@@ -408,3 +408,39 @@ func TestHandleOpenAIUpstreamTransportError_NonPoolErrorKeepsGenericBody(t *test
 	require.Empty(t, fo.ClientMessage)
 	require.NotEqual(t, OpenAIGatewayPoolReason, fo.Reason)
 }
+
+// 池子那一侧的失败必须带 Retry-After，而且要带**池子说的那个数**。
+//
+// 这是整条链路上唯一的刹车：池子的失败都是秒级返回的 503（退避期里只要 0.2 秒），而 Codex CLI
+// 对 503 立刻重发 —— 2026-10-02 现场 16:17–16:22 五分钟打出 200 发 503，用户座位上看就是卡死，
+// 而每一轮重发还可能再烧几张票，(消费账号 × 网关) 的再生预算只有约 25 张/小时。
+func TestHandleOpenAIUpstreamTransportError_GatewayPoolCarriesRetryAfter(t *testing.T) {
+	svc := &OpenAIGatewayService{accountRepo: &openaiTransportAccountRepoStub{}}
+	account := &Account{ID: 1, Name: "pro1", Platform: PlatformOpenAI}
+
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		// 池子自己给了时长（退避那条把剩余秒数放进 PoolError.RetryAfter）⇒ 原样报。
+		"池子说了多久": {
+			fmt.Errorf("%w: backing off", &gwpool.PoolError{Code: gwpool.CodeAllCooling, RetryAfter: 47 * time.Second}),
+			"47",
+		},
+		// 没说 ⇒ 本地兜底。向上取整：报 0 等于没报。
+		"连试几张都降智": {errOpenAIGatewayPoolWarmExhausted, "30"},
+		"这一发判了降智":  {errOpenAIGatewayPoolRouteDegraded, "30"},
+	} {
+		err, want := tc.err, tc.want
+		t.Run(name, func(t *testing.T) {
+			c, _ := newOpenAITransportErrTestContext()
+			var fo *UpstreamFailoverError
+			require.True(t, errors.As(
+				svc.handleOpenAIUpstreamTransportError(context.Background(), c, account, err, false), &fo))
+			require.Equal(t, OpenAIGatewayPoolReason, fo.Reason)
+			require.Equal(t, http.StatusServiceUnavailable, fo.ClientStatusCode)
+			require.Equal(t, want, fo.ResponseHeaders.Get("Retry-After"),
+				"handler 的 copyFailoverRetryAfter 只从 ResponseHeaders 里取这一项")
+		})
+	}
+}

@@ -19,14 +19,26 @@ import (
 //
 // **口径注意**：这条记录挂在账号行上，而真正被烧掉的单位是上游账号——同一份 Codex 凭据
 // 可能挂在多个行上（克隆行、影子行，见 gatewayPoolLedgerKey 的注释），各行只看得见自己
-// 发出去的那些。所以它只能用来展示，一个判定都不许接；要判「这个网关还能不能用」仍然走
-// gatewayPoolUsedRecently。
+// 发出去的那些，所以它报的「碰过」是真相的**子集**。
+//
+// 子集这件事决定了它能接什么判定：**可以喂「别再碰这个落点」**（少避不会错避，漏避的代价是
+// 一次降智，而那条路本来就有 state-echo 兜着），**不许反过来当「这个落点还能用」**（会把
+// 别的行烧掉的窗口当成没烧）。前者就是 gatewayPoolHydrateUsed；后者仍然只信
+// gatewayPoolUsedRecently 那本内存账。
 const openAIGatewayHistoryExtraKey = "openai_gwpool_gateways"
 
 const (
-	// openAIGatewayHistoryMax 是留多少个网关。池子现在摸到的总共几十个，24 条足够看出
-	// 「这个号在哪些落点上烧过」，又不会把 extra 撑成一本日志。
-	openAIGatewayHistoryMax = 24
+	// openAIGatewayHistoryMax 是留多少个网关。
+	//
+	// 24 太小：池子 2026-10-02 已经摸到 99 个落点（而网关名到 unified-215），一个跑了几小时的
+	// 账号碰过的网关远超 24 个 ⇒ pruneOpenAIGatewayHistory 按时间裁掉最旧的 ⇒ 九宫格里那些格子
+	// 直接消失，而「这个大区我没碰过」和「碰过但被裁了」在页面上长得一模一样。更要紧的是这份
+	// 记录现在要给 /cookie 的 exclude 补账本（gatewayPoolHydrateUsed），裁掉一条就等于重启后
+	// 把那个落点重新放出来。
+	//
+	// 201 = 把目前见过的网关号段整段盖住，还留了余量。条目很小（名字 + 两个时间戳 + 一个判定），
+	// 201 条序列化后是十几 KB 量级的 JSONB，和这个 extra 里别的键同数量级。
+	openAIGatewayHistoryMax = 201
 	// openAIGatewayHistoryWriteInterval 是同一个网关的写节流窗口。没有它的话一个会话里
 	// 每一发请求都要 UPDATE 一次账号行（UpdateExtra 对中性键仍会连带 GetByID + Redis 写）。
 	// 换网关要立刻写——那正是这张卡要看的事，不该被节流窗口压住。
@@ -47,6 +59,69 @@ const (
 	openAIGatewayVerdictFull     = "full"
 	openAIGatewayVerdictDegraded = "degraded"
 )
+
+// openAIGatewayForecastHorizon 是满血分钟预测往前看多久。
+//
+// 一小时：用户要的就是「一小时内能用多少分钟满血」。它同时是预测值的天花板 ——
+// 一小时里最多也只能用到一小时的满血。
+const openAIGatewayForecastHorizon = time.Hour
+
+// openAIGatewayFullMinutesAhead 预测「接下来一小时最多能用到多少满血时长」。
+//
+// 单位是 **(账号 × 大区)**，不是 (账号 × 网关)：降智的作用单位是「这个号在这个大区的
+// 那个网关」，而一个号在一个大区同一时间只有一个网关（2026-10-02/03 实测：回放一张票
+// 落到的是**自己**在那个大区的网关，不是铸票号那个 —— 51 发定向续期里落点漂移 44 次、
+// 落到票上那个网关 0 次）。所以按网关名数单位会把同一个单位数好几遍：现网光 us-west
+// 一个大区就有 20 张活票 / 20 个不同网关名，对同一个消费者其实是**一个**单位。
+//
+//	可用单位 = 这个号的大区里，冷却在 horizon 内结束的那些（含从没碰过的）
+//	预测    = min(可用单位 × 一个满血窗口, horizon)
+//
+// **这是上界不是承诺**，两个方向都偏乐观：
+//   - 这本账挂在**账号行**上，而单位是**上游账号**的 —— 同一份凭据的克隆行/影子行各自
+//     只看得见自己发出去的那些，所以「烧过」记少了（见本文件开头那段口径）。
+//   - 冷却时长本身没测准（openAIGatewayPoolGatewayWindow 的注释：静置 30 分钟到 4 小时
+//     命中率恒定，零相关），4 小时是工程保守取值。
+//
+// 所以它答的是「最多」，用来回答「现在值不值得发请求」，**不能**反过来当调度闸 ——
+// 那条仍然只信 gatewayPoolUsedRecently 那本内存账。
+//
+// regions 是这个号能摸到的大区总数。<= 0 时退回「账本里见过的大区数」，那会让从没碰过
+// 的大区不计入 ⇒ 预测偏小。池子报得出总数时应该把它传进来。
+func openAIGatewayFullMinutesAhead(
+	rec openAIGatewayHistory, regions int, window time.Duration, now time.Time,
+) time.Duration {
+	// 每个大区留它**最近**一次被碰的时刻：同一个大区下的多个网关名是同一个单位，
+	// 取最近的那次才是这个单位真正的冷却起点。
+	latest := map[string]time.Time{}
+	for _, seen := range rec.Seen {
+		region := strings.TrimSpace(seen.Region)
+		if region == "" {
+			continue // 不知道属于哪个大区的落点没法归到单位上，不计
+		}
+		if at, ok := latest[region]; !ok || seen.At.After(at) {
+			latest[region] = seen.At
+		}
+	}
+	if regions <= 0 {
+		regions = len(latest)
+	}
+	// 冷却在一小时内结束的算可用。从没碰过的大区（regions 比账本里多的那些）天然可用。
+	units := regions - len(latest)
+	if units < 0 {
+		units = 0 // 账本里的大区比报的总数还多（总数过时了）：按账本算，别算出负数
+	}
+	for _, at := range latest {
+		if rest := window - now.Sub(at); rest <= openAIGatewayForecastHorizon {
+			units++
+		}
+	}
+	ahead := time.Duration(units) * openAIGatewayFullWindow
+	if ahead > openAIGatewayForecastHorizon {
+		return openAIGatewayForecastHorizon
+	}
+	return ahead
+}
 
 // openAIGatewayHistory 是那条记录。
 //

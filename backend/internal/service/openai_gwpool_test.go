@@ -215,10 +215,17 @@ func newGwpoolFakePool(t *testing.T, cookie string, validForS int) *gwpoolFakePo
 }
 
 // configure 把这个假池子的地址与 consumer key 写进账号 extra。
+// configure 把这个假池子配到账号上，并**显式把降智防护钉在 cut 档**。
+//
+// 钉档位是 2026-10-02 加的：默认档那天改成了 queue，而 queue 会在业务请求之前先打垫话去验
+// 满血 —— 这个文件里几乎所有用例测的是取票/还票/注入协议，不配 shooter 的话它们会连带跑进
+// 预热路径，测的就不是自己声称的那件事了。默认档本身由
+// TestGatewayPoolGuardDefaultsToTheStrictestMode 和 TestWarmUpOnlyRunsInQueueMode 单独钉。
 func (f *gwpoolFakePool) configure(accounts ...*Account) {
 	for _, acct := range accounts {
 		acct.Extra[openAIGatewayPoolBaseURLExtraKey] = f.baseURL
 		acct.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = gwpoolTestConsumerKey
+		acct.Extra[openAIGatewayPoolGuardExtraKey] = string(gatewayPoolGuardCut)
 	}
 }
 
@@ -1013,15 +1020,40 @@ func TestGatewayPoolFallsBackToBareTakeWhenListUnavailable(t *testing.T) {
 	}
 }
 
-// 一个候选都挑不出来（池子侧全烧过 / 没活 pair，加上本地账本排掉的那个）⇒ 同样裸取。
-func TestGatewayPoolFallsBackToBareTakeWhenEveryCandidateIsBurnt(t *testing.T) {
+// 有活 pair 的候选**全在本地账本窗口里** ⇒ 不再裸取，而是轮到「我们自己碰得最早」的那个，
+// 并且**把它从 exclude 里摘掉**（池子对「点名的又在排除名单里」是按排除办，不摘等于没点名）。
+//
+// 为什么不裸取：裸取是把选择权交回池子，而本地那 4 小时窗口是个保守估计
+// （docs/conventions/codex-full-strength-tickets.md 明说没测准）—— 「全都在窗口内」不等于
+// 「全都还降智」，碰得最早的那个是最可能已经恢复的。真没恢复也不会发出降智的票：池子自己那条
+// (消费账号 × 网关) 冷却过滤还在，它认得的烧灼它会拒。
+func TestGatewayPoolRotatesToTheOldestBurntCandidateInsteadOfBareTake(t *testing.T) {
+	poolCookie := gwpoolTestPairCookie(t, "unified-142")
+	fake := newGwpoolFakePool(t, poolCookie, 150)
+	fake.listGateways = []gwpoolFakeGateway{
+		{Name: "unified-126", PairReady: true, UsedByYou: true}, // 池子说这张是你自己正拿着的
+		{Name: "unified-195"},                                   // 没活 pair
+		{Name: "unified-167", PairReady: true},                  // 本地 1 分钟前碰过
+		{Name: "unified-84", PairReady: true},                   // 本地 3 小时前碰过 ⇒ 轮到它
+	}
+	store := &openAICodexCookieStore{}
+	store.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, "unified-167"), time.Now().Add(-time.Minute))
+	store.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, "unified-84"), time.Now().Add(-3*time.Hour))
+
+	headers := http.Header{}
+	require.NoError(t, attachRoute(context.Background(), store, fake.account(1), gwpoolTestURL, headers))
+	require.Equal(t, poolCookie, headers.Get("Cookie"))
+	require.Equal(t, gwpoolTestAccountQuery+"&exclude=unified-167&gateway=unified-84", fake.nextQuery(t),
+		"点名碰得最早那个，并把它自己从 exclude 里摘掉；别的烧过的照旧带着")
+}
+
+// 一个有活 pair 的候选都没有（池子侧全烧过 / 没活 pair）⇒ 仍然裸取，账本带成 exclude。
+func TestGatewayPoolFallsBackToBareTakeWhenNothingIsSteerable(t *testing.T) {
 	poolCookie := gwpoolTestPairCookie(t, "unified-142")
 	fake := newGwpoolFakePool(t, poolCookie, 150)
 	fake.listGateways = []gwpoolFakeGateway{
 		{Name: "unified-126", PairReady: true, UsedByYou: true},
 		{Name: "unified-195"},
-		// 池子还认为这个可用，但本地账本里 4 小时内碰过（下面种进去）。
-		{Name: "unified-167", PairReady: true},
 	}
 	store := &openAICodexCookieStore{}
 	store.gatewayPoolMarkUsed(gwpoolTestIdentity, "unified-167")
@@ -1153,6 +1185,9 @@ func TestDoOpenAIUpstreamGatewayPoolNoSlotFailsClosed(t *testing.T) {
 	acct := gwpoolTestAccount(1)
 	acct.Extra[openAIGatewayPoolBaseURLExtraKey] = srv.URL
 	acct.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = gwpoolTestConsumerKey
+	// 测的是「池子 503 ⇒ 失败关闭」，不是档位：默认档 queue 会先跑预热，而这个请求体
+	// 读不出 model ⇒ 死在 errOpenAIGatewayPoolWarmNoModel 上，根本走不到池子。
+	acct.Extra[openAIGatewayPoolGuardExtraKey] = string(gatewayPoolGuardCut)
 	// 罐里有一张能回放的 pair：也不许用。
 	svc.codexCookies.Store(acct, gwpoolTestURL, codexCookieUpstreamResponse())
 

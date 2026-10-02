@@ -43,18 +43,24 @@ describe('gateway pool locale keys', () => {
       'gwpoolFetchTimeoutDesc',
       'gwpoolListTimeout',
       'gwpoolListTimeoutDesc',
+      'gwpoolWarmTickets',
+      'gwpoolWarmTicketsDesc',
       'gwpoolSteering',
       'gwpoolSteeringDesc',
       'gwpoolGuard'
     ]) {
       expect(typeof openai[key], key).toBe('string')
     }
-    // 降智防护的四档：每档都要有标签和说明，少一条下拉里就会出现一个空选项。
-    for (const mode of ['off', 'cut', 'retry', 'queue']) {
+    // 降智防护的三档：每档都要有标签和说明，少一条下拉里就会出现一个空选项。
+    // retry 那一档 2026-10-02 删了（它漏降智），文案也必须跟着删 —— 留着会让下拉里多出一个
+    // 选不中的选项，而选中它的存量行在后端会被当成手滑值回默认档。
+    for (const mode of ['off', 'cut', 'queue']) {
       expect(typeof openai.gwpoolGuardModes[mode], mode).toBe('string')
       expect(typeof openai.gwpoolGuardDescs[mode], mode).toBe('string')
       expect(openai.gwpoolGuardDescs[mode].length, mode).toBeGreaterThan(40)
     }
+    expect(openai.gwpoolGuardModes.retry, 'retry 档已删').toBeUndefined()
+    expect(openai.gwpoolGuardDescs.retry, 'retry 档已删').toBeUndefined()
     // queue 档会花掉上游配额（平均约 6 发垫话换一个窗口），说明里必须写清成本 —— 它是这一档
     // 唯一的代价，运营方不该靠读源码才知道。
     expect(openai.gwpoolGuardDescs.queue).toContain('gwpool_warm_probe')

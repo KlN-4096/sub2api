@@ -29,18 +29,27 @@ const render = (acc: Account) => mount(AccountGatewayCell, { props: { account: a
 const cell = (w: ReturnType<typeof render>, region: string) =>
   w.get(`[data-testid="account-gateway-region-${region}"]`)
 
-/** 格子里是「大区名 + 网关号」，断言只看网关号那一截（大区名是 i18n key 桩）。 */
+/**
+ * 格子里是「大区名 + 判定字符 + 网关号」，断言只看网关号那一截（大区名是 i18n key 桩）。
+ * 判定字符单独由 markOf 看 —— 两件事分开断言，改一个不会连带改另一个的期望值。
+ */
 const gatewayOf = (w: ReturnType<typeof render>, region: string) =>
+  markedOf(w, region)?.replace(/^[✓!] /, '')
+
+const markedOf = (w: ReturnType<typeof render>, region: string) =>
   cell(w, region)
     .findAll('span')
     .map((s) => s.text())
     .at(-1)
 
-/** 琥珀色 = 窗口内打过、还在冷却。 */
-const isHot = (w: ReturnType<typeof render>, region: string) =>
-  cell(w, region).html().includes('amber')
+/** 判定字符：'✓ ' = 验过满血，'! ' = 窗口内碰过（现在打就是降智），'' = 已过窗口。 */
+const markOf = (w: ReturnType<typeof render>, region: string) =>
+  (markedOf(w, region) ?? '').match(/^[✓!] /)?.[0] ?? ''
 
-/** 格子的状态色：full / degraded / hot / idle（见 AccountGatewayCell 的 TONE_CLASS）。 */
+/** 「还烧着」= 本地账本窗口内碰过 = 格子不是淡显的那一档。 */
+const isHot = (w: ReturnType<typeof render>, region: string) => tone(w, region) !== 'idle'
+
+/** 格子的状态色：full / degraded / idle（见 AccountGatewayCell 的 TONE_CLASS）。 */
 const tone = (w: ReturnType<typeof render>, region: string) => cell(w, region).attributes('data-tone')
 
 describe('AccountGatewayCell', () => {
@@ -165,9 +174,12 @@ describe('AccountGatewayCell', () => {
     }
   })
 
-  // state-echo 判定的状态色（2026-10-02）。卡片上「验过是满血」和「只是碰过」是两回事 ——
-  // 不分色的话运营方看不出这个号现在手里有没有一个能用的落点。
-  it('窗口内按判定分色，窗口外一律淡显', () => {
+  // 状态色只有三种（2026-10-02 从四种并成三种）：绿 = 此刻真的在 183 秒满血窗口里；
+  // 红 = 窗口内碰过、现在打过去就是降智；灰 = 已过本地账本窗口，可以再用。
+  //
+  // 原来那档琥珀（「碰过没判据」/「曾判满血但 183 秒窗口已过」）并进红色：它们在
+  // 「现在能不能用」这个问题上和降智完全等价，分两色只会让人以为琥珀比红安全。
+  it('窗口内只分满血与降智，窗口外一律淡显', () => {
     const w = render(
       account({
         current: 'unified-73',
@@ -184,15 +196,37 @@ describe('AccountGatewayCell', () => {
     )
     expect(tone(w, 'east-asia')).toBe('full')
     expect(tone(w, 'us-west')).toBe('degraded')
-    expect(tone(w, 'us-east')).toBe('hot')
+    expect(tone(w, 'us-east')).toBe('degraded') // 碰过没判据 = 窗口已经烧了
     expect(tone(w, 'oceania')).toBe('idle')
     expect(tone(w, 'europe')).toBe('idle') // 空格子
+
+    // 色退化成装饰（9px 字号 + 红绿色盲 + title 在触屏上摸不到）时信息仍然读得出来。
+    expect(markOf(w, 'east-asia')).toBe('✓ ')
+    expect(markOf(w, 'us-west')).toBe('! ')
+    expect(markOf(w, 'us-east')).toBe('! ')
+    expect(markOf(w, 'oceania')).toBe('')
 
     // 判定不管窗口内外都进 tooltip：它是「验出过满血没有」唯一的记录。
     expect(cell(w, 'east-asia').attributes('title')).toContain('gatewayHistory.verdicts.full')
     expect(cell(w, 'us-west').attributes('title')).toContain('gatewayHistory.verdicts.degraded')
     expect(cell(w, 'oceania').attributes('title')).toContain('gatewayHistory.verdicts.full')
-    expect(cell(w, 'us-east').attributes('title')).not.toContain('verdicts')
+    expect(cell(w, 'us-east').attributes('title')).toContain('gatewayHistory.verdicts.none')
+  })
+
+  // 判过满血、但 183 秒窗口已经过去 ⇒ 红，不是绿也不是琥珀：窗口是 (账号 × 网关) 首次接触
+  // 那一下给的，过了就没了。
+  it('满血判定过了 183 秒窗口就变红', () => {
+    const w = render(
+      account({
+        current: 'unified-73',
+        seen: {
+          'unified-73': { at: isoAgo(60), region: 'east-asia', verdict: 'full', full_at: isoAgo(400) }
+        },
+        updated_at: isoAgo(60)
+      })
+    )
+    expect(tone(w, 'east-asia')).toBe('degraded')
+    expect(cell(w, 'east-asia').attributes('title')).toContain('gatewayHistory.verdicts.full')
   })
 
   it('认不出的判定值按「没判过」处理', () => {
@@ -203,8 +237,37 @@ describe('AccountGatewayCell', () => {
         updated_at: isoAgo(60)
       })
     )
-    expect(tone(w, 'east-asia')).toBe('hot')
-    expect(cell(w, 'east-asia').attributes('title')).not.toContain('verdicts')
+    expect(tone(w, 'east-asia')).toBe('degraded')
+    expect(cell(w, 'east-asia').attributes('title')).toContain('gatewayHistory.verdicts.none')
+  })
+
+  // tooltip 固定五段：区域 · 网关名 · 满血时刻 · 状态 · 上次判定。
+  // 段位固定（没有就写「从未 / 没判过」）是刻意的 —— 运营方竖着扫一列格子看，段数会变的话
+  // 每一行都得重新找「满血时刻」在哪儿。
+  it('tooltip 恒为五段：区域·网关·满血时刻·状态·判定', () => {
+    const w = render(
+      account({
+        current: 'unified-73',
+        seen: {
+          'unified-73': { at: isoAgo(60), region: 'east-asia', verdict: 'full', full_at: isoAgo(60) },
+          'unified-95': { at: isoAgo(180), region: 'us-east' }
+        },
+        updated_at: isoAgo(60)
+      })
+    )
+    const judged = (cell(w, 'east-asia').attributes('title') ?? '').split(' · ')
+    expect(judged).toHaveLength(5)
+    expect(judged[0]).toContain('gatewayHistory.regions.east-asia')
+    expect(judged[1]).toBe('unified-73')
+    expect(judged[2]).toContain('gatewayHistory.fullAt')
+    expect(judged[3]).toContain('gatewayHistory.regionHot')
+    expect(judged[4]).toContain('gatewayHistory.verdicts.full')
+
+    // 从没判过满血的那一格段数一样，第三段写「从未」而不是整段消失。
+    const never = (cell(w, 'us-east').attributes('title') ?? '').split(' · ')
+    expect(never).toHaveLength(5)
+    expect(never[2]).toContain('gatewayHistory.fullNever')
+    expect(never[4]).toContain('gatewayHistory.verdicts.none')
   })
 
   it('非 Codex 上游的账号整块不展示', () => {

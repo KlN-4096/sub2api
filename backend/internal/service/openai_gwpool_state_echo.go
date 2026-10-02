@@ -55,10 +55,15 @@ const (
 	//
 	//	off    不判。降智原样交给客户端
 	//	cut    判；判到降智就截断回一个干净的错误 + 标 Stale，客户端自己重发
-	//	retry  判；判到降智就当场换票把同一个请求重发一遍，客户端无感（**默认**）
 	//	queue  业务请求只落在**验过满血**的槽上：取到的新票先用便宜的垫话跑一遍判据
 	//	       （openai_gwpool_warm.go），没验出满血就换下一张，验出来了才放业务请求进去。
-	//	       判据仍然留着当兜底网，但**不重发**（档位等价于 cut，见 retries()）。
+	//	       判据仍然留着当兜底网，但不重发。**默认档**。
+	//
+	// **2026-10-02 删掉了中间那档 retry**（「判到降智就当场换票把同一个请求重发一遍」）。
+	// 它漏降智：重发那一发走 AttachRoute 换一张**没验过**的票就把用户的 prompt 打出去，
+	// 而判据对首轮请求结构性失效（没送 turn-state ⇒ 没有回声 ⇒ 判不出来，见
+	// gatewayPoolRouteDegraded），于是「客户端无感」实际上是「降智无声地交付了」。
+	// 原先靠它兜的那件事（客户端不用自己重发）现在由 queue 档在请求**之前**完成。
 	openAIGatewayPoolGuardExtraKey = "openai_gwpool_guard"
 	// openAIGatewayPoolStateEchoExtraKey / openAIGatewayPoolDegradedRetriesExtraKey 是合并前的
 	// 两个老键，**只保留读兼容**：库里已经有运营方配好的行，静默回默认会悄悄改掉它们的行为。
@@ -67,12 +72,6 @@ const (
 	// 老键」是常态，gatewayPoolGuard 的存在性判断承重就在这里。
 	openAIGatewayPoolStateEchoExtraKey       = "openai_gwpool_state_echo"
 	openAIGatewayPoolDegradedRetriesExtraKey = "openai_gwpool_degraded_retries"
-	// openAIGatewayPoolDegradedRetriesMax 是换票重发的硬上限。
-	//
-	// 刻意**不做成可配的数**：判据有假阴性（见文件头纪律 2）会偶尔把满血判成降智，放大系数必须
-	// 封顶，不然一个整体降智的池子会把一次客户端请求放大成 N 发真实上游请求 —— 而每一发都烧掉
-	// 一个 (上游账号 × 网关) 单位。重试那一发若又判降智，直接走错误路径，绝不再试。
-	openAIGatewayPoolDegradedRetriesMax = 1
 )
 
 // gatewayPoolGuardMode 是上面那条梯子的一档。
@@ -81,35 +80,39 @@ type gatewayPoolGuardMode string
 const (
 	gatewayPoolGuardOff   gatewayPoolGuardMode = "off"
 	gatewayPoolGuardCut   gatewayPoolGuardMode = "cut"
-	gatewayPoolGuardRetry gatewayPoolGuardMode = "retry"
 	gatewayPoolGuardQueue gatewayPoolGuardMode = "queue"
 )
 
-// gatewayPoolGuard 报告这个账号的降智防护档位。缺省 = retry。
+// gatewayPoolGuard 报告这个账号的降智防护档位。缺省 = **queue**（最严的那档）。
 //
-// 新键**在场就只看它**：认得的值照用，认不出的值（写了错别字、大小写、写成数字）直接回默认档
-// retry，**不落回老键**。回落的那一版有个 fail-open 角：库里存量行可能还带着
+// 缺省取最严而不是取最省：这个功能的全部意义是「不把降智交给客户端」，而没显式配过的号
+// 恰好是运营方没想过这件事的号 —— 让它们默认落在「验过满血才放行」上，代价是多花几张票，
+// 收益是没人需要先踩一次降智才知道有这个开关。要省供给就显式选 cut。
+//
+// 新键**在场就只看它**：认得的值照用，认不出的值（写了错别字、大小写、写成数字）直接回默认档，
+// **不落回老键**。回落的那一版有个 fail-open 角：库里存量行可能还带着
 // `openai_gwpool_state_echo: false`，于是 `guard: "Queue"` 这种手滑会被读成 off —— 运营方点了
 // 最严的那档，拿到的是最松的。前端 select 造不出这种值，但管理 API 和批量导入造得出。
 func (a *Account) gatewayPoolGuard() gatewayPoolGuardMode {
 	if a == nil || a.Extra == nil {
-		return gatewayPoolGuardRetry
+		return gatewayPoolGuardQueue
 	}
 	// 按**存在性**分支，不是按类型断言：extra 是 JSONB，这个键可以是 number / bool / null。
 	// 断言 `.(string)` 的那一版对它们全部失败 ⇒ 掉进老键 ⇒ 行里若还留着
 	// `openai_gwpool_state_echo: false`（前端刻意双写，见 EditAccountModal.vue），
 	// 一发 `{"openai_gwpool_guard": null}`（「清掉这个键恢复默认」的常见写法）就被读成 **off**：
-	// 判据一发不跑、降智原样交给客户端，而前端显示的也是 off，没人会发现它本该是 retry。
+	// 判据一发不跑、降智原样交给客户端，而前端显示的也是 off，没人会发现它本该是默认档。
 	if raw, present := a.Extra[openAIGatewayPoolGuardExtraKey]; present {
 		text, _ := raw.(string) // 非字符串 ⇒ "" ⇒ 落 default
 		switch mode := gatewayPoolGuardMode(strings.TrimSpace(text)); mode {
-		case gatewayPoolGuardOff, gatewayPoolGuardCut, gatewayPoolGuardRetry, gatewayPoolGuardQueue:
+		case gatewayPoolGuardOff, gatewayPoolGuardCut, gatewayPoolGuardQueue:
 			return mode
 		default:
 			// 静默回默认档 = 运营方以为配上了、其实没有，而唯一的线索是行为。打一条出来。
+			// 存量行里 "retry" 走的也是这一条：那一档 2026-10-02 删了，它和手滑值一样回默认。
 			slog.Warn("gwpool_guard_unrecognized", "account_id", a.ID,
-				"value", fmt.Sprintf("%v", raw), "fallback", string(gatewayPoolGuardRetry))
-			return gatewayPoolGuardRetry
+				"value", fmt.Sprintf("%v", raw), "fallback", string(gatewayPoolGuardQueue))
+			return gatewayPoolGuardQueue
 		}
 	}
 	return gatewayPoolGuardLegacy(a.Extra)
@@ -121,6 +124,9 @@ func (a *Account) gatewayPoolGuard() gatewayPoolGuardMode {
 // 「断言 bool 成功且为 false」，getExtraBool 在这里用不了 —— 它把「没配」和「配了 false」读成
 // 同一个值）；retries **只有显式写成数字 0 才是「只截断」**，其余一切（缺省、非数字、越界、
 // 负数）都是默认档。extra 是 JSONB：从库里读回来是 float64，从请求体/Go 字面量过来是 int。
+//
+// 「其余一切」那一支以前落的是 retry，现在落默认档 queue —— retry 删了，而这些行当初选的是
+// 「判，而且别让客户端看见降智」，queue 是现存档位里唯一仍然承诺这件事的。
 func gatewayPoolGuardLegacy(extra map[string]any) gatewayPoolGuardMode {
 	if enabled, ok := extra[openAIGatewayPoolStateEchoExtraKey].(bool); ok && !enabled {
 		return gatewayPoolGuardOff
@@ -139,25 +145,11 @@ func gatewayPoolGuardLegacy(extra map[string]any) gatewayPoolGuardMode {
 			return gatewayPoolGuardCut
 		}
 	}
-	return gatewayPoolGuardRetry
+	return gatewayPoolGuardQueue
 }
 
 // judges 报告这一档要不要跑 state-echo 判据。
 func (m gatewayPoolGuardMode) judges() bool { return m != gatewayPoolGuardOff }
-
-// retries 报告判到降智之后换票重发几次。cut 是 0，其余都是上限（off 档判据根本不跑，取值无关）。
-// retries 报告判到降智后换票重发几次。
-//
-// **queue 和 cut 一样是 0**，这一条是承重的：换票重发那一发走的是 gatewayPoolReplayRequest →
-// doOpenAIUpstreamOnce → AttachRoute，force 取一张全新的票，然后**一发判据都不跑**就把用户的
-// prompt 打出去 —— 那恰好是 queue 档存在的理由要消灭的东西（「不让用户的业务请求降智，把降智
-// 拦在外边」）。queue 档判到降智就截断，让下一发客户端请求重新走预热。
-func (m gatewayPoolGuardMode) retries() int {
-	if m == gatewayPoolGuardCut || m == gatewayPoolGuardQueue {
-		return 0
-	}
-	return openAIGatewayPoolDegradedRetriesMax
-}
 
 // gatewayPoolDegradedClientMsg 原样进网关客户端的错误响应与 Ops 错误日志（转发面没有 i18n 协商
 // 通道，与 gatewayPoolNoSlotClientMsg 同口径）。只说类别：票本体、cookie 本体一个字都不许出现。
@@ -182,11 +174,11 @@ var errOpenAIGatewayPoolRouteDegraded = fmt.Errorf("%s: %w", gatewayPoolDegraded
 // 客户端（turn-metadata 头里不补 model）。文案要直接说出该怎么办。
 const gatewayPoolWarmNoModelClientMsg = "读不出本轮模型，无法在请求前验满血（降智防护为「只用验过满血的槽」档）。" +
 	"已知成因：账号开了 device 指纹收敛（出站请求体被压缩）而客户端是 Codex 0.156 之前的版本。" +
-	"换档到「换票重试」或升级客户端" +
+	"升级客户端，或把降智防护换到「判到降智就截断」档" +
 	" / Cannot read this turn's model, so the route cannot be verified before the request " +
 	"(degradation guard is set to verified-full slots only). Known cause: this account runs the device " +
-	"fingerprint profile (compressed outbound body) with a pre-0.156 Codex client. Switch the guard to " +
-	"retry, or upgrade the client"
+	"fingerprint profile (compressed outbound body) with a pre-0.156 Codex client. Upgrade the client, " +
+	"or switch the guard to cut-on-degraded"
 
 var errOpenAIGatewayPoolWarmNoModel = fmt.Errorf("%s: %w", gatewayPoolWarmNoModelClientMsg, gwpool.ErrPool)
 
@@ -235,15 +227,97 @@ func (s *OpenAIGatewayService) gatewayPoolRouteDegraded(
 		return false
 	}
 	fresh := extractOpenAICodexTurnState(resp.Header)
-	degraded := fresh != "" && fresh != sent
+	refreshed := fresh != "" && fresh != sent
 	// 两个方向都记：走到这里就是一个**有结论**的读数，而账号卡片上「这个落点验过是满血」
 	// 和「没验过」是两回事（openai_gwpool_gateway_history.go）。满血那条只有这里产出。
 	verdict := openAIGatewayVerdictFull
-	if degraded {
+	if refreshed {
 		verdict = openAIGatewayVerdictDegraded
 	}
 	openAIGatewayPoolSinkFrom(request.Context()).noteVerdict(applied.Gateway, verdict)
-	return degraded
+	return s.gatewayPoolEchoStrike(request, account, applied, refreshed)
+}
+
+// 半程 state-echo 的两个票龄分界。
+const (
+	gatewayPoolEchoYoungAge = 90 * time.Second
+	gatewayPoolEchoMidAge   = 140 * time.Second
+)
+
+// gatewayPoolEchoStrikes 是这个票龄下要**连着**几发被刷新才判这条路由降智。
+//
+//	票龄 < 90s    3 发（含这一发）
+//	90s – 140s    2 发
+//	140s 以上     1 发 —— 被刷新就认窗口到点了
+//
+// 为什么越老越信一次刷新：判据只有假阴、没有假阳（SPEC 第 3 节），而窗口刚开的时候
+// 被刷新更可能就是那个假阴；快到点时被刷新本来就是窗口正常结束，再花几发去确认是白花。
+//
+// **上界刻意开口**（140s 以上，而不是 140–180s）：满血窗口实测是「约 183 秒」不是精确
+// 183 秒（2026-10-02 的测量纪律：窗口不是固定 183s）。写死上界的话一张活得更久的票在
+// 180 秒之后会掉进一个没定义的格子里；开口之后活得久的票只要**不**被刷新就一直能用。
+func gatewayPoolEchoStrikes(age time.Duration) int {
+	switch {
+	case age < gatewayPoolEchoYoungAge:
+		return 3
+	case age < gatewayPoolEchoMidAge:
+		return 2
+	default:
+		return 1
+	}
+}
+
+// gatewayPoolEchoStrike 记一次回声读数，返回「这条路由判定降智了吗」。
+//
+// 这就是「半程 state-echo」：被刷新一次**不**判死，要按票龄连着几发才算
+// （gatewayPoolEchoStrikes）。它一发上游都不打 —— 验据就是业务请求自己的响应头，
+// 比请求前的两发探测（openai_gwpool_warm.go）便宜得多。
+//
+// 代价要说清楚：没攒满之前这一发会**照常交给客户端**，所以 queue 档「绝不把降智结果
+// 交给客户端」在窗口刚开那 90 秒里松动成「连着三发都说降智才认」。这是刻意的 ——
+// queue 档的那张票是请求之前刚验过满血的，用一次有假阴的读数去推翻一个刚拿到的
+// 阳性结论，比放过去两发更可能是错的。
+//
+// 身份解析不出来就按**最严**办（判死）：那说明这个号的凭证域身份坏了，而这条路上
+// 我们宁可少服务一发，也不要把降智当满血放出去。
+func (s *OpenAIGatewayService) gatewayPoolEchoStrike(
+	request *http.Request,
+	account *Account,
+	applied OpenAIGatewayPoolApplied,
+	refreshed bool,
+) bool {
+	if !refreshed {
+		// 归零也要落笔：中间夹一发满血就说明这条路由还好着。
+		// 身份解析失败时无处可记，而「不记」对满血读数没有坏处（计数只会偏大一点）。
+		if identity, err := s.codexCookies.gatewayPoolIdentity(request.Context(), account); err == nil {
+			s.codexCookies.gatewayPoolNoteEcho(identity, applied.Version, applied.Gateway, false)
+		}
+		return false
+	}
+	identity, err := s.codexCookies.gatewayPoolIdentity(request.Context(), account)
+	if err != nil {
+		slog.Warn("gwpool_echo_identity_failed", "account_id", account.ID,
+			"gateway", applied.Gateway, "fallback", "judge degraded on the first refresh")
+		return true
+	}
+	misses, age := s.codexCookies.gatewayPoolNoteEcho(identity, applied.Version, applied.Gateway, true)
+	if misses == 0 {
+		// 缓存里已经是另一张票了（并发换过、还过）⇒ 这一发的读数无处可归。
+		// 按最严办：这一发确实带着活票收到了一张新的。
+		return true
+	}
+	need := gatewayPoolEchoStrikes(age)
+	if misses >= need {
+		return true
+	}
+	slog.Info("gwpool_echo_strike",
+		"account_id", account.ID,
+		"gateway", applied.Gateway,
+		"misses", misses,
+		"need", need,
+		"age_s", int(age.Seconds()),
+		"reason", "a live turn-state came back refreshed, but not enough times for this ticket age yet")
+	return false
 }
 
 // gatewayPoolMarkStale 把缓存里那张票的满血窗口按「已到点」处理。
@@ -281,26 +355,50 @@ func (s *openAICodexCookieStore) gatewayPoolMarkStale(identity, version, gateway
 	s.poolPairs.CompareAndSwap(identity, cached, next)
 }
 
-// gatewayPoolReplayRequest 复制一份可重放的上游请求，不可重放时返回 nil。
+// gatewayPoolNoteEcho 把一次回声读数记到缓存里那张票上，返回记完之后的连续刷新数
+// 和这张票的票龄。
 //
-// GetBody 是 net/http 自己为可重放 body（*bytes.Reader / *strings.Reader / *bytes.Buffer）设的
-// 工厂，重定向与 HTTP/2 的内建重试用的就是它。本仓库的 Codex 出站请求都是
-// http.NewRequestWithContext(..., bytes.NewReader(wireBody))（openai_gateway_passthrough.go:659、
-// openai_gateway_forward.go:1495）⇒ 恒有 GetBody。
+// refreshed=false 要**归零**：窗口真烧完之后每一发都会被刷新，所以中间夹一发没被刷新的
+// 就说明这条路由还好着。不归零的话 刷新/满血/刷新 会被数成「连着两发」。
 //
-// 它为 nil 说明那条路径的 body 读一遍就没了，这时**绝不重放**：半截的请求体会被上游当成一个
-// 合法请求处理，静默产生一次错误的推理轮次。按 nil 退回「只截断」。
-func gatewayPoolReplayRequest(request *http.Request) *http.Request {
-	if request == nil || request.GetBody == nil {
-		return nil
+// 票号/落点的匹配和 gatewayPoolMarkStale 逐字同一条（并发 + 临期票交叠时票号会变，
+// 被判的是落点不是票号）。对不上就什么都不记、回 0：缓存里已经是另一张票了，
+// 把读数记到它头上等于拿上一条路由的历史判这一条。
+func (s *openAICodexCookieStore) gatewayPoolNoteEcho(
+	identity, version, gateway string, refreshed bool,
+) (int, time.Duration) {
+	if s == nil || identity == "" {
+		return 0, 0
 	}
-	body, err := request.GetBody()
-	if err != nil {
-		return nil
+	// CAS 失败要重读重试：另一路请求同时在记自己那一发的读数，或者正在标 Stale。
+	// 单发 CAS 的那种写法会把「没抢到」静默读成「这一发没被刷新」，于是并发下
+	// 连续计数永远攒不满，降智判定再也不会触发。
+	for {
+		value, ok := s.poolPairs.Load(identity)
+		if !ok {
+			return 0, 0
+		}
+		cached, isPair := value.(openAIGatewayPoolPair)
+		if !isPair {
+			return 0, 0
+		}
+		if cached.version != version && (gateway == "" || cached.gateway != gateway) {
+			return 0, 0
+		}
+		age := time.Since(cached.since)
+		next := cached
+		next.echoMisses = 0
+		if refreshed {
+			next.echoMisses = cached.echoMisses + 1
+		}
+		// 已经是 0 又要记 0：没得改，别白做一次 CAS（也别因为它失败就重来）。
+		if next.echoMisses == cached.echoMisses {
+			return next.echoMisses, age
+		}
+		if s.poolPairs.CompareAndSwap(identity, cached, next) {
+			return next.echoMisses, age
+		}
 	}
-	replay := request.Clone(request.Context())
-	replay.Body = body
-	return replay
 }
 
 // dropDegradedGatewayPoolRoute 丢掉这一发降智的响应，并把当前网关标成要换。
@@ -317,7 +415,6 @@ func (s *OpenAIGatewayService) dropDegradedGatewayPoolRoute(
 	request *http.Request,
 	resp *http.Response,
 	account *Account,
-	retrying bool,
 ) {
 	// resp 非 nil 由调用约定保证（判成降智的前提就是拿到了响应）；Body 仍要判，合成响应可以没有。
 	if resp.Body != nil {
@@ -342,12 +439,10 @@ func (s *OpenAIGatewayService) dropDegradedGatewayPoolRoute(
 		"gateway", applied.Gateway,
 		"status", resp.StatusCode,
 		"sent_state_fingerprint", openAICodexTurnStateKey(sent),
-		"retrying", retrying,
 		"reason", "a live turn-state came back with a different one (state-echo): this route is degraded")
 	// 丢弃的这一发是一次真实上游请求：把读数留给用量侧落一条可审计的记录
 	// （openai_gateway_usage.go 的 RecordGatewayPoolDiscardedUsageLogs）。
 	openAIGatewayPoolSinkFrom(request.Context()).noteDiscarded(OpenAIGatewayPoolDiscardedAttempt{
 		Applied: applied,
-		Retried: retrying,
 	})
 }

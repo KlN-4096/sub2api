@@ -717,3 +717,47 @@ func (u *gwpoolCancelingUpstream) DoWithTLS(
 ) (*http.Response, error) {
 	return u.Do(req, proxyURL, id, c)
 }
+
+// 重启后内存账本是空的，但落库的落点记录还在 ⇒ exclude 必须从它补回来。
+//
+// 现场（2026-10-02）：池子对同一个号说「45 个候选网关都还在 4h 冷却里」，而我们这一发的
+// gwpool_pair_taken 打的是 excluded=6 —— 那 6 是重启之后重新数起来的，于是烧过的落点被
+// 原样发回来，而业务请求落上去就是降智。
+func TestGatewayPoolSeedsExcludeFromThePersistedLandingRecord(t *testing.T) {
+	poolCookie := gwpoolTestPairCookie(t, "unified-142")
+	fake := newGwpoolFakePool(t, poolCookie, 150)
+	store := &openAICodexCookieStore{} // 全新进程：poolUsed 是空的
+	acct := fake.account(1)
+	acct.Extra[openAIGatewayHistoryExtraKey] = map[string]any{
+		"seen": map[string]any{
+			"unified-167": map[string]any{"at": time.Now().Add(-time.Hour).Format(time.RFC3339Nano)},
+			// 出了本地账本窗口（默认 4 小时）⇒ 不该补进来，它又能用了。
+			"unified-84": map[string]any{"at": time.Now().Add(-5 * time.Hour).Format(time.RFC3339Nano)},
+		},
+	}
+
+	headers := http.Header{}
+	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, headers))
+	require.Equal(t, gwpoolTestAccountQuery+"&exclude=unified-167", fake.nextQuery(t),
+		"窗口内那条要补回 exclude；出了窗口的那条不许补")
+	require.True(t, store.gatewayPoolUsedRecently(gwpoolTestIdentity, "unified-167", time.Hour+time.Minute))
+}
+
+// 补回来的时间**只许往后对齐**：这个进程自己刚取的票比落库那条新，不许被旧读数盖回去
+//（盖回去会让「刚烧过」看起来像「一小时前烧的」，而挑落点正是按这个时间排序轮转的）。
+func TestGatewayPoolHydrateNeverRewindsAFresherLocalEntry(t *testing.T) {
+	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	store := &openAICodexCookieStore{}
+	store.gatewayPoolMarkUsed(gwpoolTestIdentity, "unified-167") // 刚刚
+	acct := fake.account(1)
+	acct.Extra[openAIGatewayHistoryExtraKey] = map[string]any{
+		"seen": map[string]any{
+			"unified-167": map[string]any{"at": time.Now().Add(-3 * time.Hour).Format(time.RFC3339Nano)},
+		},
+	}
+
+	store.gatewayPoolHydrateUsed(acct, gwpoolTestIdentity)
+	at, used := store.gatewayPoolUsedAt(gwpoolTestIdentity, "unified-167", openAIGatewayPoolGatewayWindow)
+	require.True(t, used)
+	require.WithinDuration(t, time.Now(), at, time.Minute, "内存里那条更新，不许被落库的旧读数盖掉")
+}

@@ -27,26 +27,16 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 			return nil, err
 		}
 	}
-	// 判据有假阴性（见 openai_gwpool_state_echo.go 的纪律 2）⇒ 换票重发的放大系数硬封顶在 1：
-	// 重试那一发若又判降智，直接走错误路径，绝不再试。
-	for remaining := guard.retries(); ; remaining-- {
-		resp, degraded, err := s.doOpenAIUpstreamOnce(request, proxyURL, account)
-		if !degraded {
-			return resp, err
-		}
-		// 换票重发要把同一个请求体再发一遍；重放不了（GetBody 为 nil）就退回「只截断」，
-		// 绝不发一个半截的请求体。
-		var replay *http.Request
-		if remaining > 0 {
-			replay = gatewayPoolReplayRequest(request)
-		}
-		s.dropDegradedGatewayPoolRoute(request, resp, account, replay != nil)
-		if replay == nil {
-			return nil, errOpenAIGatewayPoolRouteDegraded
-		}
-		// 当前 pair 已标 Stale ⇒ 下一圈的 AttachRoute 自然带 force=1 取一张别的网关的票。
-		request = replay
+	resp, degraded, err := s.doOpenAIUpstreamOnce(request, proxyURL, account)
+	if !degraded {
+		return resp, err
 	}
+	// 判到降智就**只截断**，不在这里换票重发。重发那一档（guard=retry）2026-10-02 删了：
+	// 它取一张没验过的新票就把用户的 prompt 打出去，而判据对首轮请求结构性失效（没送
+	// turn-state ⇒ 没有回声），所以「客户端无感」实际是「降智静默交付」。
+	// 当前 pair 已标 Stale ⇒ 下一发客户端请求的 AttachRoute 自然带 force=1 换网关。
+	s.dropDegradedGatewayPoolRoute(request, resp, account)
+	return nil, errOpenAIGatewayPoolRouteDegraded
 }
 
 // doOpenAIUpstreamOnce 发一发上游，并把 state-echo 判据跑在 Store **之前**。

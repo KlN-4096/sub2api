@@ -2,9 +2,10 @@ package service
 
 // queue 档的预热：业务请求只落在**已验满血**的槽上（openAIGatewayPoolGuardExtraKey）。
 //
-// 为什么要它：retry 档（默认）是「先放行、判到降智再换票重发一次」—— 客户端看不到降智响应，
-// 但那一发已经打出去了，花了钱和延迟，而且重试那一发若又判降智就直接走错误路径。queue 档把
-// 判据挪到业务请求**之前**，拿便宜的垫话去试网关，验出满血才放业务请求进去。
+// 为什么要它：另外两档都是**事后**判。cut 判到降智就截断、让客户端自己重发，而判据对首轮请求
+// 结构性失效（客户端没送 turn-state ⇒ 没有回声 ⇒ 判不出来，见 gatewayPoolRouteDegraded）⇒
+// 那种请求的降智它一发都拦不住。queue 档把判据挪到业务请求**之前**，自己铸一张 state 当回声
+// 基准（shot A），拿便宜的垫话去试网关，验出满血才放业务请求进去。
 //
 // 成本是算过的：
 //   - **窗口内连打多发都满血**（2026-10-02 实测，窗口 ≥200s、窗口内 7/7）⇒ 验过一次就覆盖
@@ -33,14 +34,30 @@ import (
 )
 
 const (
-	// gatewayPoolWarmMaxTickets 是一次预热最多试几张票。
+	// gatewayPoolWarmMaxTickets 是一次预热最多试几张票的**默认值**，账号可覆盖
+	// （openAIGatewayPoolWarmTicketsExtraKey）。
 	//
-	// 命中率约 33% ⇒ 4 张的累计命中率约 80%，而每张票要花 2 发上游请求 + 烧掉一个
-	// (上游账号 × 网关) 单位，而池子的供给是个位数张/小时。再往上加换来的命中率不值那个价，
-	// 试不出来就按失败处理（queue 档的承诺是「绝不放降智出去」，不是「一定能放行」）。
-	gatewayPoolWarmMaxTickets = 4
+	// 实测命中率约 29%（14 ready / 48 结论，2026-10-02 线路机）⇒ 累计命中率 4 张约 75%、
+	// 5 张约 82%。往上加的边际收益掉得很快，而代价是线性的：每张票 2 发上游请求 + 烧掉一个
+	// (上游账号 × 网关) 单位。
+	//
+	// 这个数是**供给闸**。现场这条链是实测的：16:10–17:12 一小时烧了 40 张 ⇒ 池子对这个号
+	// 报 all_cooling ⇒ 退避 60 秒 ⇒ 退避期里每一发业务请求都是 0.2 秒的 503 ⇒ Codex CLI
+	// 疯狂重发（五分钟 200 发）⇒ 用户看到的是「卡死」。
+	//
+	// 但「一小时能烧几张」这个数**还没定**：按网关名算是 99 ÷ 4h ≈ 25 张/小时，而消费者回放
+	// 一张票落到的是**它自己在那个大区**的网关（不是铸票号那个），真实单位可能是
+	// (消费账号 × 大区) = 9 个 —— 那样换一堆网关名其实都落在同一个烧过的单位上。池子那边正在
+	// 按后者改（消费侧账本整个交给客户端），落地后这笔账要重算。所以做成旋钮而不是常数。
+	gatewayPoolWarmMaxTickets = 5
+	// gatewayPoolWarmMaxTicketsCeiling 是那个旋钮的硬上限。
+	//
+	// 封顶而不是任配：一轮预热最坏要花 N × 2 × gatewayPoolWarmShotTimeout 的墙上时间，而
+	// 客户端在整段时间里一个字节都收不到；配到两位数等于把「首输出超时」变成常态。
+	// 超了回默认值（同 gatewayPoolSeconds 的口径：填出这种数一定是打错了）。
+	gatewayPoolWarmMaxTicketsCeiling = 8
 	// gatewayPoolWarmBudget 是一次预热最多占用客户端多少墙上时间。
-	// 4 张票 × 2 发 × 6s ≈ 48s，留一倍余量；超了就停，别让客户端无限等。
+	// 5 张票 × 2 发 × 6s ≈ 60s，留一点余量；超了就停，别让客户端无限等。张数可按账号调（见上）。
 	gatewayPoolWarmBudget = 90 * time.Second
 	// gatewayPoolWarmMinBudget 是「还值得预热吗」的下限：一组判据两发、每发 3–6s，
 	// 不到这个数就连一张票都验不完，白烧配额还要把业务请求的首输出预算拖进去。
@@ -117,7 +134,7 @@ func (s *OpenAIGatewayService) gatewayPoolWarmUpWith(
 	shoot gatewayPoolWarmShooter,
 ) error {
 	// 预算必须是一个**带截止时间的 ctx**，不能只在循环顶上判时间：一次 attempt 内部就能花掉
-	// 两发垫话各 35s，只判循环顶的话 4 张票最坏能让客户端等三分钟 —— 而这一档对运营方承诺的
+	// 两发垫话各 35s，只判循环顶的话 5 张票最坏能让客户端等六分钟 —— 而这一档对运营方承诺的
 	// 是 90 秒。挂成 ctx 之后预算一到，排在后面的垫话立刻失败而不是各自再跑满 35s。
 	//
 	// **仍然会超一点**：取票那一步（gatewayPoolPair）刻意用 WithoutCancel + 自己的
@@ -125,7 +142,7 @@ func (s *OpenAIGatewayService) gatewayPoolWarmUpWith(
 	// 的断开连坐）⇒ 最坏会被一次取票超时拖过线。文案照这个实情写。
 	budget, ok := gatewayPoolWarmBudgetFor(request.Context())
 	if !ok {
-		// 首输出守卫的额度已经不够验一张票了 ⇒ **不预热，放行给业务请求**（退化成 retry 档）。
+		// 首输出守卫的额度已经不够验一张票 ⇒ **不预热，放行给业务请求**（退化成 cut 档）。
 		// 不这样做的话预热会把守卫那点额度吃光，业务请求带着一个已经过期的 ctx 出门，守卫当场
 		// 开火、报成 newOpenAIFirstOutputTimeoutError —— 那是个**按代理归因**的
 		// UpstreamFailoverError，恰好是降智路径刻意不产出的那一类（它包 gwpool.ErrPool 就是
@@ -137,10 +154,11 @@ func (s *OpenAIGatewayService) gatewayPoolWarmUpWith(
 	ctx, cancel := context.WithTimeout(request.Context(), budget)
 	defer cancel()
 	rawURL := request.URL.String()
+	tickets := account.gatewayPoolWarmTickets()
 	// burned 是这一轮判死的落点名，只为放弃时那条终态日志能一行答完「试了哪几个网关」。
-	burned := make([]string, 0, gatewayPoolWarmMaxTickets)
+	burned := make([]string, 0, tickets)
 attempts:
-	for attempt := 1; attempt <= gatewayPoolWarmMaxTickets; attempt++ {
+	for attempt := 1; attempt <= tickets; attempt++ {
 		if ctx.Err() != nil {
 			break
 		}
@@ -166,6 +184,11 @@ attempts:
 		// 拿到过状态码的一律不还：窗口真的烧了，还回去等于让池子把它当新鲜的再发给别人。
 		if !conclusive && !sent {
 			gatewayPoolReleaseUnsent(release)
+		} else if !conclusive {
+			// 下不了结论但**票确证打出去了** ⇒ 这个落点的窗口真的烧了。记一笔没有判定的接触，
+			// 否则它只活在进程内存的 poolUsed 里、重启就没了，而落点记录才是 exclude 重启后
+			// 的唯一来源（gatewayPoolHydrateUsed）。verdict 留空 = 不覆盖上一次判出来的结论。
+			s.noteWarmVerdict(request, account, applied, "", false)
 		}
 		switch {
 		case !conclusive && ctx.Err() != nil:
@@ -177,7 +200,7 @@ attempts:
 			// 三轮就过线；那时两发垫话在一个已死的 ctx 上立刻报错 → !conclusive → 放行，而手里
 			// 那张是**刚 force 取回来、一发判据都没跑过**的票（这条路不标 Stale 也不标验过）
 			// ⇒ 业务请求的 AttachRoute 读到 Live 原样复用它 ⇒ 「只用验过满血的槽」当场破掉，
-			// 连 gatewayPoolWarmMaxTickets 那个「最多烧 4 张」的上限也一起突破。
+			// 连 gatewayPoolWarmTickets 那个「最多烧几张」的上限也一起突破。
 			slog.Warn("gwpool_warm_inconclusive", "account_id", account.ID,
 				"gateway", applied.Gateway, "attempt", attempt, "budget_exhausted", true,
 				"error", gatewayPoolWarmErrorText(perr))
@@ -253,6 +276,11 @@ attempts:
 // 留**一半**给业务请求自己的首输出：没有更有依据的分法（守卫那个值是运营方按模型吐字速度配的，
 // 和判据成本无关），一半是能说清楚的那个取舍。剩下不够验一张票就返回 false。
 // 没有截止时间（守卫没开，缺省就是没开）时原样给满额。
+//
+// **预算按账号各发一份，故障转移换号时不累计**（2026-10-02 用户拍板）：每个账号碰过的票不一样，
+// A 号烧光自己的额度不代表 B 号没有满血落点可试，共享一份会让排在后面的号拿不到公平的机会。
+// 代价是客户端的零输出时间按换号次数叠加 —— 这一侧的刹车改成「每轮更便宜」（试票上限可配，
+// 见 gatewayPoolWarmTickets）和「失败带 Retry-After」（gatewayPoolRetryAfter），而不是砍预算。
 func gatewayPoolWarmBudgetFor(ctx context.Context) (time.Duration, bool) {
 	budget := gatewayPoolWarmBudget
 	if deadline, ok := ctx.Deadline(); ok {

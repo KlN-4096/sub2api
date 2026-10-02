@@ -2704,6 +2704,22 @@
                     :title="t('admin.accounts.openai.gwpoolListTimeoutDesc')"
                   />
                 </div>
+                <!-- 只有 queue 档会用它（别的档一发垫话都不打），所以跟着档位显示 —— 一个
+                     恒灰的输入框比没有这个框更让人以为自己配上了。 -->
+                <div v-if="openAIGwpoolGuard === 'queue'">
+                  <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolWarmTickets') }}</label>
+                  <input
+                    v-model.number="openAIGwpoolWarmTickets"
+                    type="number"
+                    min="1"
+                    max="8"
+                    step="1"
+                    placeholder="5"
+                    class="input text-xs"
+                    data-testid="edit-openai-gwpool-warm-tickets"
+                    :title="t('admin.accounts.openai.gwpoolWarmTicketsDesc')"
+                  />
+                </div>
               </div>
             </div>
           </div>
@@ -4067,17 +4083,21 @@ const openAIGwpoolConsumerKey = ref('')
 const openAIGwpoolConsumerKeySaved = ref(false)
 // 缺省即开，与后端 gatewayPoolSteering 同口径（只有显式 false 才关）。
 const openAIGwpoolSteering = ref(true)
-// 降智防护档位（openai_gwpool_guard）。顺序 = 守得多严，缺省 retry。
-// queue 档会在业务请求之前拿便宜的垫话去验满血（平均约 6 发），所以它在列表最后、要人主动选。
-const openAIGwpoolGuardModes = ['off', 'cut', 'retry', 'queue'] as const
+// 降智防护档位（openai_gwpool_guard）。顺序 = 守得多严，**缺省 queue**（最严那档）。
+// 中间那档 retry（「判到降智就换票重发一遍」）2026-10-02 删了：它漏降智 —— 重发那一发用的是
+// 一张没验过的新票，而判据对首轮请求结构性失效，于是「客户端无感」实际是「降智静默交付」。
+const openAIGwpoolGuardModes = ['off', 'cut', 'queue'] as const
 type OpenAIGwpoolGuardMode = (typeof openAIGwpoolGuardModes)[number]
-const openAIGwpoolGuard = ref<OpenAIGwpoolGuardMode>('retry')
+const openAIGwpoolGuard = ref<OpenAIGwpoolGuardMode>('queue')
 // 续期缺省即关：那一发要摘掉 __oailb 出站，是对真实 Codex 报文形状的偏离，而且从没单独实测过。
 // 三个「秒」旋钮：null = 留空 = 用后端默认值（4h / 25s / 2s），不往 extra 里写键。
 // 占位符要和后端那三个常量一致 —— 它展示的就是「留空会用什么」。
 const openAIGwpoolGatewayWindow = ref<number | null>(null)
 const openAIGwpoolFetchTimeout = ref<number | null>(null)
 const openAIGwpoolListTimeout = ref<number | null>(null)
+// queue 档一轮预热最多试几张票。null = 留空 = 用后端默认值 5，不往 extra 里写键。
+// 后端封顶 8（gatewayPoolWarmMaxTicketsCeiling），越界回默认值。
+const openAIGwpoolWarmTickets = ref<number | null>(null)
 const readGwpoolSeconds = (value: unknown): number | null =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
 
@@ -4085,10 +4105,10 @@ const readGwpoolSeconds = (value: unknown): number | null =>
  * 读降智防护档位。只有新键**整个缺席**时才回落老的两个键，映射与后端 gatewayPoolGuardLegacy
  * 一字对一字 —— 库里已经有运营方配好的行，静默回默认会在页面上把它们的配置显示成另一回事。
  *
- * 新键在场但认不出来（`"Queue"`、`"OFF"` 这种，经管理 API / 批量导入写进来的）**也不回落老键**，
- * 而是和后端 gatewayPoolGuard 一样回默认档。不这样的话两边会分叉：
- * `{guard:"Queue", state_echo:false}` 后端当 retry 跑、页面显示成 off，运营方改个别的字段一存，
- * 这个号就真的变成 off 了 —— 判据被静默关掉，而他从没打算改这一项。
+ * 新键在场但认不出来（`"Queue"`、`"OFF"`、以及存量行里那个已删的 `"retry"`，经管理 API /
+ * 批量导入写进来的）**也不回落老键**，而是和后端 gatewayPoolGuard 一样回默认档。不这样的话
+ * 两边会分叉：`{guard:"Queue", state_echo:false}` 后端按默认档跑、页面显示成 off，运营方改个
+ * 别的字段一存，这个号就真的变成 off 了 —— 判据被静默关掉，而他从没打算改这一项。
  */
 const readGwpoolGuard = (extra: Record<string, unknown> | undefined): OpenAIGwpoolGuardMode => {
   // 按**存在性**分支，不是按 typeof：extra 是 JSONB，这个键可以是 number / bool / null，
@@ -4097,11 +4117,11 @@ const readGwpoolGuard = (extra: Record<string, unknown> | undefined): OpenAIGwpo
   if (extra && 'openai_gwpool_guard' in extra) {
     const raw = extra.openai_gwpool_guard
     const mode = (typeof raw === 'string' ? raw.trim() : '') as OpenAIGwpoolGuardMode
-    return (openAIGwpoolGuardModes as readonly string[]).includes(mode) ? mode : 'retry'
+    return (openAIGwpoolGuardModes as readonly string[]).includes(mode) ? mode : 'queue'
   }
   if (extra?.openai_gwpool_state_echo === false) return 'off'
   if (extra?.openai_gwpool_degraded_retries === 0) return 'cut'
-  return 'retry'
+  return 'queue'
 }
 
 const turnStateProbeEfforts = ['minimal', 'low', 'medium', 'high', 'xhigh']
@@ -4660,6 +4680,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	openAIGwpoolGatewayWindow.value = readGwpoolSeconds(extra?.openai_gwpool_gateway_window_s)
 	openAIGwpoolFetchTimeout.value = readGwpoolSeconds(extra?.openai_gwpool_fetch_timeout_s)
 	openAIGwpoolListTimeout.value = readGwpoolSeconds(extra?.openai_gwpool_list_timeout_s)
+	openAIGwpoolWarmTickets.value = readGwpoolSeconds(extra?.openai_gwpool_warm_tickets)
 	openAIImagesUrlToB64JsonEnabled.value = extra?.images_url_to_b64_json === true
 	autoPause5hThreshold.value = typeof extra?.auto_pause_5h_threshold === 'number' ? extra.auto_pause_5h_threshold * 100 : null
 	autoPause7dThreshold.value = typeof extra?.auto_pause_7d_threshold === 'number' ? extra.auto_pause_7d_threshold * 100 : null
@@ -6283,7 +6304,7 @@ const handleSubmit = async () => {
         delete newExtra.openai_gwpool_guard
         delete newExtra.openai_gwpool_state_echo
         delete newExtra.openai_gwpool_degraded_retries
-        if (openAIGwpoolGuard.value !== 'retry') {
+        if (openAIGwpoolGuard.value !== 'queue') {
           newExtra.openai_gwpool_guard = openAIGwpoolGuard.value
         }
         if (openAIGwpoolGuard.value === 'off') {
@@ -6292,13 +6313,16 @@ const handleSubmit = async () => {
           // 后端只认数字 0 当「只截断」，别的值一律回默认档 ⇒ 必须落 0 而不是 false。
           newExtra.openai_gwpool_degraded_retries = 0
         }
-        // queue 在老键里没有对应档，刻意不落老键：回滚后它退化成默认的「判 + 换票重试一次」，
-        // 那是老后端能做到的最接近的行为。
-        // 三个「秒」旋钮：留空 / 非正数 = 用后端默认值，所以不落键。
+        // queue 现在是默认档，三个键一个都不落。回滚到只认老键的后端时它退化成那边的默认档
+        // 「判 + 换票重试一次」—— 那是老后端能做到的最接近的行为。
+        // 三个「秒」旋钮 + 试票张数：留空 / 非正数 = 用后端默认值，所以不落键。
+        // 试票张数后端还封了个 8 的上限，越界同样回默认值 —— 这里不另做钳位，让后端那一处
+        // 当唯一真源（前端 input 的 max 只是提示，管理 API 和批量导入绕得过去）。
         for (const [key, value] of [
           ['openai_gwpool_gateway_window_s', openAIGwpoolGatewayWindow.value],
           ['openai_gwpool_fetch_timeout_s', openAIGwpoolFetchTimeout.value],
-          ['openai_gwpool_list_timeout_s', openAIGwpoolListTimeout.value]
+          ['openai_gwpool_list_timeout_s', openAIGwpoolListTimeout.value],
+          ['openai_gwpool_warm_tickets', openAIGwpoolWarmTickets.value]
         ] as const) {
           if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
             newExtra[key] = Math.floor(value)

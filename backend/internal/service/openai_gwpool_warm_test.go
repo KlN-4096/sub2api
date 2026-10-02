@@ -215,7 +215,7 @@ func TestWarmUpFailsClosedWhenNoTicketVerifiesFull(t *testing.T) {
 //
 // 纪律 1：非 200 一律不下结论。在这里返回错误会把读数吞掉 —— 非 200 的典型成因是限流/故障，
 // 而限流登记、瞬时熔断、故障转移全挂在业务响应那条路上。放行不会把降智交给客户端：业务请求
-// 上的判据还在（queue 档 judges()=true、retries()=1），这一发退化成 retry 档的行为。
+// 上的判据还在（queue 档 judges()=true），这一发退化成 cut 档的行为。
 func TestWarmUpFallsThroughOnInconclusiveShots(t *testing.T) {
 	for name, tc := range map[string]struct {
 		replies []gwpoolWarmReply
@@ -389,19 +389,22 @@ func TestGatewayPoolWarmModelReadsTheRequestBody(t *testing.T) {
 	}
 }
 
-// queue 档不是默认档：没显式配的账号一发垫话都不打（成本不许被默认打开）。
+// 别的档一发垫话都不打：预热的成本只许挂在 queue 档上。
+//
+// 2026-10-02 之前这条测的是「queue 不是默认档」；现在 queue **就是**默认档，所以反过来钉
+// cut 档 —— 它是运营方选来省供给的那一档，一旦它也开始打垫话，省下来的那部分就没了。
 func TestWarmUpOnlyRunsInQueueMode(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{{status: http.StatusOK}}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
-	acct := fake.account(1)
-	require.Equal(t, gatewayPoolGuardRetry, acct.gatewayPoolGuard())
+	acct := gwpoolEchoAccount(fake)
+	require.Equal(t, gatewayPoolGuardCut, acct.gatewayPoolGuard())
 
 	_, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	_ = resp.Body.Close()
-	require.Len(t, upstream.sentBodies, 1, "retry 档只打业务请求那一发")
+	require.Len(t, upstream.sentBodies, 1, "cut 档只打业务请求那一发")
 }
 
 // 同一身份的并发预热只跑**一遍**判据。
@@ -575,4 +578,80 @@ func TestWarmUpIgnoresNonInferenceRequests(t *testing.T) {
 	require.NoError(t, svc.gatewayPoolWarmUp(req.WithContext(ctx), "", gwpoolWarmAccount(fake)))
 	require.Empty(t, upstream.sentBodies)
 	require.Zero(t, fake.hits.Load())
+}
+
+
+// 预热预算**按账号各发一份**，故障转移换号时不累计（2026-10-02 用户拍板）。
+//
+// 理由是供给不是时间：每个账号碰过的票不一样，A 号烧光自己的额度不代表 B 号没有满血落点
+// 可试，共享一份会让排在后面的号拿不到公平的机会。同一个 sink（= 同一条客户端请求）上调
+// 两次必须都拿满额。
+func TestWarmUpBudgetIsPerAccountNotPerClientRequest(t *testing.T) {
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx, _ := withOpenAIGatewayPoolSink(context.Background(), ginCtx)
+
+	for round := 1; round <= 3; round++ {
+		budget, ok := gatewayPoolWarmBudgetFor(ctx)
+		require.Truef(t, ok, "第 %d 个账号也该有预算", round)
+		require.Equalf(t, gatewayPoolWarmBudget, budget, "第 %d 个账号领的必须是满额", round)
+	}
+}
+
+// 没有截止时间（首输出守卫没开，缺省就是没开）给满额；额度不够验一张票时报 false，
+// 调用方据此**放行**而不是失败 —— 把守卫那点额度吃光会让业务请求带着过期 ctx 出门。
+func TestWarmUpBudgetYieldsToTheFirstOutputGuard(t *testing.T) {
+	budget, ok := gatewayPoolWarmBudgetFor(context.Background())
+	require.True(t, ok)
+	require.Equal(t, gatewayPoolWarmBudget, budget)
+
+	// 守卫还剩 40 秒 ⇒ 预热最多拿一半。
+	half, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	budget, ok = gatewayPoolWarmBudgetFor(half)
+	require.True(t, ok)
+	require.InDelta(t, 20.0, budget.Seconds(), 1)
+
+	// 只剩 10 秒 ⇒ 一半是 5 秒，连一张票都验不完 ⇒ 不预热。
+	tight, cancelTight := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelTight()
+	_, ok = gatewayPoolWarmBudgetFor(tight)
+	require.False(t, ok)
+}
+
+// 试票上限是账号旋钮：缺省 5，越界回缺省，封顶 8。
+//
+// 它是**供给闸**：每张票烧掉一个 (上游账号 × 网关) 单位，而那个单位的再生预算约 25 张/小时
+// （已知网关数 ÷ 4 小时冷却）。做成旋钮是因为供给在涨，合适的值跟着它走。
+func TestWarmTicketsIsAnAccountKnobWithACeiling(t *testing.T) {
+	tickets := func(raw any) int {
+		return (&Account{Extra: map[string]any{openAIGatewayPoolWarmTicketsExtraKey: raw}}).gatewayPoolWarmTickets()
+	}
+	require.Equal(t, gatewayPoolWarmMaxTickets, (&Account{}).gatewayPoolWarmTickets(), "缺省 = 5")
+	require.Equal(t, gatewayPoolWarmMaxTickets, (*Account)(nil).gatewayPoolWarmTickets())
+	require.Equal(t, 1, tickets(1))
+	require.Equal(t, 3, tickets(3.0), "extra 是 JSONB，从库里读回来是 float64")
+	require.Equal(t, 3, tickets("3"), "getExtraInt 认数字字符串，和别的秒旋钮同口径")
+	require.Equal(t, gatewayPoolWarmMaxTicketsCeiling, tickets(gatewayPoolWarmMaxTicketsCeiling))
+	for _, raw := range []any{0, -1, 99, "nope", true, nil} {
+		require.Equalf(t, gatewayPoolWarmMaxTickets, tickets(raw), "越界/畸形值回缺省：%v", raw)
+	}
+}
+
+// 旋钮真的管着循环次数，不是只读出来不用。
+func TestWarmUpStopsAtTheConfiguredTicketCount(t *testing.T) {
+	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	svc := &OpenAIGatewayService{}
+	acct := gwpoolWarmAccount(fake)
+	acct.Extra[openAIGatewayPoolWarmTicketsExtraKey] = 2
+	// 每一轮都判降智：A 下发一张、B 回一张**不同的**。
+	replies := make([]gwpoolWarmReply, 0, 8)
+	for i := 0; i < 4; i++ {
+		replies = append(replies,
+			gwpoolWarmReply{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
+			gwpoolWarmReply{status: http.StatusOK, minted: gwpoolEchoFreshTicket + "-b"})
+	}
+	shooter := &gwpoolWarmShooter{replies: replies}
+
+	require.ErrorIs(t, gwpoolWarmRun(t, svc, acct, shooter), errOpenAIGatewayPoolWarmExhausted)
+	require.Len(t, shooter.shots, 4, "配 2 张就只许打 2×2 发，不许按默认的 5 张跑")
 }

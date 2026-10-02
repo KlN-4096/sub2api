@@ -149,16 +149,20 @@ interface GatewayItem {
 }
 
 /**
- * 格子的四种色：窗口内按 state-echo 判定分，窗口外一律淡显。
+ * 格子的三种色：绿 = 此刻真的在满血窗口里；红 = 窗口内碰过、现在打过去就是降智；灰 = 已过
+ * 本地账本窗口，可以再用。
  *
- * **窗口外不着色是刻意的**：判定是「上一次判成什么」，而回归的触发变量未知（后端
- * openAIGatewaySeen.FullAt 的注释），所以过了本地账本窗口那条读数就只是历史，不该再当成
- * 当前状态渲染。想看历史判定去读 tooltip。
+ * **原来还有一档琥珀**（「碰过没判据，或曾判满血但 183 秒窗口已过」），2026-10-02 并进红色：
+ * 那两种情况在「现在能不能用」这个问题上和降智完全等价 —— 满血窗口是 (账号 × 网关) 首次接触
+ * 那一下给的，过了就没了，判没判过不改变这个事实。分成两色只会让人以为琥珀比红安全。
+ * 历史判定仍然在 tooltip 里（verdict 粘滞保存）。
+ *
+ * **窗口外不着色是刻意的**：回归的触发变量未知（后端 openAIGatewaySeen.FullAt 的注释），
+ * 过了本地账本窗口那条读数就只是历史，不该再当成当前状态渲染。
  */
 const TONE_CLASS = {
   full: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
   degraded: 'bg-rose-50 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300',
-  hot: 'bg-amber-50 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
   idle: 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
 } as const
 
@@ -272,11 +276,10 @@ function isHot(at: string): boolean {
 
 function toneOf(item: GatewayItem | null | undefined): GatewayTone {
   if (!item || !isHot(item.at)) return 'idle'
-  // 降智按本地账本那个窗口算（和后端判「这个网关还能不能用」同一个兜底数）；
-  // 满血只在真实的满血窗口内才算（见 FULL_WINDOW_MS），过期回落「碰过」。
-  if (item.verdict === 'degraded') return 'degraded'
+  // 满血只在真实的满血窗口内才算（见 FULL_WINDOW_MS）。过了它、或者压根没判过，都是红：
+  // 窗口内碰过 ⇒ 这一刻打过去就是降智，这三种情况对使用者是同一件事。
   if (item.verdict === 'full' && within(item.fullAt, FULL_WINDOW_MS)) return 'full'
-  return 'hot'
+  return 'degraded'
 }
 
 /**
@@ -303,32 +306,25 @@ function regionLabel(key: string): string {
   return t(`admin.accounts.openai.gatewayHistory.regions.${key || 'unknown'}`)
 }
 
+/**
+ * tooltip 固定五段：区域 · 网关名 · 满血时刻 · 状态 · 上次判定。
+ *
+ * 段位固定（没有就写「从未 / 没判过」而不是整段省掉）是刻意的：运营方是竖着扫一列格子看的，
+ * 段数会变的话每一行都得重新找「满血时刻」在哪儿。
+ *
+ * 满血时刻是**判成满血的那一刻**，不是「最近用过」那一刻 —— verdict 在后端是粘滞的
+ * （没判据的那些发只刷新 at、判定原样留着），不写时刻的话一条 3 小时前的满血判定读起来
+ * 和刚验出来的一样。
+ */
 function titleOf(item: GatewayItem): string {
-  const head = `${regionLabel(item.region)} · ${item.name}`
-  if (!item.at) return head
-  const when = `${t('admin.accounts.openai.gatewayHistory.lastUsed')} ${formatDateTime(item.at)}`
-  const state = t(
-    isHot(item.at)
-      ? 'admin.accounts.openai.gatewayHistory.regionHot'
-      : 'admin.accounts.openai.gatewayHistory.regionCooled'
-  )
-  const parts = [head, when, state]
-  // 判定**不管窗口内外都写进 tooltip**：格子的色只渲染当前状态，而这条历史判定本身有用
-  // （它是「这个号在这个落点上到底验出过满血没有」唯一的记录）。
-  //
-  // 满血必须带**判定时刻**：上面那个时间是「用过」的时间，而 verdict 在后端是粘滞的 ——
-  // 不写时刻的话一条 3 小时前的满血判定读起来和刚验出来的一样。
-  if (item.verdict === 'full') {
-    parts.push(
-      item.fullAt
-        ? t('admin.accounts.openai.gatewayHistory.verdicts.fullAt', {
-            when: formatRelativeTime(item.fullAt)
-          })
-        : t('admin.accounts.openai.gatewayHistory.verdicts.full')
-    )
-  } else if (item.verdict) {
-    parts.push(t(`admin.accounts.openai.gatewayHistory.verdicts.${item.verdict}`))
-  }
-  return parts.join(' · ')
+  const base = 'admin.accounts.openai.gatewayHistory'
+  const full = item.fullAt
+    ? t(`${base}.fullAt`, { when: formatDateTime(item.fullAt) })
+    : t(`${base}.fullNever`)
+  const state = t(isHot(item.at) ? `${base}.regionHot` : `${base}.regionCooled`)
+  const verdict = item.verdict
+    ? t(`${base}.verdicts.${item.verdict}`)
+    : t(`${base}.verdicts.none`)
+  return [regionLabel(item.region), item.name, full, state, verdict].join(' · ')
 }
 </script>
