@@ -88,7 +88,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { Account } from '@/types'
 import { targetsCodexUpstream } from '@/utils/turnState'
-import { formatDateTime, formatRelativeTime } from '@/utils/format'
+import { formatRelativeTime } from '@/utils/format'
 import { useNowTicker } from '@/composables/useNowTicker'
 
 /**
@@ -274,7 +274,7 @@ const cells = computed<RegionCell[]>(() => {
         mark: verdictMark(bucket[0]),
         title: bucket.length
           ? bucket.map(titleOf).join('\n')
-          : `${regionLabel(key)} · ${t('admin.accounts.openai.gatewayHistory.regionIdle')}`
+          : `${regionLabel(key)}${TITLE_SEP}${t('admin.accounts.openai.gatewayHistory.regionIdle')}`
       }
     })
 })
@@ -377,24 +377,26 @@ function regionLabel(key: string): string {
 }
 
 /**
- * tooltip 固定五段：区域 · 网关名 · 满血时刻 · 状态 · 上次判定。
+ * tooltip 固定五段：区域-网关名-满血时间-状态-判定（例：`美东-149-45 分钟前-冷却中-降智`）。
  *
- * 段位固定（没有就写「从未 / 没判过」而不是整段省掉）是刻意的：运营方是竖着扫一列格子看的，
- * 段数会变的话每一行都得重新找「满血时刻」在哪儿。
+ * 段位固定（没有就写「未满血 / 没判过」而不是整段省掉）是刻意的：运营方是竖着扫一列格子
+ * 看的，段数会变的话每一行都得重新找「满血时间」在哪儿。同理每段只放值、不带标签——
+ * 一列里每行都重复一遍「满血于」「上次判定：」，真正要比的那几个值反而被推到行尾对不齐。
  *
- * 满血时刻是**判成满血的那一刻**，不是「最近用过」那一刻 —— verdict 在后端是粘滞的
- * （没判据的那些发只刷新 at、判定原样留着），不写时刻的话一条 3 小时前的满血判定读起来
- * 和刚验出来的一样。
+ * 满血时间是**判成满血的那一刻**，不是「最近用过」那一刻 —— verdict 在后端是粘滞的
+ * （没判据的那些发只刷新 at、判定原样留着），不写时间的话一条 3 小时前的满血判定读起来
+ * 和刚验出来的一样。写相对时长而不是绝对时刻：满血窗口只有 183 秒，「多久以前」才是能
+ * 直接判断的那个量，而绝对时刻有 19 个字符、一行里会把别的段挤出视野。
  */
+const TITLE_SEP = '-'
+
 function titleOf(item: GatewayItem): string {
   const base = 'admin.accounts.openai.gatewayHistory'
-  const full = item.fullAt
-    ? t(`${base}.fullAt`, { when: formatDateTime(item.fullAt) })
-    : t(`${base}.fullNever`)
+  const full = item.fullAt ? formatRelativeTime(item.fullAt) : t(`${base}.fullNever`)
   const state = t(isHot(item.at) ? `${base}.regionHot` : `${base}.regionCooled`)
   const verdict = item.verdict
     ? t(`${base}.verdicts.${item.verdict}`)
     : t(`${base}.verdicts.none`)
-  return [regionLabel(item.region), item.name, full, state, verdict].join(' · ')
+  return [regionLabel(item.region), shortName(item.name), full, state, verdict].join(TITLE_SEP)
 }
 </script>

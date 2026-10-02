@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import AccountGatewayCell from '../AccountGatewayCell.vue'
 import type { Account } from '@/types'
+import { formatRelativeTime } from '@/utils/format'
 
 // 只替 useI18n，其余保留真实导出：src/utils/format.ts 会 import src/i18n/index.ts，
 // 整个模块被 mock 掉的话 createI18n 就没了。
@@ -153,7 +154,10 @@ describe('AccountGatewayCell', () => {
       })
     )
     expect(gatewayOf(w, 'east-asia')).toBe('73+1')
-    expect(cell(w, 'east-asia').attributes('title') ?? '').toContain('unified-99')
+    // 被折进 +1 的那个必须在 tooltip 里单独占一行。名字和格子里一样去掉 `unified-` 前缀，
+    // 所以这里认的是行首那个 `-99-`：`toContain('99')` 会被 `unified-199` 之类蒙混过去。
+    expect((cell(w, 'east-asia').attributes('title') ?? '').split('\n')).toHaveLength(2)
+    expect(cell(w, 'east-asia').attributes('title') ?? '').toContain('-99-')
   })
 
   it('没有读数时给占位，不是整块消失', () => {
@@ -247,33 +251,46 @@ describe('AccountGatewayCell', () => {
     expect(cell(w, 'east-asia').attributes('title')).toContain('gatewayHistory.verdicts.none')
   })
 
-  // tooltip 固定五段：区域 · 网关名 · 满血时刻 · 状态 · 上次判定。
-  // 段位固定（没有就写「从未 / 没判过」）是刻意的 —— 运营方竖着扫一列格子看，段数会变的话
-  // 每一行都得重新找「满血时刻」在哪儿。
-  it('tooltip 恒为五段：区域·网关·满血时刻·状态·判定', () => {
+  // tooltip 固定五段：区域-网关名-满血时间-状态-判定，例 `美东-149-45 分钟前-冷却中-降智`。
+  //
+  // 段位固定（没有就写「未满血 / 没判过」）是刻意的 —— 运营方竖着扫一列格子看，段数会变
+  // 的话每一行都得重新找「满血时间」在哪儿。每段只放**值**、不带标签，同一个理由。
+  //
+  // 这里断言整串 toBe 而不是切开数段数：分隔符是 `-`，而 i18n 桩回的是带 `-` 的 key
+  // （`regions.east-asia`），切出来的段数没有意义。整串比对连「段里混进标签」也一起钉住。
+  it('tooltip 恒为五段：区域-网关-满血时间-状态-判定', () => {
+    const base = 'admin.accounts.openai.gatewayHistory'
+    const fullAt = isoAgo(60)
     const w = render(
       account({
         current: 'unified-73',
         seen: {
-          'unified-73': { at: isoAgo(60), region: 'east-asia', verdict: 'full', full_at: isoAgo(60) },
+          'unified-73': { at: isoAgo(60), region: 'east-asia', verdict: 'full', full_at: fullAt },
           'unified-95': { at: isoAgo(180), region: 'us-east' }
         },
         updated_at: isoAgo(60)
       })
     )
-    const judged = (cell(w, 'east-asia').attributes('title') ?? '').split(' · ')
-    expect(judged).toHaveLength(5)
-    expect(judged[0]).toContain('gatewayHistory.regions.east-asia')
-    expect(judged[1]).toBe('unified-73')
-    expect(judged[2]).toContain('gatewayHistory.fullAt')
-    expect(judged[3]).toContain('gatewayHistory.regionHot')
-    expect(judged[4]).toContain('gatewayHistory.verdicts.full')
+    expect(cell(w, 'east-asia').attributes('title')).toBe(
+      [
+        `${base}.regions.east-asia`,
+        '73', // `unified-` 前缀在这一列里是恒定的，省掉才塞得下
+        formatRelativeTime(fullAt), // 相对时长，不是绝对时刻
+        `${base}.regionHot`,
+        `${base}.verdicts.full`
+      ].join('-')
+    )
 
-    // 从没判过满血的那一格段数一样，第三段写「从未」而不是整段消失。
-    const never = (cell(w, 'us-east').attributes('title') ?? '').split(' · ')
-    expect(never).toHaveLength(5)
-    expect(never[2]).toContain('gatewayHistory.fullNever')
-    expect(never[4]).toContain('gatewayHistory.verdicts.none')
+    // 从没判过满血的那一格段数一样，第三段写「未满血」而不是整段消失。
+    expect(cell(w, 'us-east').attributes('title')).toBe(
+      [
+        `${base}.regions.us-east`,
+        '95',
+        `${base}.fullNever`,
+        `${base}.regionHot`,
+        `${base}.verdicts.none`
+      ].join('-')
+    )
   })
 
   // 满血分钟预测：单位是 (账号 × 网关)，**一个网关名就是一个单位**，而且算**下界**。

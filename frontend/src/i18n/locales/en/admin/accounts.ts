@@ -800,13 +800,18 @@ export default {
           empty: 'Gateway -',
           current: 'Current',
           seen: '{n} used',
-          regionHot: 'used within the window, still cooling',
-          regionCooled: 'window elapsed, usable again',
+          // The tooltip's five segments are region-gateway-fullTime-state-verdict, each
+          // carrying only the VALUE and no label: operators scan a column vertically, and
+          // repeating "used within the window, still cooling" on every row pushes the values
+          // that actually need comparing off to the right where they no longer line up.
+          // The long wording stays in gatewayColumnHint and legend, which appear once.
+          regionHot: 'cooling',
+          regionCooled: 'usable',
           regionIdle: 'never used',
-          // Tooltip segment 3: when the full-strength verdict happened. The window is only
-          // 183s, so this is an absolute time rather than a timeless "verified full".
-          fullAt: 'full strength at {when}',
-          fullNever: 'never verified full',
+          // No fullAt key: segment 3 is a relative duration (formatRelativeTime). The window
+          // is only 183s, so "how long ago" is the number you can act on, and an absolute
+          // timestamp would blow the line width.
+          fullNever: 'never full',
           legend:
             '✓ verified full (inside the 183s window) · ! used inside the window, degraded right now · grey window elapsed, usable again',
           // Full-strength minutes forecast for the next hour, deliberately a LOWER bound.
@@ -818,8 +823,8 @@ export default {
             'One thing still optimistic: the 4h cooldown itself is not pinned down (resting 30 minutes vs 4 hours gave a constant full-strength rate, zero correlation), so if real recovery takes longer this number is still too high.',
           // state-echo verdict (backend openai_gwpool_state_echo.go).
           verdicts: {
-            full: 'last verdict: full strength',
-            degraded: 'last verdict: degraded',
+            full: 'full',
+            degraded: 'degraded',
             none: 'never judged'
           },
           regions: {

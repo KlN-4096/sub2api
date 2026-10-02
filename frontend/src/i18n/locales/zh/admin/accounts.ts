@@ -907,13 +907,15 @@ export default {
           empty: '网关 -',
           current: '当前',
           seen: '打过 {n} 个',
-          regionHot: '窗口内打过，仍在冷却',
-          regionCooled: '已过窗口，可再用',
+          // tooltip 的五段是「区域-网关名-满血时间-状态-判定」，每段只放**值**不带标签：
+          // 运营方竖着扫一列看，每行重复一遍「窗口内打过，仍在冷却」会把真正要比的那几个
+          // 值推到行尾对不齐。长说法留在 gatewayColumnHint 和 legend 里，那两处只出现一次。
+          regionHot: '冷却中',
+          regionCooled: '可再用',
           regionIdle: '未打过',
-          // tooltip 第三段：满血判定发生在什么时候。满血窗口只有 183 秒，所以这一段写的是
-          // 绝对时刻而不是「验过满血」这种没有时效的说法。
-          fullAt: '满血于 {when}',
-          fullNever: '从未验出满血',
+          // 第三段没有 fullAt 键：满血时间直接用相对时长（formatRelativeTime），满血窗口
+          // 只有 183 秒，「多久以前」才是能直接判断的量，绝对时刻还会把这一行撑爆。
+          fullNever: '未满血',
           legend: '✓ 验过满血（183 秒窗口内）· ! 窗口内碰过，现在打就是降智 · 灰 已过窗口，可再用',
           // 一小时满血分钟预测，刻意算**下界**。文案必须写「至少」：写「最多」会被当配额用。
           forecast: '一小时内至少 {minutes} 分钟满血',
@@ -923,8 +925,8 @@ export default {
             '仍然乐观的一处：4 小时冷却本身没测准（静置 30 分钟到 4 小时，满血率恒定、零相关），真实恢复时间比它长的话这个数还会偏大。',
           // state-echo 判定（后端 openai_gwpool_state_echo.go）。
           verdicts: {
-            full: '上次判定：满血',
-            degraded: '上次判定：降智',
+            full: '满血',
+            degraded: '降智',
             none: '没判过'
           },
           regions: {
