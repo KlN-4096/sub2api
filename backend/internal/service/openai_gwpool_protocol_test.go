@@ -751,7 +751,7 @@ func TestGatewayPoolSeedsExcludeFromThePersistedLandingRecord(t *testing.T) {
 
 	headers := http.Header{}
 	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, headers))
-	require.Equal(t, gwpoolTestAccountQuery+"&exclude=unified-167", fake.nextQuery(t),
+	require.Equal(t, gwpoolTestCookieQuery+"&exclude=unified-167", fake.nextQuery(t),
 		"窗口内那条要补回 exclude；出了窗口的那条不许补")
 	require.True(t, store.gatewayPoolUsedRecently(gwpoolTestIdentity, "unified-167", time.Hour+time.Minute))
 }

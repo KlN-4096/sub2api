@@ -60,6 +60,16 @@ type openAICodexCookieStore struct {
 	// poolBackoff 是「池子让这个身份先别取票」的到点（见 gatewayPoolBackoff）。
 	// 按**上游账号**记而不是按请求：退避只对本次请求生效的话，重试环照旧每轮都去敲池子。
 	poolBackoff sync.Map // 账本身份（上游账号粒度）→ time.Time
+	// poolSpare 是批量取票剩下的备用票（/cookie?count=，见 gatewayPoolTakeBatch）。
+	//
+	// 验满血那条路的形状是「取一张 → 验 → 不满血再取一张」，每轮一个 HTTP 往返，而池子内部
+	// 可能顺带现铸（取票超时默认 25s），三轮就能把 90 秒的预热预算花光在往返上。一发拿 N 张
+	// 之后第 2..N 轮**一个往返都不用打**。
+	//
+	// 架子上这张不是浪费而是预取：它在自己的满血窗口内对**后面的**业务请求一样有效。
+	// 窗口过了还没人用才算损失，而那只发生在这个身份突然没请求的时候。
+	// 键按凭证域身份，和 poolPairs 同一个口径（同一份凭据的几个账号行共用）。
+	poolSpare sync.Map // 凭证域身份 → *gatewayPoolTicketBatch
 }
 
 // openAICodexCookieJarKey：本地行 ID + 凭证域身份。同一行重新授权成另一个 ChatGPT 身份时
