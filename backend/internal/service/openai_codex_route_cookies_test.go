@@ -118,3 +118,21 @@ func TestRoutePairInUsePrefersUpstream(t *testing.T) {
 	require.NotNil(t, overridden)
 	require.True(t, *overridden)
 }
+
+// 池子说的大区只在它说的网关就是这一发实际在用的那个时才作数。改派走了还认，
+// 等于把落点归到错的大区 ⇒ 账号卡片上「哪个大区还能用」会反过来。
+func TestUsageCodexRouteRegion(t *testing.T) {
+	t.Run("网关对得上就采用", func(t *testing.T) {
+		require.Equal(t, "east-asia",
+			usageCodexRouteRegion("unified-167", "unified-167", "east-asia"))
+	})
+	t.Run("被改派走了就不记", func(t *testing.T) {
+		require.Empty(t, usageCodexRouteRegion("unified-167", "unified-73", "east-asia"))
+	})
+	t.Run("没走池子就不记", func(t *testing.T) {
+		require.Empty(t, usageCodexRouteRegion("", "unified-167", "east-asia"))
+	})
+	t.Run("两头都空不算对得上", func(t *testing.T) {
+		require.Empty(t, usageCodexRouteRegion("", "", "east-asia"))
+	})
+}

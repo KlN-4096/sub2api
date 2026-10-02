@@ -448,6 +448,9 @@ func mergeOpenAIGatewayPoolConsumerKey(existing, incoming map[string]any) {
 type openAIGatewayPoolPair struct {
 	cookie  string
 	gateway string
+	// region 是池子报的「铸这张票的出口属于哪个大区」。只用于账号卡片上按大区归档落点，
+	// 一个判定都不接（口径见 gwpool.Pair.Region）。空 = 池子没报。
+	region  string
 	version string
 	until   time.Time
 }
@@ -851,6 +854,7 @@ func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *A
 		pair := openAIGatewayPoolPair{
 			cookie:  cookie,
 			gateway: gateway,
+			region:  strings.TrimSpace(got.Region),
 			version: got.Version,
 			until:   time.Now().Add(got.ValidFor),
 		}
@@ -985,7 +989,9 @@ type OpenAIGatewayPoolApplied struct {
 	AccountID int64
 	Cookie    string
 	Gateway   string
-	Version   string
+	// Region 是池子说的「这张票是哪个大区铸的」，给账号卡片按大区归档落点用。空 = 不知道。
+	Region  string
+	Version string
 }
 
 // openAIGatewayPoolSink 是 ctx 里承载的那个指针。
@@ -1183,7 +1189,7 @@ func (s *openAICodexCookieStore) AttachRoute(
 	// 写完头**之后**才记标记：使用记录那张卡片据此断言「这一发真的注入了」。
 	openAIGatewayPoolSinkFrom(ctx).mark(OpenAIGatewayPoolApplied{
 		AccountID: account.ID, Cookie: pair.cookie, Gateway: pair.gateway,
-		Version: pair.version,
+		Region: pair.region, Version: pair.version,
 	})
 	return release, nil
 }

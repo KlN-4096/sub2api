@@ -194,6 +194,19 @@ func usageCodexRoutePairOverriddenPtr(account *Account, fromPool bool) *bool {
 	return &fromPool
 }
 
+// usageCodexRouteRegion 判这一发的落点能不能归到池子说的那个大区上。
+//
+// 只有「池子说的网关 == 这一发实际在用的网关」时才算：不一致说明上游把这一发改派走了
+// （见 routePairInUse），池子那个大区讲的是另一个网关的事，记上去会把落点归到错的大区，
+// 于是账号卡片上「这个号在哪个大区还有没烧过的落点」直接答错。宁可留空（显示未归类）。
+func usageCodexRouteRegion(poolGateway, inUseGateway, region string) string {
+	poolGateway = strings.TrimSpace(poolGateway)
+	if poolGateway == "" || poolGateway != strings.TrimSpace(inUseGateway) {
+		return ""
+	}
+	return strings.TrimSpace(region)
+}
+
 // usageCodexRoutePairPoolGatewayPtr 记池子交付时说的那个网关：与 route_gateway 比对就知道注入
 // 被不被上游接受（见 routePairInUse）。没走池子 / 池子没报出网关名时为 nil。
 func usageCodexRoutePairPoolGatewayPtr(gateway string) *string {
