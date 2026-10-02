@@ -208,7 +208,7 @@ func (a *Account) gatewayPoolSeconds(key string, fallback time.Duration) time.Du
 // gatewayPoolWarmTickets 读「一轮预热最多试几张票」。缺省 / 非正数 / 超上限回默认值。
 //
 // 这是个**供给旋钮**，不是性能旋钮：每张票都烧掉一个 (上游账号 × 网关) 单位，而那个单位的
-// 再生预算是个位数到几十张/小时（这个数还没定，见 gatewayPoolWarmMaxTickets）。调大它换到的是单发请求的命中率，
+// 再生预算 ≈ 已知网关数 ÷ 槽位冷却（现场约 25 张/小时，见 gatewayPoolWarmMaxTickets）。调大它换到的是单发请求的命中率，
 // 花掉的是整个账号的小时预算 —— 超支的后果是池子报 all_cooling、整段时间里每一发业务请求
 // 都秒回 503（见 gatewayPoolWarmMaxTickets 的注释）。
 func (a *Account) gatewayPoolWarmTickets() int {

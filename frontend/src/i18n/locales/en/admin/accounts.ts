@@ -757,7 +757,7 @@ export default {
         gwpoolWarmTickets: 'Pairs tried per warm-up',
         gwpoolWarmTicketsDesc:
           'How many pairs one business request may take and check before giving up. Default 5 (hit rate is roughly one in three, so 5 pairs is about 82% cumulative), capped at 8, blank uses the default. ' +
-          'This is a supply knob, not a performance knob: every pair burns one (upstream account x gateway) unit, and that unit regenerates at somewhere between a handful and a few dozen per hour (the number is not settled - counting by gateway name it is known-gateways / a 4-hour cooldown, but several gateway names in one region may be a single unit as far as one consumer is concerned). Overspending does not make things slow - the pool starts answering all_cooling for this account and every request during the back-off returns 503 instantly.',
+          'This is a supply knob, not a performance knob: every pair burns one (upstream account x gateway) unit, and that unit regenerates at roughly known-gateways / slot-cooldown (99 gateways over a 4-hour cooldown is about 25 per hour in production). Overspending does not make things slow - the pool starts answering all_cooling for this account and every request during the back-off returns 503 instantly. Count your gateways before raising it.',
         gwpoolSteering: 'Pick the landing gateway myself',
         gwpoolSteeringDesc:
           'On (default): list the gateways first and name one this account has not burnt in the ledger window. Off: let the pool schedule it.',
