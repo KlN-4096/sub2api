@@ -888,6 +888,12 @@ export default {
         turnStateRecoveryCooldown: '失败冷却（小时）',
         turnStateRecoveryMin: '间隔下限（分钟）',
         turnStateRecoveryMax: '间隔上限（分钟）',
+        gatewayHistory: {
+          empty: '网关 -',
+          current: '当前',
+          seen: '打过 {n} 个',
+          lastUsed: '最近一次'
+        },
         turnStatePool: {
           empty: 'Turn-State -',
           starved: 'Turn-State 无票·裸奔中',
