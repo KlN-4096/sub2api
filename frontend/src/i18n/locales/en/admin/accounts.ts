@@ -816,13 +816,17 @@ export default {
           fullUntimed: 'not timed',
           legend:
             '✓ verified full (inside the 183s window) · ! used inside the window, degraded right now · grey window elapsed, usable again',
-          // Window usage. The denominator is THIS ROW'S ledger, not the pool's gateway count
-          // (this row does not know that — see forecastHint). So "still usable" means "of the
-          // ones I have touched, how many have cooled off".
-          windowUsage: '{used} landing(s) used in the {hours}h window, {free} still usable',
+          // Window usage. The denominator is the POOL'S deliverable gateway count, not the
+          // size of this row's ledger: the ledger only holds gateways we have touched, so
+          // using it as the denominator makes "how many are left" equal "how many I touched
+          // that have cooled off" — a different question.
+          windowUsage: '{used} landing(s) used in the {hours}h window, {free} left in the pool',
+          // When the pool listing is unavailable, report only the used half: inventing a
+          // denominator is worse than omitting it.
+          windowUsageUsedOnly: '{used} landing(s) used in the {hours}h window',
           windowUsageHint:
-            'Counts landings in THIS ROW\'S ledger: touched inside the window = used, past the window = still usable. ' +
-            'It does not include "how many gateways in the pool this account has never touched" — this row does not know how many the pool has.',
+            '"Used" counts landings in this row\'s ledger touched inside the window; the denominator is how many gateways the pool can deliver right now (the listing length fetched alongside ticket pickup — unavailable when "let the pool pick the landing" is off, in which case only the used half is shown).\n' +
+            'The two are not measured the same way: the ledger spans the local window while the listing is a snapshot of now, so a ledger landing may already be off the listing (ticket expired). The difference is clamped at 0 — it never goes negative.',
           // Full-strength minutes forecast for the next hour, deliberately a LOWER bound.
           // "at least" is required: "at most" would get read as a quota.
           forecast: 'at least {minutes} min full-strength in the next hour',

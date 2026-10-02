@@ -910,6 +910,9 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 		slog.Debug("gwpool_gateways_unavailable", "account_id", account.ID, "error", err)
 		return "", false
 	}
+	// /gateways 只列此刻有活 pair 的网关 ⇒ 列表长度就是池子的可交付网关数。账号卡片拿它当
+	// 「还剩几个落点没用」的分母（见 OpenAIGatewayPoolApplied.PoolLive）。
+	openAIGatewayPoolSinkFrom(ctx).notePoolLive(len(gateways))
 	var fresh, oldest string
 	var freshAt, oldestAt time.Time
 	window := account.gatewayPoolGatewayWindow()
@@ -1425,6 +1428,14 @@ type OpenAIGatewayPoolApplied struct {
 	// （queue 档的预热一张张试、故障转移换号重试），而丢弃行各自快照走自己那一份 Applied
 	// ⇒ 每条用量行读到的是它自己那一发的结论。
 	Verdict string
+	// PoolLive 是**池子此刻报的可交付网关数**（/gateways 只列有活 pair 的，所以列表长度
+	// 就是它）。0 = 这一发没问过池子要清单（关了 steering、或者列表打不开）。
+	//
+	// 它是整个池子的读数、不是这一发的，挂在这个快照上纯粹是搭车：账号卡片要拿它当
+	// 「还剩几个落点没用」的分母，而这条已经是「池子对这一发说了什么」通向用量侧的现成
+	// 管道。由 snapshot() 从 sink 合进来，不走 mark() —— 取清单发生在注入之前，让 mark
+	// 覆盖它就等于永远是 0。
+	PoolLive int
 }
 
 // openAIGatewayPoolSink 是 ctx 里承载的那个指针。
@@ -1447,6 +1458,9 @@ type openAIGatewayPoolSink struct {
 	// *http.Request —— 而且双开账号的出站体是 zstd，裸解 JSON 必然失败
 	// （compressCodexRequestBody）。所以在还看得见明文的那一层记下来。
 	model string
+	// poolLive 是池子最近一次报的可交付网关数（见 OpenAIGatewayPoolApplied.PoolLive）。
+	// 存在 sink 上而不是 applied 上：取清单发生在注入之前，放进 applied 会被 mark() 覆盖。
+	poolLive int
 }
 
 type openAIGatewayPoolSinkCtxKey struct{}
@@ -1573,13 +1587,27 @@ func (s *openAIGatewayPoolSink) noteVerdict(gateway, verdict string) {
 }
 
 // snapshot 读回这一发的标记（出站挂钩点之后、同一个 ctx 上的调用方用，见 gatewayPoolRenew）。
+// notePoolLive 记下池子这一发报的可交付网关数。0 不覆盖已有值：列表打不开时该保留上一次
+// 问到的数，报 0 会让卡片说「池子一个落点都没有」。
+func (s *openAIGatewayPoolSink) notePoolLive(n int) {
+	if s == nil || n <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.poolLive = n
+}
+
 func (s *openAIGatewayPoolSink) snapshot() OpenAIGatewayPoolApplied {
 	if s == nil {
 		return OpenAIGatewayPoolApplied{}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.applied
+	// 在读的时候合进来，不在 mark 里写：取清单在注入之前，让 mark 覆盖它就恒为 0。
+	applied := s.applied
+	applied.PoolLive = s.poolLive
+	return applied
 }
 
 // publish 把标记落到转发结果上（result 为 nil = 这一发失败了，没有用量行要写）。

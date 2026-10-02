@@ -518,7 +518,9 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 			verdict = result.GatewayPoolApplied.Verdict
 		}
 		// 业务请求真的落在这里了 ⇒ 推进「当前网关」。
-		s.noteOpenAIGatewayUse(ctx, account, *usageLog.RouteGateway, region, verdict, true)
+		// PoolLive 不受 landed 影响：它是整个池子的读数，和这一发落到哪儿无关。
+		s.noteOpenAIGatewayUse(ctx, account, *usageLog.RouteGateway, region, verdict, true,
+			result.GatewayPoolApplied.PoolLive)
 	}
 	isVideoUsage := isGrokVideoUsageResult(result, billingModels)
 	if isVideoUsage {

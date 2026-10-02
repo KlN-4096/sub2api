@@ -97,6 +97,16 @@ type openAIGatewayHistory struct {
 	// 账本（判「这个网关还能不能用」走 gatewayPoolUsedRecently），丢了只是卡片空一会儿，
 	// 所以不写迁移代码。
 	Seen map[string]openAIGatewaySeen `json:"seen"`
+	// PoolLive 是最近一次问到的**池子可交付网关数**，账号卡片拿它当「还剩几个落点没用」
+	// 的分母（已用 = Seen 里还在本地账本窗口内的那些）。
+	//
+	// 0 = 还没问到过：关了 steering 的号不取清单（gatewayPoolPick 直接返回），列表打不开
+	// 时也不覆盖旧值。卡片在 0 的时候**不显示剩余**，别拿账本自己的条目数顶上去——那个数
+	// 是「我碰过几个」，当分母会把「还剩多少没用」算成恒等于 0。
+	//
+	// 存在账号行上是搭车：它是池子全局的读数，每一行各存一份。新鲜度跟着这一行自己的流量
+	// 走，而那正是要看它的时候。
+	PoolLive int `json:"pool_live,omitempty"`
 	// UpdatedAt 是写下这条记录的时刻，只用于展示「这份读数有多新」。
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -154,8 +164,11 @@ func readOpenAIGatewayHistory(a *Account) (openAIGatewayHistory, bool) {
 // advanceCurrent=false 只更新 Seen，不动 `Current`/`CurrentRegion`：queue 档的预热在业务请求
 // **之前**判死一批落点，那些落点上永远不会有业务请求，推进「当前网关」会把卡片第一行写成最后
 // 一个被判死的落点（见 openai_gwpool_warm.go 的 noteWarmVerdict）。
+// poolLive 是池子这一发报的可交付网关数，0 = 没问到（关了 steering / 列表打不开）⇒ 留旧值。
+// 它蹭的是这条已有的写路径：另起一条写 extra 的路就是两个写者抢同一个键。
 func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 	ctx context.Context, account *Account, gateway, region, verdict string, advanceCurrent bool,
+	poolLive int,
 ) {
 	if s == nil || s.accountRepo == nil || account == nil {
 		return
@@ -205,6 +218,12 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 		}
 	}
 	rec.Seen[gateway] = next
+	// 0 不覆盖：没问到清单的那些发（关了 steering、列表超时）该留着上一次问到的数，
+	// 写 0 会让卡片说「池子一个落点都没有」。跟着这条写路径走、不单独穿过节流 ——
+	// 它只是个展示用的分母，下一次正常写就会刷新。
+	if poolLive > 0 {
+		rec.PoolLive = poolLive
+	}
 	rec.UpdatedAt = now
 	pruneOpenAIGatewayHistory(&rec)
 

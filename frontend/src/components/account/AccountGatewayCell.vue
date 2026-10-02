@@ -61,11 +61,16 @@
         data-testid="account-gateway-window-usage"
       >
         {{
-          t('admin.accounts.openai.gatewayHistory.windowUsage', {
-            hours: windowHours,
-            used: windowUsage.used,
-            free: windowUsage.free
-          })
+          windowUsage.free >= 0
+            ? t('admin.accounts.openai.gatewayHistory.windowUsage', {
+                hours: windowHours,
+                used: windowUsage.used,
+                free: windowUsage.free
+              })
+            : t('admin.accounts.openai.gatewayHistory.windowUsageUsedOnly', {
+                hours: windowHours,
+                used: windowUsage.used
+              })
         }}
       </p>
       <p
@@ -175,6 +180,8 @@ interface GatewayHistory {
   current?: string
   current_region?: string
   seen?: Record<string, GatewaySeen>
+  /** 池子最近一次报的可交付网关数，窗口用量的分母。缺省 / 0 = 没问到。 */
+  pool_live?: number
   updated_at?: string
 }
 
@@ -357,14 +364,17 @@ const forecastMinutes = computed(() =>
 )
 
 /**
- * 本地账本窗口的用量：窗口内烧掉了几个落点、还剩几个能用。
+ * 本地账本窗口的用量：窗口内烧掉了几个落点、池子里还剩几个没用。
  *
- * 分母是**这一行账本里的落点数**，不是池子的网关总数 —— 这一行不知道池子一共有多少个
- * （见 forecastUnits 第 1 条），所以「还可用」说的是「我碰过的这些里有几个已经凉了」，
- * 不是「池子里还有几个我没碰过」。那个数要后端把池子的清单写进这条记录才给得出来。
+ * **分母是池子报的可交付网关数**（后端 openAIGatewayHistory.PoolLive，取自 /gateways 的
+ * 清单长度），不是这一行账本里的条目数 —— 账本只装「我碰过的」，拿它当分母的话
+ * 「还剩多少没用」恒等于「我碰过但已经凉了的」，答的是另一个问题。
  *
- * 和 forecast 分开一行：这条回答「现在手上还有几个」，forecast 回答「接下来一小时能打
- * 多少分钟」。合成一句的话 0 个落点和 0 分钟会被读成同一件事。
+ * 分母拿不到时（poolLive=0：这个号关了 steering 不取清单，或者清单一直打不开）**不显示
+ * 剩余那一半**，只报已用。编一个分母比不报更坏。
+ *
+ * 和 forecast 分开一行：这条回答「现在还有几个落点能用」，forecast 回答「接下来一小时能
+ * 打多少分钟」。合成一句的话「0 个落点」和「0 分钟」会被读成同一件事。
  */
 const windowHours = computed(() => +(windowMs.value / 3_600_000).toFixed(1))
 
@@ -373,7 +383,10 @@ const windowUsage = computed(() => {
   for (const item of items.value) {
     if (isHot(item.at)) used += 1
   }
-  return { used, free: items.value.length - used }
+  const live = typeof history.value.pool_live === 'number' ? history.value.pool_live : 0
+  // 池子的清单是**此刻可交付的**那些，而 used 来自本地 4 小时账本 —— 账本里的落点可能
+  // 此刻并不在清单上（票过期了）。所以差值可能是负的，夹到 0：报负数等于说谎。
+  return { used, free: live > 0 ? Math.max(0, live - used) : -1 }
 })
 
 /**

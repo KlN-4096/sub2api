@@ -468,6 +468,30 @@ func TestDiscardedAttemptsWithoutSinkAreEmpty(t *testing.T) {
 	require.Len(t, sink.discarded, 1)
 }
 
+// 池子的可交付网关数要搭 Applied 这班车到用量侧，而且**不能被 mark() 覆盖**。
+//
+// 取清单发生在注入之前（gatewayPoolPick → AttachRoute），所以它只能存在 sink 上、由
+// snapshot() 在读的时候合进来。写进 applied 的那种写法会被后来的 mark 整体盖掉，
+// 现象是卡片上的分母恒为 0 —— 和「这个号没开 steering」长得一模一样，查不出来。
+func TestPoolLiveSurvivesMark(t *testing.T) {
+	_, sink := withOpenAIGatewayPoolSink(context.Background(), nil)
+	sink.notePoolLive(50)
+	sink.mark(OpenAIGatewayPoolApplied{Gateway: "unified-142", Version: "tkt-1"})
+	snap := sink.snapshot()
+	require.Equal(t, 50, snap.PoolLive, "mark 把池子清单长度盖掉了")
+	require.Equal(t, "unified-142", snap.Gateway)
+
+	// 0 不覆盖：列表打不开的那一发该留着上一次问到的数，报 0 会说成「池子是空的」。
+	sink.notePoolLive(0)
+	require.Equal(t, 50, sink.snapshot().PoolLive)
+	sink.notePoolLive(41)
+	require.Equal(t, 41, sink.snapshot().PoolLive)
+
+	// 没挂 sink 的路径静默退化，不 panic。
+	require.NotPanics(t, func() { (*openAIGatewayPoolSink)(nil).notePoolLive(9) })
+	require.Zero(t, (*openAIGatewayPoolSink)(nil).snapshot().PoolLive)
+}
+
 // 判据的**两个方向**都要留下读数（2026-10-02 加的 Applied.Verdict ⇒ 账号卡片的状态色）。
 //
 // 账号卡片上「验过是满血」和「没验过」是两回事，而满血那条读数只有这里产出 —— 判据判满血时
