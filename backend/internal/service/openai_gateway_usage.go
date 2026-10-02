@@ -501,6 +501,11 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	usageLog.RoutePairOverridden = usageCodexRoutePairOverriddenPtr(account, routePairFromPool)
 	usageLog.RoutePairPoolGateway = usageCodexRoutePairPoolGatewayPtr(routePairPoolGateway)
 	usageLog.RoutePairPoolVersion = usageCodexRoutePairPoolVersionPtr(routePairPoolVersion)
+	// 顺手把落点记进账号 extra：用量行是按请求的，答不了「这个号碰过哪些网关、现在在哪个」。
+	// 用 RouteGateway（实际落点）而不是池子说的那个：注入被改派时，这张卡该显示真正打到的。
+	if usageLog.RouteGateway != nil {
+		s.noteOpenAIGatewayUse(ctx, account, *usageLog.RouteGateway)
+	}
 	isVideoUsage := isGrokVideoUsageResult(result, billingModels)
 	if isVideoUsage {
 		usageLog.VideoCount = result.VideoCount

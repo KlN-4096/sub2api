@@ -788,6 +788,12 @@ export default {
         turnStateRecoveryCooldown: 'Failure cooldown (hours)',
         turnStateRecoveryMin: 'Min interval (minutes)',
         turnStateRecoveryMax: 'Max interval (minutes)',
+        gatewayHistory: {
+          empty: 'Gateway -',
+          current: 'Current',
+          seen: '{n} used',
+          lastUsed: 'last used'
+        },
         turnStatePool: {
           empty: 'Turn-state —',
           starved: 'Turn-state: no ticket, passing through',

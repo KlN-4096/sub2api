@@ -83,6 +83,9 @@ var schedulerNeutralExtraKeys = map[string]struct{}{
 	// 降智恢复探测的运行态（连胜 / 下次窗口 / 已恢复时刻），每次探测写一次，纯展示不参与调度。
 	// 配置键 openai_turn_state_recovery 由管理员写，不在此列。
 	"openai_turn_state_recovery_state": {},
+	// 这个账号落过哪些网关、当前在哪个（openai_gwpool_gateway_history.go）。用量路径上
+	// 带节流地写，纯展示不参与调度。
+	"openai_gwpool_gateways": {},
 }
 
 const postgresParameterBatchSize = 50000

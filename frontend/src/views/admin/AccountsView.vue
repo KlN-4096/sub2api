@@ -325,6 +325,7 @@
               @account-updated="handleAccountUpdated"
               @usage-loaded="handleAccountUsageLoaded(row.id, $event)"
             />
+            <AccountGatewayCell :account="row" />
             <AccountTurnStateCell :account="row" />
           </template>
           <template #cell-proxy="{ row }">
@@ -533,6 +534,7 @@ import ScheduledTestsPanel from '@/components/admin/account/ScheduledTestsPanel.
 import type { SelectOption } from '@/components/common/Select.vue'
 import AccountStatusIndicator from '@/components/account/AccountStatusIndicator.vue'
 import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
+import AccountGatewayCell from '@/components/account/AccountGatewayCell.vue'
 import AccountTurnStateCell from '@/components/account/AccountTurnStateCell.vue'
 import AccountTodayStatsCell from '@/components/account/AccountTodayStatsCell.vue'
 import AccountGroupsCell from '@/components/account/AccountGroupsCell.vue'
