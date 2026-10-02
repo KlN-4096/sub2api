@@ -13,9 +13,45 @@ func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
 
 // doOpenAIUpstream 只在 OpenAI OAuth 能力绑定已启用时把真实请求交给插件。
 // 插件返回标准 http.Response，响应解析、错误映射、SSE 和计费仍由现有核心链处理。
+//
+// 这里还夹着 state-echo 降智判据（openai_gwpool_state_echo.go）。判定点落在这一层是因为它同时
+// 满足两个条件：响应头已经到手，而调用方还一个字节都没往下游写（调用方要等这个函数返回才开始
+// 解析响应）。所以「截断」在这里是干净的，不会留一个半截的 SSE 流。
 func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
+	// 判据有假阳性（见 openai_gwpool_state_echo.go 的纪律 2）⇒ 换票重发的放大系数硬封顶在 1：
+	// 重试那一发若又判降智，直接走错误路径，绝不再试。
+	for remaining := account.gatewayPoolDegradedRetries(); ; remaining-- {
+		resp, degraded, err := s.doOpenAIUpstreamOnce(request, proxyURL, account)
+		if !degraded {
+			return resp, err
+		}
+		// 换票重发要把同一个请求体再发一遍；重放不了（GetBody 为 nil）就退回「只截断」，
+		// 绝不发一个半截的请求体。
+		var replay *http.Request
+		if remaining > 0 {
+			replay = gatewayPoolReplayRequest(request)
+		}
+		s.dropDegradedGatewayPoolRoute(request, resp, account, replay != nil)
+		if replay == nil {
+			return nil, errOpenAIGatewayPoolRouteDegraded
+		}
+		// 当前 pair 已标 Stale ⇒ 下一圈的 AttachRoute 自然带 force=1 取一张别的网关的票。
+		request = replay
+	}
+}
+
+// doOpenAIUpstreamOnce 发一发上游，并把 state-echo 判据跑在 Store / 续期**之前**。
+//
+// 顺序是承重的：判到降智这张票就不要了，再去 Store 它的 Set-Cookie、拿它去池子续寿命都是在给
+// 一条已经废掉的路由延命，而续期是异步的（gatewayPoolRenew 起 goroutine），会和随后的标 Stale
+// 抢同一个缓存槽。
+func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
+	request *http.Request,
+	proxyURL string,
+	account *Account,
+) (*http.Response, bool, error) {
 	if err := requireOpenAIProxyBinding(account, proxyURL); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// ChatGPT cookie 回放（openai_codex_cookies.go）：出站前带上该账号罐里的 cookie，拿到响应
 	// 后收 Set-Cookie。插件路径与直连路径都经过这里，两条路一致。
@@ -27,27 +63,30 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 	}
 	release, err := s.codexCookies.AttachRoute(request.Context(), account, rawURL, request.Header)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// 取到票之后、真正发出去之前，这一发还可能死在三处：客户端已经走了（ctx 取消）、
 	// 上游主机校验否掉、取 HTTP 客户端/并发槽失败。它们都在 httpUpstream.Do 进 http.Client
 	// **之前**，一个字节都没出去 ⇒ 槽位还给池子（见 gatewayPoolReleasesUnsent）。
 	if ctxErr := request.Context().Err(); ctxErr != nil {
 		gatewayPoolReleaseUnsent(release)
-		return nil, ctxErr
+		return nil, false, ctxErr
 	}
 	resp, err := s.doOpenAIUpstreamRoundTrip(request, proxyURL, account)
 	if err == nil && resp != nil {
+		if s.gatewayPoolRouteDegraded(request, resp, account) {
+			return resp, true, nil
+		}
 		s.codexCookies.Store(account, rawURL, resp.Header)
 		// 取票后的第一发（且票临期）会摘掉 __oailb 出站，换回来的那张新 __cflb 要回传池子续寿命。
 		// 异步 + 自带 ctx，绝不拖业务响应；没抢到名额 / 上游没下发新两件时它什么都不做。
 		s.codexCookies.gatewayPoolRenew(request.Context(), account, resp.Header)
-		return resp, nil
+		return resp, false, nil
 	}
 	if gatewayPoolReleasesUnsent(resp, err) {
 		gatewayPoolReleaseUnsent(release)
 	}
-	return resp, err
+	return resp, false, err
 }
 
 // gatewayPoolReleasesUnsent 判「这一发一个字节都没发出去」，决定取到的池子票要不要还。

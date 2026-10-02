@@ -743,13 +743,23 @@ export default {
         gwpoolGatewayWindowDesc:
           'How long this account treats a gateway it already touched as burnt when picking a landing spot. Default 14400 (4h). The pool keeps its own book per consumer key, which cannot see one Codex credential sitting on several account rows.',
         gwpoolFetchTimeout: 'Pair fetch timeout (s)',
-        gwpoolFetchTimeoutDesc: 'Caps one /cookie call. Default 8.',
+        gwpoolFetchTimeoutDesc:
+          'Caps one /cookie call. Default 25. It also decides how long we let the pool mint (the wait we send is this value minus 1s, capped at 30). The number has to cover everything the pool does for one delivery, not just the network round trip: with verify-before-deliver on, every gateway it tries costs a real state-echo request upstream. The old 8s did not cover it - on 2026-10-02, 301 of 458 production takes (66%) were cut off before a response was written, after the upstream call had already gone out and burned a slot for nothing. Lowering this brings that failure back.',
         gwpoolListTimeout: 'Gateway list timeout (s)',
         gwpoolListTimeoutDesc:
           'Caps the /gateways call used to pick a landing spot. Default 2 — it is an optimisation and must never eat into the fetch budget; on timeout the pool picks for you.',
         gwpoolSteering: 'Pick the landing gateway myself',
         gwpoolSteeringDesc:
           'On (default): list the gateways first and name one this account has not burnt in the ledger window. Off: let the pool schedule it.',
+        gwpoolRenew: 'Renew near-expiry pairs',
+        gwpoolRenewDesc:
+          'Off (default): when on, if a freshly taken pair has under 12 minutes of life left, the first business request after taking it sends only __cflb and drops __oailb so the upstream issues a replacement, resetting route life to 3600s. This extends route life only, never the full-strength window. The cost: a real Codex client always sends both items, so dropping one deviates from its wire shape, and that deviation has never been measured on its own (its safety is inferred from the route being pinned by __cflb). Only near-expiry pairs and only the first request do this, so the steady state is zero deviation. Turn it off if you suspect it causes trouble.',
+        gwpoolStateEcho: 'Judge degradation inline (state-echo)',
+        gwpoolStateEchoDesc:
+          'On (default): when a request carried a live turn-state and the upstream answered with a different fresh one, the route is judged degraded and the current gateway is marked for rotation. Response headers only, and only on HTTP 200 - a fresh ticket on a 429/5xx is rate limiting or a fault, not evidence of degradation. This test has false negatives but no false positives: a full-strength verdict is trustworthy, a degraded verdict is occasionally wrong, so it will sometimes rotate a gateway and burn a slot for nothing - and supply is single digits of pairs per hour. Turn it off if the rotation rate becomes too expensive; with it off the behaviour is byte-for-byte what it was before this feature.',
+        gwpoolDegradedRetry: 'Swap pairs and retry once when degraded',
+        gwpoolDegradedRetryDesc:
+          'On (default): take a fresh pair (a different gateway) and replay the same request once, so the client never notices; if the replay is judged degraded too it is not retried again and the request fails. Off: truncate only and return a clean error for the client to retry itself. The cap is hard-wired at one and cannot be raised - the test misjudges sometimes, and every retry is a real upstream request that burns one (account x gateway) unit. Both attempts get a usage row: the dropped one is tagged as degraded-dropped and its tokens and cost are always zero (nothing of the response body is read at the truncation point, so usage simply cannot be observed, and it is deliberately not estimated).',
         gwpoolErrors: {
           GWPOOL_BASE_URL_INVALID:
             'The gateway pool URL must be an absolute http(s) address, e.g. https://pool.0102400.xyz. Fill in the pool root, not the /a/xxxx page.',

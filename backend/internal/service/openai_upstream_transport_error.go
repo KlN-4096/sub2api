@@ -163,10 +163,32 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 		s.tempUnscheduleOpenAITransportError(ctx, account, safeErr)
 	}
 
-	return &UpstreamFailoverError{
+	out := &UpstreamFailoverError{
 		StatusCode:   http.StatusBadGateway,
 		ResponseBody: openAITransportFailoverBody,
 	}
+	// 判降智**不换账号**：这是**路由**问题不是账号问题，换个账号换不出满血路由。
+	//
+	// 不拦的话放大系数在 handler 层：换账号上限 maxAccountSwitches 默认 10，而内层
+	// degraded_retries 封顶 1 ⇒ 一次客户端请求最坏 2×(1+10) = 22 发真实上游，各烧一张
+	// pair 和一个 (上游账号 × 网关) 单位——而 pair 按文档是个位数张/小时。
+	// degraded_retries 的常量注释写着「放大系数必须封顶」，但真正的乘数在这儿，
+	// 不设 Stop 的话那句话只封住了内层。
+	// 同型先例：gatewayPoolRetriesBare 对 no_exit 也是「不值得换网关」。
+	if errors.Is(err, errOpenAIGatewayPoolRouteDegraded) {
+		out.NextAccountAction = NextAccountStop
+	}
+	// 把池子那三条双语说明交到客户端手里。不填的话 handler 的分支全不命中，最后落到
+	// mapUpstreamError(502) 的通用文案「Upstream request failed」——而「池子没票，等会儿
+	// 再试」和「池子地址配错了，去改配置」对使用者要做的事完全相反。
+	// Reason 同时让 ShouldReportAccountScheduleFailure 放过这个账号：池子挂了不是它的错，
+	// 与 classifyUpstreamTransportError 对 gwpool.ErrPool 的豁免同一个道理。
+	if msg := gatewayPoolClientMessage(err); msg != "" {
+		out.Reason = OpenAIGatewayPoolReason
+		out.ClientMessage = msg
+		out.ClientStatusCode = http.StatusServiceUnavailable
+	}
+	return out
 }
 
 // tempUnscheduleOpenAITransportError marks an account temporarily unschedulable

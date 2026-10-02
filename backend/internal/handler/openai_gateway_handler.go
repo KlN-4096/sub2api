@@ -3517,6 +3517,18 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		h.handleStreamingAwareError(c, status, "server_error", message, streamStarted)
 		return
 	}
+	if failoverErr.Reason == service.OpenAIGatewayPoolReason && strings.TrimSpace(failoverErr.ClientMessage) != "" {
+		// 网关池：说清是「没满血槽位，等会儿再试」还是「池子不可用/配错了」还是「判了降智」。
+		// 不说的话这三种在客户端那头长得一模一样（一句 Upstream request failed），
+		// 而它们要做的事完全相反。文案本身不带地址、不带 key（见 service 侧那三条常量）。
+		status := failoverErr.ClientStatusCode
+		if status <= 0 {
+			status = http.StatusServiceUnavailable
+		}
+		service.SetOpsUpstreamError(c, status, failoverErr.ClientMessage, "")
+		h.handleStreamingAwareError(c, status, "server_error", failoverErr.ClientMessage, streamStarted)
+		return
+	}
 	if failoverErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(failoverErr)
 		h.handleStreamingAwareError(c, status, "upstream_error", message, streamStarted)
@@ -4284,11 +4296,58 @@ func (h *OpenAIGatewayHandler) enqueueCyberSessionBlockedOpsEntry(c *gin.Context
 	enqueueOpsErrorLog(h.opsService, buildCyberSessionBlockedOpsEntry(meta))
 }
 
+// recordGatewayPoolDiscardedUsage 给被 state-echo 判成降智、整发丢掉的那些上游尝试落可审计的
+// 用量行（service.RecordGatewayPoolDiscardedUsageLogs 里说明了为什么是 0 token / 0 金额）。
+//
+// 同步调：读数已经在内存里，整个动作就是几条 insert，而丢弃行不落就永久丢了。
+// 没有丢弃读数时服务侧第一道闸直接返回，常态零开销。
+func (h *OpenAIGatewayHandler) recordGatewayPoolDiscardedUsage(
+	c *gin.Context,
+	apiKey *service.APIKey,
+	account *service.Account,
+	subscription *service.UserSubscription,
+	model string,
+	channelFields service.ChannelUsageFields,
+	requestPayloadHash string,
+) {
+	if h.gatewayService == nil {
+		return
+	}
+	ctx := context.Background()
+	if c.Request != nil {
+		// 客户端已经断开也要把行落下去：那几发上游是真实发生过的。
+		ctx = context.WithoutCancel(c.Request.Context())
+	}
+	h.gatewayService.RecordGatewayPoolDiscardedUsageLogs(ctx, c, service.CyberPolicyUsageInput{
+		APIKey:             apiKey,
+		Account:            account,
+		Subscription:       subscription,
+		Model:              clientRequestedModel(c, model),
+		Stream:             c.GetBool(opsStreamKey),
+		InboundEndpoint:    GetInboundEndpoint(c),
+		UpstreamEndpoint:   resolveOpenAIUpstreamEndpoint(c, account, nil),
+		UserAgent:          c.GetHeader("User-Agent"),
+		IPAddress:          strings.TrimSpace(ip.GetClientIP(c)),
+		SessionID:          service.ExtractClientSessionID(c),
+		RequestPayloadHash: requestPayloadHash,
+		APIKeyService:      h.apiKeyService,
+		NativeCompactionV2: service.IsOpenAINativeCompactionV2(c),
+		ChannelUsageFields: channelFields,
+	})
+}
+
 // recordCyberPolicyIfMarked 在 gateway forward 返回后检查 cyber 标记，异步写风控日志/邮件，
 // 并在 forward 返回错误时写一条 tokens=0 用量行。标记由 gateway 服务层在透传 cyber 后设置；
 // 当前请求已发给用户，本方法只做事后记录，不影响响应。forwardErrored 为 true 时才写用量行，
 // 避免与正常 RecordUsage(forward 成功路径)重复。每请求至多记录一次。
 func (h *OpenAIGatewayHandler) recordCyberPolicyIfMarked(c *gin.Context, apiKey *service.APIKey, account *service.Account, subscription *service.UserSubscription, model string, forwardErrored bool, cyberBlockBody []byte, channelFields service.ChannelUsageFields, requestPayloadHash string) {
+	// 网关池 state-echo 判据的丢弃行借这个钩子落库（openai_gwpool_state_echo.go）。
+	//
+	// 为什么挂在这里而不是新开 6 个调用点：这是转发返回后**唯一**一个在成功与失败两条路上都被
+	// 调到、且手里已经凑齐完整计费上下文（apiKey / account / subscription / 渠道归因）的地方。
+	// 丢弃行必须在两条路上都落：两发都判降智时整条请求失败，OpenAIForwardResult 恒为 nil，
+	// 挂在结果上的读数一条都到不了用量侧。读数取走即清，重复调用不会落重复行。
+	h.recordGatewayPoolDiscardedUsage(c, apiKey, account, subscription, model, channelFields, requestPayloadHash)
 	mark := service.GetOpsCyberPolicy(c)
 	if mark == nil {
 		return
