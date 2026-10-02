@@ -60,17 +60,6 @@ func routePairOf(candidates []string) string {
 	return strings.Join(out, "; ")
 }
 
-// routePairItem 从 routePairOf 的产物里取出一项（"name=value"，没有这一项就返回空串）。
-func routePairItem(pair, name string) string {
-	for _, item := range strings.Split(pair, ";") {
-		item = strings.TrimSpace(item)
-		if itemName, _, _ := strings.Cut(item, "="); itemName == name {
-			return item
-		}
-	}
-	return ""
-}
-
 // Set-Cookie 一行一对，属性段（Path/Max-Age/...）在第一个 ";" 之后，丢掉。
 func openAICodexRoutePairFromSetCookie(h http.Header) string {
 	var candidates []string

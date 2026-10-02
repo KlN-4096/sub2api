@@ -683,54 +683,6 @@ func TestGatewayPoolAppliedMarkerIsScopedToAccount(t *testing.T) {
 // ---------------------------------------------------------------------------
 //
 // 实测前提（docs/conventions/codex-full-strength-tickets.md）：两件齐发时上游什么都不回；
-// 只送 __cflb 时上游会补发一张新 __cflb（寿命重新拉满 3600s）。所以续期必须摘掉 __oailb，
-// 而摘掉就偏离真实 Codex 客户端的报文形状 ⇒ 两道闸把它压到最小：只有**临期票**、
-// 只有**取票后的第一发**。
-
-// gwpoolDoUpstream 代演转发入口：给请求 ctx 挂 sink（续期只在挂了 sink 的路径上发生），
-// 跑一发真实的 doOpenAIUpstream，把 per-request 标记取回来。
-func gwpoolDoUpstream(t *testing.T, svc *OpenAIGatewayService, acct *Account) OpenAIGatewayPoolApplied {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
-	require.NoError(t, err)
-	ctx, sink := withOpenAIGatewayPoolSink(req.Context(), nil)
-	resp, err := gwpoolRunOnce(svc, req.WithContext(ctx), acct)
-	require.NoError(t, err)
-	_ = resp.Body.Close()
-	result := &OpenAIForwardResult{}
-	sink.publish(result)
-	return result.GatewayPoolApplied
-}
-
-// gwpoolRenewedPair 造一组「上游补发的新两件」：落点仍是同一个网关（__cflb 钉死了路由），
-// 只有串变了 —— 续期那一发的常态就是这样。
-func gwpoolRenewedPair(t *testing.T, gateway string) (cflb, oailb string) {
-	t.Helper()
-	// 只改签名段：解出来的落点还是同一个网关，但整串和交付时那张不同 ⇒ 能断言「换成新的了」。
-	return "__cflb=renewed-lb", "__oailb=" + routeCookieTestOailb(t, "chat.gateway."+gateway+".api.openai.com") + "x"
-}
-
-// gwpoolCancelingUpstream 在响应到达之前把业务 ctx 取消掉（客户端刚好在这一瞬断开）。
-type gwpoolCancelingUpstream struct {
-	cancel    func()
-	setCookie http.Header
-}
-
-func (u *gwpoolCancelingUpstream) Do(*http.Request, string, int64, int) (*http.Response, error) {
-	u.cancel()
-	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody}
-	for k, v := range u.setCookie {
-		resp.Header[k] = append([]string(nil), v...)
-	}
-	return resp, nil
-}
-
-func (u *gwpoolCancelingUpstream) DoWithTLS(
-	req *http.Request, proxyURL string, id int64, c int, _ *tlsfingerprint.Profile,
-) (*http.Response, error) {
-	return u.Do(req, proxyURL, id, c)
-}
-
 // 重启后内存账本是空的，但落库的落点记录还在 ⇒ exclude 必须从它补回来。
 //
 // 现场（2026-10-02）：池子对同一个号说「45 个候选网关都还在 4h 冷却里」，而我们这一发的

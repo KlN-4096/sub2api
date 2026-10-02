@@ -320,18 +320,6 @@ func gwpoolCookieVersion(cookie string) string {
 	return hex.EncodeToString(sum[:])[:12]
 }
 
-// nextRenew 取下一次 POST /pair/renew 的请求体（续期是异步的，这里顺带当同步点用）。
-func (f *gwpoolFakePool) nextRenew(t *testing.T) string {
-	t.Helper()
-	select {
-	case body := <-f.renewBodies:
-		return body
-	case <-time.After(3 * time.Second):
-		t.Fatal("没有回传续期")
-		return ""
-	}
-}
-
 // attachRoute 调 AttachRoute 并丢掉还票闭包：这组用例关心的是出站 cookie 与错误。
 // 还票本身在 TestGatewayPoolReleases* 里单独测。
 func attachRoute(
