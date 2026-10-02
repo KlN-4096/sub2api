@@ -750,12 +750,24 @@ export default {
         gwpoolSteering: 'Pick the landing gateway myself',
         gwpoolSteeringDesc:
           'On (default): list the gateways first and name one this account has not burnt in the ledger window. Off: let the pool schedule it.',
-        gwpoolStateEcho: 'Degradation check',
-        gwpoolStateEchoDesc:
-          'On (default): when a request carried a live turn-state and the upstream answered with a different fresh one, the route is judged degraded and the current gateway is marked for rotation. Response headers only, and only on HTTP 200 - a fresh ticket on a 429/5xx is rate limiting or a fault, not evidence of degradation. This test has false negatives but no false positives: a full-strength verdict is trustworthy, a degraded verdict is occasionally wrong, so it will sometimes rotate a gateway and burn a slot for nothing - and supply is single digits of pairs per hour. Turn it off if the rotation rate becomes too expensive; with it off the behaviour is byte-for-byte what it was before this feature.',
-        gwpoolDegradedRetry: 'Degradation retry',
-        gwpoolDegradedRetryDesc:
-          'On (default): take a fresh pair (a different gateway) and replay the same request once, so the client never notices; if the replay is judged degraded too it is not retried again and the request fails. Off: truncate only and return a clean error for the client to retry itself. The cap is hard-wired at one and cannot be raised - the test misjudges sometimes, and every retry is a real upstream request that burns one (account x gateway) unit. Both attempts get a usage row: the dropped one is tagged as degraded-dropped and its tokens and cost are always zero (nothing of the response body is read at the truncation point, so usage simply cannot be observed, and it is deliberately not estimated).',
+        gwpoolGuard: 'Degradation guard (the old Degradation check + Degradation retry switches merged into this)',
+        // The discipline all four modes share lives here so it is stated once; each mode keeps only its difference.
+        gwpoolGuardDesc:
+          'The check (state-echo): the business request already carries a live turn-state, so the verdict is read off the response headers - no fresh ticket (or the same one) means full strength, a different fresh one means degraded. Response headers only, and a verdict only on HTTP 200 (a fresh ticket on a 429/5xx is rate limiting or a fault, not evidence of degradation). No extra upstream request, except in the last mode. It has false negatives but no false positives: a full-strength verdict is trustworthy, a degraded verdict is occasionally wrong, so it will sometimes rotate a gateway and burn a slot for nothing - and supply is single digits of pairs per hour. The modes differ in whether the check runs, what happens after a degraded verdict, and - in the last mode - when the check runs.',
+        gwpoolGuardModes: {
+          off: 'Off: no check',
+          cut: 'Truncate: clean error on degradation',
+          retry: 'Retry with a fresh pair (default): invisible to the client',
+          queue: 'Verified-full slots only: check first'
+        },
+        gwpoolGuardDescs: {
+          off: 'Loosest. The check never runs; whatever the upstream returns goes straight to the client, byte-for-byte what it was before this check existed (the gateway pool itself keeps working - to take this account out of the pool, turn off the gateway pool switch above) - degraded answers reach your users. Only use this if the rotation rate becomes too expensive.',
+          cut: 'On a degraded verdict: drop that attempt, mark the current gateway for rotation, and return a clean error for the client to retry itself. The client sees a failure, but never a degraded answer.',
+          retry: 'Default. On a degraded verdict it takes a fresh pair (a different gateway) and replays the same request once, so the client never notices; if the replay is judged degraded too it is not retried again and the request fails. The cap is hard-wired at one and cannot be raised - the check misjudges sometimes, and every retry is a real upstream request that burns one (account x gateway) unit. Both attempts get a usage row: the dropped one is tagged as degraded-dropped and its tokens and cost are always zero (nothing of the response body is read at the truncation point, so usage simply cannot be observed, and it is deliberately not estimated).',
+          queue:
+            'Strictest, degradation never leaves the building: after taking a fresh pair, two cheap filler shots run the check first and the business request is only let through once a full-strength verdict comes back; a degraded verdict rotates to the next pair, at most 4, after which the request fails. This mode does not replay on a degraded verdict - it truncates and lets the client come back, because a replay would take a brand-new pair and send your prompt on it without any check, which is the very thing this mode exists to prevent. No filler is spent while the current pair is both verified full strength and still inside its delivery window. ' +
+            'Five costs to know up front: (1) about 6 filler shots per window on average (hit rate is roughly one in three); concurrent requests share one pair and one check, so this does not scale with concurrency. (2) The client receives no bytes at all while this runs (not even response headers); the budget is 90 seconds, but taking a pair does not spend that budget, so the worst case is about 2 minutes - make sure your client timeout exceeds that. The budget restarts on every account failover. (3) Filler shots are not billed and get no usage row (a known gap; the two shots in Retry mode are visible), so reconcile them against the gwpool_warm_probe / gwpool_warm_degraded / gwpool_warm_exhausted log lines; gateways judged degraded do turn red on the gateway cell. (4) When a filler shot comes back inconclusive (non-200, rate limiting, a fault) there is no verdict, no further rotation, and the request is not blocked: it is let through and that one request falls back to Truncate behaviour (the check still runs on the business response). So this mode does not block requests during upstream rate limiting - it is temporarily less strict than usual; count gwpool_warm_inconclusive in the log. (5) It shares wall-clock with the server-side first-output timeout (gateway.openai_first_output_timeout_seconds): warming takes at most half of whatever that deadline has left, and when the remainder is too short to verify a single pair the whole mode is silently skipped (only a gwpool_warm_no_budget line). To use this mode, leave that value at 0 (the default) or set it above 60 seconds.'
+        },
         gwpoolErrors: {
           GWPOOL_BASE_URL_INVALID:
             'The gateway pool URL must be an absolute http(s) address, e.g. https://pool.0102400.xyz. Fill in the pool root, not the /a/xxxx page.',
@@ -785,6 +797,13 @@ export default {
           regionHot: 'used within the window, still cooling',
           regionCooled: 'window elapsed, usable again',
           regionIdle: 'never used',
+          legend: '✓ verified full · ! judged degraded · amber used, no verdict · grey window elapsed',
+          // state-echo verdict (backend openai_gwpool_state_echo.go). Absent = never judged.
+          verdicts: {
+            full: 'last verdict: full strength',
+            fullAt: 'last verdict: full strength ({when})',
+            degraded: 'last verdict: degraded'
+          },
           regions: {
             'us-east': 'US-E',
             'us-west': 'US-W',

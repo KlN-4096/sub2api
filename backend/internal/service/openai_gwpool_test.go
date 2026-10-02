@@ -1515,6 +1515,52 @@ func TestGatewayPoolSteeringOffSkipsGatewayListing(t *testing.T) {
 	require.NotContains(t, fake.nextQuery(t), "gateway=", "不许点名")
 }
 
+// 2026-10-02 现场：池子回 consumer_rejected（"需要本账号的 key"，owner 一拆 key 就换了），
+// 客户端收到的却是「网关池当前没有满血槽位……稍后重试即可」。此刻池子有 51 个空闲网关、
+// 51 张活票，一个槽位都不缺——文案把「要人去改配置」说成了「供给不够，等等再来」，
+// 而后面 300 秒退避期里每一发都是同一句，运维对着它查不出是 key 的问题。
+//
+// 根因：pkg/gwpool 把 11 个错误码**全部** Unwrap 到 ErrNoSlot，于是 gatewayPoolClientMessage
+// 的判序里 ErrNoSlot 先命中，gatewayPoolUnavailableClientMsg（原文就带「检查账号的池子地址与
+// consumer key」）永远够不着。分流线按**「重试会不会好」**划，不按谁的责任。
+func TestGatewayPoolClientMessageSplitsHopelessCodes(t *testing.T) {
+	msg := func(code string) string {
+		return gatewayPoolClientMessage(gatewayPoolClientError(
+			fmt.Errorf("take: %w", &gwpool.PoolError{Code: code, Status: http.StatusServiceUnavailable})))
+	}
+	// 重试不会好：要人去改 key / 改参数。
+	for _, code := range []string{gwpool.CodeConsumerRejected, gwpool.CodeBadRequest} {
+		require.Contains(t, msg(code), "网关池不可用或配置有误", code)
+	}
+	// 会自愈：「稍后重试即可」对它们是**对的**，不要改。
+	for _, code := range []string{
+		gwpool.CodeAllCooling, gwpool.CodeNoLivePair, gwpool.CodeNoGateway, gwpool.CodeMintFailed,
+		gwpool.CodeRateLimited, gwpool.CodeNoExit, gwpool.CodePublicClosed, gwpool.CodeUpstreamRejected,
+	} {
+		require.Contains(t, msg(code), "网关池当前没有满血槽位", code)
+	}
+	// 没报码（池子回了集合外的值）⇒ 仍按供给不足，别凭空升级成「你配错了」。
+	require.Contains(t, msg(""), "网关池当前没有满血槽位")
+}
+
+// 退避期间的那一发也要说得出原因：原来退避错误是裸的 fmt.Errorf(ErrNoSlot)，
+// 码在 gwpool_backoff_started 那一行之后就丢了，于是 300 秒里全报「没有满血槽位」。
+func TestGatewayPoolBackoffErrorCarriesCode(t *testing.T) {
+	store := &openAICodexCookieStore{}
+	const identity = "acct-1"
+	store.poolBackoff.Store(gatewayPoolLedgerIdentity(identity),
+		gatewayPoolBackoffEntry{Until: time.Now().Add(5 * time.Minute), Code: gwpool.CodeConsumerRejected})
+
+	remaining, code := store.gatewayPoolBackoffFor(identity)
+	require.Greater(t, remaining, 4*time.Minute)
+	require.Equal(t, gwpool.CodeConsumerRejected, code)
+
+	_, _, err := store.gatewayPoolPair(context.Background(), &Account{ID: 1}, identity)
+	require.ErrorIs(t, err, gwpool.ErrNoSlot, "退避仍然是「这一发没拿到票」")
+	require.Contains(t, gatewayPoolClientMessage(gatewayPoolClientError(err)), "网关池不可用或配置有误",
+		"退避期里也要指向 consumer key，不能继续说槽位不够")
+}
+
 // 池子侧失败的报错要能看懂（双语单串，转发面没有 i18n 协商通道），同时必须保住两件事：
 // errors.Is 的标记（否则传输错误分类器会把真账号按「代理持久故障」停调度 10 分钟），
 // 以及原始诊断信息。

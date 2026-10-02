@@ -23,7 +23,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 	t.Run("第一次落点要写，并记成当前网关", func(t *testing.T) {
 		svc, repo := newSvc()
 		acct := &Account{ID: 7}
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "")
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true)
 
 		require.Len(t, repo.extraWrites, 1)
 		require.Contains(t, repo.extraWrites[0], openAIGatewayHistoryExtraKey)
@@ -36,16 +36,16 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 	t.Run("同一个网关在节流窗口里不再写", func(t *testing.T) {
 		svc, repo := newSvc()
 		acct := &Account{ID: 7}
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "")
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "")
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true)
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true)
 		require.Len(t, repo.extraWrites, 1, "节流没生效：每发请求都会写一次账号行")
 	})
 
 	t.Run("换了网关立刻写", func(t *testing.T) {
 		svc, repo := newSvc()
 		acct := &Account{ID: 7}
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "")
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-73", "")
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true)
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-73", "", "", true)
 
 		require.Len(t, repo.extraWrites, 2, "换网关被节流窗口压住了")
 		rec, _ := readOpenAIGatewayHistory(acct)
@@ -58,9 +58,9 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 	t.Run("切回刚用过的网关也要立刻写", func(t *testing.T) {
 		svc, repo := newSvc()
 		acct := &Account{ID: 7}
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "")
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-73", "")
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "")
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true)
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-73", "", "", true)
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true)
 
 		require.Len(t, repo.extraWrites, 3)
 		rec, _ := readOpenAIGatewayHistory(acct)
@@ -70,7 +70,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 	t.Run("节流窗口过了同一个网关也要刷新时间", func(t *testing.T) {
 		svc, repo := newSvc()
 		acct := &Account{ID: 7}
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "")
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true)
 
 		rec, _ := readOpenAIGatewayHistory(acct)
 		stale := rec
@@ -79,7 +79,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 		}
 		writeGatewayHistoryForTest(t, acct, stale)
 
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "")
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true)
 		require.Len(t, repo.extraWrites, 2)
 	})
 
@@ -87,7 +87,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 	t.Run("大区跟着落点一起记", func(t *testing.T) {
 		svc, _ := newSvc()
 		acct := &Account{ID: 7}
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "east-asia")
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "east-asia", "", true)
 
 		rec, _ := readOpenAIGatewayHistory(acct)
 		require.Equal(t, "east-asia", rec.CurrentRegion)
@@ -99,9 +99,9 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 	t.Run("读不出大区时不擦掉已记的", func(t *testing.T) {
 		svc, _ := newSvc()
 		acct := &Account{ID: 7}
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "east-asia")
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-73", "")
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "")
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "east-asia", "", true)
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-73", "", "", true)
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true)
 
 		rec, _ := readOpenAIGatewayHistory(acct)
 		require.Equal(t, "east-asia", rec.Seen["unified-167"].Region)
@@ -113,8 +113,8 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 	t.Run("第一次拿到大区要穿过节流窗口", func(t *testing.T) {
 		svc, repo := newSvc()
 		acct := &Account{ID: 7}
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "")
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "east-asia")
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true)
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "east-asia", "", true)
 
 		require.Len(t, repo.extraWrites, 2, "新的大区被节流窗口吞掉了")
 		rec, _ := readOpenAIGatewayHistory(acct)
@@ -125,20 +125,93 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 	t.Run("大区重复上报不绕过节流", func(t *testing.T) {
 		svc, repo := newSvc()
 		acct := &Account{ID: 7}
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "east-asia")
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "east-asia")
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "east-asia", "", true)
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "east-asia", "", true)
 		require.Len(t, repo.extraWrites, 1, "同一个大区重复上报也在写库")
 	})
 
 	t.Run("读不出落点时什么都不做", func(t *testing.T) {
 		svc, repo := newSvc()
 		acct := &Account{ID: 7}
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "")
-		svc.noteOpenAIGatewayUse(context.Background(), acct, "   ", "")
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true)
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "   ", "", "", true)
 
 		require.Len(t, repo.extraWrites, 1)
 		rec, _ := readOpenAIGatewayHistory(acct)
 		require.Equal(t, "unified-167", rec.Current, "空网关把当前落点擦掉了")
+	})
+
+	// state-echo 读数（2026-10-02 加的两个字段）。卡片上「验过是满血」和「没验过」是两回事。
+	t.Run("判定写进落点，判定变了要穿过节流", func(t *testing.T) {
+		svc, repo := newSvc()
+		acct := &Account{ID: 7}
+		seen := func() openAIGatewaySeen {
+			rec, _ := readOpenAIGatewayHistory(acct)
+			return rec.Seen["unified-167"]
+		}
+
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", openAIGatewayVerdictFull, true)
+		require.Len(t, repo.extraWrites, 1)
+		require.Equal(t, openAIGatewayVerdictFull, seen().Verdict)
+		fullAt := seen().FullAt
+		require.False(t, fullAt.IsZero(), "判成满血必须记下时刻：它是唯一有意义的回归起点")
+
+		// 同一个网关、同一个判定、还在节流窗口里 ⇒ 不写。
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", openAIGatewayVerdictFull, true)
+		require.Len(t, repo.extraWrites, 1, "判定没变就该被节流压住")
+
+		// 判定变了必须立刻写：「这个落点刚被判降智」正是这张卡要看的事。
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", openAIGatewayVerdictDegraded, true)
+		require.Len(t, repo.extraWrites, 2)
+		require.Equal(t, openAIGatewayVerdictDegraded, seen().Verdict)
+		require.Equal(t, fullAt, seen().FullAt, "降智不许把上一次判成满血的时刻擦掉")
+
+		// 这一发没判据（判据关着 / 没送票 / 非 200）⇒ 留着上一次的判定，别当成「没验过」。
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-73", "", "", true)
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true)
+		require.Equal(t, openAIGatewayVerdictDegraded, seen().Verdict, "没判 ≠ 判不出来")
+		require.Equal(t, fullAt, seen().FullAt)
+	})
+
+	// queue 档的预热在业务请求**之前**判死一批落点。那些落点必须进 Seen（否则每轮真烧 4 个
+	// (账号 × 网关) + 8 发上游配额，事后页面上一条痕迹都没有：失败路径不落用量行，
+	// 本地账本 poolUsed 重启即失），但**不许推进 Current** —— 上面永远不会有业务请求。
+	t.Run("只记 Seen 不推进当前网关", func(t *testing.T) {
+		svc, repo := newSvc()
+		acct := &Account{ID: 7}
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "east-asia", openAIGatewayVerdictFull, true)
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-73", "us-east", openAIGatewayVerdictDegraded, false)
+
+		require.Len(t, repo.extraWrites, 2, "判死的落点也要落盘")
+		rec, _ := readOpenAIGatewayHistory(acct)
+		require.Equal(t, "unified-167", rec.Current, "预热判死的落点不许变成「当前网关」")
+		require.Equal(t, "east-asia", rec.CurrentRegion)
+		require.Equal(t, openAIGatewayVerdictDegraded, rec.Seen["unified-73"].Verdict)
+		require.Equal(t, "us-east", rec.Seen["unified-73"].Region)
+	})
+
+	// 持续被验成满血的落点，它的 FullAt 至少每个满血窗口刷新一次。
+	//
+	// 不穿过节流（5 分钟 > 满血窗口 183 秒）的话 FullAt 停在第一次那一刻 ⇒ 前端那一格
+	// 183 秒后掉成琥珀，而它可能几十秒前刚验过 —— 运营方照着这一格挑落点，会跳过一个好的。
+	t.Run("满血判定过了满血窗口要穿过节流刷新时刻", func(t *testing.T) {
+		svc, repo := newSvc()
+		acct := &Account{ID: 7}
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", openAIGatewayVerdictFull, true)
+		require.Len(t, repo.extraWrites, 1)
+
+		// 把这条记录往回拨一个满血窗口多一点（At 仍在节流窗口里 ⇒ 只有满血那条规则能救它）。
+		rec, _ := readOpenAIGatewayHistory(acct)
+		aged := time.Now().UTC().Add(-openAIGatewayFullWindow - time.Second)
+		rec.Seen["unified-167"] = openAIGatewaySeen{
+			At: time.Now().UTC(), Verdict: openAIGatewayVerdictFull, FullAt: aged,
+		}
+		writeGatewayHistoryForTest(t, acct, rec)
+
+		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", openAIGatewayVerdictFull, true)
+		require.Len(t, repo.extraWrites, 2, "满血窗口已过的 FullAt 被节流压住了")
+		refreshed, _ := readOpenAIGatewayHistory(acct)
+		require.True(t, refreshed.Seen["unified-167"].FullAt.After(aged), "FullAt 没刷新")
 	})
 }
 

@@ -18,6 +18,12 @@ import (
 // 2026-10-02 池子新协议的消费侧：exclude（本地账本）/ 按错误码退避 / min_remaining / wait /
 // cookie_version + exclude_versions / POST /release。一律打 httptest 假池子，**绝不打真实上游**。
 
+// gwpoolBackoffLeft 只要剩余时长那一半，给 require.Zero / require.LessOrEqual 当表达式用。
+func gwpoolBackoffLeft(store *openAICodexCookieStore) time.Duration {
+	left, _ := store.gatewayPoolBackoffFor(gwpoolTestIdentity)
+	return left
+}
+
 // ---------------------------------------------------------------------------
 // 1. 本地账本当 exclude 带上去
 // ---------------------------------------------------------------------------
@@ -104,7 +110,7 @@ func TestGatewayPoolBacksOffByErrorCode(t *testing.T) {
 			require.ErrorIs(t, err, gwpool.ErrNoSlot)
 			require.EqualValues(t, 1, fake.hits.Load(), "退避期内一个池子请求都不许发")
 
-			remaining := store.gatewayPoolBackoffFor(gwpoolTestIdentity)
+			remaining, _ := store.gatewayPoolBackoffFor(gwpoolTestIdentity)
 			require.Positive(t, remaining)
 			require.LessOrEqual(t, remaining, tc.wantBackoff)
 			require.Greater(t, remaining, tc.wantBackoff-10*time.Second)
@@ -130,7 +136,7 @@ func TestGatewayPoolRateLimitedNeverBlocksBusinessRequests(t *testing.T) {
 	require.ErrorIs(t, err, gwpool.ErrNoSlot)
 	require.EqualValues(t, 1, fake.hits.Load())
 
-	require.Zero(t, store.gatewayPoolBackoffFor(gwpoolTestIdentity),
+	require.Zero(t, gwpoolBackoffLeft(store),
 		"rate_limited 不许记退避：它说的是池子铸不动，不是池子没票")
 
 	// 池子补上票之后，**下一发业务请求立刻就能拿到**——退避会把这一段整个吃掉。
@@ -160,7 +166,7 @@ func TestGatewayPoolCapsAllCoolingBackoff(t *testing.T) {
 		gwpool.ErrNoSlot)
 
 	// 期望值写成独立字面量，不引用生产常量：引用它的话把常量改成 4h 这条用例照样绿。
-	require.LessOrEqual(t, store.gatewayPoolBackoffFor(gwpoolTestIdentity), time.Minute,
+	require.LessOrEqual(t, gwpoolBackoffLeft(store), time.Minute,
 		"all_cooling 的 retry_after 只对当时那批网关成立，不能拿来静默数小时")
 }
 
@@ -176,7 +182,7 @@ func TestGatewayPoolHonorsShortAllCoolingRetryAfter(t *testing.T) {
 	require.ErrorIs(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, http.Header{}),
 		gwpool.ErrNoSlot)
 
-	remaining := store.gatewayPoolBackoffFor(gwpoolTestIdentity)
+	remaining, _ := store.gatewayPoolBackoffFor(gwpoolTestIdentity)
 	require.Positive(t, remaining)
 	require.LessOrEqual(t, remaining, 12*time.Second)
 	require.Greater(t, remaining, 2*time.Second)
@@ -201,7 +207,7 @@ func TestGatewayPoolDoesNotBackOffOnWaitableCodes(t *testing.T) {
 					gwpool.ErrNoSlot)
 			}
 			require.EqualValues(t, 2, fake.hits.Load(), "不退避 ⇒ 下一发照常取票")
-			require.Zero(t, store.gatewayPoolBackoffFor(gwpoolTestIdentity))
+			require.Zero(t, gwpoolBackoffLeft(store))
 		})
 	}
 }

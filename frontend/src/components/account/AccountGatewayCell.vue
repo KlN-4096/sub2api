@@ -11,17 +11,21 @@
         <span class="shrink-0 text-[10px] text-gray-400">
           {{ t('admin.accounts.openai.gatewayHistory.current') }}
         </span>
+        <!-- 色和下面九宫格同一把尺子：这个 chip 原来恒为绿，而同一个落点在格子里可能是红的，
+             同一张卡上一绿一红指着同一件事。 -->
         <span
-          class="truncate rounded bg-emerald-50 px-1 text-[10px] font-medium leading-4 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+          class="truncate rounded px-1 text-[10px] font-medium leading-4"
+          :class="TONE_CLASS[toneOf(current)]"
           :title="titleOf(current)"
         >
-          {{ regionLabel(current.region) }} · {{ current.name }}
+          {{ verdictMark(current) }}{{ regionLabel(current.region) }} · {{ current.name }}
         </span>
         <span class="shrink-0 text-[10px] text-gray-400">{{ formatRelativeTime(current.at) }}</span>
       </div>
       <!-- 九个大区各自落在哪个网关。满血窗口的单位是 (账号 × 网关)，而网关 = (大区 × 账号)
            ⇒ 这张格子回答的是「这个号现在还能去哪个大区铸没烧过的票」：窗口内打过的高亮
-           （还烧着），窗口外的淡显（那个大区又能用了）。和网关池页面那张九宫格同一把尺子。 -->
+           （还烧着），窗口外的淡显（那个大区又能用了）。和网关池页面那张九宫格同一把尺子。
+           窗口内再按 state-echo 判定分色：绿=验过满血、红=判过降智、黄=碰过但没判据。 -->
       <div v-if="cells.length" class="grid grid-cols-3 gap-x-1" data-testid="account-gateway-regions">
         <span
           v-for="cell in cells"
@@ -34,22 +38,22 @@
           "
           :title="cell.title"
           :data-testid="`account-gateway-region-${cell.key}`"
+          :data-tone="cell.tone"
         >
           <span class="shrink-0">{{ cell.label }}</span>
-          <span
-            v-if="cell.name"
-            class="truncate rounded px-0.5"
-            :class="
-              cell.hot
-                ? 'bg-amber-50 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
-                : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
-            "
-          >
-            {{ cell.name }}<template v-if="cell.extra">+{{ cell.extra }}</template>
+          <!-- 判定用**字符**打头而不是只靠颜色：这一列是 9px 字号，emerald/rose 同明度，
+               红绿色盲分不出来；而 tooltip 是 title 属性，触屏上摸不到。 -->
+          <span v-if="cell.name" class="truncate rounded px-0.5" :class="TONE_CLASS[cell.tone]">
+            {{ cell.mark }}{{ cell.name }}<template v-if="cell.extra">+{{ cell.extra }}</template>
           </span>
           <span v-else class="text-gray-300 dark:text-gray-600">-</span>
         </span>
       </div>
+      <!-- 图例：四种色的语义原来只写在这个文件的注释里，页面上没有任何地方说，而 tooltip
+           是 title 属性、触屏摸不到。 -->
+      <p v-if="cells.length" class="text-[9px] leading-3 text-gray-400" data-testid="account-gateway-legend">
+        {{ t('admin.accounts.openai.gatewayHistory.legend') }}
+      </p>
     </template>
   </div>
 </template>
@@ -100,6 +104,24 @@ const MAX_PER_REGION = 1
 /** 本地账本窗口默认 4 小时 = 槽位冷却，和后端 openai_gwpool_gateway_window_s 的默认值同一个数。 */
 const DEFAULT_WINDOW_MS = 4 * 60 * 60 * 1000
 
+/**
+ * 满血窗口 183 秒，**必须和后端 openAIGatewayFullWindow 同值**（跨语言，只能靠这条注释）。
+ *
+ * 183 不是我们测出来的，是取两边最保守的那个：实测窗口是 200–300 秒，而池子自己的
+ * types.FullWindow 就是 183 秒、DeliverTTL 只有 150 秒。取大的会让这一格在池子和后端都认为
+ * 窗口已关之后还绿着 —— 而运营方正照着它挑落点。
+ *
+ * 「验过满血」这一格**必须按它判，不能按本地账本那 4 小时**：后端的 verdict 是粘滞的
+ * （没判据的那些发只刷新 at、判定原样留着，见 openai_gwpool_gateway_history.go），
+ * 按 4 小时着色的话「3 小时 59 分前判过满血、1 分钟前又用过」会和「刚刚验出满血」长得一样 ——
+ * 运营方照着那一格去挑落点，挑中的是一个烧了三个多小时的网关。
+ *
+ * 过期就回落「碰过」（琥珀），不是「没碰过」（淡显）：窗口过了不代表那次接触没发生。
+ * 后端对 `full` 判定有一条节流穿透就是为了这个：持续被验成满血的落点，它的 FullAt 至少每
+ * 183 秒刷新一次，否则格子会在写节流（5 分钟）的空档里掉成琥珀。
+ */
+const FULL_WINDOW_MS = 183 * 1000
+
 const props = defineProps<{ account: Account }>()
 const { t } = useI18n()
 const now = useNowTicker()
@@ -107,6 +129,8 @@ const now = useNowTicker()
 interface GatewaySeen {
   at?: string
   region?: string
+  verdict?: string
+  full_at?: string
 }
 
 interface GatewayHistory {
@@ -120,7 +144,25 @@ interface GatewayItem {
   name: string
   at: string
   region: string
+  verdict: string
+  fullAt: string
 }
+
+/**
+ * 格子的四种色：窗口内按 state-echo 判定分，窗口外一律淡显。
+ *
+ * **窗口外不着色是刻意的**：判定是「上一次判成什么」，而回归的触发变量未知（后端
+ * openAIGatewaySeen.FullAt 的注释），所以过了本地账本窗口那条读数就只是历史，不该再当成
+ * 当前状态渲染。想看历史判定去读 tooltip。
+ */
+const TONE_CLASS = {
+  full: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
+  degraded: 'bg-rose-50 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300',
+  hot: 'bg-amber-50 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+  idle: 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
+} as const
+
+type GatewayTone = keyof typeof TONE_CLASS
 
 const isCodexAccount = computed(() => targetsCodexUpstream(props.account))
 
@@ -150,7 +192,9 @@ const items = computed<GatewayItem[]>(() => {
     .map(([name, row]) => ({
       name,
       at: typeof row.at === 'string' ? row.at : '',
-      region: typeof row.region === 'string' ? row.region : ''
+      region: typeof row.region === 'string' ? row.region : '',
+      verdict: row.verdict === 'full' || row.verdict === 'degraded' ? row.verdict : '',
+      fullAt: typeof row.full_at === 'string' ? row.full_at : ''
     }))
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
 })
@@ -163,7 +207,9 @@ const current = computed<GatewayItem | null>(() => {
     items.value.find((i) => i.name === name) ?? {
       name,
       at: history.value.updated_at ?? '',
-      region: history.value.current_region ?? ''
+      region: history.value.current_region ?? '',
+      verdict: '',
+      fullAt: ''
     }
   )
 })
@@ -174,6 +220,8 @@ interface RegionCell {
   name: string
   extra: number
   hot: boolean
+  tone: GatewayTone
+  mark: string
   title: string
 }
 
@@ -199,8 +247,13 @@ const cells = computed<RegionCell[]>(() => {
         label: regionLabel(key),
         name: shown.map((i) => shortName(i.name)).join(' '),
         extra: bucket.length - shown.length,
-        // 窗口内打过 ⇒ 这个大区的落点还烧着。空格子永远不是「烧着」。
-        hot: bucket.some((i) => isHot(i.at)),
+        // 外层高亮和内层的色**必须看同一条记录**：原来 hot 用 some()、tone 用 bucket[0]，
+        // 一个大区里最新那个已出窗口而旧的还在窗口内时，外层按「烧着」渲染、内层按淡显渲染。
+        // 统一按最近那一条（bucket 已按时间倒排）：一个大区正常只有一个网关，真出现多个时
+        // 最新那条才是当前状态，老的在 tooltip 里。
+        hot: !!bucket.length && isHot(bucket[0].at),
+        tone: toneOf(bucket[0]),
+        mark: verdictMark(bucket[0]),
         title: bucket.length
           ? bucket.map(titleOf).join('\n')
           : `${regionLabel(key)} · ${t('admin.accounts.openai.gatewayHistory.regionIdle')}`
@@ -208,9 +261,37 @@ const cells = computed<RegionCell[]>(() => {
     })
 })
 
-function isHot(at: string): boolean {
+function within(at: string, span: number): boolean {
   const ts = Date.parse(at)
-  return Number.isFinite(ts) && now.value - ts < windowMs.value
+  return Number.isFinite(ts) && now.value - ts < span
+}
+
+function isHot(at: string): boolean {
+  return within(at, windowMs.value)
+}
+
+function toneOf(item: GatewayItem | null | undefined): GatewayTone {
+  if (!item || !isHot(item.at)) return 'idle'
+  // 降智按本地账本那个窗口算（和后端判「这个网关还能不能用」同一个兜底数）；
+  // 满血只在真实的满血窗口内才算（见 FULL_WINDOW_MS），过期回落「碰过」。
+  if (item.verdict === 'degraded') return 'degraded'
+  if (item.verdict === 'full' && within(item.fullAt, FULL_WINDOW_MS)) return 'full'
+  return 'hot'
+}
+
+/**
+ * 判定的字符前缀：颜色退化成装饰之后，信息仍然读得出来。
+ * 带一个空格 —— 不带的话渲染成 `✓US · unified-107`，前缀和大区名糊在一起。
+ */
+function verdictMark(item: GatewayItem | null | undefined): string {
+  switch (toneOf(item)) {
+    case 'full':
+      return '✓ '
+    case 'degraded':
+      return '! '
+    default:
+      return ''
+  }
 }
 
 /** `unified-` 是恒定前缀，这一列按格子排，省掉它才塞得下大区名。 */
@@ -231,6 +312,23 @@ function titleOf(item: GatewayItem): string {
       ? 'admin.accounts.openai.gatewayHistory.regionHot'
       : 'admin.accounts.openai.gatewayHistory.regionCooled'
   )
-  return `${head} · ${when} · ${state}`
+  const parts = [head, when, state]
+  // 判定**不管窗口内外都写进 tooltip**：格子的色只渲染当前状态，而这条历史判定本身有用
+  // （它是「这个号在这个落点上到底验出过满血没有」唯一的记录）。
+  //
+  // 满血必须带**判定时刻**：上面那个时间是「用过」的时间，而 verdict 在后端是粘滞的 ——
+  // 不写时刻的话一条 3 小时前的满血判定读起来和刚验出来的一样。
+  if (item.verdict === 'full') {
+    parts.push(
+      item.fullAt
+        ? t('admin.accounts.openai.gatewayHistory.verdicts.fullAt', {
+            when: formatRelativeTime(item.fullAt)
+          })
+        : t('admin.accounts.openai.gatewayHistory.verdicts.full')
+    )
+  } else if (item.verdict) {
+    parts.push(t(`admin.accounts.openai.gatewayHistory.verdicts.${item.verdict}`))
+  }
+  return parts.join(' · ')
 }
 </script>

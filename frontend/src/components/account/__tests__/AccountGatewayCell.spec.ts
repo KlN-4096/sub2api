@@ -40,6 +40,9 @@ const gatewayOf = (w: ReturnType<typeof render>, region: string) =>
 const isHot = (w: ReturnType<typeof render>, region: string) =>
   cell(w, region).html().includes('amber')
 
+/** 格子的状态色：full / degraded / hot / idle（见 AccountGatewayCell 的 TONE_CLASS）。 */
+const tone = (w: ReturnType<typeof render>, region: string) => cell(w, region).attributes('data-tone')
+
 describe('AccountGatewayCell', () => {
   it('第一行是当前大区 · 当前网关', () => {
     const w = render(
@@ -160,6 +163,48 @@ describe('AccountGatewayCell', () => {
       const w = render(account(bad))
       expect(w.find('[data-testid="account-gateway-empty"]').exists()).toBe(true)
     }
+  })
+
+  // state-echo 判定的状态色（2026-10-02）。卡片上「验过是满血」和「只是碰过」是两回事 ——
+  // 不分色的话运营方看不出这个号现在手里有没有一个能用的落点。
+  it('窗口内按判定分色，窗口外一律淡显', () => {
+    const w = render(
+      account({
+        current: 'unified-73',
+        current_region: 'east-asia',
+        seen: {
+          'unified-73': { at: isoAgo(60), region: 'east-asia', verdict: 'full', full_at: isoAgo(60) },
+          'unified-84': { at: isoAgo(120), region: 'us-west', verdict: 'degraded' },
+          'unified-95': { at: isoAgo(180), region: 'us-east' },
+          // 窗口外（默认 4 小时）：判定过期了，不该再按它渲染当前状态。
+          'unified-200': { at: isoAgo(5 * 3600), region: 'oceania', verdict: 'full' }
+        },
+        updated_at: isoAgo(60)
+      })
+    )
+    expect(tone(w, 'east-asia')).toBe('full')
+    expect(tone(w, 'us-west')).toBe('degraded')
+    expect(tone(w, 'us-east')).toBe('hot')
+    expect(tone(w, 'oceania')).toBe('idle')
+    expect(tone(w, 'europe')).toBe('idle') // 空格子
+
+    // 判定不管窗口内外都进 tooltip：它是「验出过满血没有」唯一的记录。
+    expect(cell(w, 'east-asia').attributes('title')).toContain('gatewayHistory.verdicts.full')
+    expect(cell(w, 'us-west').attributes('title')).toContain('gatewayHistory.verdicts.degraded')
+    expect(cell(w, 'oceania').attributes('title')).toContain('gatewayHistory.verdicts.full')
+    expect(cell(w, 'us-east').attributes('title')).not.toContain('verdicts')
+  })
+
+  it('认不出的判定值按「没判过」处理', () => {
+    const w = render(
+      account({
+        current: 'unified-73',
+        seen: { 'unified-73': { at: isoAgo(60), region: 'east-asia', verdict: 'FULL' } },
+        updated_at: isoAgo(60)
+      })
+    )
+    expect(tone(w, 'east-asia')).toBe('hot')
+    expect(cell(w, 'east-asia').attributes('title')).not.toContain('verdicts')
   })
 
   it('非 Codex 上游的账号整块不展示', () => {

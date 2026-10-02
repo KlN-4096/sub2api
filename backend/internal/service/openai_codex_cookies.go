@@ -32,6 +32,19 @@ type openAICodexCookieStore struct {
 	identity  openAICodexCredentialIdentity
 	poolPairs sync.Map // 凭证域身份 → openAIGatewayPoolPair
 	poolFetch singleflight.Group
+	// poolVerified 是「这个身份手上那张票**验过是满血**」（openai_gwpool_warm.go，queue 档）。
+	//
+	// 必须单独记，**不能拿 poolPairs 的 Live 当「验过」**：Live 的唯一含义是取票那一刻写的
+	// `until = now + valid_for_s`，和验没验过是两件事。三条路都会留下一张 Live 的未验票 ——
+	// 并发取票（singleflight 的 shared 对领头者也为真 ⇒ 谁都拿不到还票闭包）、同一份凭据挂在
+	// 多个账号行上（键是凭证域身份，retry 档那一行取的票 queue 档这一行照样看得见）、
+	// 以及 retry 兜底换到的那张。值存票号，换票即失效。
+	poolVerified sync.Map // 凭证域身份 → 票号（string）
+	// poolWarm 把同一张票上的并发预热判据收口成一次（openai_gwpool_warm.go，queue 档）。
+	// 取票本身已经被 poolFetch 收成一次 ⇒ 同身份的并发请求手里是**同一张票**、同一个
+	// (上游账号 × 网关) 单元、同一个满血窗口 ⇒ 结论必然相同，各自打一遍纯属白烧配额，
+	// 而供给只有个位数张/小时。键按票号分，换了票要重新验。
+	poolWarm singleflight.Group
 	// poolUsed 是「这个凭证域身份最近碰过哪些网关」的本地账本，用来挑一个没烧过的落点，
 	// 并作为 /cookie 的 exclude 带给池子（裸取时也能避开烧过的落点）。
 	// 池子按它发的 consumer key 记账，认不出同一份凭据挂在多个账号行上（见 gatewayPoolLedgerKey）。
