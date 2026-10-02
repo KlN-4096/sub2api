@@ -816,9 +816,21 @@ export default {
           fullUntimed: 'not timed',
           legend:
             '✓ verified full (inside the 183s window) · ! used inside the window, degraded right now · grey window elapsed, usable again',
+          // Window usage. The denominator is THIS ROW'S ledger, not the pool's gateway count
+          // (this row does not know that — see forecastHint). So "still usable" means "of the
+          // ones I have touched, how many have cooled off".
+          windowUsage: '{used} landing(s) used in the {hours}h window, {free} still usable',
+          windowUsageHint:
+            'Counts landings in THIS ROW\'S ledger: touched inside the window = used, past the window = still usable. ' +
+            'It does not include "how many gateways in the pool this account has never touched" — this row does not know how many the pool has.',
           // Full-strength minutes forecast for the next hour, deliberately a LOWER bound.
           // "at least" is required: "at most" would get read as a quota.
           forecast: 'at least {minutes} min full-strength in the next hour',
+          // At 0 this must not read "at least 0 minutes": that sounds like a verdict on the
+          // account, when it actually states a fact about TIME — every landing in the ledger
+          // comes out of cooldown more than an hour from now. And the number is a lower bound
+          // anyway: gateways never touched are not counted at all.
+          forecastNone: 'no landing comes out of cooldown within the hour',
           forecastHint:
             'Counted per (account × gateway): {units} gateways are in the ledger and come out of cooldown within the hour, each worth about {window}s of full strength. One gateway name is one unit — different gateways in the same region have separate full-strength windows, so do not collapse by region (region is only the grouping for the grid above).\n' +
             'This is a **lower bound**: only units with positive evidence are counted. Gateways this row never touched are left out, so possibly more — no number is given because this row cannot work it out: it does not know how many gateways the pool has, and "this row never touched it" may well mean another row on the same credential burned it, or the record was pruned.\n' +

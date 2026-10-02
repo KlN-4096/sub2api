@@ -26,7 +26,7 @@
            ⇒ 这张格子回答的是「这个号现在还能去哪个大区铸没烧过的票」：窗口内打过的高亮
            （还烧着），窗口外的淡显（那个大区又能用了）。和网关池页面那张九宫格同一把尺子。
            窗口内再按 state-echo 判定分色：绿=验过满血、红=判过降智、黄=碰过但没判据。 -->
-      <div v-if="cells.length" class="grid grid-cols-3 gap-x-1" data-testid="account-gateway-regions">
+      <div v-if="usesPool && cells.length" class="grid grid-cols-3 gap-x-1" data-testid="account-gateway-regions">
         <span
           v-for="cell in cells"
           :key="cell.key"
@@ -52,17 +52,41 @@
       <!-- 一小时满血分钟预测。单位是 (账号 × 网关)，算法和口径见 forecastUnits。
            上行空间（本行没碰过的网关）只在 tooltip 里定性说一句：这一行不知道池子一共有
            多少网关，给不出数。 -->
+      <!-- 窗口用量：这一条回答「现在手上还有几个落点能用」，和下面那条「能打多少分钟」
+           分开两行 —— 合成一句的话「0 个落点」和「0 分钟」会被读成同一件事。 -->
       <p
-        v-if="cells.length"
+        v-if="usesPool && cells.length"
+        class="text-[9px] leading-3 text-gray-500 dark:text-gray-400"
+        :title="t('admin.accounts.openai.gatewayHistory.windowUsageHint')"
+        data-testid="account-gateway-window-usage"
+      >
+        {{
+          t('admin.accounts.openai.gatewayHistory.windowUsage', {
+            hours: windowHours,
+            used: windowUsage.used,
+            free: windowUsage.free
+          })
+        }}
+      </p>
+      <p
+        v-if="usesPool && cells.length"
         class="text-[9px] leading-3 text-gray-500 dark:text-gray-400"
         :title="forecastTitle"
         data-testid="account-gateway-forecast"
       >
-        {{ t('admin.accounts.openai.gatewayHistory.forecast', { minutes: forecastMinutes }) }}
+        {{
+          forecastMinutes > 0
+            ? t('admin.accounts.openai.gatewayHistory.forecast', { minutes: forecastMinutes })
+            : t('admin.accounts.openai.gatewayHistory.forecastNone')
+        }}
       </p>
       <!-- 图例：四种色的语义原来只写在这个文件的注释里，页面上没有任何地方说，而 tooltip
            是 title 属性、触屏摸不到。 -->
-      <p v-if="cells.length" class="text-[9px] leading-3 text-gray-400" data-testid="account-gateway-legend">
+      <p
+        v-if="usesPool && cells.length"
+        class="text-[9px] leading-3 text-gray-400"
+        data-testid="account-gateway-legend"
+      >
         {{ t('admin.accounts.openai.gatewayHistory.legend') }}
       </p>
     </template>
@@ -185,6 +209,19 @@ type GatewayTone = keyof typeof TONE_CLASS
 const isCodexAccount = computed(() => targetsCodexUpstream(props.account))
 
 const extra = computed(() => (props.account.extra as Record<string, unknown> | undefined) ?? {})
+
+/**
+ * 这个号的路由 cookie 是不是由网关池下发（账号上的 `openai_gwpool` 开关）。
+ *
+ * **没开的号只显示落点本身，不套烧灼那一套。** 烧灼模型的三件东西对它全都不成立：
+ *   - 颜色：红的含义是「窗口内碰过 ⇒ 现在打过去就是降智」，而那是针对**取票轮换**说的。
+ *     没开池子的号根本不选落点，上游把它路由到哪儿就是哪儿，红色读起来像「这个号废了」。
+ *     而且 state-echo 判据只在池子那条传输路径上跑 ⇒ 它的 verdict 恒为空 ⇒ toneOf 的兜底
+ *     把**每一个**最近用过的落点都染成红的。这正是误导的来源。
+ *   - 一小时满血预测：分子是「冷却到期的落点数」，而它没有冷却这回事。
+ *   - 九宫格：它回答「这个号还能去哪个大区铸没烧过的票」，而它不铸票。
+ */
+const usesPool = computed(() => extra.value.openai_gwpool === true)
 
 const history = computed<GatewayHistory>(() => {
   const raw = extra.value.openai_gwpool_gateways
@@ -320,6 +357,26 @@ const forecastMinutes = computed(() =>
 )
 
 /**
+ * 本地账本窗口的用量：窗口内烧掉了几个落点、还剩几个能用。
+ *
+ * 分母是**这一行账本里的落点数**，不是池子的网关总数 —— 这一行不知道池子一共有多少个
+ * （见 forecastUnits 第 1 条），所以「还可用」说的是「我碰过的这些里有几个已经凉了」，
+ * 不是「池子里还有几个我没碰过」。那个数要后端把池子的清单写进这条记录才给得出来。
+ *
+ * 和 forecast 分开一行：这条回答「现在手上还有几个」，forecast 回答「接下来一小时能打
+ * 多少分钟」。合成一句的话 0 个落点和 0 分钟会被读成同一件事。
+ */
+const windowHours = computed(() => +(windowMs.value / 3_600_000).toFixed(1))
+
+const windowUsage = computed(() => {
+  let used = 0
+  for (const item of items.value) {
+    if (isHot(item.at)) used += 1
+  }
+  return { used, free: items.value.length - used }
+})
+
+/**
  * 预测的 tooltip。要交代清楚这个数是**下界**，以及它往哪两个方向偏：
  *
  *  - 往大偏（上行空间）：本行没碰过的网关不计入，实际可能更多。定性说，不给数 ——
@@ -345,6 +402,9 @@ function isHot(at: string): boolean {
 }
 
 function toneOf(item: GatewayItem | null | undefined): GatewayTone {
+  // 没开网关池的号一律中性：见 usesPool 的注释，它的 verdict 恒为空，不拦的话下面那条
+  // 兜底会把每个最近用过的落点都染红。
+  if (!usesPool.value) return 'idle'
   if (!item || !isHot(item.at)) return 'idle'
   // 满血只在真实的满血窗口内才算（见 FULL_WINDOW_MS）。过了它、或者压根没判过，都是红：
   // 窗口内碰过 ⇒ 这一刻打过去就是降智，这三种情况对使用者是同一件事。

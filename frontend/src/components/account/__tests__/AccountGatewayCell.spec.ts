@@ -16,12 +16,14 @@ vi.mock('vue-i18n', async (importOriginal) => ({
 const nowSec = Math.floor(Date.now() / 1000)
 const isoAgo = (sec: number) => new Date((nowSec - sec) * 1000).toISOString()
 
+// openai_gwpool 默认开：整块烧灼读数（颜色、九宫格、预测）只对走网关池的号成立，关着的号
+// 另有一条用例。放在 spread 前面，用例可以传 false 覆盖。
 const account = (gateways: unknown, extra: Record<string, unknown> = {}): Account =>
   ({
     id: 1,
     platform: 'openai',
     type: 'oauth',
-    extra: { openai_gwpool_gateways: gateways, ...extra }
+    extra: { openai_gwpool: true, openai_gwpool_gateways: gateways, ...extra }
   }) as unknown as Account
 
 const render = (acc: Account) => mount(AccountGatewayCell, { props: { account: acc } })
@@ -55,6 +57,9 @@ const tone = (w: ReturnType<typeof render>, region: string) => cell(w, region).a
 /** 预测那行里的分钟数。t() 是桩，渲染出来是 `key:{"minutes":N}`。 */
 const minutesOf = (w: ReturnType<typeof render>) => {
   const text = w.get('[data-testid="account-gateway-forecast"]').text()
+  // 0 分钟那一档换成了另一句话（forecastNone，不带插值）—— 没有 `{` 就是那一档。
+  // 措辞由专门那条用例钉，这里只把它折回 0，免得每个算单位数的断言都要分两种写法。
+  if (!text.includes('{')) return 0
   return JSON.parse(text.slice(text.indexOf('{'), text.indexOf('}') + 1)).minutes as number
 }
 
@@ -295,6 +300,67 @@ describe('AccountGatewayCell', () => {
         `${base}.verdicts.none`
       ].join('-')
     )
+  })
+
+  // 没开「Codex 路由 cookie 由网关池下发」的号：只显示落点本身，整块烧灼读数都不出现。
+  //
+  // 这条是用户 2026-10-03 当场指出来的误导：那种号的 state-echo 判据压根不跑 ⇒ verdict 恒为空
+  // ⇒ toneOf 的兜底把**每一个**最近用过的落点都染成红的（「现在打就是降智」），而它根本不选
+  // 落点、也没有冷却这回事。红色读起来像「这个号废了」。
+  it('没开网关池的号不套烧灼读数：不染色、没有九宫格/预测/图例', () => {
+    const w = render(
+      account(
+        {
+          current: 'unified-121',
+          current_region: 'east-asia',
+          seen: { 'unified-121': { at: isoAgo(60), region: 'east-asia' } },
+          updated_at: isoAgo(60)
+        },
+        { openai_gwpool: false }
+      )
+    )
+    // 落点本身仍然要显示 —— 它是真的，只是不该按烧灼去读。
+    const current = w.get('[data-testid="account-gateway-current"]')
+    expect(current.text()).toContain('unified-121')
+    // 判定字符和红色都不许出现。
+    expect(current.text()).not.toContain('!')
+    expect(current.text()).not.toContain('✓')
+    for (const id of ['regions', 'forecast', 'legend', 'window-usage']) {
+      expect(w.find(`[data-testid="account-gateway-${id}"]`).exists(), id).toBe(false)
+    }
+  })
+
+  // 窗口用量：分母是这一行账本里的落点数，窗口内碰过的算已用、出了窗口的算还可用。
+  it('窗口用量按账本里的落点数分已用/还可用', () => {
+    const w = render(
+      account({
+        current: 'unified-1',
+        seen: {
+          'unified-1': { at: isoAgo(60), region: 'us-east' }, // 窗口内 ⇒ 已用
+          'unified-2': { at: isoAgo(120), region: 'us-west' }, // 窗口内 ⇒ 已用
+          'unified-3': { at: isoAgo(5 * 3600), region: 'europe' } // 4h 窗口外 ⇒ 还可用
+        },
+        updated_at: isoAgo(60)
+      })
+    )
+    const text = w.get('[data-testid="account-gateway-window-usage"]').text()
+    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 2, free: 1 })
+  })
+
+  // 0 的时候不能渲染成「至少 0 分钟满血」：那读起来像对这个号的判决，而它说的是
+  // 「账本里每个落点的冷却都要一小时之后才结束」——一个关于时间的事实。
+  it('一小时内没有落点出冷却时换一句话，不写「至少 0 分钟」', () => {
+    const w = render(
+      account({
+        current: 'unified-1',
+        // 刚碰过 ⇒ 冷却还剩约 4 小时 ⇒ 一小时内出不了冷却 ⇒ 预测为 0。
+        seen: { 'unified-1': { at: isoAgo(30), region: 'us-east' } },
+        updated_at: isoAgo(30)
+      })
+    )
+    const text = w.get('[data-testid="account-gateway-forecast"]').text()
+    expect(text).toContain('gatewayHistory.forecastNone')
+    expect(text).not.toContain('gatewayHistory.forecast:')
   })
 
   // 窗口还在跑的时候**不许**报时长：这时候算出来的是「到目前为止」，而它会被当成
