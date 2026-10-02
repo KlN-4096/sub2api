@@ -271,6 +271,7 @@ export default {
         todayStats: 'Today Stats',
         groups: 'Groups',
         usageWindows: 'Usage Windows',
+        gateway: 'Gateway',
         proxy: 'Proxy',
         lastUsed: 'Last Used',
         createdAt: 'Created',
@@ -283,6 +284,7 @@ export default {
         ungrouped: 'Ungrouped',
         hint: 'Displayed as "group / base score / sticky bonus". The base score is computed within the current filtered candidate set and includes priority, load, queue depth, error rate, first-token latency, reset window, quota headroom, billing rate, and related factors. The sticky bonus applies only when sticky weighting is enabled for previous_response_id or session_hash. Higher scores are preferred.'
       },
+      gatewayColumnHint: 'Landing gateways come from the route tickets delivered by the gateway pool (gwpool). The full-strength window applies to (upstream account × gateway), and a gateway is determined by (region × account), so this column is laid out by the nine regions: the first line is the current region and gateway, and each cell below is the gateway most recently landed on in that region. Amber means the gateway was used within the local ledger window (4 hours by default, adjustable in the gateway pool settings of that account) and is still cooling; grey means the window has elapsed and that region is usable again. Note that both the region and the gateway name are what the pool claimed on delivery, not the upstream landing point actually observed.',
       usageWindowsHint: '"5h / 7d" are the upstream account\'s official rolling usage windows (e.g. OpenAI ChatGPT, Claude). They are imposed by the upstream provider on the account itself — not configured by sub2api, and unrelated to the models you map. Usage resets automatically once each window rolls over, and the limit cannot be lifted from within sub2api. Purple/amber rows are the Codex turn-states currently in effect for this account (one per model); the countdown is the remainder of the one-hour validity from minting, and amber means the ticket looks degraded.',
       ollamaCloud: {
         title: 'Ollama Cloud usage',
@@ -786,7 +788,22 @@ export default {
           empty: 'Gateway -',
           current: 'Current',
           seen: '{n} used',
-          lastUsed: 'last used'
+          lastUsed: 'last used',
+          regionHot: 'used within the window, still cooling',
+          regionCooled: 'window elapsed, usable again',
+          regionIdle: 'never used',
+          regions: {
+            'us-east': 'US-E',
+            'us-west': 'US-W',
+            'south-america': 'S.Am',
+            'west-europe': 'W.EU',
+            europe: 'EU',
+            'east-asia': 'E.Asia',
+            oceania: 'Ocea',
+            'south-asia': 'S.Asia',
+            'middle-east': 'M.East',
+            unknown: 'Unknown'
+          }
         },
         turnStatePool: {
           empty: 'Turn-state —',

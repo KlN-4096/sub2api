@@ -325,8 +325,16 @@
               @account-updated="handleAccountUpdated"
               @usage-loaded="handleAccountUsageLoaded(row.id, $event)"
             />
-            <AccountGatewayCell :account="row" />
             <AccountTurnStateCell :account="row" />
+          </template>
+          <template #header-gateway="{ column }">
+            <div class="flex items-center">
+              <span>{{ column.label }}</span>
+              <HelpTooltip :content="t('admin.accounts.gatewayColumnHint')" width-class="w-72" />
+            </div>
+          </template>
+          <template #cell-gateway="{ row }">
+            <AccountGatewayCell :account="row" />
           </template>
           <template #cell-proxy="{ row }">
             <div class="flex flex-col gap-1">
@@ -1827,6 +1835,9 @@ const allColumns = computed(() => {
     c.push({ key: 'groups', label: t('admin.accounts.columns.groups'), sortable: false })
   }
   c.push({ key: 'usage', label: t('admin.accounts.columns.usageWindows'), sortable: false })
+  // 网关落点独立成列：它答的是「这个号在哪个大区还能拿到没烧过的落点」，和用量窗口
+  // （上游的滚动限额）是两件事，挤在一格里两边都读不出来。
+  c.push({ key: 'gateway', label: t('admin.accounts.columns.gateway'), sortable: false })
   c.push(
     { key: 'proxy', label: t('admin.accounts.columns.proxy'), sortable: false },
     { key: 'priority', label: t('admin.accounts.columns.priority'), sortable: true },

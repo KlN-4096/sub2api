@@ -389,3 +389,30 @@ func TestCookieReadsPairRemaining(t *testing.T) {
 		}
 	}
 }
+
+// region 是消费端把落点按大区归档的唯一来源（账号卡片那九个格子）。缺失必须是空串而不是
+// 猜一个：老版本池子不报它，猜出来的大区会让卡片把一个还能用的大区标成已烧过。
+// 它和网关名一样进账号 extra 和前端 ⇒ 同样要过 sanitizeOpaque。
+func TestCookieReadsRegion(t *testing.T) {
+	for _, tc := range []struct{ field, want string }{
+		{`,"region":"east-asia"`, "east-asia"},
+		{``, ""},
+		{`,"region":""`, ""},
+		// 过长判废而不是截断 —— 这一格同时证明 region 真的过了 sanitizeOpaque
+		//（控制字符那一支由 TestCookieSanitizesGateway 盯着，两者同一个函数）。
+		{`,"region":"` + strings.Repeat("r", maxGatewayLen+1) + `"`, ""},
+	} {
+		body := `{"gateway":"unified-1","cookie":"__cflb=a; __oailb=b","valid_for_s":150` + tc.field + `}`
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{})
+		srv.Close()
+		if err != nil {
+			t.Fatalf("%s: %v", tc.field, err)
+		}
+		if pair.Region != tc.want {
+			t.Fatalf("%s: region = %q，应为 %q", tc.field, pair.Region, tc.want)
+		}
+	}
+}

@@ -146,6 +146,13 @@ const (
 type Pair struct {
 	// Gateway 形如 "unified-142"。
 	Gateway string
+	// Region 是**铸这张票的出口**所属的大区（池子那九个 key 之一，SPEC 第 4 节）。
+	// 空 = 池子没报（老版本池子 / 它自己也反查不到），消费端按「未归类」处理，不要猜：
+	// 网关 = (大区 × 账号)，同一个网关名在不同账号眼里可能来自不同大区，事后反查不出来。
+	//
+	// 它**不是**「这一发会落在哪个大区」—— cflb 跨出口回放会漂（docs 第四节），
+	// 真实落点只有响应里的新 __oailb 说得准。只做读数，不接任何判定。
+	Region string
 	// Cookie 是直接写进出站 Cookie 头的整串 "__cflb=...; __oailb=..."。
 	Cookie string
 	// ValidFor 是**满血窗口**的剩余量（池子的 valid_for_s），不是 cookie 的有效期。
@@ -361,6 +368,7 @@ func (c *Client) Cookie(ctx context.Context, request CookieRequest) (Pair, error
 	}
 	var payload struct {
 		Gateway        string `json:"gateway"`
+		Region         string `json:"region"`
 		Cookie         string `json:"cookie"`
 		ValidForS      int    `json:"valid_for_s"`
 		VerifiedFull   bool   `json:"verified_full"`
@@ -384,7 +392,9 @@ func (c *Client) Cookie(ctx context.Context, request CookieRequest) (Pair, error
 		return Pair{}, fmt.Errorf("%w: cookie response carried a non-positive valid_for_s", ErrPool)
 	}
 	return Pair{
-		Gateway:       sanitizeOpaque(payload.Gateway, maxGatewayLen),
+		Gateway: sanitizeOpaque(payload.Gateway, maxGatewayLen),
+		// 同样过 sanitizeOpaque：池子的响应是信任边界，这个串会进账号 extra 和前端。
+		Region:        sanitizeOpaque(payload.Region, maxGatewayLen),
 		Cookie:        strings.TrimSpace(payload.Cookie),
 		ValidFor:      clampDuration(time.Duration(payload.ValidForS)*time.Second, 0, maxValidFor),
 		VerifiedFull:  payload.VerifiedFull,

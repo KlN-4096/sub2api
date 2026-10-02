@@ -40,10 +40,27 @@ const (
 type openAIGatewayHistory struct {
 	// Current 是最近一发请求实际落在的网关。空 = 这个号还没拿到过能读出落点的路由。
 	Current string `json:"current"`
-	// Seen 是「网关名 → 最近一次落在它上面的时刻」。
-	Seen map[string]time.Time `json:"seen"`
+	// CurrentRegion 是 Current 那个网关所属的大区（池子报的）。空 = 不知道。
+	// 单独存一份而不是现查 Seen：卡片第一行要的就是「当前大区 · 当前网关」这一对。
+	CurrentRegion string `json:"current_region,omitempty"`
+	// Seen 是「网关名 → 最近一次落在它上面的时刻 + 它属于哪个大区」。
+	//
+	// **换过值的形状**（2026-10-02）：以前是 map[string]time.Time。老记录解不出来 ⇒
+	// readOpenAIGatewayHistory 按「没有」处理 ⇒ 下一发请求重写一条。这条记录是读数不是
+	// 账本（判「这个网关还能不能用」走 gatewayPoolUsedRecently），丢了只是卡片空一会儿，
+	// 所以不写迁移代码。
+	Seen map[string]openAIGatewaySeen `json:"seen"`
 	// UpdatedAt 是写下这条记录的时刻，只用于展示「这份读数有多新」。
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// openAIGatewaySeen 是一个网关的一条记录。
+type openAIGatewaySeen struct {
+	// At 是最近一次落在这个网关上的时刻。
+	At time.Time `json:"at"`
+	// Region 是池子说的「这张票是哪个大区铸的」。空 = 池子没报 / 这一发被上游改派走了
+	// （那时池子说的大区对不上实际落点，记上去会把落点归到错的大区里，宁可留空）。
+	Region string `json:"region,omitempty"`
 }
 
 // readOpenAIGatewayHistory 读这条记录。解析失败按「没有」处理。
@@ -72,7 +89,7 @@ func readOpenAIGatewayHistory(a *Account) (openAIGatewayHistory, bool) {
 
 // noteOpenAIGatewayUse 记一发请求落在了哪个网关。gateway 为空（读不出落点）时什么都不做：
 // 「这一发没能读出网关」和「这一发没有网关」是两回事，记空值会把 Current 擦掉。
-func (s *OpenAIGatewayService) noteOpenAIGatewayUse(ctx context.Context, account *Account, gateway string) {
+func (s *OpenAIGatewayService) noteOpenAIGatewayUse(ctx context.Context, account *Account, gateway, region string) {
 	if s == nil || s.accountRepo == nil || account == nil {
 		return
 	}
@@ -80,20 +97,28 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(ctx context.Context, account
 	if gateway == "" {
 		return
 	}
+	region = strings.TrimSpace(region)
 	now := time.Now().UTC()
 
 	rec, _ := readOpenAIGatewayHistory(account)
-	// 没换网关、而且这个网关刚写过 ⇒ 不写。换了就立刻写。
-	if rec.Current == gateway {
-		if at, ok := rec.Seen[gateway]; ok && now.Before(at.Add(openAIGatewayHistoryWriteInterval)) {
+	prev := rec.Seen[gateway]
+	// 没换网关、这个网关刚写过、而且大区也没新消息 ⇒ 不写。换了就立刻写。
+	if rec.Current == gateway && (region == "" || region == prev.Region) {
+		if !prev.At.IsZero() && now.Before(prev.At.Add(openAIGatewayHistoryWriteInterval)) {
 			return
 		}
 	}
 	if rec.Seen == nil {
-		rec.Seen = map[string]time.Time{}
+		rec.Seen = map[string]openAIGatewaySeen{}
 	}
 	rec.Current = gateway
-	rec.Seen[gateway] = now
+	// 大区读不出来时**留着上一次记的那个**：同一个网关的大区不会变（网关 = 大区 × 账号），
+	// 一发改派就把它擦掉等于白丢一格信息。
+	if region == "" {
+		region = prev.Region
+	}
+	rec.CurrentRegion = region
+	rec.Seen[gateway] = openAIGatewaySeen{At: now, Region: region}
 	rec.UpdatedAt = now
 	pruneOpenAIGatewayHistory(&rec)
 
@@ -131,8 +156,8 @@ func pruneOpenAIGatewayHistory(rec *openAIGatewayHistory) {
 		at   time.Time
 	}
 	all := make([]seen, 0, len(rec.Seen))
-	for name, at := range rec.Seen {
-		all = append(all, seen{name, at})
+	for name, s := range rec.Seen {
+		all = append(all, seen{name, s.At})
 	}
 	sort.Slice(all, func(i, j int) bool {
 		if all[i].at.Equal(all[j].at) {
