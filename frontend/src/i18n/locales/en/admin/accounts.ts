@@ -811,6 +811,16 @@ export default {
           fullNever: 'never verified full',
           legend:
             '✓ verified full (inside the 183s window) · ! used inside the window, degraded right now · grey window elapsed, usable again',
+          // Full-strength minutes forecast for the next hour. "at most" is deliberate: it is an
+          // upper bound, not a promise — the reasons are in the tooltip.
+          forecast: 'at most {minutes} min full-strength in the next hour',
+          forecastBlind: '(+{count} unclassified landings not counted, so actually less)',
+          forecastHint:
+            'Counted per (account × region): {units} regions come out of cooldown within the hour (including never-touched ones), each worth about {window}s of full strength.\n' +
+            'This is an **upper bound, not a promise**: this ledger hangs on the account row while the burned unit belongs to the upstream account — clone/shadow rows each only see their own traffic, so "already burned" is undercounted.\n' +
+            'The 4h cooldown itself is not pinned down either (resting 30 minutes vs 4 hours gave a constant full-strength rate, zero correlation); it is a conservative engineering value.',
+          forecastBlindHint:
+            '{count} more landings are inside the window but have no region (the pool\'s older renewal mints did not report one — fixed since, but old records do not backfill) ⇒ they did burn some region\'s unit, and the forecast counted those units as never-touched.',
           // state-echo verdict (backend openai_gwpool_state_echo.go).
           verdicts: {
             full: 'last verdict: full strength',

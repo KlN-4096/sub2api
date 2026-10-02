@@ -60,68 +60,25 @@ const (
 	openAIGatewayVerdictDegraded = "degraded"
 )
 
-// openAIGatewayForecastHorizon 是满血分钟预测往前看多久。
+// 满血分钟预测**刻意不在这里算**，在前端（AccountGatewayCell.vue 的 forecastUnits）。
 //
-// 一小时：用户要的就是「一小时内能用多少分钟满血」。它同时是预测值的天花板 ——
-// 一小时里最多也只能用到一小时的满血。
-const openAIGatewayForecastHorizon = time.Hour
+// 它是个随时间衰减的值，而这条记录有 5 分钟写节流（openAIGatewayHistoryWriteInterval）
+// ⇒ 存进去的预测立刻就过期。前端那边 now 跟着 ticker 走，而 seen[].at / seen[].region
+// 和冷却窗口（openai_gwpool_gateway_window_s）本来就全在 extra 里，算得出来。
+//
+// 单位是 (账号 × 大区) 不是 (账号 × 网关)：一个号在一个大区同一时间只有一个网关，
+// 同一大区下的多个网关名是同一个单位（现网 us-west 一个大区有 20 个不同网关名）。
 
-// openAIGatewayFullMinutesAhead 预测「接下来一小时最多能用到多少满血时长」。
-//
-// 单位是 **(账号 × 大区)**，不是 (账号 × 网关)：降智的作用单位是「这个号在这个大区的
-// 那个网关」，而一个号在一个大区同一时间只有一个网关（2026-10-02/03 实测：回放一张票
-// 落到的是**自己**在那个大区的网关，不是铸票号那个 —— 51 发定向续期里落点漂移 44 次、
-// 落到票上那个网关 0 次）。所以按网关名数单位会把同一个单位数好几遍：现网光 us-west
-// 一个大区就有 20 张活票 / 20 个不同网关名，对同一个消费者其实是**一个**单位。
-//
-//	可用单位 = 这个号的大区里，冷却在 horizon 内结束的那些（含从没碰过的）
-//	预测    = min(可用单位 × 一个满血窗口, horizon)
-//
-// **这是上界不是承诺**，两个方向都偏乐观：
+// **这是上界不是承诺**，两个方向都偏乐观，前端那边的 tooltip 必须把它们说出来：
 //   - 这本账挂在**账号行**上，而单位是**上游账号**的 —— 同一份凭据的克隆行/影子行各自
 //     只看得见自己发出去的那些，所以「烧过」记少了（见本文件开头那段口径）。
 //   - 冷却时长本身没测准（openAIGatewayPoolGatewayWindow 的注释：静置 30 分钟到 4 小时
 //     命中率恒定，零相关），4 小时是工程保守取值。
+//   - openAIGatewayHistoryMax 从 24 提到 201 之前写下的行，历史被按时间裁过 ⇒ 那些被裁掉
+//     的落点看起来「没碰过」。
 //
 // 所以它答的是「最多」，用来回答「现在值不值得发请求」，**不能**反过来当调度闸 ——
 // 那条仍然只信 gatewayPoolUsedRecently 那本内存账。
-//
-// regions 是这个号能摸到的大区总数。<= 0 时退回「账本里见过的大区数」，那会让从没碰过
-// 的大区不计入 ⇒ 预测偏小。池子报得出总数时应该把它传进来。
-func openAIGatewayFullMinutesAhead(
-	rec openAIGatewayHistory, regions int, window time.Duration, now time.Time,
-) time.Duration {
-	// 每个大区留它**最近**一次被碰的时刻：同一个大区下的多个网关名是同一个单位，
-	// 取最近的那次才是这个单位真正的冷却起点。
-	latest := map[string]time.Time{}
-	for _, seen := range rec.Seen {
-		region := strings.TrimSpace(seen.Region)
-		if region == "" {
-			continue // 不知道属于哪个大区的落点没法归到单位上，不计
-		}
-		if at, ok := latest[region]; !ok || seen.At.After(at) {
-			latest[region] = seen.At
-		}
-	}
-	if regions <= 0 {
-		regions = len(latest)
-	}
-	// 冷却在一小时内结束的算可用。从没碰过的大区（regions 比账本里多的那些）天然可用。
-	units := regions - len(latest)
-	if units < 0 {
-		units = 0 // 账本里的大区比报的总数还多（总数过时了）：按账本算，别算出负数
-	}
-	for _, at := range latest {
-		if rest := window - now.Sub(at); rest <= openAIGatewayForecastHorizon {
-			units++
-		}
-	}
-	ahead := time.Duration(units) * openAIGatewayFullWindow
-	if ahead > openAIGatewayForecastHorizon {
-		return openAIGatewayForecastHorizon
-	}
-	return ahead
-}
 
 // openAIGatewayHistory 是那条记录。
 //

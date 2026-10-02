@@ -236,60 +236,6 @@ func gatewayNameForTest(i int) string {
 	return fmt.Sprintf("unified-%d", i)
 }
 
-// 满血分钟预测按 (账号 × 大区) 数单位，不按网关名数。
-func TestFullMinutesAheadCountsRegionsNotGatewayNames(t *testing.T) {
-	now := time.Now()
-	window := 4 * time.Hour
-
-	// 同一个大区下的三个网关名 = **一个**单位。全都刚烧过 ⇒ 一小时内出不来 ⇒ 0。
-	oneRegionJustBurned := openAIGatewayHistory{Seen: map[string]openAIGatewaySeen{
-		"unified-1": {At: now.Add(-time.Minute), Region: "us-west"},
-		"unified-2": {At: now.Add(-2 * time.Minute), Region: "us-west"},
-		"unified-3": {At: now.Add(-3 * time.Minute), Region: "us-west"},
-	}}
-	require.Zero(t, openAIGatewayFullMinutesAhead(oneRegionJustBurned, 0, window, now),
-		"三个网关名同属 us-west ⇒ 一个单位，刚烧过就该是 0。按网关名数会算出 3 个窗口")
-
-	// 取**最近**那次当冷却起点：同一个大区里有一条很旧的，不该让这个单位看起来已恢复。
-	require.Zero(t, openAIGatewayFullMinutesAhead(openAIGatewayHistory{
-		Seen: map[string]openAIGatewaySeen{
-			"unified-1": {At: now.Add(-5 * time.Hour), Region: "us-west"},
-			"unified-2": {At: now.Add(-time.Minute), Region: "us-west"},
-		},
-	}, 0, window, now), "同一个大区要按最近一次碰的时刻算冷却")
-
-	// 冷却在一小时内结束 ⇒ 这个单位算可用。
-	recovers := openAIGatewayHistory{Seen: map[string]openAIGatewaySeen{
-		"unified-1": {At: now.Add(-3*time.Hour - 30*time.Minute), Region: "us-west"},
-	}}
-	require.Equal(t, openAIGatewayFullWindow,
-		openAIGatewayFullMinutesAhead(recovers, 0, window, now))
-
-	// 没碰过的大区天然可用：报 9 个大区、账本里只有 1 个 ⇒ 8 个白板 + 那 1 个刚烧过。
-	justBurned := openAIGatewayHistory{Seen: map[string]openAIGatewaySeen{
-		"unified-1": {At: now, Region: "us-west"},
-	}}
-	require.Equal(t, 8*openAIGatewayFullWindow,
-		openAIGatewayFullMinutesAhead(justBurned, 9, window, now))
-
-	// 封顶在一小时：一小时里最多只能用到一小时的满血。
-	require.Equal(t, openAIGatewayForecastHorizon,
-		openAIGatewayFullMinutesAhead(openAIGatewayHistory{}, 100, window, now))
-
-	// 总数过时了（账本里的大区比报的还多）不许算出负数。
-	require.Equal(t, openAIGatewayFullWindow, openAIGatewayFullMinutesAhead(openAIGatewayHistory{
-		Seen: map[string]openAIGatewaySeen{
-			"unified-1": {At: now, Region: "us-west"},
-			"unified-2": {At: now.Add(-5 * time.Hour), Region: "europe"},
-		},
-	}, 1, window, now), "europe 已恢复算一个，us-west 刚烧过不算，总数报小了也不能变负")
-
-	// 不知道属于哪个大区的落点不计：归不到单位上，猜一个会把别的单位算重。
-	require.Zero(t, openAIGatewayFullMinutesAhead(openAIGatewayHistory{
-		Seen: map[string]openAIGatewaySeen{"unified-1": {At: now.Add(-5 * time.Hour)}},
-	}, 0, window, now))
-}
-
 // writeGatewayHistoryForTest 按**从库里读回来的样子**把记录塞进 extra（JSON 往返一圈），
 // 而不是直接存结构体：生产里 extra 来自 JSONB，时间是字符串不是 time.Time。
 func writeGatewayHistoryForTest(t *testing.T, a *Account, rec openAIGatewayHistory) {

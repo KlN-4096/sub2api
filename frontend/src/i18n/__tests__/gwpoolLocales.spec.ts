@@ -80,6 +80,20 @@ describe('gateway pool locale keys', () => {
     for (const mark of ['✓', '!']) {
       expect(openai.gatewayHistory.legend, mark).toContain(mark)
     }
+    // 满血分钟预测是**上界不是承诺**。主文案里必须出现「最多」那个限定词，tooltip 里必须
+    // 同时交代两条偏乐观的理由（账本只看得见本行、冷却时长没测准）—— 少了限定词，运营方
+    // 会照着这个数当配额用。
+    expect(openai.gatewayHistory.forecast).toMatch(/最多|at most/)
+    expect(openai.gatewayHistory.forecastHint).toMatch(/上界|upper bound/)
+    expect(openai.gatewayHistory.forecastHint).toMatch(/克隆行|clone/)
+    expect(openai.gatewayHistory.forecastHint).toMatch(/没测准|not pinned down/)
+    // 预测用的插值名必须是 minutes / units / window —— 组件按这三个名字传参，
+    // 改了名字 vue-i18n 会静默渲染成字面量。
+    expect(openai.gatewayHistory.forecast).toContain('{minutes}')
+    expect(openai.gatewayHistory.forecastHint).toContain('{units}')
+    expect(openai.gatewayHistory.forecastHint).toContain('{window}')
+    expect(openai.gatewayHistory.forecastBlind).toContain('{count}')
+    expect(openai.gatewayHistory.forecastBlindHint).toContain('{count}')
   })
 
   // 判不出来那条路的文案在中英两边都必须说「放行」，不能说「失败」。
