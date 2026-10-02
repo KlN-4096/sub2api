@@ -31,6 +31,21 @@ const (
 	// 每一发请求都要 UPDATE 一次账号行（UpdateExtra 对中性键仍会连带 GetByID + Redis 写）。
 	// 换网关要立刻写——那正是这张卡要看的事，不该被节流窗口压住。
 	openAIGatewayHistoryWriteInterval = 5 * time.Minute
+	// openAIGatewayFullWindow 是前端把「验过满血」那一格显示成绿色的时长，也是 FullAt 必须
+	// 刷新的节奏（见下面的节流穿透）。
+	//
+	// 183 秒不是我们测出来的，是**取两边最保守的那个**：实测窗口是 200–300 秒，而池子自己的
+	// types.FullWindow 就是 183 秒、DeliverTTL 只有 150 秒（gwpool/internal/types）。取大的
+	// 会让格子在池子和后端都认为窗口已关之后还绿着 —— 而运营方正照着这一格挑落点。
+	// 前端 AccountGatewayCell.vue 的 FULL_WINDOW_MS 必须和它同值（跨语言，只能靠这条注释）。
+	openAIGatewayFullWindow = 183 * time.Second
+)
+
+// state-echo 的两个结论（openai_gwpool_state_echo.go 产出，这里只存与展示）。
+// 空串是第三态「没判过」，刻意不给它名字：零值就该是它。
+const (
+	openAIGatewayVerdictFull     = "full"
+	openAIGatewayVerdictDegraded = "degraded"
 )
 
 // openAIGatewayHistory 是那条记录。
@@ -61,6 +76,17 @@ type openAIGatewaySeen struct {
 	// Region 是池子说的「这张票是哪个大区铸的」。空 = 池子没报 / 这一发被上游改派走了
 	// （那时池子说的大区对不上实际落点，记上去会把落点归到错的大区里，宁可留空）。
 	Region string `json:"region,omitempty"`
+	// Verdict 是这个 (账号 × 网关) 上**最后一次** state-echo 判成什么：
+	// "" = 没判过 / full / degraded。
+	Verdict string `json:"verdict,omitempty"`
+	// FullAt 是最后一次**判成满血**的时刻，唯一有意义的「回归」起点。
+	//
+	// 只能当排序权重，**不能当闸**：回归的触发变量未知（10-01 的 11 点测试里休息 30 分钟到
+	// 4 小时的命中率是常数，零相关），所以「等 N 小时就算恢复」没有实测依据。判「这个网关
+	// 还能不能用」仍然走 gatewayPoolUsedRecently 那个工程兜底窗口。
+	// omitzero 而不是 omitempty：omitempty 对 struct 不生效，零值会落库成
+	// "0001-01-01T00:00:00Z"（同 openai_turn_state_recovery.go 的两个时间字段）。
+	FullAt time.Time `json:"full_at,omitzero"`
 }
 
 // readOpenAIGatewayHistory 读这条记录。解析失败按「没有」处理。
@@ -87,9 +113,18 @@ func readOpenAIGatewayHistory(a *Account) (openAIGatewayHistory, bool) {
 	return rec, true
 }
 
-// noteOpenAIGatewayUse 记一发请求落在了哪个网关。gateway 为空（读不出落点）时什么都不做：
-// 「这一发没能读出网关」和「这一发没有网关」是两回事，记空值会把 Current 擦掉。
-func (s *OpenAIGatewayService) noteOpenAIGatewayUse(ctx context.Context, account *Account, gateway, region string) {
+// noteOpenAIGatewayUse 记一发请求落在了哪个网关，以及这一发的 state-echo 读数
+// （verdict 为空 = 这一发没判据，照旧只记落点）。
+//
+// gateway 为空（读不出落点）时什么都不做：「这一发没能读出网关」和「这一发没有网关」是两回事，
+// 记空值会把 Current 擦掉。
+//
+// advanceCurrent=false 只更新 Seen，不动 `Current`/`CurrentRegion`：queue 档的预热在业务请求
+// **之前**判死一批落点，那些落点上永远不会有业务请求，推进「当前网关」会把卡片第一行写成最后
+// 一个被判死的落点（见 openai_gwpool_warm.go 的 noteWarmVerdict）。
+func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
+	ctx context.Context, account *Account, gateway, region, verdict string, advanceCurrent bool,
+) {
 	if s == nil || s.accountRepo == nil || account == nil {
 		return
 	}
@@ -102,8 +137,17 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(ctx context.Context, account
 
 	rec, _ := readOpenAIGatewayHistory(account)
 	prev := rec.Seen[gateway]
-	// 没换网关、这个网关刚写过、而且大区也没新消息 ⇒ 不写。换了就立刻写。
-	if rec.Current == gateway && (region == "" || region == prev.Region) {
+	// 没换网关、这个网关刚写过、大区没新消息、**判定也没变** ⇒ 不写。换了就立刻写。
+	// 判定变了必须穿过节流：「这个落点刚被判降智」正是这张卡要看的事，压住它等于不记。
+	//
+	// 判成满血、而上一次判成满血已经比满血窗口还旧 ⇒ **也要穿过**：节流窗口（5 分钟）比满血
+	// 窗口（183 秒）长，不穿的话一个持续被验成满血的落点，它的 FullAt 会停在第一次那一刻，
+	// 格子在 183 秒后掉成琥珀 —— 而它可能几十秒前刚验过。穿过的频率上界就是满血窗口，
+	// 不比原来的节流多出数量级。
+	staleFull := verdict == openAIGatewayVerdictFull &&
+		now.After(prev.FullAt.Add(openAIGatewayFullWindow))
+	if (!advanceCurrent || rec.Current == gateway) && (region == "" || region == prev.Region) &&
+		(verdict == "" || verdict == prev.Verdict) && !staleFull {
 		if !prev.At.IsZero() && now.Before(prev.At.Add(openAIGatewayHistoryWriteInterval)) {
 			return
 		}
@@ -111,14 +155,24 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(ctx context.Context, account
 	if rec.Seen == nil {
 		rec.Seen = map[string]openAIGatewaySeen{}
 	}
-	rec.Current = gateway
 	// 大区读不出来时**留着上一次记的那个**：同一个网关的大区不会变（网关 = 大区 × 账号），
 	// 一发改派就把它擦掉等于白丢一格信息。
 	if region == "" {
 		region = prev.Region
 	}
-	rec.CurrentRegion = region
-	rec.Seen[gateway] = openAIGatewaySeen{At: now, Region: region}
+	if advanceCurrent {
+		rec.Current = gateway
+		rec.CurrentRegion = region
+	}
+	next := openAIGatewaySeen{At: now, Region: region, Verdict: prev.Verdict, FullAt: prev.FullAt}
+	// 这一发没判据时**留着上一次的判定**，和大区同一个道理：没判 ≠ 判不出来。
+	if verdict != "" {
+		next.Verdict = verdict
+		if verdict == openAIGatewayVerdictFull {
+			next.FullAt = now
+		}
+	}
+	rec.Seen[gateway] = next
 	rec.UpdatedAt = now
 	pruneOpenAIGatewayHistory(&rec)
 

@@ -45,16 +45,44 @@ describe('gateway pool locale keys', () => {
       'gwpoolListTimeoutDesc',
       'gwpoolSteering',
       'gwpoolSteeringDesc',
-      'gwpoolStateEcho',
-      'gwpoolStateEchoDesc',
-      'gwpoolDegradedRetry',
-      'gwpoolDegradedRetryDesc'
+      'gwpoolGuard'
     ]) {
       expect(typeof openai[key], key).toBe('string')
     }
+    // 降智防护的四档：每档都要有标签和说明，少一条下拉里就会出现一个空选项。
+    for (const mode of ['off', 'cut', 'retry', 'queue']) {
+      expect(typeof openai.gwpoolGuardModes[mode], mode).toBe('string')
+      expect(typeof openai.gwpoolGuardDescs[mode], mode).toBe('string')
+      expect(openai.gwpoolGuardDescs[mode].length, mode).toBeGreaterThan(40)
+    }
+    // queue 档会花掉上游配额（平均约 6 发垫话换一个窗口），说明里必须写清成本 —— 它是这一档
+    // 唯一的代价，运营方不该靠读源码才知道。
+    expect(openai.gwpoolGuardDescs.queue).toContain('gwpool_warm_probe')
+    // 判不出来那条路的**行为**必须点名，而且必须点对：代码在那条路上放行业务请求
+    // （openai_gwpool_warm.go 的 `case !conclusive`），第一版文案写的是「这一发直接失败、
+    // 上游限流期间这一档会挡掉每个请求」—— 正好相反。运营方选这一档就是为了「上游不正常时
+    // 宁可失败也别放降智出去」，而这里恰好是它做不到的那一格，说反了比不说更坏。
+    // 长度/关键词断言抓不到语义反转，所以钉死这两个判别词。
+    expect(openai.gwpoolGuardDescs.queue).toContain('gwpool_warm_inconclusive')
+    // 和首输出超时共享墙上时间这件事也要点名：配到 30 秒以下整档静默失效。
+    expect(openai.gwpoolGuardDescs.queue).toContain('gwpool_warm_no_budget')
     // 地址提示必须点出「根地址」这个坑（用户填过 /a/xxxx 个人页面）。
     expect(openai.gwpoolBaseUrlDesc).toContain('pool.0102400.xyz')
     expect(openai.gwpoolBaseUrlDesc).toContain('/a/xxxx')
+    // 九宫格的四种色只靠颜色传达不行（9px 字号、emerald/rose 同明度、title 触屏摸不到），
+    // 图例必须在页面上，而且要带那两个字符前缀。
+    for (const mark of ['✓', '!']) {
+      expect(openai.gatewayHistory.legend, mark).toContain(mark)
+    }
+  })
+
+  // 判不出来那条路的文案在中英两边都必须说「放行」，不能说「失败」。
+  // 分开一条用例是因为判别词按语言不同，塞进上面那个 it.each 会变成一堆 if。
+  it('describes the inconclusive filler shot as letting the request through', () => {
+    expect(zh.admin.accounts.openai.gwpoolGuardDescs.queue).toContain('不拦这一发')
+    expect(zh.admin.accounts.openai.gwpoolGuardDescs.queue).not.toContain('这一发直接失败')
+    expect(en.admin.accounts.openai.gwpoolGuardDescs.queue).toContain('is not blocked')
+    expect(en.admin.accounts.openai.gwpoolGuardDescs.queue).not.toContain('the request simply fails')
   })
 
   it.each([

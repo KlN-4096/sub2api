@@ -18,9 +18,18 @@ func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
 // 满足两个条件：响应头已经到手，而调用方还一个字节都没往下游写（调用方要等这个函数返回才开始
 // 解析响应）。所以「截断」在这里是干净的，不会留一个半截的 SSE 流。
 func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
-	// 判据有假阳性（见 openai_gwpool_state_echo.go 的纪律 2）⇒ 换票重发的放大系数硬封顶在 1：
+	guard := account.gatewayPoolGuard()
+	// queue 档：业务请求只落在**验过满血**的槽上。判据跑在这一发之前、用便宜的垫话，
+	// 所以用户的请求不会是那个去试网关的人（openai_gwpool_warm.go）。
+	// 验不出来就把错误往上抛，**绝不降级放行**。
+	if guard == gatewayPoolGuardQueue {
+		if err := s.gatewayPoolWarmUp(request, proxyURL, account); err != nil {
+			return nil, err
+		}
+	}
+	// 判据有假阴性（见 openai_gwpool_state_echo.go 的纪律 2）⇒ 换票重发的放大系数硬封顶在 1：
 	// 重试那一发若又判降智，直接走错误路径，绝不再试。
-	for remaining := account.gatewayPoolDegradedRetries(); ; remaining-- {
+	for remaining := guard.retries(); ; remaining-- {
 		resp, degraded, err := s.doOpenAIUpstreamOnce(request, proxyURL, account)
 		if !degraded {
 			return resp, err

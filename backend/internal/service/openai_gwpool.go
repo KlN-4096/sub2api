@@ -312,6 +312,21 @@ func validateOpenAIGatewayPoolAccountExtra(account *Account, extra map[string]an
 			"account %d enables %s so %s must be set",
 			account.ID, openAIGatewayPoolExtraKey, OpenAIGatewayPoolConsumerKeyExtraKey)
 	}
+	// 档位也在写入时拦：gatewayPoolGuard 对认不出的值回默认档（**不能**在转发时 fail closed，
+	// 那会让一个手滑的值停掉整个账号），所以「保存成功了但配的那一档没生效」是这一项唯一的
+	// 失败形态 —— 而 extra 是 JSONB、管理 API 与批量导入直收，`"Queue"` / `"OFF"` / `1` 都进得来。
+	// 同型先例：ValidateOpenAITurnStateHunterExtra 的「保存成功但什么都不做是最难排查的失败」。
+	if raw, present := extra[openAIGatewayPoolGuardExtraKey]; present {
+		text, isText := raw.(string)
+		switch mode := gatewayPoolGuardMode(strings.TrimSpace(text)); {
+		case !isText,
+			mode != gatewayPoolGuardOff && mode != gatewayPoolGuardCut &&
+				mode != gatewayPoolGuardRetry && mode != gatewayPoolGuardQueue:
+			return infraerrors.Newf(http.StatusBadRequest, "GWPOOL_GUARD_INVALID",
+				"account %d: %s must be one of off/cut/retry/queue, got %v",
+				account.ID, openAIGatewayPoolGuardExtraKey, raw)
+		}
+	}
 	return nil
 }
 
@@ -336,15 +351,35 @@ const (
 // 同型先例：OpenAITurnStateHoldReason（注释写的正是「客户端一眼能看出不是上游故障」）。
 const OpenAIGatewayPoolReason = GatewayFailureReason("openai_gateway_pool")
 
+// gatewayPoolHopelessCodes 是「重试不会好」的池子错误码：要人去改 key 或改参数。
+//
+// 分流线刻意按**重试会不会好**划，不按谁的责任。no_exit / public_closed / upstream_rejected
+// 也不是我们的错，但它们**会自愈**，所以「稍后重试即可」对它们是对的，留在 NoSlot 那条。
+var gatewayPoolHopelessCodes = map[string]struct{}{
+	gwpool.CodeConsumerRejected: {}, // 我们的 consumer key 配错 / 被吊销（owner 一拆就会变）
+	gwpool.CodeBadRequest:       {}, // 我们发出去的参数不合法，池子刻意不给 retry_after
+}
+
 // gatewayPoolClientMessage 挑出该交给客户端的那一条，空串 = 这不是池子的错。
 //
 // 判序不能动：errOpenAIGatewayPoolRouteDegraded 自己就包着 ErrPool，排在后面会被吃掉。
+//
+// 码要在 ErrNoSlot 之前看：*PoolError **全部** Unwrap 到 ErrNoSlot（pkg/gwpool 的设计，
+// 让 fail-closed 判断不用逐码改），所以仅按 errors.Is 分流的话十一个码只剩一句话。
+// 2026-10-02 现场：池子回 consumer_rejected（owner 拆分后 key 变了），客户端却收到
+// 「没有满血槽位……稍后重试即可」，而那一刻池子有 51 个空闲网关、一个槽位都不缺。
 func gatewayPoolClientMessage(err error) string {
 	switch {
 	case err == nil:
 		return ""
 	case errors.Is(err, errOpenAIGatewayPoolRouteDegraded):
 		return gatewayPoolDegradedClientMsg
+	case errors.Is(err, errOpenAIGatewayPoolWarmNoModel):
+		return gatewayPoolWarmNoModelClientMsg
+	case errors.Is(err, errOpenAIGatewayPoolWarmExhausted):
+		return gatewayPoolWarmExhaustedClientMsg
+	case gatewayPoolHopeless(err):
+		return gatewayPoolUnavailableClientMsg
 	case errors.Is(err, gwpool.ErrNoSlot):
 		return gatewayPoolNoSlotClientMsg
 	case errors.Is(err, gwpool.ErrPool):
@@ -352,6 +387,17 @@ func gatewayPoolClientMessage(err error) string {
 	default:
 		return ""
 	}
+}
+
+// gatewayPoolHopeless 报告这个错误的码属不属于「重试不会好」。
+// 没报码（池子回了闭集外的值）⇒ false：不凭空把供给不足升级成「你配错了」。
+func gatewayPoolHopeless(err error) bool {
+	var refused *gwpool.PoolError
+	if !errors.As(err, &refused) {
+		return false
+	}
+	_, ok := gatewayPoolHopelessCodes[refused.Code]
+	return ok
 }
 
 // gatewayPoolClientError 给池子侧的失败套一层双语说明。
@@ -363,7 +409,9 @@ func gatewayPoolClientError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, gwpool.ErrNoSlot) {
+	// 和 gatewayPoolClientMessage 同一条分流线：客户端看到的那串就是这里拼的前缀
+	// （2026-10-02 那发 503 的正文），两处必须一致，否则日志和客户端各说一套。
+	if errors.Is(err, gwpool.ErrNoSlot) && !gatewayPoolHopeless(err) {
 		return fmt.Errorf("%s: %w", gatewayPoolNoSlotClientMsg, err)
 	}
 	return fmt.Errorf("%s: %w", gatewayPoolUnavailableClientMsg, err)
@@ -619,17 +667,27 @@ func (s *openAICodexCookieStore) gatewayPoolBurnedGateways(identity string, wind
 	return out
 }
 
-// gatewayPoolBackoffFor 报告这个身份现在还要停多久不取票（0 = 可以取）。
-func (s *openAICodexCookieStore) gatewayPoolBackoffFor(identity string) time.Duration {
+// gatewayPoolBackoffEntry 是一次退避：到点 + **当初是哪个码让我们退的**。
+//
+// 为什么要留码：退避一开，后面整段时间里业务请求一个池子请求都不发（见 gatewayPoolPair），
+// 可报的只有这个退避本身。只记到点的话 consumer_rejected（要人去改 key）和 all_cooling
+// （等几小时）在退避期里长得一模一样，而 gatewayPoolClientMessage 要靠码分流文案。
+type gatewayPoolBackoffEntry struct {
+	Until time.Time
+	Code  string
+}
+
+// gatewayPoolBackoffFor 报告这个身份现在还要停多久不取票（0 = 可以取），以及当初的码。
+func (s *openAICodexCookieStore) gatewayPoolBackoffFor(identity string) (time.Duration, string) {
 	value, ok := s.poolBackoff.Load(gatewayPoolLedgerIdentity(identity))
 	if !ok {
-		return 0
+		return 0, ""
 	}
-	until, ok := value.(time.Time)
+	entry, ok := value.(gatewayPoolBackoffEntry)
 	if !ok {
-		return 0
+		return 0, ""
 	}
-	return time.Until(until)
+	return time.Until(entry.Until), entry.Code
 }
 
 // gatewayPoolBackoff 按池子的错误码决定要不要停这个身份的取票，并返回「停多久」（0 = 不停）。
@@ -765,11 +823,16 @@ func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *A
 	}
 	// 退避只挡**取新票**：手里那张还活着就照常用（上面已经返回）。
 	// 不在 singleflight 里判：退避期一个池子请求都不该发，包括排队的那些。
-	if remaining := s.gatewayPoolBackoffFor(identity); remaining > 0 {
+	if remaining, code := s.gatewayPoolBackoffFor(identity); remaining > 0 {
 		// 身份不进报错（它含上游 account_id）；账号 id 进日志，与本文件其它日志同口径。
-		slog.Debug("gwpool_backoff_active", "account_id", account.ID, "remaining_s", int(remaining.Seconds()))
+		slog.Debug("gwpool_backoff_active", "account_id", account.ID,
+			"code", code, "remaining_s", int(remaining.Seconds()))
+		// 把当初那个码原样带回去：退避期里一个池子请求都不发，这是唯一的线索来源。
+		// 包成 *PoolError 而不是另造一种错 ⇒ gatewayPoolClientMessage 的分流一个字都不用改。
+		// Status 0 = 这一发没发出去，没有真实 HTTP 状态可报。
 		return openAIGatewayPoolPair{}, false, fmt.Errorf(
-			"%w: pool asked this account to back off for another %ds", gwpool.ErrNoSlot, int(remaining.Seconds()))
+			"%w: pool asked this account to back off for another %ds",
+			&gwpool.PoolError{Code: code}, int(remaining.Seconds()))
 	}
 	pool, err := s.poolClient(account)
 	if err != nil {
@@ -830,7 +893,8 @@ func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *A
 			// 池子明说了「先别来」就按身份记下来：只对本次请求生效的退避挡不住重试环，
 			// 而每一轮重试都会在池子侧触发一次发现铸票。
 			if backoff, code := gatewayPoolBackoff(err); backoff > 0 {
-				s.poolBackoff.Store(gatewayPoolLedgerIdentity(identity), time.Now().Add(backoff))
+				s.poolBackoff.Store(gatewayPoolLedgerIdentity(identity),
+					gatewayPoolBackoffEntry{Until: time.Now().Add(backoff), Code: code})
 				slog.Warn("gwpool_backoff_started", "account_id", account.ID,
 					"code", code, "backoff_s", int(backoff.Seconds()))
 			}
@@ -992,6 +1056,12 @@ type OpenAIGatewayPoolApplied struct {
 	// Region 是池子说的「这张票是哪个大区铸的」，给账号卡片按大区归档落点用。空 = 不知道。
 	Region  string
 	Version string
+	// Verdict 是这一发的 state-echo 读数："" = 没判（判据关着、没送票、非 200）、
+	// openAIGatewayVerdictFull、openAIGatewayVerdictDegraded。
+	//
+	// 挂在这个快照上而不是 sink 上另存一份：换票重试那一圈里前一个落点判降智、后一个判满血，
+	// 而丢弃行各自快照走自己那一份 Applied ⇒ 两条用量行读到各自的结论。
+	Verdict string
 }
 
 // openAIGatewayPoolSink 是 ctx 里承载的那个指针。
@@ -1008,6 +1078,12 @@ type openAIGatewayPoolSink struct {
 	// discarded 是本次请求里被 state-echo 判成降智、整发丢掉的那些上游尝试
 	// （openai_gwpool_state_echo.go）。它们都是**真实发生过的**上游请求，要落可审计的用量行。
 	discarded []OpenAIGatewayPoolDiscardedAttempt
+	// model 是这一发的出站模型名，由 buildUpstreamRequest 在**压缩之前**从明文体里记一笔。
+	//
+	// queue 档的垫话必须用同一个模型（state 绑在 (账号 × 模型 × 这张票) 上），而传输层只拿到
+	// *http.Request —— 而且双开账号的出站体是 zstd，裸解 JSON 必然失败
+	// （compressCodexRequestBody）。所以在还看得见明文的那一层记下来。
+	model string
 }
 
 type openAIGatewayPoolSinkCtxKey struct{}
@@ -1095,6 +1171,45 @@ func (s *openAIGatewayPoolSink) mark(applied OpenAIGatewayPoolApplied) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.applied = applied
+}
+
+// noteModel / modelOf 记取这一发的出站模型名（见字段注释）。空串 = 不知道。
+func (s *openAIGatewayPoolSink) noteModel(model string) {
+	if s == nil {
+		return
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.model = model
+}
+
+func (s *openAIGatewayPoolSink) modelOf() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.model
+}
+
+// noteVerdict 把 state-echo 的结论补到当前标记上（gatewayPoolRouteDegraded 调）。
+//
+// 网关对不上就不记：换票重试时 mark 已经被下一张票覆盖，拿上一发的结论去改它会把结论
+// 记到错的落点上。
+func (s *openAIGatewayPoolSink) noteVerdict(gateway, verdict string) {
+	if s == nil || gateway == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.applied.Gateway != gateway {
+		return
+	}
+	s.applied.Verdict = verdict
 }
 
 // snapshot 读回这一发的标记（出站挂钩点之后、同一个 ctx 上的调用方用，见 gatewayPoolRenew）。
