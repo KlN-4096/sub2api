@@ -141,6 +141,12 @@ describe('gateway pool locale keys', () => {
     // 被改派的文案要把两个网关都点出来，否则读的人不知道比对的是什么。
     expect(usage.routePairRerouted).toContain('{promised}')
     expect(usage.routePairRerouted).toContain('{landed}')
+    // 「已覆写」那一档必须说清落点**没观测到**。它读的是我们自己发出去那张 cookie，而上游
+    // 只在改派时才下发新 __oailb ⇒「池子说的和 route_gateway 一样」恒为真、无法证伪。
+    // 第一版写的是「落点就是池子给的那个网关」，那是拿零证据当确认 —— 而「消费者回放之后
+    // 到底落在哪」恰好是 (账号 × 网关) 这个单位唯一还没实证的一环，这条文案是页面上唯一的提示。
+    expect(usage.routePairOverridden).toMatch(/没有观测到|never observed/)
+    expect(usage.routePairOverridden).not.toMatch(/落点就是|landed on the gateway/)
     // 卡片只给网关名与状态，不许把 cookie 本体写进文案。
     expect(usage.routePairOverridden).not.toContain('=')
     expect(usage.routePairRerouted).not.toContain('=')

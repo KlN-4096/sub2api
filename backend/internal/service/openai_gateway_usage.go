@@ -502,7 +502,11 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	usageLog.RoutePairPoolGateway = usageCodexRoutePairPoolGatewayPtr(routePairPoolGateway)
 	usageLog.RoutePairPoolVersion = usageCodexRoutePairPoolVersionPtr(routePairPoolVersion)
 	// 顺手把落点记进账号 extra：用量行是按请求的，答不了「这个号碰过哪些网关、现在在哪个」。
-	// 用 RouteGateway（实际落点）而不是池子说的那个：注入被改派时，这张卡该显示真正打到的。
+	// 用 RouteGateway 而不是池子说的那个：被改派的那些发，这张卡该显示真正打到的那个。
+	//
+	// RouteGateway 只在**上游下发了新 __oailb** 时才是观测值，其余时候读的是我们自己发出去
+	// 那张（见 UsageLog.RouteGateway 的注释）。账本照记不变：它的用途是「别再用烧过的那一格」，
+	// 而没观测到时按「我们要求它去哪」记是保守方向，记空等于忘掉这一发。
 	if usageLog.RouteGateway != nil {
 		// 大区和判定共用**同一个**谓词「池子交付的落点 == 实际落点」：改派的那些发，池子说的
 		// 大区与判据问的都是另一个网关，记到实际落点上就是把读数挂到错的单位上（而降智的单位
