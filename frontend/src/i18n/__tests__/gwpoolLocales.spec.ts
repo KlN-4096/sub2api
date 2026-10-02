@@ -80,19 +80,23 @@ describe('gateway pool locale keys', () => {
     for (const mark of ['✓', '!']) {
       expect(openai.gatewayHistory.legend, mark).toContain(mark)
     }
-    // 满血分钟预测是**上界不是承诺**。主文案里必须出现「最多」那个限定词，tooltip 里必须
-    // 同时交代两条偏乐观的理由（账本只看得见本行、冷却时长没测准）—— 少了限定词，运营方
-    // 会照着这个数当配额用。
-    expect(openai.gatewayHistory.forecast).toMatch(/最多|at most/)
-    expect(openai.gatewayHistory.forecastHint).toMatch(/上界|upper bound/)
-    expect(openai.gatewayHistory.forecastHint).toMatch(/克隆行|clone/)
+    // 满血分钟预测是**下界**。主文案必须出现「至少」那个限定词 —— 写成「最多」会被
+    // 运营方当配额用，而这个数的全部意义是「可以指望这么多」。
+    expect(openai.gatewayHistory.forecast).toMatch(/至少|at least/)
+    expect(openai.gatewayHistory.forecast).not.toMatch(/最多|at most/)
+    expect(openai.gatewayHistory.forecastHint).toMatch(/下界|lower bound/)
+    // tooltip 必须同时交代两个偏移方向：往大偏（没摸过的大区不计入）和仍然乐观的那一处
+    // （冷却时长没测准）。只说一个方向的话读者会以为另一个方向不存在。
+    expect(openai.gatewayHistory.forecastHint).toMatch(/没碰过|never touched/)
     expect(openai.gatewayHistory.forecastHint).toMatch(/没测准|not pinned down/)
-    // 预测用的插值名必须是 minutes / units / window —— 组件按这三个名字传参，
+    expect(openai.gatewayHistory.forecastUntouchedHint).toMatch(/别的行|another row/)
+    // 预测用的插值名必须是 minutes / units / window / count —— 组件按这些名字传参，
     // 改了名字 vue-i18n 会静默渲染成字面量。
     expect(openai.gatewayHistory.forecast).toContain('{minutes}')
     expect(openai.gatewayHistory.forecastHint).toContain('{units}')
     expect(openai.gatewayHistory.forecastHint).toContain('{window}')
-    expect(openai.gatewayHistory.forecastBlind).toContain('{count}')
+    expect(openai.gatewayHistory.forecastUntouched).toContain('{count}')
+    expect(openai.gatewayHistory.forecastUntouchedHint).toContain('{count}')
     expect(openai.gatewayHistory.forecastBlindHint).toContain('{count}')
   })
 

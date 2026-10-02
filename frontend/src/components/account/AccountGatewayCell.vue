@@ -57,8 +57,14 @@
         data-testid="account-gateway-forecast"
       >
         {{ t('admin.accounts.openai.gatewayHistory.forecast', { minutes: forecastMinutes }) }}
-        <span v-if="forecastBlind" class="text-amber-600 dark:text-amber-400">
-          {{ t('admin.accounts.openai.gatewayHistory.forecastBlind', { count: forecastBlind }) }}
+        <!-- 上行空间：本行没碰过的大区不进上面那个数（可能是别的行烧过了，也可能是记录被
+             裁过），但它确实是「可能更多」的来源，不说出来这个下界会被当成天花板。 -->
+        <span v-if="forecastUntouched" class="text-gray-400 dark:text-gray-500">
+          {{
+            t('admin.accounts.openai.gatewayHistory.forecastUntouched', {
+              count: forecastUntouched
+            })
+          }}
         </span>
       </p>
       <!-- 图例：四种色的语义原来只写在这个文件的注释里，页面上没有任何地方说，而 tooltip
@@ -281,19 +287,11 @@ const cells = computed<RegionCell[]>(() => {
 })
 
 /**
- * 「接下来一小时最多能用到几分钟满血」。
- *
- * 单位是 **(账号 × 大区)**，不是 (账号 × 网关)：一个号在一个大区同一时间只有一个网关，
- * 所以同一个大区下的多个网关名是**同一个**单位（现网 us-west 一个大区就有 20 个不同
- * 网关名，按名字数会把它数 20 遍）。每个大区取它**最近**一次被碰的时刻当冷却起点。
- *
- *	可用单位 = 冷却剩余 ≤ 1 小时的大区 + 从没碰过的大区
- *	预测     = min(可用单位 × 183 秒, 1 小时)
- *
- * 算在前端而不是后端：这是个随时间衰减的值，而后端那条记录有 5 分钟写节流 ——
- * 存进去的预测立刻就过期了。前端这里 now 是跟着 ticker 走的，读数永远是当下的。
+ * 每个大区**最近**一次被碰的时刻。同一个大区下的多个网关名是**同一个**单位
+ * （一个号在一个大区同一时间只有一个网关；现网 us-west 一个大区就有 20 个不同网关名，
+ * 按名字数会把一个单位数 20 遍），所以取最近那次才是这个单位真正的冷却起点。
  */
-const forecastUnits = computed(() => {
+const regionLastSeen = computed(() => {
   const latest = new Map<string, number>()
   for (const item of items.value) {
     // 未归类（region 为空）的落点归不到单位上，猜一个会把别的单位算重。
@@ -303,13 +301,34 @@ const forecastUnits = computed(() => {
     const prev = latest.get(item.region)
     if (prev === undefined || ts > prev) latest.set(item.region, ts)
   }
-  // 从没碰过的大区天然可用。REGION_KEYS 末尾那个空串是「未归类」那一格，不算大区。
-  let units = REGION_KEYS.filter((key) => key !== '').length - latest.size
-  if (units < 0) units = 0
-  for (const ts of latest.values()) {
+  return latest
+})
+
+/**
+ * 「接下来一小时**至少**能用到几分钟满血」—— 刻意算**下界**。
+ *
+ * 只数有**正面证据**的单位：账本里有这个大区的记录，而且它的冷却在一小时内结束。
+ * 三处刻意悲观，全是为了别让这个数偏到不能用：
+ *
+ *  1. **从没碰过的大区不计入数字**，挪到 forecastUntouched 当提示。这本账只看得见
+ *     **本行**发出去的那些（克隆行/影子行各看各的，见 openai_gwpool_gateway_history.go
+ *     开头那段口径），而且 openAIGatewayHistoryMax 从 24 提到 201 之前写下的行被按时间
+ *     裁过 ⇒「本行没碰过」完全可能是「别的行烧过了」或「记录被裁了」。把它算进数字
+ *     就是拿「不知道」当「可用」，而那正是偏移最大的一项（一个刚接池子的行会凭空
+ *     多出九个单位）。
+ *  2. **未归类且还在窗口里的落点要扣掉**：它们确实烧掉了某个大区的单位，只是记录里
+ *     没有 region（池子早先的续期型铸票不报大区）⇒ 不扣就等于白送这么多单位。
+ *  3. 一个单位只按一个满血窗口算（183 秒，取的是实测 200–300 秒里最保守的那个）。
+ *
+ * 算在前端而不是后端：这是个随时间衰减的值，而后端那条记录有 5 分钟写节流 ——
+ * 存进去的预测立刻就过期了。前端这里 now 是跟着 ticker 走的，读数永远是当下的。
+ */
+const forecastUnits = computed(() => {
+  let units = 0
+  for (const ts of regionLastSeen.value.values()) {
     if (windowMs.value - (now.value - ts) <= FORECAST_HORIZON_MS) units += 1
   }
-  return units
+  return Math.max(0, units - forecastBlind.value)
 })
 
 const forecastMinutes = computed(() =>
@@ -317,11 +336,20 @@ const forecastMinutes = computed(() =>
 )
 
 /**
- * 还在窗口里、却归不到大区上的落点数。
+ * 本行账本里没有记录的大区数 —— 下界之外的**上行空间**，只当提示不进数字。
  *
- * 它是预测**偏乐观多少**的度量：这些落点确实烧掉了某个大区的单位，但记录里没有 region
- * （池子侧续期型铸票的出口反查不出九个代表出口之一时 Pair.RegionKey 会落空，已修，
- * 但**旧记录不会自己补上**）⇒ 预测把那些单位当成了「没碰过」。非零时要在 tooltip 里说。
+ * REGION_KEYS 末尾那个空串是「未归类」那一格，不算大区。
+ */
+const forecastUntouched = computed(
+  () => REGION_KEYS.filter((key) => key !== '').length - regionLastSeen.value.size
+)
+
+/**
+ * 还在窗口里、却归不到大区上的落点数，**直接从可用单位里扣掉**（见 forecastUnits 第 2 条）。
+ *
+ * 这些落点确实烧掉了某个大区的单位，只是记录里没有 region（池子侧续期型铸票的出口反查
+ * 不出九个代表出口之一时 Pair.RegionKey 会落空，已修，但**旧记录不会自己补上**）。
+ * 不扣的话它们既不占自己那个大区的格子、也不减少可用数 —— 等于白送。
  */
 const forecastBlind = computed(
   () =>
@@ -332,18 +360,20 @@ const forecastBlind = computed(
 )
 
 /**
- * 预测的 tooltip。三条**必须**写出来，否则这个数会被当成承诺：
+ * 预测的 tooltip。要交代清楚这个数是**下界**，以及它往哪两个方向偏：
  *
- *  1. 它是**上界**不是承诺 —— 这本账挂在账号行上，而烧灼的单位是上游账号的，
- *     同一份凭据的克隆行/影子行各自只看得见自己发出去的那些 ⇒「烧过」记少了。
- *  2. 4 小时冷却本身**没测准**（静置 30 分钟到 4 小时，满血率恒定、零相关），是工程保守取值。
- *  3. 有未归类落点时数字还会再偏大一截（见 forecastBlind）。
+ *  - 往大偏（上行空间）：本行没碰过的大区不计入（forecastUntouched），实际可能更多。
+ *  - 往小偏（仍然乐观的那一处）：4 小时冷却本身**没测准**（静置 30 分钟到 4 小时，
+ *    满血率恒定、零相关），真实恢复时间比它长的话这个数还是会偏大。
  */
 const forecastTitle = computed(() => {
   const base = 'admin.accounts.openai.gatewayHistory'
   const lines = [
     t(`${base}.forecastHint`, { units: forecastUnits.value, window: FULL_WINDOW_MS / 1000 })
   ]
+  if (forecastUntouched.value) {
+    lines.push(t(`${base}.forecastUntouchedHint`, { count: forecastUntouched.value }))
+  }
   if (forecastBlind.value) {
     lines.push(t(`${base}.forecastBlindHint`, { count: forecastBlind.value }))
   }

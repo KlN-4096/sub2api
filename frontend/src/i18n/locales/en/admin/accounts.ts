@@ -811,16 +811,18 @@ export default {
           fullNever: 'never verified full',
           legend:
             '✓ verified full (inside the 183s window) · ! used inside the window, degraded right now · grey window elapsed, usable again',
-          // Full-strength minutes forecast for the next hour. "at most" is deliberate: it is an
-          // upper bound, not a promise — the reasons are in the tooltip.
-          forecast: 'at most {minutes} min full-strength in the next hour',
-          forecastBlind: '(+{count} unclassified landings not counted, so actually less)',
+          // Full-strength minutes forecast for the next hour, deliberately a LOWER bound.
+          // "at least" is required: "at most" would get read as a quota.
+          forecast: 'at least {minutes} min full-strength in the next hour',
+          forecastUntouched: '(this row has {count} regions it never touched, so possibly more)',
           forecastHint:
-            'Counted per (account × region): {units} regions come out of cooldown within the hour (including never-touched ones), each worth about {window}s of full strength.\n' +
-            'This is an **upper bound, not a promise**: this ledger hangs on the account row while the burned unit belongs to the upstream account — clone/shadow rows each only see their own traffic, so "already burned" is undercounted.\n' +
-            'The 4h cooldown itself is not pinned down either (resting 30 minutes vs 4 hours gave a constant full-strength rate, zero correlation); it is a conservative engineering value.',
+            'Counted per (account × region): {units} regions are in the ledger and come out of cooldown within the hour, each worth about {window}s of full strength.\n' +
+            'This is a **lower bound**: only units with positive evidence are counted. Regions this row never touched are left out (another row on the same credential may have burned them, or the record may have been pruned), and landings still inside the window with no region are subtracted.\n' +
+            'One thing still optimistic: the 4h cooldown itself is not pinned down (resting 30 minutes vs 4 hours gave a constant full-strength rate, zero correlation), so if real recovery takes longer this number is still too high.',
+          forecastUntouchedHint:
+            '{count} regions have no record in this row\'s ledger. They are **not counted** above: this ledger only sees what this row sent, so "this row never touched it" may well mean "another row burned it" or "the record was pruned".',
           forecastBlindHint:
-            '{count} more landings are inside the window but have no region (the pool\'s older renewal mints did not report one — fixed since, but old records do not backfill) ⇒ they did burn some region\'s unit, and the forecast counted those units as never-touched.',
+            '{count} landings are still inside the window but have no region (the pool\'s older renewal mints did not report one — fixed since, but old records do not backfill) ⇒ they did burn some region\'s unit, so they have been subtracted from the available count.',
           // state-echo verdict (backend openai_gwpool_state_echo.go).
           verdicts: {
             full: 'last verdict: full strength',

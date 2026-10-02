@@ -52,6 +52,12 @@ const isHot = (w: ReturnType<typeof render>, region: string) => tone(w, region) 
 /** 格子的状态色：full / degraded / idle（见 AccountGatewayCell 的 TONE_CLASS）。 */
 const tone = (w: ReturnType<typeof render>, region: string) => cell(w, region).attributes('data-tone')
 
+/** 预测那行里的分钟数。t() 是桩，渲染出来是 `key:{"minutes":N}`。 */
+const minutesOf = (w: ReturnType<typeof render>) => {
+  const text = w.get('[data-testid="account-gateway-forecast"]').text()
+  return JSON.parse(text.slice(text.indexOf('{'), text.indexOf('}') + 1)).minutes as number
+}
+
 describe('AccountGatewayCell', () => {
   it('第一行是当前大区 · 当前网关', () => {
     const w = render(
@@ -270,13 +276,8 @@ describe('AccountGatewayCell', () => {
     expect(never[4]).toContain('gatewayHistory.verdicts.none')
   })
 
-  // 满血分钟预测：单位是 (账号 × 大区)，同一大区下的多个网关名算一个。
+  // 满血分钟预测：单位是 (账号 × 大区)，同一大区下的多个网关名算一个，而且算**下界**。
   it('满血分钟预测按大区数单位，不按网关名数', () => {
-    const minutesOf = (w: ReturnType<typeof render>) => {
-      const text = w.get('[data-testid="account-gateway-forecast"]').text()
-      return JSON.parse(text.slice(text.indexOf('{'), text.indexOf('}') + 1)).minutes as number
-    }
-
     // 九个大区全部刚烧过 ⇒ 一小时内一个都出不来 ⇒ 0 分钟。
     const allBurned = Object.fromEntries(
       ['us-east', 'us-west', 'south-america', 'west-europe', 'europe', 'east-asia', 'oceania', 'south-asia', 'middle-east'].map(
@@ -285,20 +286,29 @@ describe('AccountGatewayCell', () => {
     )
     expect(minutesOf(render(account({ current: 'unified-0', seen: allBurned })))).toBe(0)
 
-    // 同一个大区三个网关名 = 一个单位。其余八个大区没碰过 ⇒ 8 个单位 × 183 秒 ≈ 24 分钟。
-    // 按网关名数的实现会把 us-west 算成 3 个「已烧」，剩下的照样是 8，所以这一条真正卡住的
-    // 是下一条：三个名字只能扣掉**一个**大区。
+    // 九个大区都已出冷却 ⇒ 九个单位 × 183 秒，封顶一小时之前是 27 分钟。
+    const allCooled = Object.fromEntries(
+      Object.entries(allBurned).map(([name, row]) => [
+        name,
+        { ...(row as object), at: isoAgo(5 * 3600) }
+      ])
+    )
+    expect(minutesOf(render(account({ current: 'unified-0', seen: allCooled })))).toBe(
+      Math.round((9 * 183) / 60)
+    )
+
+    // 同一个大区三个网关名 = **一个**单位。都已出冷却 ⇒ 1 个单位，不是 3 个。
     const oneRegion = render(
       account({
         current: 'unified-1',
         seen: {
-          'unified-1': { at: isoAgo(60), region: 'us-west' },
-          'unified-2': { at: isoAgo(120), region: 'us-west' },
-          'unified-3': { at: isoAgo(180), region: 'us-west' }
+          'unified-1': { at: isoAgo(5 * 3600), region: 'us-west' },
+          'unified-2': { at: isoAgo(6 * 3600), region: 'us-west' },
+          'unified-3': { at: isoAgo(7 * 3600), region: 'us-west' }
         }
       })
     )
-    expect(minutesOf(oneRegion)).toBe(Math.round((8 * 183) / 60))
+    expect(minutesOf(oneRegion)).toBe(Math.round(183 / 60))
 
     // 同一个大区里取**最近**那次当冷却起点：旧的那条不该让这个单位看起来已恢复。
     const staleAndFresh = render(
@@ -310,38 +320,58 @@ describe('AccountGatewayCell', () => {
         }
       })
     )
-    expect(minutesOf(staleAndFresh)).toBe(Math.round((8 * 183) / 60))
+    expect(minutesOf(staleAndFresh)).toBe(0)
 
-    // 冷却剩余 ≤ 1 小时就算可用：4 小时窗口下，3.5 小时前烧的那个算回来 ⇒ 九个全可用。
+    // 冷却剩余 ≤ 1 小时就算可用：4 小时窗口下，3.5 小时前烧的那个算回来。
     const recovering = render(
       account({
         current: 'unified-1',
         seen: { 'unified-1': { at: isoAgo(3.5 * 3600), region: 'us-west' } }
       })
     )
-    expect(minutesOf(recovering)).toBe(Math.round((9 * 183) / 60))
+    expect(minutesOf(recovering)).toBe(Math.round(183 / 60))
   })
 
-  it('未归类且还在窗口里的落点要单独提示，因为预测把它们当成了没碰过', () => {
+  // 下界的两条悲观规则，都是为了别让这个数偏到不能用。
+  it('没摸过的大区不进数字，只当上行空间提示', () => {
     const w = render(
       account({
-        current: 'unified-9',
-        seen: {
-          'unified-9': { at: isoAgo(60) }, // 没有 region
-          'unified-1': { at: isoAgo(60), region: 'us-west' }
-        }
+        current: 'unified-1',
+        seen: { 'unified-1': { at: isoAgo(5 * 3600), region: 'us-west' } }
       })
     )
-    const forecast = w.get('[data-testid="account-gateway-forecast"]').text()
-    expect(forecast).toContain('gatewayHistory.forecastBlind')
-    expect(forecast).toContain('"count":1')
+    // 只有 us-west 有正面证据 ⇒ 1 个单位。另外八个大区本行没碰过，**不算**。
+    expect(minutesOf(w)).toBe(Math.round(183 / 60))
+    const text = w.get('[data-testid="account-gateway-forecast"]').text()
+    expect(text).toContain('gatewayHistory.forecastUntouched')
+    expect(text).toContain('"count":8')
 
-    // 都归了类就不该出现这段提示。
-    const clean = render(
-      account({ current: 'unified-1', seen: { 'unified-1': { at: isoAgo(60), region: 'us-west' } } })
+    // 九个大区都有记录了就没有上行空间可说。
+    const full = Object.fromEntries(
+      ['us-east', 'us-west', 'south-america', 'west-europe', 'europe', 'east-asia', 'oceania', 'south-asia', 'middle-east'].map(
+        (region, i) => [`unified-${i}`, { at: isoAgo(5 * 3600), region }]
+      )
     )
-    expect(clean.get('[data-testid="account-gateway-forecast"]').text()).not.toContain(
-      'gatewayHistory.forecastBlind'
+    expect(
+      render(account({ current: 'unified-0', seen: full }))
+        .get('[data-testid="account-gateway-forecast"]')
+        .text()
+    ).not.toContain('gatewayHistory.forecastUntouched')
+  })
+
+  it('未归类且还在窗口里的落点要从可用数里扣掉，不是白送', () => {
+    const seen = {
+      'unified-1': { at: isoAgo(5 * 3600), region: 'us-west' },
+      'unified-2': { at: isoAgo(5 * 3600), region: 'europe' },
+      'unified-9': { at: isoAgo(60) } // 还在窗口里，但读不出大区
+    }
+    // 两个大区出了冷却，扣掉一个未归类的烧灼 ⇒ 1 个单位。
+    expect(minutesOf(render(account({ current: 'unified-1', seen })))).toBe(Math.round(183 / 60))
+
+    // 那个未归类落点出了窗口就不再扣 ⇒ 回到 2 个单位。
+    const cooled = { ...seen, 'unified-9': { at: isoAgo(5 * 3600) } }
+    expect(minutesOf(render(account({ current: 'unified-1', seen: cooled })))).toBe(
+      Math.round((2 * 183) / 60)
     )
   })
 
