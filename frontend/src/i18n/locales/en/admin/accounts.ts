@@ -812,15 +812,10 @@ export default {
           // Full-strength minutes forecast for the next hour, deliberately a LOWER bound.
           // "at least" is required: "at most" would get read as a quota.
           forecast: 'at least {minutes} min full-strength in the next hour',
-          forecastUntouched: '(this row has {count} regions it never touched, so possibly more)',
           forecastHint:
-            'Counted per (account × region): {units} regions are in the ledger and come out of cooldown within the hour, each worth about {window}s of full strength.\n' +
-            'This is a **lower bound**: only units with positive evidence are counted. Regions this row never touched are left out (another row on the same credential may have burned them, or the record may have been pruned), and landings still inside the window with no region are subtracted.\n' +
+            'Counted per (account × gateway): {units} gateways are in the ledger and come out of cooldown within the hour, each worth about {window}s of full strength. One gateway name is one unit — different gateways in the same region have separate full-strength windows, so do not collapse by region (region is only the grouping for the grid above).\n' +
+            'This is a **lower bound**: only units with positive evidence are counted. Gateways this row never touched are left out, so possibly more — no number is given because this row cannot work it out: it does not know how many gateways the pool has, and "this row never touched it" may well mean another row on the same credential burned it, or the record was pruned.\n' +
             'One thing still optimistic: the 4h cooldown itself is not pinned down (resting 30 minutes vs 4 hours gave a constant full-strength rate, zero correlation), so if real recovery takes longer this number is still too high.',
-          forecastUntouchedHint:
-            '{count} regions have no record in this row\'s ledger. They are **not counted** above: this ledger only sees what this row sent, so "this row never touched it" may well mean "another row burned it" or "the record was pruned".',
-          forecastBlindHint:
-            '{count} landings are still inside the window but have no region (the pool\'s older renewal mints did not report one — fixed since, but old records do not backfill) ⇒ they did burn some region\'s unit, so they have been subtracted from the available count.',
           // state-echo verdict (backend openai_gwpool_state_echo.go).
           verdicts: {
             full: 'last verdict: full strength',
