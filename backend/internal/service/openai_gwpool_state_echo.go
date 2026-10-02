@@ -17,7 +17,8 @@ package service
 //     反向同理：429/5xx 带回一张新票**不算**降智证据 —— 那是限流/故障，不是路由质量。
 //  2. **有假阴性、无假阳性。** 满血号偶尔也会下发新票（用户 2026-10-01 确认）⇒ 判「满血」可信，
 //     判「降智」可能偏严。所以这个判据会偶尔白换一次网关、白烧一个槽位，而供给是个位数张/小时。
-//     正因为会误判，**必须有开关**（openAIGatewayPoolStateEchoExtraKey），运营方得能停掉它。
+//     误判的代价由票龄分档吸收（gatewayPoolEchoStrikes），**不再有开关**：2026-10-03 删掉了
+//     档位（见下面那段）—— 接了网关池就是为了满血，「把降智交给客户端」没有意义。
 //
 // 判到降智之后做两件事，都刻意不碰别的子系统：
 //
@@ -46,111 +47,20 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 )
 
-const (
-	// openAIGatewayPoolGuardExtraKey 是账号级的降智防护档位，把原来那两个键
-	// （openai_gwpool_state_echo + openai_gwpool_degraded_retries）合成一条梯子。
-	//
-	// 为什么合：两键四个组合里有一个是死的 —— state_echo=false 时 retries 一点意义都没有，
-	// 而页面上仍然是两个控件、配得出那个状态。按「守得多严」排成一个枚举之后，非法状态不存在。
-	//
-	//	off    不判。降智原样交给客户端
-	//	cut    判；判到降智就截断回一个干净的错误 + 标 Stale，客户端自己重发
-	//	queue  业务请求只落在**验过满血**的槽上：取到的新票先用便宜的垫话跑一遍判据
-	//	       （openai_gwpool_warm.go），没验出满血就换下一张，验出来了才放业务请求进去。
-	//	       判据仍然留着当兜底网，但不重发。**默认档**。
-	//
-	// **2026-10-02 删掉了中间那档 retry**（「判到降智就当场换票把同一个请求重发一遍」）。
-	// 它漏降智：重发那一发走 AttachRoute 换一张**没验过**的票就把用户的 prompt 打出去，
-	// 而判据对首轮请求结构性失效（没送 turn-state ⇒ 没有回声 ⇒ 判不出来，见
-	// gatewayPoolRouteDegraded），于是「客户端无感」实际上是「降智无声地交付了」。
-	// 原先靠它兜的那件事（客户端不用自己重发）现在由 queue 档在请求**之前**完成。
-	openAIGatewayPoolGuardExtraKey = "openai_gwpool_guard"
-	// openAIGatewayPoolStateEchoExtraKey / openAIGatewayPoolDegradedRetriesExtraKey 是合并前的
-	// 两个老键，**只保留读兼容**：库里已经有运营方配好的行，静默回默认会悄悄改掉它们的行为。
-	// 新键存在时老键一概不看 —— 但写入侧**刻意把老键同步写一份**（不是删掉，见
-	// EditAccountModal.vue 的保存路径）：回滚到只认老键的后端时行为才不变。所以「行里还留着
-	// 老键」是常态，gatewayPoolGuard 的存在性判断承重就在这里。
-	openAIGatewayPoolStateEchoExtraKey       = "openai_gwpool_state_echo"
-	openAIGatewayPoolDegradedRetriesExtraKey = "openai_gwpool_degraded_retries"
-)
-
-// gatewayPoolGuardMode 是上面那条梯子的一档。
-type gatewayPoolGuardMode string
-
-const (
-	gatewayPoolGuardOff   gatewayPoolGuardMode = "off"
-	gatewayPoolGuardCut   gatewayPoolGuardMode = "cut"
-	gatewayPoolGuardQueue gatewayPoolGuardMode = "queue"
-)
-
-// gatewayPoolGuard 报告这个账号的降智防护档位。缺省 = **queue**（最严的那档）。
+// 降智防护**没有档位**：接了网关池的账号一律走「业务请求只落在验过满血的槽上」
+// （openai_gwpool_warm.go 的预热 + 这里的判据兜底）。
 //
-// 缺省取最严而不是取最省：这个功能的全部意义是「不把降智交给客户端」，而没显式配过的号
-// 恰好是运营方没想过这件事的号 —— 让它们默认落在「验过满血才放行」上，代价是多花几张票，
-// 收益是没人需要先踩一次降智才知道有这个开关。要省供给就显式选 cut。
+// 2026-10-03 把三档删成零档，用户的理由是「用我们网关的就是为了满血，其它档没意义」：
 //
-// 新键**在场就只看它**：认得的值照用，认不出的值（写了错别字、大小写、写成数字）直接回默认档，
-// **不落回老键**。回落的那一版有个 fail-open 角：库里存量行可能还带着
-// `openai_gwpool_state_echo: false`，于是 `guard: "Queue"` 这种手滑会被读成 off —— 运营方点了
-// 最严的那档，拿到的是最松的。前端 select 造不出这种值，但管理 API 和批量导入造得出。
-func (a *Account) gatewayPoolGuard() gatewayPoolGuardMode {
-	if a == nil || a.Extra == nil {
-		return gatewayPoolGuardQueue
-	}
-	// 按**存在性**分支，不是按类型断言：extra 是 JSONB，这个键可以是 number / bool / null。
-	// 断言 `.(string)` 的那一版对它们全部失败 ⇒ 掉进老键 ⇒ 行里若还留着
-	// `openai_gwpool_state_echo: false`（前端刻意双写，见 EditAccountModal.vue），
-	// 一发 `{"openai_gwpool_guard": null}`（「清掉这个键恢复默认」的常见写法）就被读成 **off**：
-	// 判据一发不跑、降智原样交给客户端，而前端显示的也是 off，没人会发现它本该是默认档。
-	if raw, present := a.Extra[openAIGatewayPoolGuardExtraKey]; present {
-		text, _ := raw.(string) // 非字符串 ⇒ "" ⇒ 落 default
-		switch mode := gatewayPoolGuardMode(strings.TrimSpace(text)); mode {
-		case gatewayPoolGuardOff, gatewayPoolGuardCut, gatewayPoolGuardQueue:
-			return mode
-		default:
-			// 静默回默认档 = 运营方以为配上了、其实没有，而唯一的线索是行为。打一条出来。
-			// 存量行里 "retry" 走的也是这一条：那一档 2026-10-02 删了，它和手滑值一样回默认。
-			slog.Warn("gwpool_guard_unrecognized", "account_id", a.ID,
-				"value", fmt.Sprintf("%v", raw), "fallback", string(gatewayPoolGuardQueue))
-			return gatewayPoolGuardQueue
-		}
-	}
-	return gatewayPoolGuardLegacy(a.Extra)
-}
-
-// gatewayPoolGuardLegacy 把合并前那两个键映射成档位。
+//	off    不判、降智原样交给客户端 —— 和接网关池这件事本身矛盾
+//	cut    判到降智就截断让客户端自己重发 —— 判据对首轮请求结构性失效（没送 turn-state ⇒
+//	       没有回声 ⇒ 判不出来，见 gatewayPoolRouteDegraded），所以它拦不住首轮那一发降智
+//	retry  2026-10-02 先删的那档：重发走 AttachRoute 换一张**没验过**的票就把用户的 prompt
+//	       打出去，「客户端无感」实际是「降智静默交付」
 //
-// 老键的口径原样照搬，一个字都不改：state_echo **缺省即开**（只有显式 false 才关，所以读法是
-// 「断言 bool 成功且为 false」，getExtraBool 在这里用不了 —— 它把「没配」和「配了 false」读成
-// 同一个值）；retries **只有显式写成数字 0 才是「只截断」**，其余一切（缺省、非数字、越界、
-// 负数）都是默认档。extra 是 JSONB：从库里读回来是 float64，从请求体/Go 字面量过来是 int。
-//
-// 「其余一切」那一支以前落的是 retry，现在落默认档 queue —— retry 删了，而这些行当初选的是
-// 「判，而且别让客户端看见降智」，queue 是现存档位里唯一仍然承诺这件事的。
-func gatewayPoolGuardLegacy(extra map[string]any) gatewayPoolGuardMode {
-	if enabled, ok := extra[openAIGatewayPoolStateEchoExtraKey].(bool); ok && !enabled {
-		return gatewayPoolGuardOff
-	}
-	switch raw := extra[openAIGatewayPoolDegradedRetriesExtraKey].(type) {
-	case float64:
-		if raw == 0 {
-			return gatewayPoolGuardCut
-		}
-	case int:
-		if raw == 0 {
-			return gatewayPoolGuardCut
-		}
-	case int64:
-		if raw == 0 {
-			return gatewayPoolGuardCut
-		}
-	}
-	return gatewayPoolGuardQueue
-}
-
-// judges 报告这一档要不要跑 state-echo 判据。
-func (m gatewayPoolGuardMode) judges() bool { return m != gatewayPoolGuardOff }
-
+// 三个老键（openai_gwpool_guard / openai_gwpool_state_echo / openai_gwpool_degraded_retries）
+// 一律**不再读**。存量行里留着它们是无害的死键，但要知道后果：显式配过 `guard: "off"` 的行
+// 升级后开始跑判据 + 预热，会开始花票。这是用户拍的取舍，不是疏漏。
 // gatewayPoolDegradedClientMsg 原样进网关客户端的错误响应与 Ops 错误日志（转发面没有 i18n 协商
 // 通道，与 gatewayPoolNoSlotClientMsg 同口径）。只说类别：票本体、cookie 本体一个字都不许出现。
 const gatewayPoolDegradedClientMsg = "这一发的上游路由已降智（带着活 turn-state 又收到一张新的），" +
@@ -209,7 +119,7 @@ func (s *OpenAIGatewayService) gatewayPoolRouteDegraded(
 	resp *http.Response,
 	account *Account,
 ) bool {
-	if s == nil || request == nil || resp == nil || !account.gatewayPoolGuard().judges() {
+	if s == nil || request == nil || resp == nil {
 		return false
 	}
 	applied := openAIGatewayPoolSinkFrom(request.Context()).snapshot()

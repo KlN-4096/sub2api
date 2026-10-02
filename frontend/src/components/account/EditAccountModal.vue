@@ -2633,31 +2633,15 @@
                 class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
               />
             </div>
-            <!-- 降智防护：原来是「就地判降智」+「判到降智换票重试」两个勾（四个组合里有一个
-                 是死的），2026-10-02 合成一条按严格程度排的梯子。 -->
+            <!-- 降智防护**没有开关了**（2026-10-03）：接了池子就一律「业务请求只落在验过满血
+                 的槽上」。原来那条三档梯子（off/cut/queue）删了，说明留着 —— 这一档会花票，
+                 运营方得知道钱花在哪。 -->
             <div>
-              <label for="edit-openai-gwpool-guard" class="input-label text-xs">
-                {{ t('admin.accounts.openai.gwpoolGuard') }}
-              </label>
-              <select
-                id="edit-openai-gwpool-guard"
-                v-model="openAIGwpoolGuard"
-                class="input text-xs"
-                data-testid="edit-openai-gwpool-guard"
-              >
-                <option v-for="mode in openAIGwpoolGuardModes" :key="mode" :value="mode">
-                  {{ t(`admin.accounts.openai.gwpoolGuardModes.${mode}`) }}
-                </option>
-              </select>
-              <!-- 选中档的差异放**前面**：选了 off 的人不该先读完一整段「判据是什么」才看到
-                   「这一档一发判据都不跑」。共用的那段判据纪律只出现一次，而且 off 档不显示
-                   （那一档根本不跑判据，摆在那儿只会让人以为它跑）。 -->
+              <p class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolGuard') }}</p>
               <p class="input-hint" data-testid="edit-openai-gwpool-guard-hint">
-                {{ t(`admin.accounts.openai.gwpoolGuardDescs.${openAIGwpoolGuard}`) }}
+                {{ t('admin.accounts.openai.gwpoolGuardDescs.queue') }}
               </p>
-              <p v-if="openAIGwpoolGuard !== 'off'" class="input-hint">
-                {{ t('admin.accounts.openai.gwpoolGuardDesc') }}
-              </p>
+              <p class="input-hint">{{ t('admin.accounts.openai.gwpoolGuardDesc') }}</p>
             </div>
             <div>
               <p class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolAdvanced') }}</p>
@@ -2704,9 +2688,7 @@
                     :title="t('admin.accounts.openai.gwpoolListTimeoutDesc')"
                   />
                 </div>
-                <!-- 只有 queue 档会用它（别的档一发垫话都不打），所以跟着档位显示 —— 一个
-                     恒灰的输入框比没有这个框更让人以为自己配上了。 -->
-                <div v-if="openAIGwpoolGuard === 'queue'">
+                <div>
                   <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolWarmTickets') }}</label>
                   <input
                     v-model.number="openAIGwpoolWarmTickets"
@@ -4083,46 +4065,20 @@ const openAIGwpoolConsumerKey = ref('')
 const openAIGwpoolConsumerKeySaved = ref(false)
 // 缺省即开，与后端 gatewayPoolSteering 同口径（只有显式 false 才关）。
 const openAIGwpoolSteering = ref(true)
-// 降智防护档位（openai_gwpool_guard）。顺序 = 守得多严，**缺省 queue**（最严那档）。
-// 中间那档 retry（「判到降智就换票重发一遍」）2026-10-02 删了：它漏降智 —— 重发那一发用的是
-// 一张没验过的新票，而判据对首轮请求结构性失效，于是「客户端无感」实际是「降智静默交付」。
-const openAIGwpoolGuardModes = ['off', 'cut', 'queue'] as const
-type OpenAIGwpoolGuardMode = (typeof openAIGwpoolGuardModes)[number]
-const openAIGwpoolGuard = ref<OpenAIGwpoolGuardMode>('queue')
+// 降智防护**没有档位了**（2026-10-03）：三个老键 openai_gwpool_guard /
+// openai_gwpool_state_echo / openai_gwpool_degraded_retries 都不再读也不再写，页面上那个
+// select 一起删了。存量行里留着它们是无害的死键 —— 但别再接回来，后端也不读了。
 // 续期缺省即关：那一发要摘掉 __oailb 出站，是对真实 Codex 报文形状的偏离，而且从没单独实测过。
 // 三个「秒」旋钮：null = 留空 = 用后端默认值（4h / 25s / 2s），不往 extra 里写键。
 // 占位符要和后端那三个常量一致 —— 它展示的就是「留空会用什么」。
 const openAIGwpoolGatewayWindow = ref<number | null>(null)
 const openAIGwpoolFetchTimeout = ref<number | null>(null)
 const openAIGwpoolListTimeout = ref<number | null>(null)
-// queue 档一轮预热最多试几张票。null = 留空 = 用后端默认值 5，不往 extra 里写键。
+// 一轮预热最多试几张票。null = 留空 = 用后端默认值 5，不往 extra 里写键。
 // 后端封顶 8（gatewayPoolWarmMaxTicketsCeiling），越界回默认值。
 const openAIGwpoolWarmTickets = ref<number | null>(null)
 const readGwpoolSeconds = (value: unknown): number | null =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
-
-/**
- * 读降智防护档位。只有新键**整个缺席**时才回落老的两个键，映射与后端 gatewayPoolGuardLegacy
- * 一字对一字 —— 库里已经有运营方配好的行，静默回默认会在页面上把它们的配置显示成另一回事。
- *
- * 新键在场但认不出来（`"Queue"`、`"OFF"`、以及存量行里那个已删的 `"retry"`，经管理 API /
- * 批量导入写进来的）**也不回落老键**，而是和后端 gatewayPoolGuard 一样回默认档。不这样的话
- * 两边会分叉：`{guard:"Queue", state_echo:false}` 后端按默认档跑、页面显示成 off，运营方改个
- * 别的字段一存，这个号就真的变成 off 了 —— 判据被静默关掉，而他从没打算改这一项。
- */
-const readGwpoolGuard = (extra: Record<string, unknown> | undefined): OpenAIGwpoolGuardMode => {
-  // 按**存在性**分支，不是按 typeof：extra 是 JSONB，这个键可以是 number / bool / null，
-  // 而行里通常还留着老键（保存路径刻意双写）。只看 typeof 的话一发 `{guard: null}` 会掉进
-  // 老键、被显示成 off —— 和后端 gatewayPoolGuard 的同一个坑。
-  if (extra && 'openai_gwpool_guard' in extra) {
-    const raw = extra.openai_gwpool_guard
-    const mode = (typeof raw === 'string' ? raw.trim() : '') as OpenAIGwpoolGuardMode
-    return (openAIGwpoolGuardModes as readonly string[]).includes(mode) ? mode : 'queue'
-  }
-  if (extra?.openai_gwpool_state_echo === false) return 'off'
-  if (extra?.openai_gwpool_degraded_retries === 0) return 'cut'
-  return 'queue'
-}
 
 const turnStateProbeEfforts = ['minimal', 'low', 'medium', 'high', 'xhigh']
 // 只有最终落到 ChatGPT Codex 后端的账号才做恢复探测：apikey 走的是别的上游，
@@ -4675,7 +4631,6 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	openAIGwpoolConsumerKey.value = ''
 	// 自己挑落点缺省即开：只有显式 false 才算关（与后端同口径）。
 	openAIGwpoolSteering.value = extra?.openai_gwpool_steering !== false
-	openAIGwpoolGuard.value = readGwpoolGuard(extra)
 	// 续期缺省即关：只有显式 true 才算开（与后端 gatewayPoolRenew 同口径）。
 	openAIGwpoolGatewayWindow.value = readGwpoolSeconds(extra?.openai_gwpool_gateway_window_s)
 	openAIGwpoolFetchTimeout.value = readGwpoolSeconds(extra?.openai_gwpool_fetch_timeout_s)
@@ -6297,24 +6252,12 @@ const handleSubmit = async () => {
         } else {
           newExtra.openai_gwpool_steering = false
         }
-        // 降智防护档位。新键是唯一真源（后端 gatewayPoolGuard 恒以它为准，老键只在它缺席时
-        // 才看），但老的两个键**同步写一份而不是删掉**，只为一件事：回滚到只认老键的后端时
-        // 行为不变 —— 删掉的话一个刻意把检测关掉的号会在回滚后被悄悄打开、开始烧槽位。
-        // 默认档三个键一个都不落，省得 extra 里堆默认项。
+        // 降智防护的三个档位键 2026-10-03 全删了（接了池子就一律验满血才放行），保存时顺手
+        // 把残留清掉。**刻意不再「同步写一份老键」**：那是为回滚到只认老键的后端留的后路，
+        // 而现在没有哪一档可退 —— 留着反而会让回滚后的后端把一个本该验满血的号读成 off。
         delete newExtra.openai_gwpool_guard
         delete newExtra.openai_gwpool_state_echo
         delete newExtra.openai_gwpool_degraded_retries
-        if (openAIGwpoolGuard.value !== 'queue') {
-          newExtra.openai_gwpool_guard = openAIGwpoolGuard.value
-        }
-        if (openAIGwpoolGuard.value === 'off') {
-          newExtra.openai_gwpool_state_echo = false
-        } else if (openAIGwpoolGuard.value === 'cut') {
-          // 后端只认数字 0 当「只截断」，别的值一律回默认档 ⇒ 必须落 0 而不是 false。
-          newExtra.openai_gwpool_degraded_retries = 0
-        }
-        // queue 现在是默认档，三个键一个都不落。回滚到只认老键的后端时它退化成那边的默认档
-        // 「判 + 换票重试一次」—— 那是老后端能做到的最接近的行为。
         // 三个「秒」旋钮 + 试票张数：留空 / 非正数 = 用后端默认值，所以不落键。
         // 试票张数后端还封了个 8 的上限，越界同样回默认值 —— 这里不另做钳位，让后端那一处
         // 当唯一真源（前端 input 的 max 只是提示，管理 API 和批量导入绕得过去）。

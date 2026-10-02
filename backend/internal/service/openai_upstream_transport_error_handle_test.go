@@ -429,7 +429,7 @@ func TestHandleOpenAIUpstreamTransportError_GatewayPoolCarriesRetryAfter(t *test
 		},
 		// 没说 ⇒ 本地兜底。向上取整：报 0 等于没报。
 		"连试几张都降智": {errOpenAIGatewayPoolWarmExhausted, "30"},
-		"这一发判了降智":  {errOpenAIGatewayPoolRouteDegraded, "30"},
+		"这一发判了降智": {errOpenAIGatewayPoolRouteDegraded, "30"},
 	} {
 		err, want := tc.err, tc.want
 		t.Run(name, func(t *testing.T) {

@@ -51,18 +51,16 @@ describe('gateway pool locale keys', () => {
     ]) {
       expect(typeof openai[key], key).toBe('string')
     }
-    // 降智防护的三档：每档都要有标签和说明，少一条下拉里就会出现一个空选项。
-    // retry 那一档 2026-10-02 删了（它漏降智），文案也必须跟着删 —— 留着会让下拉里多出一个
-    // 选不中的选项，而选中它的存量行在后端会被当成手滑值回默认档。
-    for (const mode of ['off', 'cut', 'queue']) {
-      expect(typeof openai.gwpoolGuardModes[mode], mode).toBe('string')
-      expect(typeof openai.gwpoolGuardDescs[mode], mode).toBe('string')
-      expect(openai.gwpoolGuardDescs[mode].length, mode).toBeGreaterThan(40)
+    // 降智防护 2026-10-03 删成零档：页面上只剩一段常驻说明，下拉和三个档的标签全删了。
+    // 这三条钉住「别把档位接回来」—— 留着任何一个标签，页面就会重新长出一个选不中的选项。
+    expect(openai.gwpoolGuardModes, '档位已删').toBeUndefined()
+    for (const mode of ['off', 'cut', 'retry']) {
+      expect(openai.gwpoolGuardDescs[mode], `${mode} 档已删`).toBeUndefined()
     }
-    expect(openai.gwpoolGuardModes.retry, 'retry 档已删').toBeUndefined()
-    expect(openai.gwpoolGuardDescs.retry, 'retry 档已删').toBeUndefined()
-    // queue 档会花掉上游配额（平均约 6 发垫话换一个窗口），说明里必须写清成本 —— 它是这一档
-    // 唯一的代价，运营方不该靠读源码才知道。
+    expect(typeof openai.gwpoolGuardDescs.queue).toBe('string')
+    expect(openai.gwpoolGuardDescs.queue.length).toBeGreaterThan(40)
+    // 验满血要花掉上游配额（平均约 6 发垫话换一个窗口），说明里必须写清成本 —— 现在它是
+    // 无条件生效的，运营方更不该靠读源码才知道这笔钱花在哪。
     expect(openai.gwpoolGuardDescs.queue).toContain('gwpool_warm_probe')
     // 判不出来那条路的**行为**必须点名，而且必须点对：代码在那条路上放行业务请求
     // （openai_gwpool_warm.go 的 `case !conclusive`），第一版文案写的是「这一发直接失败、

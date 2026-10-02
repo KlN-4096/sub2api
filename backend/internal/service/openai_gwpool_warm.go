@@ -463,13 +463,13 @@ func (s *OpenAIGatewayService) gatewayPoolWarmShot(
 
 // gatewayPoolWarmModel 读这一发出站请求的 model，按可靠度排三个来源。
 //
-// 1. **本次请求的网关池 sink** —— 由 buildUpstreamRequest 在压缩之前从明文体里记的
-//    （openai_gateway_forward.go）。这是唯一恒定可靠的那个：所有经转发入口的出站请求都过它。
-// 2. turn-metadata 头 —— 双开账号的头里有本轮 model。注意它**只在入站本来就带这个字段时才
-//    对齐**（alignCodexTurnMetadataJSON 的 `if current, ok := metadata[name]; ok`），所以
-//    0.156 之前的客户端、桥接口过来的请求都没有。
-// 3. 明文请求体 —— 非双开账号的出站体是明文 JSON。双开账号这里是 zstd，必然解不出
-//    （compressCodexRequestBody；仓库自己的测试断言「明文不得直接上线」）。
+//  1. **本次请求的网关池 sink** —— 由 buildUpstreamRequest 在压缩之前从明文体里记的
+//     （openai_gateway_forward.go）。这是唯一恒定可靠的那个：所有经转发入口的出站请求都过它。
+//  2. turn-metadata 头 —— 双开账号的头里有本轮 model。注意它**只在入站本来就带这个字段时才
+//     对齐**（alignCodexTurnMetadataJSON 的 `if current, ok := metadata[name]; ok`），所以
+//     0.156 之前的客户端、桥接口过来的请求都没有。
+//  3. 明文请求体 —— 非双开账号的出站体是明文 JSON。双开账号这里是 zstd，必然解不出
+//     （compressCodexRequestBody；仓库自己的测试断言「明文不得直接上线」）。
 //
 // 为什么不读 gin 上下文：模型名在那儿（OpsUpstreamModelKey），而这一层只拿到 *http.Request。
 // 三个都读不出来返回空串，调用方 fail closed。

@@ -103,18 +103,40 @@ func gwpoolEchoRun(t *testing.T, svc *OpenAIGatewayService, acct *Account, sent 
 	}
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ctx, _ := withOpenAIGatewayPoolSink(req.Context(), ginCtx)
+	gwpoolEchoSeedVerified(t, svc, acct)
 	resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", acct)
 	return ginCtx, resp, err
 }
 
-// gwpoolEchoAccount 造一个配好假池子、**显式落在 cut 档**的账号。
-//
-// 必须显式写：默认档 2026-10-02 改成了 queue，那一档会在业务请求之前先打垫话去验满血，
-// 而这个文件验的是业务响应上的判据 —— 不写的话每个用例都要先把预热那条路也配出来。
+// gwpoolEchoAccount 造一个配好假池子的账号。
 func gwpoolEchoAccount(fake *gwpoolFakePool) *Account {
-	acct := fake.account(1)
-	acct.Extra[openAIGatewayPoolGuardExtraKey] = string(gatewayPoolGuardCut)
-	return acct
+	return fake.account(1)
+}
+
+// gwpoolEchoSeedVerified 先按正常路径取一张票，再把它标成「已验满血」。
+//
+// 降智防护的档位 2026-10-03 删了 ⇒ doOpenAIUpstream 一律先跑预热。而这个文件验的是**业务响应**
+// 上的判据，不是预热：不先塞这一张的话，每个用例都要把两发垫话的回应也排进 replies 里，
+// sentBodies 的下标全要跟着挪，而那些断言本来就是在数业务请求。
+//
+// 「已验满血 + 还 Live」正是预热的快路条件（gatewayPoolWarmUp 的早返回），一发垫话都不打。
+// 刻意走真实取票而不是手搓一个 pair：网关名、票号、cookie 都得和假池子发的那张对得上。
+func gwpoolEchoSeedVerified(t *testing.T, svc *OpenAIGatewayService, acct *Account) {
+	t.Helper()
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx, _ := withOpenAIGatewayPoolSink(context.Background(), ginCtx)
+	identity, err := svc.codexCookies.gatewayPoolIdentity(ctx, acct)
+	if err != nil {
+		return // 解不出身份 ⇒ 预热那条路自己也会在这里返回，没什么要塞的
+	}
+	if _, state := svc.codexCookies.cachedPoolPair(identity); state != openAIGatewayPoolPairLive {
+		// release 刻意丢掉：这张票要留在缓存里给紧接着那一发业务请求用，还回去就白取了。
+		if _, err := svc.codexCookies.AttachRoute(ctx, acct, gwpoolTestURL, http.Header{}); err != nil {
+			return // 本来就不接管（没配池子）⇒ 预热也不会跑
+		}
+	}
+	pair, _ := svc.codexCookies.cachedPoolPair(identity)
+	svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, pair.version)
 }
 
 // ---------------------------------------------------------------------------
@@ -249,98 +271,40 @@ func TestStateEchoIgnoresNon200EvenWithFreshTicket(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 开关与取值钳位
+// 没有档位了
 // ---------------------------------------------------------------------------
 
-// 开关缺省即开，显式关掉之后降智响应原样透传（行为与接入前逐字节一致）。
-func TestStateEchoSwitchDefaultsOnAndCanBeTurnedOff(t *testing.T) {
-	require.True(t, (*Account)(nil).gatewayPoolGuard().judges(), "缺省即开")
-	require.True(t, (&Account{}).gatewayPoolGuard().judges())
-	require.True(t, (&Account{Extra: map[string]any{openAIGatewayPoolStateEchoExtraKey: "false"}}).
-		gatewayPoolGuard().judges(), "老键只认 bool，字符串不算关")
-
+// 降智防护**没有开关**：三个老键一起配成最松的那组值，判据照样跑、照样截断。
+//
+// 这一条钉的是 2026-10-03 那次删档不会被悄悄复活：三个键里任何一个被重新接回读路径，
+// 这个用例就红。它们在存量库里是真实存在的值（页面写得出 guard，更早的页面写得出另两个），
+// 所以「读到了就关掉防护」是一个**能在现网发生**的回归，不是假想。
+func TestGatewayPoolGuardHasNoModesLeft(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	// 票龄不到 90 秒要连着三发被刷新才判死（gatewayPoolEchoStrikes）。
 	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
+		{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
+		{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
 		{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
 	}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	acct := fake.account(1)
-	acct.Extra[openAIGatewayPoolGuardExtraKey] = string(gatewayPoolGuardOff)
-	require.False(t, acct.gatewayPoolGuard().judges())
+	// 删掉的那三个键，全配成「别判、别截断」。
+	acct.Extra["openai_gwpool_guard"] = "off"
+	acct.Extra["openai_gwpool_state_echo"] = false
+	acct.Extra["openai_gwpool_degraded_retries"] = 0
 
-	ginCtx, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
-	require.NoError(t, err)
-	require.NotNil(t, resp)
-	_ = resp.Body.Close()
-	require.Len(t, upstream.sentBodies, 1)
+	for i := 1; i <= 2; i++ {
+		_, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
+		require.NoError(t, err, "第 %d 发还没攒满，该照常放行", i)
+		require.NotNil(t, resp)
+		_ = resp.Body.Close()
+	}
+	_, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
+	require.Nil(t, resp, "死键不许把降智的响应放出去")
+	require.ErrorIs(t, err, errOpenAIGatewayPoolRouteDegraded)
 	_, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
-	require.Equal(t, openAIGatewayPoolPairLive, state, "关了就一个字都不碰")
-	require.Empty(t, takeDiscardedOpenAIGatewayPoolAttempts(ginCtx))
-}
-
-// 缺省档必须是**最严**的那一档，而且 retry 那一档已经不存在了。
-//
-// 这两条一起钉：默认值一旦被改回 cut/off，开着池子的号会在没人察觉的情况下开始把降智交出去；
-// 而 "retry" 作为一个**存量库里真实存在的值**（2026-10-02 之前的页面写得出来），必须和手滑值
-// 一样落到默认档，绝不能被当成一个还活着的档位。
-func TestGatewayPoolGuardDefaultsToTheStrictestMode(t *testing.T) {
-	require.Equal(t, gatewayPoolGuardQueue, (*Account)(nil).gatewayPoolGuard(), "nil 账号也要落最严档")
-	require.Equal(t, gatewayPoolGuardQueue, (&Account{}).gatewayPoolGuard())
-	require.Equal(t, gatewayPoolGuardQueue, (&Account{Extra: map[string]any{}}).gatewayPoolGuard())
-	require.Equal(t, gatewayPoolGuardQueue, (&Account{Extra: map[string]any{
-		openAIGatewayPoolGuardExtraKey: "retry",
-	}}).gatewayPoolGuard(), "存量行里的 retry 已经不是一个档位了，回默认档")
-	// 判据在三档里只有 off 不跑 —— 这条不能因为删了一档就松掉。
-	require.False(t, gatewayPoolGuardOff.judges())
-	require.True(t, gatewayPoolGuardCut.judges())
-	require.True(t, gatewayPoolGuardQueue.judges())
-}
-
-// 配置项合并（2026-10-02）：新键 openai_gwpool_guard 是一条三档梯子，老的两个键只读兼容。
-//
-// 读兼容是承重的：库里已经有运营方配好的行，静默回默认会悄悄改掉它们的行为。
-func TestGatewayPoolGuardMergesTheTwoLegacyKeys(t *testing.T) {
-	guard := func(extra map[string]any) gatewayPoolGuardMode {
-		return (&Account{Extra: extra}).gatewayPoolGuard()
-	}
-	stateEcho, retries := openAIGatewayPoolStateEchoExtraKey, openAIGatewayPoolDegradedRetriesExtraKey
-
-	// 新键：三个档都认得，认不出的值不当成新档。
-	for _, mode := range []gatewayPoolGuardMode{gatewayPoolGuardOff, gatewayPoolGuardCut, gatewayPoolGuardQueue} {
-		require.Equal(t, mode, guard(map[string]any{openAIGatewayPoolGuardExtraKey: " " + string(mode) + " "}),
-			"两边空白要修掉：%s", mode)
-	}
-	// **每一格都要带上老键**：不带的话非字符串值走老键也恰好得到默认档 ⇒ 整张表是假阳性。
-	// 真正的坑是「行里还留着 state_echo:false（保存路径刻意双写）+ 一发 guard:null」：
-	// 按类型断言分支的那一版会把它读成 off —— 运营方点的是最严那档，拿到的是最松的。
-	// "retry" 也在这张表里：它是**存量库里真实存在的值**，删档之后必须和手滑值同样处理。
-	for _, raw := range []any{"quene", "", "QUEUE", "retry", 1, true, nil, 1.0, []any{"queue"}} {
-		require.Equal(t, gatewayPoolGuardQueue, guard(map[string]any{
-			openAIGatewayPoolGuardExtraKey: raw,
-			stateEcho:                      false,
-			retries:                        0,
-		}), "新键在场就只看它：认不出的值回默认档，不许掉回老键、更不许静默关掉防护：%v", raw)
-	}
-
-	// 老键映射：四个组合里那个死状态（state_echo=false + retries）也只能读成 off。
-	require.Equal(t, gatewayPoolGuardQueue, guard(nil), "两个键都没配 = 默认档")
-	require.Equal(t, gatewayPoolGuardOff, guard(map[string]any{stateEcho: false}))
-	require.Equal(t, gatewayPoolGuardOff, guard(map[string]any{stateEcho: false, retries: 0}))
-	require.Equal(t, gatewayPoolGuardOff, guard(map[string]any{stateEcho: false, retries: 1}))
-	require.Equal(t, gatewayPoolGuardQueue, guard(map[string]any{stateEcho: true}))
-	for _, raw := range []any{0, 0.0, int64(0)} {
-		require.Equal(t, gatewayPoolGuardCut, guard(map[string]any{retries: raw}), "显式 0 = 只截断：%T", raw)
-	}
-	for _, raw := range []any{5, 99, -3, 2.7, "1", nil, true} {
-		require.Equal(t, gatewayPoolGuardQueue, guard(map[string]any{retries: raw}), "畸形值回默认档：%v", raw)
-	}
-
-	// 新键在场时老键一概不看 —— 否则「页面存了新值、行为还按老值」是最难查的那种失败。
-	require.Equal(t, gatewayPoolGuardQueue, guard(map[string]any{
-		openAIGatewayPoolGuardExtraKey: string(gatewayPoolGuardQueue),
-		stateEcho:                      false,
-		retries:                        0,
-	}))
+	require.Equal(t, openAIGatewayPoolPairStale, state, "判死之后照样标 Stale")
 }
 
 // 这一发没注入池子那张 pair（非推理面端点）⇒ 判据根本不跑：

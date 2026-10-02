@@ -16,7 +16,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 )
 
-// queue 档的预热（openai_gwpool_warm.go）。一律打假池子 + 假 shooter，**绝不打真实上游**。
+// 预热（openai_gwpool_warm.go）。一律打假池子 + 假 shooter，**绝不打真实上游**。
 
 // gwpoolWarmShot 记一发垫话送出去的 cookie 与 state，以及假上游的回应。
 type gwpoolWarmShot struct {
@@ -32,7 +32,7 @@ type gwpoolWarmReply struct {
 }
 
 // gwpoolWarmShooter 按顺序给出每一发的回应；replies 用完之后按「满血」回
-//（A 下发一张票、B 不回新的），这样默认形态是最省口舌的那条路。
+// （A 下发一张票、B 不回新的），这样默认形态是最省口舌的那条路。
 type gwpoolWarmShooter struct {
 	replies []gwpoolWarmReply
 	shots   []gwpoolWarmShot
@@ -64,11 +64,9 @@ func gwpoolWarmRun(t *testing.T, svc *OpenAIGatewayService, acct *Account, shoot
 		gwpoolTestIdentity, gwpoolWarmModel, shooter.shoot)
 }
 
-// gwpoolWarmAccount 是开着 queue 档的账号。
+// gwpoolWarmAccount 是配好假池子的账号（预热无条件跑，没有档位可开）。
 func gwpoolWarmAccount(fake *gwpoolFakePool) *Account {
-	acct := fake.account(1)
-	acct.Extra[openAIGatewayPoolGuardExtraKey] = string(gatewayPoolGuardQueue)
-	return acct
+	return fake.account(1)
 }
 
 // 手里那张票**验过满血**而且还 Live ⇒ 一发垫话都不打。
@@ -324,8 +322,8 @@ func TestWarmProbeVerdicts(t *testing.T) {
 		full, conclusive bool
 	}{
 		"不回新 state = 满血": {[]gwpoolWarmReply{{status: 200, minted: got}, {status: 200}}, true, true},
-		"回下同一张 = 满血":    {[]gwpoolWarmReply{{status: 200, minted: got}, {status: 200, minted: got}}, true, true},
-		"回一张不同的 = 降智":   {[]gwpoolWarmReply{{status: 200, minted: got}, {status: 200, minted: "other"}}, false, true},
+		"回下同一张 = 满血":     {[]gwpoolWarmReply{{status: 200, minted: got}, {status: 200, minted: got}}, true, true},
+		"回一张不同的 = 降智":    {[]gwpoolWarmReply{{status: 200, minted: got}, {status: 200, minted: "other"}}, false, true},
 		"A 非 200":        {[]gwpoolWarmReply{{status: 429, minted: got}}, false, false},
 		"A 没回 state":     {[]gwpoolWarmReply{{status: 200}}, false, false},
 		"B 非 200":        {[]gwpoolWarmReply{{status: 200, minted: got}, {status: 500, minted: "other"}}, false, false},
@@ -389,22 +387,30 @@ func TestGatewayPoolWarmModelReadsTheRequestBody(t *testing.T) {
 	}
 }
 
-// 别的档一发垫话都不打：预热的成本只许挂在 queue 档上。
+// 预热是**无条件**的：三个删掉的档位键全配成最松那组值，照样跑预热、照样 fail closed。
 //
-// 2026-10-02 之前这条测的是「queue 不是默认档」；现在 queue **就是**默认档，所以反过来钉
-// cut 档 —— 它是运营方选来省供给的那一档，一旦它也开始打垫话，省下来的那部分就没了。
-func TestWarmUpOnlyRunsInQueueMode(t *testing.T) {
+// 2026-10-03 删掉档位之前，这条测的是「别的档一发垫话都不打」。现在反过来钉：没有任何配置
+// 能让业务请求绕过预热。读不出 model 这条是最锋利的探针 —— 它是预热**自己**的失败形态
+// （errOpenAIGatewayPoolWarmNoModel），别的层产不出来，所以看到它就等于看到预热跑了；
+// 而且这一发连票都没取、上游一个请求都没打，断言不依赖任何假出站链。
+func TestWarmUpRunsWithoutAnyModeConfigured(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{{status: http.StatusOK}}}
+	upstream := &gwpoolErrorUpstream{}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
-	acct := gwpoolEchoAccount(fake)
-	require.Equal(t, gatewayPoolGuardCut, acct.gatewayPoolGuard())
+	acct := fake.account(1)
+	acct.Extra["openai_gwpool_guard"] = "off"
+	acct.Extra["openai_gwpool_state_echo"] = false
+	acct.Extra["openai_gwpool_degraded_retries"] = 0
 
-	_, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
+	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 	require.NoError(t, err)
-	require.NotNil(t, resp)
-	_ = resp.Body.Close()
-	require.Len(t, upstream.sentBodies, 1, "cut 档只打业务请求那一发")
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx, _ := withOpenAIGatewayPoolSink(req.Context(), ginCtx)
+	resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", acct)
+	require.ErrorIs(t, err, errOpenAIGatewayPoolWarmNoModel)
+	require.Nil(t, resp)
+	require.Zero(t, upstream.calls, "预热拦下来的请求一个字节都不许出去")
+	require.Zero(t, fake.hits.Load(), "也不该向池子取票")
 }
 
 // 同一身份的并发预热只跑**一遍**判据。
@@ -579,7 +585,6 @@ func TestWarmUpIgnoresNonInferenceRequests(t *testing.T) {
 	require.Empty(t, upstream.sentBodies)
 	require.Zero(t, fake.hits.Load())
 }
-
 
 // 预热预算**按账号各发一份**，故障转移换号时不累计（2026-10-02 用户拍板）。
 //

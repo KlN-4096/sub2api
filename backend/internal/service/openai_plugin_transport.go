@@ -18,22 +18,19 @@ func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
 // 满足两个条件：响应头已经到手，而调用方还一个字节都没往下游写（调用方要等这个函数返回才开始
 // 解析响应）。所以「截断」在这里是干净的，不会留一个半截的 SSE 流。
 func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
-	guard := account.gatewayPoolGuard()
-	// queue 档：业务请求只落在**验过满血**的槽上。判据跑在这一发之前、用便宜的垫话，
-	// 所以用户的请求不会是那个去试网关的人（openai_gwpool_warm.go）。
-	// 验不出来就把错误往上抛，**绝不降级放行**。
-	if guard == gatewayPoolGuardQueue {
-		if err := s.gatewayPoolWarmUp(request, proxyURL, account); err != nil {
-			return nil, err
-		}
+	// 业务请求只落在**验过满血**的槽上。判据跑在这一发之前、用便宜的垫话，所以用户的请求不会是
+	// 那个去试网关的人（openai_gwpool_warm.go）。验不出来就把错误往上抛，**绝不降级放行**。
+	// 没有档位可关：2026-10-03 删了（见 openai_gwpool_state_echo.go 文件头）。
+	if err := s.gatewayPoolWarmUp(request, proxyURL, account); err != nil {
+		return nil, err
 	}
 	resp, degraded, err := s.doOpenAIUpstreamOnce(request, proxyURL, account)
 	if !degraded {
 		return resp, err
 	}
-	// 判到降智就**只截断**，不在这里换票重发。重发那一档（guard=retry）2026-10-02 删了：
-	// 它取一张没验过的新票就把用户的 prompt 打出去，而判据对首轮请求结构性失效（没送
-	// turn-state ⇒ 没有回声），所以「客户端无感」实际是「降智静默交付」。
+	// 判到降智就**只截断**，不在这里换票重发：重发走 AttachRoute 换一张没验过的票就把用户的
+	// prompt 打出去，而判据对首轮请求结构性失效（没送 turn-state ⇒ 没有回声），所以「客户端
+	// 无感」实际是「降智静默交付」。
 	// 当前 pair 已标 Stale ⇒ 下一发客户端请求的 AttachRoute 自然带 force=1 换网关。
 	s.dropDegradedGatewayPoolRoute(request, resp, account)
 	return nil, errOpenAIGatewayPoolRouteDegraded

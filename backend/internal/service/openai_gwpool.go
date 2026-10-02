@@ -332,21 +332,8 @@ func validateOpenAIGatewayPoolAccountExtra(account *Account, extra map[string]an
 			"account %d enables %s so %s must be set",
 			account.ID, openAIGatewayPoolExtraKey, OpenAIGatewayPoolConsumerKeyExtraKey)
 	}
-	// 档位也在写入时拦：gatewayPoolGuard 对认不出的值回默认档（**不能**在转发时 fail closed，
-	// 那会让一个手滑的值停掉整个账号），所以「保存成功了但配的那一档没生效」是这一项唯一的
-	// 失败形态 —— 而 extra 是 JSONB、管理 API 与批量导入直收，`"Queue"` / `"OFF"` / `1` 都进得来。
-	// 同型先例：ValidateOpenAITurnStateHunterExtra 的「保存成功但什么都不做是最难排查的失败」。
-	if raw, present := extra[openAIGatewayPoolGuardExtraKey]; present {
-		text, isText := raw.(string)
-		switch mode := gatewayPoolGuardMode(strings.TrimSpace(text)); {
-		case !isText,
-			mode != gatewayPoolGuardOff && mode != gatewayPoolGuardCut &&
-				mode != gatewayPoolGuardQueue:
-			return infraerrors.Newf(http.StatusBadRequest, "GWPOOL_GUARD_INVALID",
-				"account %d: %s must be one of off/cut/queue, got %v",
-				account.ID, openAIGatewayPoolGuardExtraKey, raw)
-		}
-	}
+	// 降智防护的档位 2026-10-03 删了，所以这里也不再校验那个键。**刻意不改成「带这个键就报错」**：
+	// 校验看的是合并后的 extra，存量行里那个死键还在，报错会让它们一存就失败。
 	return nil
 }
 

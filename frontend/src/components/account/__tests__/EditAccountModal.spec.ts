@@ -1006,9 +1006,9 @@ describe('EditAccountModal', () => {
     expect(wrapper.find('[data-testid="edit-openai-gwpool-section"]').exists()).toBe(false)
   })
 
-  // 「一轮最多试几张票」只对 queue 档有意义（别的档一发垫话都不打）。跟着档位显示 ——
-  // 一个恒灰的输入框比没有这个框更让人以为自己配上了。
-  it('shows the warm-up ticket knob only in queue mode and writes it', async () => {
+  // 「一轮最多试几张票」现在是常驻旋钮：降智防护 2026-10-03 删成零档，预热无条件跑，
+  // 所以那个下拉和「跟着档位显示」都没了。
+  it('shows the warm-up ticket knob and writes it', async () => {
     const account = buildAccount()
     account.type = 'oauth'
     account.extra = { openai_gwpool: true, openai_gwpool_base_url: 'https://pool.0102400.xyz' }
@@ -1017,14 +1017,9 @@ describe('EditAccountModal', () => {
 
     const wrapper = mountModal(account)
     const knob = '[data-testid="edit-openai-gwpool-warm-tickets"]'
-    // 默认档就是 queue ⇒ 这个框一进来就在。
-    expect(wrapper.get<HTMLSelectElement>('[data-testid="edit-openai-gwpool-guard"]').element.value).toBe('queue')
+    expect(wrapper.find('[data-testid="edit-openai-gwpool-guard"]').exists(), '档位下拉已删').toBe(false)
     expect(wrapper.find(knob).exists()).toBe(true)
 
-    await wrapper.get('[data-testid="edit-openai-gwpool-guard"]').setValue('cut')
-    expect(wrapper.find(knob).exists(), 'cut 档一发垫话都不打，这个框不该在').toBe(false)
-
-    await wrapper.get('[data-testid="edit-openai-gwpool-guard"]').setValue('queue')
     await wrapper.get(knob).setValue('3')
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
     expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_gwpool_warm_tickets).toBe(3)
@@ -1067,16 +1062,17 @@ describe('EditAccountModal', () => {
     }
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
 
-    // 降智防护是一个三档下拉（2026-10-02 由两个勾选框合并），默认档 **queue**（最严那档）。
-    // 中间那档 retry 同日删了：它取一张没验过的新票重发，而判据对会话第一发结构性失效，
-    // 「客户端无感」实际是「降智静默交付」。下拉里不许再出现它。
-    const guard = wrapper.get<HTMLSelectElement>('[data-testid="edit-openai-gwpool-guard"]')
-    expect(guard.element.value).toBe('queue')
-    expect([...guard.element.options].map((o) => o.value)).toEqual(['off', 'cut', 'queue'])
-    // 合并之后那两个勾选框不许再出现。
-    for (const testid of ['edit-openai-gwpool-state-echo', 'edit-openai-gwpool-degraded-retry']) {
+    // 降智防护 2026-10-03 删成零档：下拉和合并前那两个勾选框都不许再出现，只剩一段常驻说明。
+    for (const testid of [
+      'edit-openai-gwpool-guard',
+      'edit-openai-gwpool-state-echo',
+      'edit-openai-gwpool-degraded-retry'
+    ]) {
       expect(wrapper.find(`[data-testid="${testid}"]`).exists(), testid).toBe(false)
     }
+    expect(wrapper.get('[data-testid="edit-openai-gwpool-guard-hint"]').text()).toBe(
+      'admin.accounts.openai.gwpoolGuardDescs.queue'
+    )
 
     let extra = updateAccountMock.mock.calls[0]?.[1]?.extra
     expect(extra?.openai_gwpool_base_url).toBe('https://pool.0102400.xyz')
@@ -1095,9 +1091,6 @@ describe('EditAccountModal', () => {
     // 改过的才落键。
     updateAccountMock.mockReset().mockResolvedValue(account)
     await wrapper.get('[data-testid="edit-openai-gwpool-steering"]').setValue(false)
-    // 选 cut 而不是 queue：queue 现在是默认档，默认档一个键都不落（上面那一轮已经钉过了），
-    // 用它测不出「改过的才落键」。cut 还顺带钉住老键的同步写。
-    await guard.setValue('cut')
     await wrapper.get('[data-testid="edit-openai-gwpool-gateway-window"]').setValue('7200')
     await wrapper.get('[data-testid="edit-openai-gwpool-fetch-timeout"]').setValue('20')
     await wrapper.get('[data-testid="edit-openai-gwpool-list-timeout"]').setValue('5')
@@ -1105,12 +1098,6 @@ describe('EditAccountModal', () => {
 
     extra = updateAccountMock.mock.calls[0]?.[1]?.extra
     expect(extra?.openai_gwpool_steering).toBe(false)
-    expect(extra?.openai_gwpool_guard).toBe('cut')
-    // 老键**同步写一份而不是删掉**：回滚到只认老键的后端时行为不变。后端只认数字 0 当
-    // 「只截断」，别的值一律回默认档 ⇒ 必须落 0 而不是 false。
-    expect(extra?.openai_gwpool_degraded_retries).toBe(0)
-    // cut 档在老键里只需要 retries=0，state_echo 没有意义 ⇒ 不落它。
-    expect(extra).not.toHaveProperty('openai_gwpool_state_echo')
     expect(extra?.openai_gwpool_gateway_window_s).toBe(7200)
     expect(extra?.openai_gwpool_fetch_timeout_s).toBe(20)
     expect(extra?.openai_gwpool_list_timeout_s).toBe(5)
@@ -1144,11 +1131,6 @@ describe('EditAccountModal', () => {
     expect(
       (wrapper.get('[data-testid="edit-openai-gwpool-steering"]').element as HTMLInputElement).checked
     ).toBe(false)
-    // 老账号行里存的是合并前那两个键 ⇒ 下拉要按后端 gatewayPoolGuardLegacy 同一张表回显。
-    // state_echo=false 压过 retries（那个组合里 retries 本来就没意义）⇒ off。
-    expect(
-      (wrapper.get('[data-testid="edit-openai-gwpool-guard"]').element as HTMLSelectElement).value
-    ).toBe('off')
     expect(
       (wrapper.get('[data-testid="edit-openai-gwpool-gateway-window"]').element as HTMLInputElement).value
     ).toBe('3600')
@@ -1171,12 +1153,16 @@ describe('EditAccountModal', () => {
     // 已删的两个键不许被原样写回库里。
     expect(extra).not.toHaveProperty('openai_gwpool_all_models')
     expect(extra).not.toHaveProperty('openai_gwpool_renew')
-    // 老键迁移成新键，而老键**同步写一份而不是删掉**：回滚到只认老键的后端时行为不变。
-    // 删掉的话这个刻意把检测关掉的号会在回滚后被悄悄打开、开始烧槽位。
-    expect(extra?.openai_gwpool_guard).toBe('off')
-    expect(extra?.openai_gwpool_state_echo).toBe(false)
-    // off 档在老键里只需要 state_echo=false，retries 没有意义 ⇒ 不落它。
-    expect(extra).not.toHaveProperty('openai_gwpool_degraded_retries')
+    // 降智防护的三个档位键 2026-10-03 全删了 ⇒ 保存时一并清掉，一个都不许写回库里。
+    // 这一条承重：这个号的 extra 里**存着** state_echo:false（它当初刻意把检测关了），
+    // 原样写回去等于把一个死键永久留在库里，而回滚到老后端时它会重新生效。
+    for (const key of [
+      'openai_gwpool_guard',
+      'openai_gwpool_state_echo',
+      'openai_gwpool_degraded_retries'
+    ]) {
+      expect(extra, key).not.toHaveProperty(key)
+    }
   })
 
   // 配置错误的报错走 reason code → i18n 命名空间（文案本体由 gwpoolLocales.spec.ts 钉）。

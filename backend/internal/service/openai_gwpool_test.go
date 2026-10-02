@@ -215,17 +215,14 @@ func newGwpoolFakePool(t *testing.T, cookie string, validForS int) *gwpoolFakePo
 }
 
 // configure 把这个假池子的地址与 consumer key 写进账号 extra。
-// configure 把这个假池子配到账号上，并**显式把降智防护钉在 cut 档**。
 //
-// 钉档位是 2026-10-02 加的：默认档那天改成了 queue，而 queue 会在业务请求之前先打垫话去验
-// 满血 —— 这个文件里几乎所有用例测的是取票/还票/注入协议，不配 shooter 的话它们会连带跑进
-// 预热路径，测的就不是自己声称的那件事了。默认档本身由
-// TestGatewayPoolGuardDefaultsToTheStrictestMode 和 TestWarmUpOnlyRunsInQueueMode 单独钉。
+// **不再钉档位**：降智防护的档位 2026-10-03 删了，预热现在是无条件的。这个文件里的用例测的是
+// 取票/还票/注入协议，它们直接调 AttachRoute / gatewayPoolPair，走不到预热那条路（预热的入口
+// 只有 doOpenAIUpstream）。少数走转发入口的用例自己负责把预热那条路也配出来。
 func (f *gwpoolFakePool) configure(accounts ...*Account) {
 	for _, acct := range accounts {
 		acct.Extra[openAIGatewayPoolBaseURLExtraKey] = f.baseURL
 		acct.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = gwpoolTestConsumerKey
-		acct.Extra[openAIGatewayPoolGuardExtraKey] = string(gatewayPoolGuardCut)
 	}
 }
 
@@ -470,7 +467,7 @@ func TestDoOpenAIUpstreamGatewayPoolReplacesOnlyRouteCookies(t *testing.T) {
 	for range 3 {
 		req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 		require.NoError(t, err)
-		resp, err := svc.doOpenAIUpstream(req, "", acct)
+		resp, err := gwpoolRunOnce(svc, req, acct)
 		require.NoError(t, err)
 		_ = resp.Body.Close()
 	}
@@ -501,7 +498,7 @@ func TestGatewayPoolNeverReportsTouch(t *testing.T) {
 	for range 2 {
 		req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 		require.NoError(t, err)
-		resp, err := svc.doOpenAIUpstream(req, "", acct)
+		resp, err := gwpoolRunOnce(svc, req, acct)
 		require.NoError(t, err)
 		_ = resp.Body.Close()
 	}
@@ -591,6 +588,10 @@ func TestOpenAIWSIngressBridgesGatewayPoolAccountToHTTP(t *testing.T) {
 	poolCookie := gwpoolTestPairCookie(t, "unified-142")
 	fake := newGwpoolFakePool(t, poolCookie, 150)
 	fake.configure(account)
+	// 预热 2026-10-03 起无条件跑在 doOpenAIUpstream 里，而这个假上游只有**一个**响应体
+	// （一个 strings.Reader）：让垫话先把它读空，桥那一发就只剩 EOF。测的是 WS→HTTP 的桥，
+	// 不是预热，所以先塞一张已验满血的票把预热那条快路点亮。
+	gwpoolEchoSeedVerified(t, svc, account)
 	dialer := &codexWSStagedDialer{conns: []openAIWSClientConn{&openAIWSCaptureConn{}}}
 	svc.openaiWSPassthroughDialer = dialer
 
@@ -1032,9 +1033,9 @@ func TestGatewayPoolRotatesToTheOldestBurntCandidateInsteadOfBareTake(t *testing
 	fake := newGwpoolFakePool(t, poolCookie, 150)
 	fake.listGateways = []gwpoolFakeGateway{
 		{Name: "unified-126", PairReady: true, UsedByYou: true}, // 池子说这张是你自己正拿着的
-		{Name: "unified-195"},                                   // 没活 pair
-		{Name: "unified-167", PairReady: true},                  // 本地 1 分钟前碰过
-		{Name: "unified-84", PairReady: true},                   // 本地 3 小时前碰过 ⇒ 轮到它
+		{Name: "unified-195"},                  // 没活 pair
+		{Name: "unified-167", PairReady: true}, // 本地 1 分钟前碰过
+		{Name: "unified-84", PairReady: true},  // 本地 3 小时前碰过 ⇒ 轮到它
 	}
 	store := &openAICodexCookieStore{}
 	store.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, "unified-167"), time.Now().Add(-time.Minute))
@@ -1185,13 +1186,13 @@ func TestDoOpenAIUpstreamGatewayPoolNoSlotFailsClosed(t *testing.T) {
 	acct := gwpoolTestAccount(1)
 	acct.Extra[openAIGatewayPoolBaseURLExtraKey] = srv.URL
 	acct.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = gwpoolTestConsumerKey
-	// 测的是「池子 503 ⇒ 失败关闭」，不是档位：默认档 queue 会先跑预热，而这个请求体
-	// 读不出 model ⇒ 死在 errOpenAIGatewayPoolWarmNoModel 上，根本走不到池子。
-	acct.Extra[openAIGatewayPoolGuardExtraKey] = string(gatewayPoolGuardCut)
 	// 罐里有一张能回放的 pair：也不许用。
 	svc.codexCookies.Store(acct, gwpoolTestURL, codexCookieUpstreamResponse())
 
-	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
+	// 体里必须带 model：预热现在无条件跑（档位 2026-10-03 删了），读不出 model 会先死在
+	// errOpenAIGatewayPoolWarmNoModel 上，根本走不到池子 —— 那就测不到这条用例要测的东西。
+	// 带上之后预热自己去取票、撞上 503，错误原样抛出来，和它要钉的失败形态是同一个。
+	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
 	require.NoError(t, err)
 	resp, err := svc.doOpenAIUpstream(req, "", acct)
 	require.ErrorIs(t, err, gwpool.ErrNoSlot)
