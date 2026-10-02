@@ -107,8 +107,16 @@ func (s *OpenAIGatewayService) gatewayPoolWarmUp(request *http.Request, proxyURL
 	// （这条省掉了绝大多数成本）。
 	//
 	// 必须同时判「验过」和 Live，**不能只判 Live**：Live 的唯一含义是取票那一刻写的
-	// `until = now + valid_for_s`（见 poolVerified 的注释列的三条路）。
+	// `until = now + valid_for_s`（见 poolVerified 的注释列的两条路）。
 	if s.codexCookies.gatewayPoolVerifiedFull(identity) {
+		// 快路上顺手看一眼「这张票是不是快到点了」：是就在后台换下一张，让客户端下一次请求
+		// 不用在这里等（openai_gwpool_prewarm.go）。到点判据很便宜（两次 map 读），而读 model
+		// 要解请求体 —— 所以先问到点、再读 model。
+		if account.gatewayPoolPrewarmEnabled() {
+			if _, due := s.codexCookies.gatewayPoolPrewarmDue(identity); due {
+				s.gatewayPoolPrewarm(request, proxyURL, account, identity, gatewayPoolWarmModel(request))
+			}
+		}
 		return nil
 	}
 	// 模型必须和业务请求一致：state 绑在 (账号 × 模型 × 这张 cflb/oailb 对) 上，拿别的模型去
@@ -370,18 +378,37 @@ func (s *openAICodexCookieStore) gatewayPoolVerifiedFull(identity string) bool {
 	if state != openAIGatewayPoolPairLive || pair.version == "" {
 		return false
 	}
-	version, _ := s.poolVerified.Load(identity)
-	got, _ := version.(string)
-	return got == pair.version
+	mark, ok := s.gatewayPoolVerifiedMarkOf(identity)
+	return ok && mark.version == pair.version
+}
+
+// gatewayPoolVerifiedMarkOf 读那一笔「验过满血」的记录（票号 + 判出来的时刻）。
+func (s *openAICodexCookieStore) gatewayPoolVerifiedMarkOf(identity string) (gatewayPoolVerifiedMark, bool) {
+	if s == nil || identity == "" {
+		return gatewayPoolVerifiedMark{}, false
+	}
+	value, loaded := s.poolVerified.Load(identity)
+	if !loaded {
+		return gatewayPoolVerifiedMark{}, false
+	}
+	mark, ok := value.(gatewayPoolVerifiedMark)
+	return mark, ok
 }
 
 // gatewayPoolMarkVerifiedFull 记「这个身份手上这张票验过满血」。票号为空（池子没报）时不记：
 // 那就认不出换没换票，宁可下一发再验一遍。
+//
+// 时刻只在**票号变了**的时候推进：同一张票被重复标（并发预热各标一次、前台验完复查那一下）
+// 不许把窗口起点往后推 —— 推了就等于每标一次都把「这张票还能满血多久」重算一遍，
+// 满血时长的样本会被系统性拉长，后台预热跟着越来越晚。
 func (s *openAICodexCookieStore) gatewayPoolMarkVerifiedFull(identity, version string) {
-	if identity == "" || version == "" {
+	if s == nil || identity == "" || version == "" {
 		return
 	}
-	s.poolVerified.Store(identity, version)
+	if mark, ok := s.gatewayPoolVerifiedMarkOf(identity); ok && mark.version == version {
+		return
+	}
+	s.poolVerified.Store(identity, gatewayPoolVerifiedMark{version: version, at: time.Now()})
 }
 
 // gatewayPoolWarmProbe 跑一组 state-echo：A 只带 cookie 拿一张 state，B 带 cookie + 那张 state

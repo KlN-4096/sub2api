@@ -32,15 +32,23 @@ type openAICodexCookieStore struct {
 	identity  openAICodexCredentialIdentity
 	poolPairs sync.Map // 凭证域身份 → openAIGatewayPoolPair
 	poolFetch singleflight.Group
-	// poolVerified 是「这个身份手上那张票**验过是满血**」（openai_gwpool_warm.go，queue 档）。
+	// poolVerified 是「这个身份手上那张票**验过是满血**」（openai_gwpool_warm.go）。
 	//
 	// 必须单独记，**不能拿 poolPairs 的 Live 当「验过」**：Live 的唯一含义是取票那一刻写的
-	// `until = now + valid_for_s`，和验没验过是两件事。三条路都会留下一张 Live 的未验票 ——
-	// 并发取票（singleflight 的 shared 对领头者也为真 ⇒ 谁都拿不到还票闭包）、同一份凭据挂在
-	// 多个账号行上（键是凭证域身份，retry 档那一行取的票 queue 档这一行照样看得见）、
-	// 以及 retry 兜底换到的那张。值存票号，换票即失效。
-	poolVerified sync.Map // 凭证域身份 → 票号（string）
-	// poolWarm 把同一张票上的并发预热判据收口成一次（openai_gwpool_warm.go，queue 档）。
+	// `until = now + valid_for_s`，和验没验过是两件事。两条路都会留下一张 Live 的未验票 ——
+	// 并发取票（singleflight 的 shared 对领头者也为真 ⇒ 谁都拿不到还票闭包），以及同一份凭据
+	// 挂在多个账号行上（键是凭证域身份，别的行取的票这一行照样看得见）。换票即失效。
+	//
+	// 值连**判出满血的时刻**一起存：满血时长的样本和后台预热的触发点都从它算
+	// （openai_gwpool_prewarm.go）。
+	poolVerified sync.Map // 凭证域身份 → gatewayPoolVerifiedMark
+	// poolPrewarm 是「这个身份正有一轮后台预热在跑」的占位，保证同时只有一轮
+	// （openai_gwpool_prewarm.go）。并发两轮就是双倍烧票换同一个窗口。
+	poolPrewarm sync.Map // 凭证域身份 → struct{}
+	// poolFullWindow 是满血时长的样本池，后台预热的开始时刻由它的 p95 决定。
+	// 刻意全局一份：窗口时长是上游的行为，不是某个账号的属性（见 gatewayPoolFullWindow）。
+	poolFullWindow gatewayPoolFullWindow
+	// poolWarm 把同一张票上的并发预热判据收口成一次（openai_gwpool_warm.go）。
 	// 取票本身已经被 poolFetch 收成一次 ⇒ 同身份的并发请求手里是**同一张票**、同一个
 	// (上游账号 × 网关) 单元、同一个满血窗口 ⇒ 结论必然相同，各自打一遍纯属白烧配额，
 	// 而供给只有个位数张/小时。键按票号分，换了票要重新验。

@@ -262,7 +262,13 @@ func (s *openAICodexCookieStore) gatewayPoolMarkStale(identity, version, gateway
 	}
 	next := cached
 	next.until = time.Time{} // 零值早于任何时刻 ⇒ cachedPoolPair 判 Stale。
-	s.poolPairs.CompareAndSwap(identity, cached, next)
+	if !s.poolPairs.CompareAndSwap(identity, cached, next) {
+		return
+	}
+	// 这张票的满血窗口到此结束 ⇒ 记一个时长样本。两条降智路径（这里和预热的垫话判据）
+	// 都从这个漏斗过，所以样本只在这一处记。后台预热的开始时刻由这些样本的 p95 决定
+	// （openai_gwpool_prewarm.go）。放在 CAS 成功之后：没标上就不是「窗口在这一刻结束」。
+	s.gatewayPoolNoteFullWindow(identity, cached.version)
 }
 
 // gatewayPoolNoteEcho 把一次回声读数记到缓存里那张票上，返回记完之后的连续刷新数

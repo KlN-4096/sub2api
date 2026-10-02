@@ -47,6 +47,8 @@ describe('gateway pool locale keys', () => {
       'gwpoolWarmTicketsDesc',
       'gwpoolSteering',
       'gwpoolSteeringDesc',
+      'gwpoolPrewarm',
+      'gwpoolPrewarmDesc',
       'gwpoolGuard'
     ]) {
       expect(typeof openai[key], key).toBe('string')

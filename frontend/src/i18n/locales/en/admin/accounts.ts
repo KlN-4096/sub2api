@@ -761,6 +761,11 @@ export default {
         gwpoolSteering: 'Pick the landing gateway myself',
         gwpoolSteeringDesc:
           'On (default): list the gateways first and name one this account has not burnt in the ledger window. Off: let the pool schedule it.',
+        gwpoolPrewarm: 'Background prewarm (off by default)',
+        gwpoolPrewarmDesc:
+          'When on, a candidate pair is taken and verified in the background as the current pair nears the end of its full-strength window, and swapped in only once it verifies full strength - so the next client request does not wait on verification. The current pair keeps serving throughout (no gap at all), and nothing changes if no candidate verifies. ' +
+          'The start point is not hardcoded: once 100 full-strength-window samples have accumulated, it uses their p95 and starts when the ticket age reaches p95 minus 15 seconds; the first 100 do not prewarm. One round per account at a time. ' +
+          'The cost is pairs: up to "pairs tried per warm-up" extra pairs per window, burned while no client is waiting. On an account whose supply is already exhausted this only reaches all_cooling faster (every request during the pool back-off returns 503 instantly). Watch gwpool_prewarm_start / _ready / _degraded / _no_ticket / _exhausted in the log.',
         gwpoolGuard: 'Degradation guard (no switch - always on once the pool is enabled)',
         // The check discipline and the cost paragraph are both unconditional now, so both stay on screen.
         gwpoolGuardDesc:
