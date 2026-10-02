@@ -380,7 +380,7 @@ func TestStateEchoDegradedRetriesClampsToZeroOrOne(t *testing.T) {
 	}
 }
 
-// 这一发没注入池子那张 pair（默认 all_models=false 时的非推理面端点）⇒ 判据根本不跑：
+// 这一发没注入池子那张 pair（非推理面端点）⇒ 判据根本不跑：
 // 没有「当前网关」可换，判出来也没有动作可做。
 func TestStateEchoSkipsRequestsWithoutAnInjectedPair(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
@@ -434,7 +434,7 @@ func TestGatewayPoolMarkStaleOnlyTouchesTheNamedTicket(t *testing.T) {
 	store := &openAICodexCookieStore{}
 	live := openAIGatewayPoolPair{
 		cookie: "__cflb=a", gateway: "unified-142", version: "tkt-2",
-		until: time.Now().Add(time.Minute), renewPending: true,
+		until: time.Now().Add(time.Minute),
 	}
 	store.poolPairs.Store(gwpoolTestIdentity, live)
 
@@ -447,32 +447,30 @@ func TestGatewayPoolMarkStaleOnlyTouchesTheNamedTicket(t *testing.T) {
 	cached, state := store.cachedPoolPair(gwpoolTestIdentity)
 	require.Equal(t, openAIGatewayPoolPairStale, state)
 	require.Equal(t, "tkt-2", cached.version, "票号要留着做 exclude_versions")
-	require.False(t, cached.renewPending, "判了降智的票不值得再花一次改报文形状的代价去续")
 
 	store.gatewayPoolMarkStale("", "tkt-2", "unified-142") // 空身份：静默返回，不 panic
 	require.NotPanics(t, func() { (*openAICodexCookieStore)(nil).gatewayPoolMarkStale("x", "y", "z") })
 }
 
-// 并发续期把票号换掉之后，标 Stale 不能静默失效。
+// 票号在手上这一份之后被换掉时，标 Stale 不能静默失效。
 //
-// 时序：请求 A 抢到续期名额、手上是 tkt-1；并发的请求 B 读走同一张缓存 pair 后被判降智，
-// 而此时 A 的 goroutine 已经 swap 成 tkt-2。只比票号的话 B 这一标就白标了——`until` 不清零、
-// cachedPoolPair 继续判 Live ⇒ 刚被判死的那条路由在窗口剩余时间里每一发都照走。
-func TestGatewayPoolMarkStaleFallsBackToGatewayAfterRenewSwappedTheTicket(t *testing.T) {
+// 时序：请求 B 读走缓存里那张 pair（tkt-1）之后被判降智，而此时缓存里已经换成了 tkt-2
+// （并发重新取票）。只比票号的话 B 这一标就白标了——`until` 不清零、cachedPoolPair 继续判
+// Live ⇒ 刚被判死的那条路由在窗口剩余时间里每一发都照走。所以落点对得上也要认。
+func TestGatewayPoolMarkStaleFallsBackToGatewayWhenTicketChanged(t *testing.T) {
 	store := &openAICodexCookieStore{}
 	store.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
-		cookie: "__cflb=a", gateway: "unified-142", version: "tkt-2", // 续期已经换成 tkt-2
-		until: time.Now().Add(time.Minute), renewPending: true,
+		cookie: "__cflb=a", gateway: "unified-142", version: "tkt-2", // 缓存里已经换成 tkt-2
+		until: time.Now().Add(time.Minute),
 	})
 
-	// B 手上还是续期前那张 tkt-1，但判死的是 unified-142 这个落点。
+	// B 手上还是换票前那张 tkt-1，但判死的是 unified-142 这个落点。
 	store.gatewayPoolMarkStale(gwpoolTestIdentity, "tkt-1", "unified-142")
 
 	cached, state := store.cachedPoolPair(gwpoolTestIdentity)
 	require.Equal(t, openAIGatewayPoolPairStale, state,
-		"续期换过票号就标不上了 ⇒ 被判死的路由会继续出站")
+		"换过票号就标不上了 ⇒ 被判死的路由会继续出站")
 	require.Equal(t, "tkt-2", cached.version, "要排掉的是缓存里现持的那张票号")
-	require.False(t, cached.renewPending)
 }
 
 // 丢弃读数的入口在没有 gin 上下文时静默退化（裸结构体单测、WS 之类没挂 sink 的路径）。

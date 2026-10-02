@@ -849,9 +849,6 @@ export default {
         gwpoolConsumerKeyKeep: '已保存，留空不修改',
         gwpoolConsumerKeyDesc:
           '池子按账号发 key，所以它配在账号上而不是实例上。与 access_token 同级：保存后页面不再回显，列表与详情里也不返回。',
-        gwpoolAllModels: '所有 chatgpt.com 请求都覆写',
-        gwpoolAllModelsDesc:
-          '范围按**请求路径**算。关（默认）：只有 Codex 推理面（/backend-api/codex/responses）取票覆写；侧信道与 /codex/alpha/search、/codex/realtime/calls、/codex/images/* 这些端点也打在 chatgpt.com 上，但它们不是推理轮次，给它们取一张票等于白烧一个 (账号 × 网关) 单位。注意 alpha 搜索还有一条兜底是直接打推理面的，那一条开关关着也会取票 —— 它确实是一发 /responses。开：这个账号打到 chatgpt.com 的每一个请求都覆写。',
         gwpoolAdvanced: '高级（留空即默认值）',
         gwpoolGatewayWindow: '本地账本窗口（秒）',
         gwpoolGatewayWindowDesc:
@@ -865,13 +862,10 @@ export default {
         gwpoolSteering: '自己挑落点网关',
         gwpoolSteeringDesc:
           '开（默认）：先列网关，再点名一个本地账本窗口内没烧过的。关：交给池子按它的调度选。',
-        gwpoolRenew: '给临期票续期',
-        gwpoolRenewDesc:
-          '关（默认）：开了之后，取回一张剩余寿命不足 12 分钟的票时，取票后的第一发业务请求会**摘掉 __oailb 只送 __cflb**，让上游补发一张新的，把路由寿命重新拉满到 3600 秒。只延路由寿命，不延满血窗口。代价：真实 Codex 客户端是两件齐发，摘掉一件是对报文形状的偏离，而这个偏离**从没单独实测过**（安全性是从「路由由 __cflb 钉死」推出来的）。只有临期票、且只有第一发会这么做，所以常态是零偏离。怀疑它引起问题就关掉。',
-        gwpoolStateEcho: '就地判降智（state-echo）',
+        gwpoolStateEcho: '降智检测',
         gwpoolStateEchoDesc:
           '开（默认）：业务请求送出了活 turn-state、而上游在响应头里回了一张**不同的**新票 ⇒ 判这条路由已降智，把当前网关标记为要换。只读响应头、只在 HTTP 200 上下结论（429/5xx 回新票是限流或故障，不算降智证据）。**这个判据有假阴性、没有假阳性：判「满血」可信，判「降智」偶尔会误判 ⇒ 会白换一次网关、白烧一个槽位**，而供给只有个位数张/小时。换网关的频率高到吃不住时就关掉它，关掉后行为与接这个功能之前逐字节一致。',
-        gwpoolDegradedRetry: '判到降智后换票重试一次',
+        gwpoolDegradedRetry: '降智重试',
         gwpoolDegradedRetryDesc:
           '开（默认）：当场换一张票（换一个网关）把同一个请求重发一遍，客户端无感；重试那一发若又判降智就不再试，直接按失败返回。关：只截断，回一个干净的错误，由客户端自己重发。上限写死一次，调不大 —— 判据会误判，而每一发重试都是一次真实上游请求、都会烧掉一个 (账号 × 网关) 单位。两发都会落使用记录：被丢掉那一发标成「降智丢弃」，它的 token 与金额恒为 0（截断时响应体一个字节都没读，用量根本观测不到，刻意不估算）。',
         gwpoolErrors: {

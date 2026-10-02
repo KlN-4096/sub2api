@@ -40,11 +40,10 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 	}
 }
 
-// doOpenAIUpstreamOnce 发一发上游，并把 state-echo 判据跑在 Store / 续期**之前**。
+// doOpenAIUpstreamOnce 发一发上游，并把 state-echo 判据跑在 Store **之前**。
 //
-// 顺序是承重的：判到降智这张票就不要了，再去 Store 它的 Set-Cookie、拿它去池子续寿命都是在给
-// 一条已经废掉的路由延命，而续期是异步的（gatewayPoolRenew 起 goroutine），会和随后的标 Stale
-// 抢同一个缓存槽。
+// 顺序是承重的：判到降智这张票就不要了，再去 Store 它的 Set-Cookie 等于给一条已经废掉的
+// 路由延命。
 func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 	request *http.Request,
 	proxyURL string,
@@ -78,9 +77,6 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 			return resp, true, nil
 		}
 		s.codexCookies.Store(account, rawURL, resp.Header)
-		// 取票后的第一发（且票临期）会摘掉 __oailb 出站，换回来的那张新 __cflb 要回传池子续寿命。
-		// 异步 + 自带 ctx，绝不拖业务响应；没抢到名额 / 上游没下发新两件时它什么都不做。
-		s.codexCookies.gatewayPoolRenew(request.Context(), account, resp.Header)
 		return resp, false, nil
 	}
 	if gatewayPoolReleasesUnsent(resp, err) {
