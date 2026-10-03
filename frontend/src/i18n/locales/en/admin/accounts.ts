@@ -805,7 +805,10 @@ export default {
           // repeating "used within the window, still cooling" on every row pushes the values
           // that actually need comparing off to the right where they no longer line up.
           // The long wording stays in gatewayColumnHint and legend, which appear once.
-          regionHot: 'cooling',
+          // "cooling" carries no information — a whole column of it. Report how many minutes
+          // are left instead (against the local ledger window, 4h by default) so a vertical
+          // scan picks out the one that comes back first.
+          regionHot: 'CD left: {minutes}min',
           regionCooled: 'usable',
           regionIdle: 'never used',
           // Segment 3 is how LONG full strength held (full verdict → degraded verdict),

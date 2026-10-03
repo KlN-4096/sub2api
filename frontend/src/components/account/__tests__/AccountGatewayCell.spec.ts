@@ -286,7 +286,9 @@ describe('AccountGatewayCell', () => {
         `${base}.regions.east-asia`,
         '73', // `unified-` 前缀在这一列里是恒定的，省掉才塞得下
         '180s', // 满血持续了多久，不是它发生在什么时候
-        `${base}.regionHot`,
+        // 4 小时窗口减掉「1 分钟前用过」再向上取整 ⇒ 239。钉死这个数同时钉住两件事：
+        // 报 240 是忘了减，报 238 是向下取整（那会让「还剩 0 分钟」读成「已经好了」）。
+        `${base}.regionHot:{"minutes":239}`,
         `${base}.verdicts.degraded`
       ].join('-')
     )
@@ -297,7 +299,7 @@ describe('AccountGatewayCell', () => {
         `${base}.regions.us-east`,
         '95',
         `${base}.fullUntimed`,
-        `${base}.regionHot`,
+        `${base}.regionHot:{"minutes":237}`,
         `${base}.verdicts.none`
       ].join('-')
     )

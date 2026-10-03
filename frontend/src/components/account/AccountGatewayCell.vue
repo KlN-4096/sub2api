@@ -492,9 +492,22 @@ function fullHeldOf(item: GatewayItem): string {
   return `${Math.round(item.fullHeldMs / 1000)}s`
 }
 
+/**
+ * 第四段：还烧着就报**还剩多少分钟出冷却**，出了就是「可再用」。
+ *
+ * 向上取整并兜到 1：这一段只在 isHot 为真时出现，而「剩余 0 分钟」会被读成「已经好了」——
+ * 正好和它要表达的相反。不足一分钟报「1 分钟」，宁可催早一点。
+ */
+function cooldownOf(item: GatewayItem): string {
+  const base = 'admin.accounts.openai.gatewayHistory'
+  if (!isHot(item.at)) return t(`${base}.regionCooled`)
+  const left = windowMs.value - (now.value - Date.parse(item.at))
+  return t(`${base}.regionHot`, { minutes: Math.max(1, Math.ceil(left / 60_000)) })
+}
+
 function titleOf(item: GatewayItem): string {
   const base = 'admin.accounts.openai.gatewayHistory'
-  const state = t(isHot(item.at) ? `${base}.regionHot` : `${base}.regionCooled`)
+  const state = cooldownOf(item)
   const verdict = item.verdict
     ? t(`${base}.verdicts.${item.verdict}`)
     : t(`${base}.verdicts.none`)
