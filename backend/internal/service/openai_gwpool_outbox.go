@@ -135,10 +135,6 @@ func (s *OpenAIGatewayService) enqueueGatewayPoolReport(account *Account, report
 	s.enqueueGatewayPoolPending(account, gatewayPoolPendingReport{Report: report})
 }
 
-func (s *OpenAIGatewayService) enqueueGatewayPoolContact(account *Account, report gwpool.ContactReport) {
-	s.enqueueGatewayPoolPending(account, gatewayPoolPendingReport{Kind: "contact", Contact: &report})
-}
-
 func (s *OpenAIGatewayService) enqueueGatewayPoolPending(account *Account, pending gatewayPoolPendingReport) {
 	ctx, cancel := context.WithTimeout(context.Background(), gatewayPoolWarmNoteTimeout)
 	defer cancel()

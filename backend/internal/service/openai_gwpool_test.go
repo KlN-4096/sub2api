@@ -696,7 +696,7 @@ func TestOpenAIWSIngressBridgesGatewayPoolAccountToHTTP(t *testing.T) {
 				"\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\ndata: [DONE]\n\n")),
 	}}
 	svc.httpUpstream = upstream
-	svc.accountRepo = &stubQuotaAccountRepo{accounts: map[int64]*Account{account.ID: account}}
+	svc.accountRepo = &gatewayRuntimeRepo{account: *account}
 	poolCookie := gwpoolTestPairCookie(t, "unified-142")
 	fake := newGwpoolFakePool(t, poolCookie, 150)
 	fake.configure(account)

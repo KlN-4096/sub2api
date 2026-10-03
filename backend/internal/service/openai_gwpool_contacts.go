@@ -189,7 +189,10 @@ func (s *OpenAIGatewayService) changeGatewayPoolContacts(ctx context.Context, ac
 	}
 	tag := gatewayPoolLedgerTag(identity)
 	value, _ := s.codexCookies.poolContactLocks.LoadOrStore(tag, &sync.Mutex{})
-	lock := value.(*sync.Mutex)
+	lock, ok := value.(*sync.Mutex)
+	if !ok {
+		panic("gwpool contact lock has an invalid type")
+	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gatewayPoolWarmNoteTimeout)
 	defer cancel()
 	lock.Lock()

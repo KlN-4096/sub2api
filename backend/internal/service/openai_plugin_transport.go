@@ -94,7 +94,7 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 	if identityErr != nil {
 		slog.Warn("gwpool_first_send_identity_unavailable", "account_id", account.ID)
 	}
-	resp, err, sentAt := s.gatewayPoolObservedRoundTrip(request, proxyURL, account, poolRequest)
+	resp, sentAt, err := s.gatewayPoolObservedRoundTrip(request, proxyURL, account, poolRequest)
 	if !sentAt.IsZero() {
 		s.codexCookies.gatewayPoolMarkSent(identity, applied.Version, sentAt)
 	}
@@ -118,10 +118,10 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 // Not being safe to return a ticket is not evidence of a send. Native HTTP
 // records a completed request write; plugins may explicitly attest RequestSent.
 // A response itself is sufficient evidence when the transport has no trace.
-func (s *OpenAIGatewayService) gatewayPoolObservedRoundTrip(request *http.Request, proxyURL string, account *Account, observe bool) (*http.Response, error, time.Time) {
+func (s *OpenAIGatewayService) gatewayPoolObservedRoundTrip(request *http.Request, proxyURL string, account *Account, observe bool) (*http.Response, time.Time, error) {
 	if !observe {
 		resp, err := s.doOpenAIUpstreamRoundTrip(request, proxyURL, account)
-		return resp, err, time.Time{}
+		return resp, time.Time{}, err
 	}
 	started := time.Now()
 	var wroteAt atomic.Int64
@@ -133,13 +133,13 @@ func (s *OpenAIGatewayService) gatewayPoolObservedRoundTrip(request *http.Reques
 	traced := request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
 	resp, err := s.doOpenAIUpstreamRoundTrip(traced, proxyURL, account)
 	if at := wroteAt.Load(); at != 0 {
-		return resp, err, time.Unix(0, at)
+		return resp, time.Unix(0, at), err
 	}
 	var pluginErr *PluginTransportError
 	if resp != nil || (errors.As(err, &pluginErr) && pluginErr.RequestSent) {
-		return resp, err, started
+		return resp, started, err
 	}
-	return resp, err, time.Time{}
+	return resp, time.Time{}, err
 }
 
 // gatewayPoolReleasesUnsent 判「这一发一个字节都没发出去」，决定取到的池子票要不要还。

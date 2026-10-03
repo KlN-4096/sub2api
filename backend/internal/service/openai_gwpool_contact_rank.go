@@ -71,7 +71,11 @@ func (s *openAICodexCookieStore) gatewayPoolRankContacts(ctx context.Context, ac
 		return candidates
 	}
 	value, _ := s.poolContactPicks.LoadOrStore(gatewayPoolLedgerTag(identity), &atomic.Uint64{})
-	if value.(*atomic.Uint64).Add(1)%gatewayPoolContactExploreEvery == 0 {
+	counter, ok := value.(*atomic.Uint64)
+	if !ok {
+		panic("gwpool contact pick counter has an invalid type")
+	}
+	if counter.Add(1)%gatewayPoolContactExploreEvery == 0 {
 		return candidates // deterministic 20% baseline exploration, with no extra requests
 	}
 	fresh, err := s.freshGatewayPoolAccount(ctx, account)

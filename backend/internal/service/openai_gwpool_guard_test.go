@@ -59,7 +59,8 @@ func TestGatewayPoolStrictGuardBlocksInsufficientBudgetBeforeFetching(t *testing
 
 func TestGatewayPoolStrictGuardChecksTheActualPairBeforeBusinessSend(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-	svc := &OpenAIGatewayService{httpUpstream: &gwpoolEchoUpstream{}}
+	upstream := &gwpoolEchoUpstream{}
+	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := fake.account(1)
 	// 上一张虽验过，但随后已经换到新票；末端必须核对实际附带的票。
 	svc.codexCookies.gatewayPoolMarkVerifiedFull(gwpoolTestIdentity, "old-verified")
@@ -71,7 +72,7 @@ func TestGatewayPoolStrictGuardChecksTheActualPairBeforeBusinessSend(t *testing.
 	require.Error(t, err)
 	require.Nil(t, response)
 	require.False(t, degraded, "未经验证不是明确降级")
-	require.Empty(t, svc.httpUpstream.(*gwpoolEchoUpstream).sentBodies)
+	require.Empty(t, upstream.sentBodies)
 }
 
 func TestGatewayPoolGuardOnlyExplicitBooleanFalseDisables(t *testing.T) {

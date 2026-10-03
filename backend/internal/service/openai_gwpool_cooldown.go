@@ -356,7 +356,10 @@ func (s *openAICodexCookieStore) freshGatewayPoolAccount(ctx context.Context, ac
 
 func (s *openAICodexCookieStore) gatewayPoolHistoryLock(id int64) func() {
 	lock, _ := s.poolHistoryLocks.LoadOrStore(id, &sync.Mutex{})
-	mu := lock.(*sync.Mutex)
+	mu, ok := lock.(*sync.Mutex)
+	if !ok {
+		panic("gwpool history lock has an invalid type")
+	}
 	mu.Lock()
 	return mu.Unlock
 }

@@ -32,10 +32,10 @@ func rotationService(account *Account) *OpenAIGatewayService {
 
 func TestGatewayPoolRotationOnlyAfterFreshCompleteExhaustion(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		list   []gwpoolFakeGateway
-		status int
-		rotate bool
+		name         string
+		list         []gwpoolFakeGateway
+		status       int
+		rotate       bool
 		localCooling bool
 	}{
 		{"all candidates cooling", []gwpoolFakeGateway{{Name: "unified-142", PairReady: true, UsedByYou: true}}, 0, true, false},

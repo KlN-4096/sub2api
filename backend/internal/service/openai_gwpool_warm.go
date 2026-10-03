@@ -509,7 +509,7 @@ func (s *OpenAIGatewayService) gatewayPoolWarmShot(
 	// 业务请求走插件、裸打 httpUpstream 走的是另一条传输层（TLS 指纹都不同，见
 	// buildOpenAITurnStateProbe 的注释）—— 那就成了「在 A 上量、给 B 放行」的空闸。
 	// 判据必须和它要放行的那一发走同一条路。
-	resp, err, sentAt := s.gatewayPoolObservedRoundTrip(req, proxyURL, account, true)
+	resp, sentAt, err := s.gatewayPoolObservedRoundTrip(req, proxyURL, account, true)
 	if trace, ok := ctx.Value(gatewayPoolProbeTraceKey{}).(*gatewayPoolProbeTrace); ok {
 		trace.mayHaveSent = trace.mayHaveSent || !gatewayPoolReleasesUnsent(resp, err)
 		if !sentAt.IsZero() {
