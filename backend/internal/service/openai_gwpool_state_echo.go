@@ -237,17 +237,18 @@ func (s *OpenAIGatewayService) gatewayPoolEchoStrike(
 // openAIGatewayPoolPairStale ⇒ 取票时 force=1 + exclude_versions=<这张> ⇒ 必定换一个网关。
 //
 // 票号对不上就什么都不做：那说明缓存里已经是另一张票了（并发换过、还过）。
-func (s *openAICodexCookieStore) gatewayPoolMarkStale(identity, version, gateway string) {
+// 返回值是这张票的满血时长，0 = 没验过满血 / 没标上（见 gatewayPoolNoteFullWindow）。
+func (s *openAICodexCookieStore) gatewayPoolMarkStale(identity, version, gateway string) time.Duration {
 	if s == nil || identity == "" {
-		return
+		return 0
 	}
 	value, ok := s.poolPairs.Load(identity)
 	if !ok {
-		return
+		return 0
 	}
 	cached, isPair := value.(openAIGatewayPoolPair)
 	if !isPair {
-		return
+		return 0
 	}
 	// 票号对不上时**再按落点比一次**，别直接放弃。
 	//
@@ -258,17 +259,17 @@ func (s *openAICodexCookieStore) gatewayPoolMarkStale(identity, version, gateway
 	//
 	// 被判死的是**落点**不是票号：同一个网关换没换票都该换走，所以落点一致就照标。
 	if cached.version != version && (gateway == "" || cached.gateway != gateway) {
-		return
+		return 0
 	}
 	next := cached
 	next.until = time.Time{} // 零值早于任何时刻 ⇒ cachedPoolPair 判 Stale。
 	if !s.poolPairs.CompareAndSwap(identity, cached, next) {
-		return
+		return 0
 	}
 	// 这张票的满血窗口到此结束 ⇒ 记一个时长样本。两条降智路径（这里和预热的垫话判据）
 	// 都从这个漏斗过，所以样本只在这一处记。后台预热的开始时刻由这些样本的 p95 决定
 	// （openai_gwpool_prewarm.go）。放在 CAS 成功之后：没标上就不是「窗口在这一刻结束」。
-	s.gatewayPoolNoteFullWindow(identity, cached.version)
+	return s.gatewayPoolNoteFullWindow(identity, cached.version)
 }
 
 // gatewayPoolNoteEcho 把一次回声读数记到缓存里那张票上，返回记完之后的连续刷新数
@@ -341,7 +342,9 @@ func (s *OpenAIGatewayService) dropDegradedGatewayPoolRoute(
 	// 票会留在缓存里被下一发继续拿出去（与 gatewayPoolRenew 同一处取舍）。
 	detached := context.WithoutCancel(request.Context())
 	if identity, err := s.codexCookies.gatewayPoolIdentity(detached, account); err == nil {
-		s.codexCookies.gatewayPoolMarkStale(identity, applied.Version, applied.Gateway)
+		// 标 Stale 顺手量到这张票的满血时长 ⇒ 记进 sink，由用量侧落到这个网关的账本上。
+		openAIGatewayPoolSinkFrom(detached).noteFullHeld(
+			s.codexCookies.gatewayPoolMarkStale(identity, applied.Version, applied.Gateway))
 		// 账本记的是**实际交付的那个网关**：标 Stale 只让下一发换票，账本才是「这个上游账号
 		// 4 小时内别再点这个落点」的依据。
 		s.codexCookies.gatewayPoolMarkUsed(identity, applied.Gateway)

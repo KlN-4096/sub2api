@@ -268,12 +268,13 @@ describe('AccountGatewayCell', () => {
       account({
         current: 'unified-73',
         seen: {
-          // 窗口已经收尾（判成降智）：满血从 240 秒前持续到 60 秒前 ⇒ 180s。
+          // 后端量到的满血时长照原样显示，不在前端拿时刻相减。
           'unified-73': {
             at: isoAgo(60),
             region: 'east-asia',
             verdict: 'degraded',
-            full_at: isoAgo(240)
+            full_at: isoAgo(240),
+            full_held_ms: 180_000
           },
           'unified-95': { at: isoAgo(180), region: 'us-east' }
         },
@@ -351,12 +352,7 @@ describe('AccountGatewayCell', () => {
     )
     const text = w.get('[data-testid="account-gateway-window-usage"]').text()
     expect(text).toContain('gatewayHistory.windowUsage:')
-    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({
-      hours: 4,
-      used: 2,
-      live: 62,
-      free: 5
-    })
+    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 2, free: 5 })
   })
 
   // 已用多于可交付是**正常的**（账本跨一个窗口、清单是此刻的快照），不许因此把「没烧过」
@@ -369,12 +365,7 @@ describe('AccountGatewayCell', () => {
       account({ current: 'unified-0', seen, pool_live: 62, pool_free: 7, updated_at: isoAgo(60) })
     )
     const text = w.get('[data-testid="account-gateway-window-usage"]').text()
-    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({
-      hours: 4,
-      used: 67,
-      live: 62,
-      free: 7
-    })
+    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 67, free: 7 })
   })
 
   // 问不到池子清单（没开 steering / 列表打不开 ⇒ pool_live 缺省）时只报已用那一半。
@@ -389,6 +380,23 @@ describe('AccountGatewayCell', () => {
     const text = w.get('[data-testid="account-gateway-window-usage"]').text()
     expect(text).toContain('gatewayHistory.windowUsageUsedOnly:')
     expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 1 })
+  })
+
+  // 旧版本（klno.3 及更早）写下的记录有 pool_live、没有 pool_free。两个字段都在才算测到 ——
+  // 只看 live 的话缺席会被当成 0，渲染出「可交付 61 个，其中 0 个没烧过」，正是这次要修的
+  // 那句假话换了个来源。后端那边 pool_free 刻意不带 omitempty，真的 0 一定在 JSON 里。
+  it('旧记录只有 pool_live 没有 pool_free 时退回「只报已用」', () => {
+    const w = render(
+      account({
+        current: 'unified-1',
+        seen: { 'unified-1': { at: isoAgo(60), region: 'us-east' } },
+        pool_live: 61,
+        updated_at: isoAgo(60)
+      })
+    )
+    const text = w.get('[data-testid="account-gateway-window-usage"]').text()
+    expect(text).toContain('gatewayHistory.windowUsageUsedOnly:')
+    expect(text).not.toContain('gatewayHistory.windowUsage:')
   })
 
   // pool_live>0 时 free=0 是**真的 0**（可交付的全烧过了），要和「没问到清单」分开。
@@ -423,24 +431,35 @@ describe('AccountGatewayCell', () => {
     expect(text).not.toContain('gatewayHistory.forecast:')
   })
 
-  // 窗口还在跑的时候**不许**报时长：这时候算出来的是「到目前为止」，而它会被当成
-  // 「这个落点只给了这么多」。判成降智那一刻才有收尾时刻，才算得出长度。
-  it('满血窗口没收尾时第三段写「未计时」，不报一个半截的数', () => {
+  // 没有 full_held_ms 就写「未计时」，**绝不拿 at − full_at 顶上**。
+  //
+  // 第一版就是那个减法：full_at 是粘滞的，而 degraded 判定要等下一次真的打到这个网关才会
+  // 写，中间空几个小时就白算几个小时 —— 现网渲染出了 22655s / 21738s（满血窗口才 183 秒）。
+  // 这条用例铺的正是那个形状：满血判定在 6 小时前、降智判定在 30 秒前，减出来是 21570s，
+  // 而正确答案是「未计时」。
+  it('没有后端量到的时长就写「未计时」，不拿两个时刻相减', () => {
     const base = 'admin.accounts.openai.gatewayHistory'
     const w = render(
       account({
         current: 'unified-73',
         seen: {
-          // 仍判满血 = 窗口正在跑。
+          // 仍判满血 = 窗口正在跑，没有收尾读数。
           'unified-73': { at: isoAgo(10), region: 'east-asia', verdict: 'full', full_at: isoAgo(70) },
-          // 判了降智但从没验出过满血：没有起点，同样算不出长度。
-          'unified-95': { at: isoAgo(30), region: 'us-east', verdict: 'degraded' }
+          // 判了降智、也有满血时刻，但两者隔了 6 小时 —— 相减是 21570s，必须是「未计时」。
+          'unified-95': {
+            at: isoAgo(30),
+            region: 'us-east',
+            verdict: 'degraded',
+            full_at: isoAgo(6 * 3600)
+          }
         },
         updated_at: isoAgo(10)
       })
     )
     expect(cell(w, 'east-asia').attributes('title')).toContain(`-${base}.fullUntimed-`)
-    expect(cell(w, 'us-east').attributes('title')).toContain(`-${base}.fullUntimed-`)
+    const stale = cell(w, 'us-east').attributes('title') ?? ''
+    expect(stale).toContain(`-${base}.fullUntimed-`)
+    expect(stale).not.toMatch(/-\d{4,}s-/)
   })
 
   // 满血分钟预测：单位是 (账号 × 网关)，**一个网关名就是一个单位**，而且算**下界**。

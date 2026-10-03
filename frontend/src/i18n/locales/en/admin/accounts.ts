@@ -816,19 +816,15 @@ export default {
           fullUntimed: 'not timed',
           legend:
             '✓ verified full (inside the 183s window) · ! used inside the window, degraded right now · grey window elapsed, usable again',
-          // Three independent numbers, NO subtraction between them: "used" comes from this
-          // row's ledger (gateway names touched over the past window), "deliverable" is what
-          // has a live ticket right now, and the two sets do not nest — subtracting goes
-          // negative and clamping it reads as "the pool is used up". "Unburned" is counted by
-          // the backend while it walks the listing.
-          windowUsage:
-            '{used} landing(s) used in the {hours}h window; pool can deliver {live} right now, {free} of them unburned',
-          // When the pool listing is unavailable, report only the used half: inventing a
-          // denominator is worse than omitting it.
-          windowUsageUsedOnly: '{used} landing(s) used in the {hours}h window',
+          // Two independent numbers, NO subtraction: "landings" comes from this row's ledger
+          // (gateway names touched over the past window), "left in pool" is the current
+          // deliverable listing reconciled against that ledger. The two sets do not nest.
+          windowUsage: '{used} landing(s) in the last {hours}h; {free} left in the pool',
+          // Without the pool listing, report only the landings: inventing a number is worse.
+          windowUsageUsedOnly: '{used} landing(s) in the last {hours}h',
           windowUsageHint:
-            '"Used" counts landings in this row\'s ledger touched inside the window; "deliverable" is how many gateways the pool has a live ticket for (fetched alongside ticket pickup — unavailable when "let the pool pick the landing" is off, in which case only the used count is shown); "unburned" is how many of those deliverable gateways neither this row\'s ledger nor the pool\'s has touched.\n' +
-            'The three must NOT be subtracted from one another: "used" spans the local window while "deliverable" is a snapshot of now, so a ledger landing may well be off the listing already (ticket expired). Used exceeding deliverable is normal and does not mean the pool is exhausted.',
+            '"Landings" counts gateways this row\'s ledger touched inside the window; "left in the pool" is how many of the gateways the pool can deliver RIGHT NOW this account has not burned according to the local ledger — recomputed against the ledger every time a ticket fetch pulls the listing, never cached. With "let the pool pick the landing" off there is no listing, so only the first number is shown.\n' +
+            'The two must NOT be subtracted: landings span the local window (expired tickets included) while the listing is a snapshot of now. More landings than deliverable gateways is normal and does not mean the pool is exhausted.',
           // Full-strength minutes forecast for the next hour, deliberately a LOWER bound.
           // "at least" is required: "at most" would get read as a quota.
           forecast: 'at least {minutes} min full-strength in the next hour',

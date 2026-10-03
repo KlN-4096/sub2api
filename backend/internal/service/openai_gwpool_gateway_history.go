@@ -111,7 +111,10 @@ type openAIGatewayHistory struct {
 	// 存在账号行上是搭车：池子全局的读数每一行各存一份。新鲜度跟着这一行自己的流量走，
 	// 而那正是要看它的时候。
 	PoolLive int `json:"pool_live,omitempty"`
-	PoolFree int `json:"pool_free,omitempty"`
+	// PoolFree **不能带 omitempty**：带了的话真实的 0（可交付的全烧过了）会被整条省掉，
+	// 和「这条记录是旧版本写的、压根没这个字段」在消费端长得一模一样 —— 而那正是这个字段
+	// 存在的意义。消费端按「两个字段都在」判「这一对测到了」。
+	PoolFree int `json:"pool_free"`
 	// UpdatedAt 是写下这条记录的时刻，只用于展示「这份读数有多新」。
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -134,6 +137,13 @@ type openAIGatewaySeen struct {
 	// omitzero 而不是 omitempty：omitempty 对 struct 不生效，零值会落库成
 	// "0001-01-01T00:00:00Z"（同 openai_turn_state_recovery.go 的两个时间字段）。
 	FullAt time.Time `json:"full_at,omitzero"`
+	// FullHeldMs 是这个 (账号 × 网关) 上量到的**满血持续了多久**（毫秒），由判降智那一刻
+	// 从「这张票验出满血」算到「判成降智」—— 两头都在同一张票的生命里，有界。
+	// 0 = 没量到（没验过满血、或者这一格的降智不是从本进程这条路判出来的）。
+	//
+	// **不能用 At − FullAt 代替**：FullAt 是粘滞的，而降智判定要等下一次真的打到这个网关
+	// 才会写，中间的空闲全算进去。2026-10-03 现网照这个减法渲染出 22655 秒。
+	FullHeldMs int64 `json:"full_held_ms,omitempty"`
 }
 
 // readOpenAIGatewayHistory 读这条记录。解析失败按「没有」处理。
@@ -174,7 +184,7 @@ func readOpenAIGatewayHistory(a *Account) (openAIGatewayHistory, bool) {
 // 抢同一个键。
 func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 	ctx context.Context, account *Account, gateway, region, verdict string, advanceCurrent bool,
-	poolLive, poolFree int,
+	poolLive, poolFree int, fullHeldMs int64,
 ) {
 	if s == nil || s.accountRepo == nil || account == nil {
 		return
@@ -215,7 +225,13 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 		rec.Current = gateway
 		rec.CurrentRegion = region
 	}
-	next := openAIGatewaySeen{At: now, Region: region, Verdict: prev.Verdict, FullAt: prev.FullAt}
+	next := openAIGatewaySeen{At: now, Region: region, Verdict: prev.Verdict, FullAt: prev.FullAt,
+		FullHeldMs: prev.FullHeldMs}
+	// 这一发量到了就刷新，没量到留着上一次的：满血时长是「上一个窗口有多长」，没新读数时
+	// 旧读数仍然是关于这一格最新的事实。
+	if fullHeldMs > 0 {
+		next.FullHeldMs = fullHeldMs
+	}
 	// 这一发没判据时**留着上一次的判定**，和大区同一个道理：没判 ≠ 判不出来。
 	if verdict != "" {
 		next.Verdict = verdict

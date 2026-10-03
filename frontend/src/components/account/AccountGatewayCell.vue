@@ -65,7 +65,6 @@
             ? t('admin.accounts.openai.gatewayHistory.windowUsage', {
                 hours: windowHours,
                 used: windowUsage.used,
-                live: windowUsage.live,
                 free: windowUsage.free
               })
             : t('admin.accounts.openai.gatewayHistory.windowUsageUsedOnly', {
@@ -175,6 +174,8 @@ interface GatewaySeen {
   region?: string
   verdict?: string
   full_at?: string
+  /** 后端在判降智那一刻量到的满血时长（毫秒）。缺省 / 0 = 没量到。 */
+  full_held_ms?: number
 }
 
 interface GatewayHistory {
@@ -194,6 +195,8 @@ interface GatewayItem {
   region: string
   verdict: string
   fullAt: string
+  /** 后端量到的满血时长（毫秒）。0 = 没量到，见 fullHeldOf。 */
+  fullHeldMs: number
 }
 
 /**
@@ -259,7 +262,8 @@ const items = computed<GatewayItem[]>(() => {
       at: typeof row.at === 'string' ? row.at : '',
       region: typeof row.region === 'string' ? row.region : '',
       verdict: row.verdict === 'full' || row.verdict === 'degraded' ? row.verdict : '',
-      fullAt: typeof row.full_at === 'string' ? row.full_at : ''
+      fullAt: typeof row.full_at === 'string' ? row.full_at : '',
+      fullHeldMs: typeof row.full_held_ms === 'number' ? row.full_held_ms : 0
     }))
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
 })
@@ -274,7 +278,8 @@ const current = computed<GatewayItem | null>(() => {
       at: history.value.updated_at ?? '',
       region: history.value.current_region ?? '',
       verdict: '',
-      fullAt: ''
+      fullAt: '',
+      fullHeldMs: 0
     }
   )
 })
@@ -389,8 +394,13 @@ const windowUsage = computed(() => {
     if (isHot(item.at)) used += 1
   }
   const live = typeof history.value.pool_live === 'number' ? history.value.pool_live : 0
-  const free = typeof history.value.pool_free === 'number' ? history.value.pool_free : 0
-  return { used, live, free, measured: live > 0 }
+  const free = history.value.pool_free
+  // **两个字段都在**才算测到。只看 live 的话，klno.3 及更早写下的记录（有 live、没有
+  // pool_free）会把缺字段当成 0，渲染出「可交付 61 个，其中 0 个没烧过」—— 正是这次要修
+  // 的那句假话，换了个来源。后端那边 pool_free 刻意不带 omitempty，所以真的 0 会出现在
+  // JSON 里，缺席只可能是老记录。
+  const measured = live > 0 && typeof free === 'number'
+  return { used, live, free: measured ? (free as number) : 0, measured }
 })
 
 /**
@@ -466,22 +476,20 @@ function regionLabel(key: string): string {
 const TITLE_SEP = '-'
 
 /**
- * 满血时长：从判成满血（fullAt）到判成降智（at）的那一段，只有**窗口已经结束**才有数。
+ * 满血时长：这一格的满血窗口持续了多久，直接读后端量好的 full_held_ms。
  *
- * 两头都是后端已经落下的读数，不用新字段：verdict 变成 degraded 必须穿过 5 分钟节流
- * （noteOpenAIGatewayUse 的注释），所以降智那一刻的 at 就是窗口的收尾时刻。
+ * **不要在这里用 `at - fullAt` 算。** 第一版就是那么写的，现网渲染出 22655s / 21738s ——
+ * fullAt 是粘滞的，而 degraded 判定要等**下一次真的打到这个网关**才会写，中间空了几小时
+ * 就白算几小时。真正的窗口长度由后端在判降智那一刻量（从这张票验出满血算起，两头都在
+ * 同一张票的生命里，有界），见 openAIGatewaySeen.FullHeldMs。
  *
- * 回「未计时」的三种情况合成一个标签，因为它们对读者是同一件事——**这一格没有时长读数**：
- *   - verdict 还是 full：窗口正在跑，这时候报的任何数都只是「到目前为止」，会被当成结果；
- *   - 从没验出过满血：窗口压根没开过，没有起点；
- *   - 算出来不是正数：两条读数来自同一次写入（判满血和判降智挤在一次节流里），测不出长度。
+ * 没有读数就写「未计时」：窗口还在跑、从没验出过满血、或者这一格的降智不是从本进程这条
+ * 路判出来的 —— 对读者都是同一件事，这一格没有时长可报。
  */
 function fullHeldOf(item: GatewayItem): string {
   const base = 'admin.accounts.openai.gatewayHistory'
-  if (item.verdict !== 'degraded' || !item.fullAt || !item.at) return t(`${base}.fullUntimed`)
-  const held = new Date(item.at).getTime() - new Date(item.fullAt).getTime()
-  if (!(held > 0)) return t(`${base}.fullUntimed`)
-  return `${Math.round(held / 1000)}s`
+  if (!(item.fullHeldMs > 0)) return t(`${base}.fullUntimed`)
+  return `${Math.round(item.fullHeldMs / 1000)}s`
 }
 
 function titleOf(item: GatewayItem): string {
