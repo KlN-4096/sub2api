@@ -79,7 +79,8 @@ type openAICodexCookieStore struct {
 	// 架子上这张不是浪费而是预取：它在自己的满血窗口内对**后面的**业务请求一样有效。
 	// 窗口过了还没人用才算损失，而那只发生在这个身份突然没请求的时候。
 	// 键按凭证域身份，和 poolPairs 同一个口径（同一份凭据的几个账号行共用）。
-	poolSpare sync.Map // 凭证域身份 → *gatewayPoolTicketBatch
+	poolSpare     sync.Map // 凭证域身份 → *gatewayPoolTicketBatch
+	poolInventory sync.Map // 凭证域身份 → *gatewayPoolInventoryState
 }
 
 // openAICodexCookieJarKey：本地行 ID + 凭证域身份。同一行重新授权成另一个 ChatGPT 身份时

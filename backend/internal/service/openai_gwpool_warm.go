@@ -148,8 +148,24 @@ func (s *OpenAIGatewayService) gatewayPoolWarmUpWith(
 			"reason", "the first-output guard's remaining deadline is too short to verify a pair")
 		return errOpenAIGatewayPoolWarmUnverified
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), budget)
+	totalBudget := budget
+	waitState := gatewayPoolWaitFrom(request.Context())
+	waitedAtStart := time.Duration(0)
+	if waitState != nil {
+		totalBudget += waitState.max
+		waitedAtStart = waitState.waited
+	}
+	started := time.Now()
+	activeRemaining := func() time.Duration {
+		waited := time.Duration(0)
+		if waitState != nil {
+			waited = waitState.waited - waitedAtStart
+		}
+		return budget - (time.Since(started) - waited)
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), totalBudget)
 	defer cancel()
+	ctx = context.WithValue(ctx, gatewayPoolWaitWorkKey{}, activeRemaining)
 	ctx = context.WithValue(ctx, gatewayPoolProbeModelKey{}, model)
 	rawURL := request.URL.String()
 	tickets := account.gatewayPoolWarmTickets()
@@ -157,13 +173,13 @@ func (s *OpenAIGatewayService) gatewayPoolWarmUpWith(
 	burned := make([]string, 0, tickets)
 attempts:
 	for attempt := 1; attempt <= tickets; attempt++ {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || activeRemaining() <= 0 {
 			break
 		}
 		// 借 AttachRoute 取票：取票、本地账本筛选、exclude、force 换网关那一整套都在它里面，
 		// 这里不另写一份选票逻辑。头是个丢弃用的容器，只为把 Cookie 取出来。
 		headers := http.Header{}
-		release, err := s.codexCookies.AttachRoute(ctx, account, rawURL, headers)
+		release, err := s.attachGatewayPoolRouteWithWait(ctx, account, rawURL, headers)
 		if err != nil {
 			return err
 		}
@@ -174,8 +190,11 @@ attempts:
 			gatewayPoolReleaseUnsent(release)
 			return nil
 		}
+		probeCtx, probeCancel := context.WithTimeout(ctx, activeRemaining())
 		full, conclusive, sent, firstSent, perr := s.codexCookies.gatewayPoolWarmVerdict(
-			ctx, account, identity, applied, cookie, attempt, shoot)
+			probeCtx, account, identity, applied, cookie, attempt, shoot)
+		probeBudgetExpired := probeCtx.Err() != nil
+		probeCancel()
 		if !firstSent.IsZero() {
 			// 同凭证的克隆行可能跟随同一次单飞；把领头者实际出站时刻带回本行缓存。
 			s.codexCookies.gatewayPoolMarkSent(identity, applied.Version, firstSent)
@@ -193,7 +212,7 @@ attempts:
 			s.noteWarmVerdict(request, account, applied, "", false)
 		}
 		switch {
-		case !conclusive && ctx.Err() != nil:
+		case !conclusive && (ctx.Err() != nil || probeBudgetExpired):
 			// **预算在这一轮内部耗尽**，不是上游给了读数 ⇒ 和循环顶那条 break 同一口径：失败关闭。
 			//
 			// 这一格必须和下面那格分开，否则 queue 档在这里 fail-open：预算是挂在 ctx 上的，而
@@ -257,8 +276,8 @@ attempts:
 	// 什么都不打，ops 只能靠「数了 4 条 degraded 又没见到 ready」反推。
 	slog.Warn("gwpool_warm_exhausted", "account_id", account.ID,
 		"tickets", len(burned), "gateways", strings.Join(burned, ","),
-		"budget_exhausted", ctx.Err() != nil)
-	if ctx.Err() == nil && len(burned) == tickets {
+		"budget_exhausted", ctx.Err() != nil || activeRemaining() <= 0)
+	if ctx.Err() == nil && activeRemaining() > 0 && len(burned) == tickets {
 		return errGatewayPoolWarmAttemptsFinished
 	}
 	return errOpenAIGatewayPoolWarmExhausted
@@ -350,6 +369,8 @@ func (s *openAICodexCookieStore) gatewayPoolWarmVerdict(
 	attempt int,
 	shoot gatewayPoolWarmShooter,
 ) (full, conclusive, sent bool, firstSent time.Time, err error) {
+	finish := s.gatewayPoolInventoryOperation(identity)
+	defer finish()
 	type verdict struct {
 		full, conclusive, sent bool
 		firstSent              time.Time

@@ -112,6 +112,10 @@ func (s *OpenAIGatewayService) gatewayPoolNoRemainingRoutes(ctx context.Context,
 	if err := s.codexCookies.hydrateGatewayPoolSharedHistory(ctx, account, identity); err != nil {
 		return false
 	}
+	generation, pending := s.codexCookies.gatewayPoolInventorySnapshot(identity, account)
+	if pending {
+		return false
+	}
 	pool, err := s.codexCookies.poolClient(account)
 	if err != nil {
 		return false
@@ -133,7 +137,8 @@ func (s *OpenAIGatewayService) gatewayPoolNoRemainingRoutes(ctx context.Context,
 			return false
 		}
 	}
-	return ready > 0
+	after, pending := s.codexCookies.gatewayPoolInventorySnapshot(identity, account)
+	return ready > 0 && !pending && after == generation
 }
 
 // Read opt-ins from the repository, not scheduler snapshots. An explicit

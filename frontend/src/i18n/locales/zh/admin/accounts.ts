@@ -747,6 +747,10 @@ export default {
       // OpenAI specific hints
       openai: {
         gwpoolRotation: '满血网关耗尽后多账号轮转',
+        gwpoolAutoWait: '缺票时等待重试（默认关闭）',
+        gwpoolAutoWaitDesc: '只在业务发送前，因无可用网关、无有效票或全部冷却而取不到票时等待；不会重发已发送的业务，不重试鉴权、限流或其他上游错误。开启轮转时先等待本账号，等待结束后仍须满足耗尽条件才能换号。',
+        gwpoolMaxWait: '最长缺票等待（秒）',
+        gwpoolMaxWaitDesc: '可填1–3600秒，留空默认120秒；同一请求累计等待，不逐轮重置。仍受客户端/反向代理及首输出截止时间限制，无法保证长连接始终不断。等待不增加前台验证张数或验证工作预算。',
         gwpoolProbeModel: 'state-echo 预检模型（实验性 · 未试验）',
         gwpoolProbeModelDefault: '默认：跟随业务模型（保持现有逻辑）',
         gwpoolProbeModelDesc: '仅明确选择后生效，从下一轮前台预检/后台预热开始，只用所选模型取 state 并 echo，不做两模型对照、不跨模型复用 state。业务模型及其响应判据不变。尚未经真实环境验证；所选模型预检通过不保证业务模型满血。关闭质量防护时不运行预检。',
@@ -869,9 +873,6 @@ export default {
         gwpoolWarmTickets: '前台最多验证几张票',
         gwpoolWarmTicketsDesc:
           '默认 5 张，上限 8 张。调大会增加验证请求、等待和冷却中的网关数量，不保证成功。只影响前台；后台每个当前窗口最多尝试 1 张。',
-        gwpoolSteering: '优先选择已结束冷却的网关',
-        gwpoolSteeringDesc:
-          '默认开启：先查看清单，再优先选择本账号尚未使用或已结束冷却的网关。关闭后由池子选择，两种方式都不会绕过本地冷却。',
         gwpoolPrewarm: '提前准备下一个网关（默认关闭）',
         gwpoolPrewarmDesc:
           '有业务请求且当前已验证的网关接近切换时，后台最多尝试 1 个候选，减少下次等待。会消耗额外上游请求，并启动候选网关的冷却。失败保留当前票，同一窗口不重试；不能保证无等待切换。',
@@ -893,6 +894,7 @@ export default {
           '前台验证预算默认 90 秒，取票可能额外增加等待；换账号重试也会叠加时间。它最多使用服务端首输出超时剩余额度的一半，预算不足时严格拒绝，不放行业务。验证请求消耗上游配额，不计入业务计费。排障日志：gwpool_warm_probe（验证）、gwpool_warm_inconclusive（无法判断并阻止业务）、gwpool_warm_no_budget（预算不足）。',
         gwpoolErrors: {
           GWPOOL_PROBE_MODEL_INVALID: '实验性预检模型只能选择 Astra、Sol 或 Luna；选择默认则保持业务模型。',
+          GWPOOL_WAIT_INVALID: '缺票等待开关必须是布尔值；最长等待需为1–3600的整数秒。',
           GWPOOL_BASE_URL_INVALID:
             '网关池地址必须是绝对的 http(s) 地址，例如 https://pool.0102400.xyz。填池子的根地址，不是 /a/xxxx 个人页面。',
           GWPOOL_CONSUMER_KEY_REQUIRED:
@@ -914,7 +916,8 @@ export default {
         turnStateRecoveryMin: '间隔下限（分钟）',
         turnStateRecoveryMax: '间隔上限（分钟）',
         gatewayHistory: {
-          runtimeSummary: '验证 {requests} 发 · 反馈待发 {pending} 条',
+          diagnostics: '诊断',
+          runtimeSummary: '验证 {requests} · 待发 {pending}',
           probeSource: { foreground: '前台验证', background: '后台准备' },
           probeTotals: '{rounds} 轮 / {requests} 发：满血 {full}、降级 {degraded}、未知 {inconclusive}；平均 {seconds}s/轮，累计 {perFull} 发/成功轮',
           feedbackTotals: '反馈：已发送 {sent}，待重试 {pending}，永久失败 {failed}，已丢弃 {discarded}',
@@ -954,7 +957,7 @@ export default {
             '按 (账号 × 网关) 算，别按大区并：一小时内可重试 {units} 个。按最近验证模型 {model} / {source} / state-echo-v1，匹配实际静置间隔分档，以数量 × 实测满血率 × 已观测结束的平均满血时长计算，封顶60分钟。\n' +
             '仅用本地最近7天内最多64轮重复接触；每档至少 {results} 次有结论和 {windows} 个结束窗口，无结论不算失败；缺样本不沿用183秒或固定成功率。未观测结束的窗口不参与时长，存在截尾偏差。同凭据其他行可能尚有未合并记录。\n' +
             '这是估计，不是满血保底、票据有效期或配额；不保证仍有票，已有业务/预热仍需确认恢复。',
-          contactSummary: '接触统计 · 最近 {count} 轮',
+          contactSummary: '接触 {count} 轮',
           contactHint: '最多保留7天内64轮；下方显示最近8轮明细。按模型、判据、来源、首次分类和实际间隔分层；成功率分母不含无结论。首次仅指本地开始跟踪后首次，不代表上游从未接触。满血时长是已观测结束窗口的历史读数，不是票据有效期。',
           contactTruncated: '历史不完整或曾被裁剪，缺失记录不能当成首次接触。',
           contactRate: '满血 {full}/{total}；无结论 {unknown}；结束窗口 {windows} 个，平均 {seconds}s',
@@ -971,10 +974,10 @@ export default {
             none: '没判过'
           },
           regions: {
-            'us-east': '美东',
-            'us-west': '美西',
+            'southeast-asia': '东南亚',
+            'africa': '非洲',
+            'north-america': '北美',
             'south-america': '南美',
-            'west-europe': '西欧',
             europe: '欧洲',
             'east-asia': '东亚',
             oceania: '大洋',

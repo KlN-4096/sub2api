@@ -630,6 +630,10 @@ export default {
       // OpenAI specific hints
       openai: {
         gwpoolRotation: 'Rotate accounts only after full-strength gateways are exhausted',
+        gwpoolAutoWait: 'Wait for tickets (off by default)',
+        gwpoolAutoWaitDesc: 'Before business transmission only, wait when no gateway, no live ticket or all gateways cooling prevents acquisition. Never replays sent business requests or retries authentication, rate-limit or other upstream failures. With rotation enabled, wait on this account first; switching still requires confirmed exhaustion.',
+        gwpoolMaxWait: 'Maximum ticket wait (seconds)',
+        gwpoolMaxWaitDesc: '1–3600 seconds, default 120 when empty; cumulative for this request, not reset each round. Client, reverse-proxy and first-output deadlines still apply, so a long connection is not guaranteed. Waiting does not increase the candidate count or active verification budget.',
         gwpoolProbeModel: 'State-echo probe model (experimental · untested)',
         gwpoolProbeModelDefault: 'Default: follow the business model (unchanged behavior)',
         gwpoolProbeModelDesc: 'Only an explicit selection changes the next foreground/background probe. Mint state and echo using only the selected model; no two-model comparison or cross-model state reuse. The business model and response checks stay unchanged. Not validated in a live environment; passing this probe does not guarantee full strength for the business model. Probes do not run while quality guard is off.',
@@ -762,9 +766,6 @@ export default {
         gwpoolWarmTickets: 'Foreground candidate limit',
         gwpoolWarmTicketsDesc:
           'Default 5 tickets, maximum 8. Higher values spend more verification requests, time and gateways entering cooldown, without guaranteeing success. Foreground only; background preparation tries at most 1 candidate per current window.',
-        gwpoolSteering: 'Prefer gateways outside cooldown',
-        gwpoolSteeringDesc:
-          'On by default: list gateways and prefer those this account has not used or whose cooldown has ended. When off, the pool selects. Neither mode bypasses local cooldown.',
         gwpoolPrewarm: 'Prepare the next gateway early (off by default)',
         gwpoolPrewarmDesc:
           'When a business request arrives near the current verified gateway’s switch time, try at most 1 candidate in the background to reduce the next wait. This spends extra upstream requests and starts the candidate’s cooldown. Failure keeps the current ticket, with no retry in the same window. Wait-free switching is not guaranteed.',
@@ -786,6 +787,7 @@ export default {
           'Foreground verification has a default 90-second budget; ticket fetching can add more waiting, as can retries on other accounts. Verification uses at most half of the remaining server first-output deadline; insufficient budget blocks the business request. Verification spends upstream quota but is not billed as business traffic. Logs: gwpool_warm_probe (verification), gwpool_warm_inconclusive (no verdict; request blocked), gwpool_warm_no_budget (insufficient budget).',
         gwpoolErrors: {
           GWPOOL_PROBE_MODEL_INVALID: 'The experimental probe model must be Astra, Sol or Luna; default follows the business model.',
+          GWPOOL_WAIT_INVALID: 'Ticket waiting must be boolean; the maximum wait must be an integer from 1 to 3600 seconds.',
           GWPOOL_BASE_URL_INVALID:
             'The gateway pool URL must be an absolute http(s) address, e.g. https://pool.0102400.xyz. Fill in the pool root, not the /a/xxxx page.',
           GWPOOL_CONSUMER_KEY_REQUIRED:
@@ -807,7 +809,8 @@ export default {
         turnStateRecoveryMin: 'Min interval (minutes)',
         turnStateRecoveryMax: 'Max interval (minutes)',
         gatewayHistory: {
-          runtimeSummary: '{requests} probe requests · {pending} reports pending',
+          diagnostics: 'Diagnostics',
+          runtimeSummary: 'Probes {requests} · Pending {pending}',
           probeSource: { foreground: 'Foreground verification', background: 'Background preparation' },
           probeTotals: '{rounds} rounds / {requests} requests: {full} full, {degraded} degraded, {inconclusive} unknown; mean {seconds}s/round, cumulative {perFull} requests/successful round',
           feedbackTotals: 'Reports: {sent} sent, {pending} pending, {failed} permanent failures, {discarded} discarded',
@@ -853,7 +856,7 @@ export default {
             'Counted per (account × gateway); do not collapse by region: {units} retry-eligible gateways within one hour. For the latest probe model {model} / {source} / state-echo-v1 and comparable observed resting intervals: count × observed full-strength rate × mean observed ended window, capped at 60 minutes.\n' +
             'Uses at most 64 local repeat-contact rounds from the last 7 days. Each interval needs {results} conclusive results and {windows} ended windows; unknowns are not failures. No fixed success rate or 183-second fallback. Unfinished windows are omitted from duration, introducing censoring bias. Other rows may have contacts not merged yet.\n' +
             'An estimate, not guaranteed full-strength time, ticket lifetime or quota. Tickets may be unavailable; existing traffic or warm-up must still confirm recovery.',
-          contactSummary: 'Contact statistics · last {count} rounds',
+          contactSummary: 'Contacts {count}',
           contactHint: 'At most 64 rounds from 7 days; the latest 8 are detailed below. Stratified by model, criterion, source, first-contact classification and observed interval; unknowns are excluded from the rate denominator. First means first since local tracking, not never touched upstream. Full-strength duration is an observed ended window, not ticket lifetime.',
           contactTruncated: 'History is incomplete or was trimmed; missing records do not prove first contact.',
           contactRate: 'Full {full}/{total}; unknown {unknown}; {windows} ended windows, mean {seconds}s',
@@ -870,10 +873,10 @@ export default {
             none: 'never judged'
           },
           regions: {
-            'us-east': 'US-E',
-            'us-west': 'US-W',
+            'southeast-asia': 'SE.Asia',
+            'africa': 'Africa',
+            'north-america': 'N.Am',
             'south-america': 'S.Am',
-            'west-europe': 'W.EU',
             europe: 'EU',
             'east-asia': 'E.Asia',
             oceania: 'Ocea',

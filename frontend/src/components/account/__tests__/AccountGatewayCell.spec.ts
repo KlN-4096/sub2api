@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import AccountGatewayCell from '../AccountGatewayCell.vue'
 import type { Account } from '@/types'
+import { gatewayRegionDisplayKey } from '@/utils/gatewayRegionDisplay'
 
 // 只替 useI18n，其余保留真实导出：src/utils/format.ts 会 import src/i18n/index.ts，
 // 整个模块被 mock 掉的话 createI18n 就没了。
@@ -51,7 +52,7 @@ function accountWithSamples(history: { current: string; seen: Record<string, { a
 }
 
 const cell = (w: ReturnType<typeof render>, region: string) =>
-  w.get(`[data-testid="account-gateway-region-${region}"]`)
+  w.get(`[data-testid="account-gateway-region-${gatewayRegionDisplayKey(region) || 'unknown'}"]`)
 
 /**
  * 格子里是「大区名 + 判定字符 + 网关号」，断言只看网关号那一截（大区名是 i18n key 桩）。
@@ -86,6 +87,23 @@ const minutesOf = (w: ReturnType<typeof render>) => {
 }
 
 describe('AccountGatewayCell', () => {
+  it('诊断默认折叠，国家城市合入固定大区且只显示有记录的项', () => {
+    const w = render(account({
+      seen: {
+        'unified-141': { at: isoAgo(30), region: 'de-central' },
+        'unified-42': { at: isoAgo(60), region: 'southeast-asia-sg' },
+        'unified-43': { at: isoAgo(90), region: 'country-fr' }
+      }
+    }, { openai_gwpool_metrics: { foreground: { requests: 10 } } }))
+    expect(w.findAll('[data-testid^="account-gateway-region-"]')).toHaveLength(2)
+    expect(cell(w, 'europe').text()).toContain('gatewayHistory.regions.europe')
+    expect(cell(w, 'southeast-asia').text()).toContain('gatewayHistory.regions.southeast-asia')
+    expect(cell(w, 'west-europe').text()).toContain('gatewayHistory.regions.europe')
+    const diagnostics = w.get('[data-testid="account-gateway-diagnostics"]')
+    expect(diagnostics.attributes('open')).toBeUndefined()
+    expect(diagnostics.get('summary').text()).toContain('gatewayHistory.diagnostics')
+    expect(diagnostics.find('[data-testid="account-gateway-runtime"]').exists()).toBe(true)
+  })
   it('没有同层实测样本时显示待统计，不把可重试网关乘以183秒', () => {
     const w = render(account({
       current: 'unified-1',
@@ -123,11 +141,41 @@ describe('AccountGatewayCell', () => {
     expect(w.get('[data-testid="account-gateway-feedback"]').text()).toContain('"failed":1')
     expect(w.text()).not.toContain('must-not-render')
   })
-  it('新出口区域独立显示稳定ID，不并入未归类', () => {
+  it('新出口只在提示里保留稳定ID，不扩增国家城市格子', () => {
     const w = render(account({ seen: { 'unified-99': { at: isoAgo(30), region: 'africa-south' } } }))
-    expect(cell(w, 'africa-south').text()).toContain('africa-south')
-    expect(gatewayOf(w, 'africa-south')).toBe('99')
+    expect(cell(w, 'africa').attributes('title')).toContain('africa-south')
+    expect(gatewayOf(w, 'africa')).toBe('99')
     expect(w.find('[data-testid="account-gateway-region-unknown"]').exists()).toBe(false)
+  })
+  it('同大区多国合并网关格，但冷却数量仍按网关独立统计', () => {
+    const w = render(account({
+      seen: {
+        'unified-141': { at: isoAgo(10), region: 'de-central' },
+        'unified-142': { at: isoAgo(5 * 3600), region: 'country-at' },
+        'unified-143': { at: isoAgo(6 * 3600), region: 'europe' },
+        'unified-144': { at: isoAgo(7 * 3600), region: 'custom-unknown-country' }
+      }
+    }))
+    expect(w.findAll('[data-testid^="account-gateway-region-"]')).toHaveLength(2)
+    expect(gatewayOf(w, 'europe')).toBe('141+2')
+    expect(cell(w, 'europe').attributes('title')).toContain('de-central')
+    expect(cell(w, 'europe').attributes('title')).toContain('country-at')
+    const summary = w.get('[data-testid="account-gateway-window-usage"]').text()
+    expect(JSON.parse(summary.slice(summary.indexOf('{')))).toEqual({ hours: 4, used: 1, cooled: 3 })
+  })
+  it('美国与西雅图共用北美格，当前落点和区域提示都保留具体出口', () => {
+    const w = render(account({
+      current: 'unified-141',
+      seen: {
+        'unified-141': { at: isoAgo(10), region: 'us-west' },
+        'unified-142': { at: isoAgo(60), region: 'us-east' },
+        'unified-143': { at: isoAgo(90), region: 'country-us' }
+      }
+    }))
+    expect(w.findAll('[data-testid^="account-gateway-region-"]')).toHaveLength(1)
+    expect(w.get('[data-testid="account-gateway-region-north-america"]').text()).toContain('141+2')
+    expect(w.get('[data-testid="account-gateway-current"] span[title]').attributes('title')).toContain('us-west')
+    expect(cell(w, 'north-america').attributes('title')).toContain('country-us')
   })
   it('缺省冷却为1小时，学习档位和固定状态按网关分别显示', () => {
     const w = render(account({
@@ -162,7 +210,7 @@ describe('AccountGatewayCell', () => {
   })
 
   // 这张格子的全部意义：按大区摊开，才看得出「这个号还能去哪个大区铸没烧过的票」。
-  it('按大区摊开打过的网关，没打过的大区留空位', () => {
+  it('按大区摊开打过的网关，不生成没打过的空格', () => {
     const w = render(
       account({
         current: 'unified-73',
@@ -177,7 +225,7 @@ describe('AccountGatewayCell', () => {
     expect(gatewayOf(w, 'east-asia')).toBe('73')
     expect(gatewayOf(w, 'us-east')).toBe('142')
     // 没打过的大区照样有格子（它才是「还能去哪儿」的答案），但没有网关名。
-    expect(gatewayOf(w, 'europe')).toBe('-')
+    expect(w.find('[data-testid="account-gateway-region-europe"]').exists()).toBe(false)
     // 「未归类」只在真有读不出大区的落点时才出现，平时不占位。
     expect(w.find('[data-testid="account-gateway-region-unknown"]').exists()).toBe(false)
   })
@@ -295,7 +343,7 @@ describe('AccountGatewayCell', () => {
     expect(tone(w, 'us-west')).toBe('degraded')
     expect(tone(w, 'us-east')).toBe('degraded') // 碰过没判据 = 窗口已经烧了
     expect(tone(w, 'oceania')).toBe('idle')
-    expect(tone(w, 'europe')).toBe('idle') // 空格子
+    expect(w.find('[data-testid="account-gateway-region-europe"]').exists()).toBe(false)
 
     // 色退化成装饰（9px 字号 + 红绿色盲 + title 在触屏上摸不到）时信息仍然读得出来。
     expect(markOf(w, 'east-asia')).toBe('✓ ')
@@ -379,12 +427,12 @@ describe('AccountGatewayCell', () => {
     // 从没验出过满血的那一格段数一样，第三段写「未计时」而不是整段消失。
     expect(cell(w, 'us-east').attributes('title')).toBe(
       [
-        `${base}.regions.us-east`,
+        `${base}.regions.north-america`,
         '95',
         `${base}.fullUntimed`,
         `${base}.regionHot:{"minutes":237}`,
         `${base}.verdicts.none`
-      ].join('-')
+      ].join('-') + ' · us-east'
     )
   })
 

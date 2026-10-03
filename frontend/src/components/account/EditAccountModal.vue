@@ -2621,19 +2621,27 @@
             </div>
             <div class="flex items-center justify-between gap-4">
               <div class="min-w-0">
-                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolSteering') }}</label>
-                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  {{ t('admin.accounts.openai.gwpoolSteeringDesc') }}
-                </p>
+                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolAutoWait') }}</label>
+                <p class="input-hint">{{ t('admin.accounts.openai.gwpoolAutoWaitDesc') }}</p>
               </div>
               <input
-                v-model="openAIGwpoolSteering"
-                data-testid="edit-openai-gwpool-steering"
+                v-model="openAIGwpoolAutoWait"
+                data-testid="edit-openai-gwpool-auto-wait"
                 type="checkbox"
                 class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
               />
             </div>
-            <!-- 由业务触发的提前准备，默认关闭；每个当前窗口最多一个候选。 -->
+            <div v-if="openAIGwpoolAutoWait">
+              <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolMaxWait') }}</label>
+              <input
+                v-model.number="openAIGwpoolMaxWait"
+                data-testid="edit-openai-gwpool-max-wait"
+                type="number" min="1" max="3600" step="1" placeholder="120"
+                class="input text-xs"
+              />
+              <p class="input-hint">{{ t('admin.accounts.openai.gwpoolMaxWaitDesc') }}</p>
+            </div>
+            <!-- 账号耗尽轮转与缺票等待各自默认关闭。 -->
             <div class="flex items-center justify-between gap-4">
               <div class="min-w-0">
                 <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolRotation') }}</label>
@@ -4125,11 +4133,11 @@ const openAIGwpoolBaseURL = ref('')
 // 输入框恒为空：后端把已存的 key 脱敏成 true，页面从不回显原值。留空 = 不修改。
 const openAIGwpoolConsumerKey = ref('')
 const openAIGwpoolConsumerKeySaved = ref(false)
-// 缺省即开，与后端 gatewayPoolSteering 同口径（只有显式 false 才关）。
-const openAIGwpoolSteering = ref(true)
 // 后台预热缺省即关，与后端 gatewayPoolPrewarmEnabled 同口径（只有显式 true 才开）。
 const openAIGwpoolPrewarm = ref(false)
 const openAIGwpoolRotation = ref(false)
+const openAIGwpoolAutoWait = ref(false)
+const openAIGwpoolMaxWait = ref<number | ''>('')
 const openAIGwpoolGuardEnabled = ref(true)
 const gatewayPoolProbeModels = ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'] as const
 const openAIGwpoolProbeModel = ref('')
@@ -4698,10 +4706,11 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	openAIGwpoolConsumerKeySaved.value = extra?.openai_gwpool_consumer_key === true
 	openAIGwpoolConsumerKey.value = ''
 	// 自己挑落点缺省即开：只有显式 false 才算关（与后端同口径）。
-	openAIGwpoolSteering.value = extra?.openai_gwpool_steering !== false
 	// 后台预热缺省即关：只有显式 true 才算开（与后端同口径）。
 	openAIGwpoolPrewarm.value = extra?.openai_gwpool_prewarm === true
 	openAIGwpoolRotation.value = extra?.openai_gwpool_rotation === true
+	openAIGwpoolAutoWait.value = extra?.openai_gwpool_auto_wait === true
+	openAIGwpoolMaxWait.value = typeof extra?.openai_gwpool_max_wait_s === 'number' ? extra.openai_gwpool_max_wait_s : ''
 	openAIGwpoolGuardEnabled.value = extra?.openai_gwpool_guard_enabled !== false
 	openAIGwpoolProbeModel.value = typeof extra?.openai_gwpool_probe_model === 'string' &&
     gatewayPoolProbeModels.some(model => model === extra.openai_gwpool_probe_model)
@@ -6321,11 +6330,18 @@ const handleSubmit = async () => {
         // 网关）。保存时顺手清掉老账号 extra 里的残留，别让一个没人读的键留在库里。
         delete newExtra.openai_gwpool_all_models
         delete newExtra.openai_gwpool_renew
-        // 自己挑落点缺省即开：只有关掉时才落键，省得 extra 里堆默认项（后端也只认显式 false）。
-        if (openAIGwpoolSteering.value) {
-          delete newExtra.openai_gwpool_steering
+        // 选票始终优先冷却完毕，清除已废弃的关闭开关。
+        delete newExtra.openai_gwpool_steering
+        if (openAIGwpoolEnabled.value && openAIGwpoolAutoWait.value) {
+          newExtra.openai_gwpool_auto_wait = true
+          if (openAIGwpoolMaxWait.value !== '') {
+            newExtra.openai_gwpool_max_wait_s = openAIGwpoolMaxWait.value
+          } else {
+            delete newExtra.openai_gwpool_max_wait_s
+          }
         } else {
-          newExtra.openai_gwpool_steering = false
+          delete newExtra.openai_gwpool_auto_wait
+          delete newExtra.openai_gwpool_max_wait_s
         }
         // 后台预热缺省即关：只有开着时才落键（后端也只认显式 true）。
         if (openAIGwpoolPrewarm.value) {

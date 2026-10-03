@@ -184,3 +184,80 @@ func TestGatewayPoolRotationCanceledOrNoGroupDoesNotReadPool(t *testing.T) {
 	defer cancel()
 	require.False(t, svc.gatewayPoolNoRemainingRoutes(ctx, account))
 }
+
+func TestGatewayPoolRotationDoesNotConfuseDeliveredWithTried(t *testing.T) {
+	for _, state := range []string{"spare", "live-unverified"} {
+		t.Run(state, func(t *testing.T) {
+			fake := newGwpoolFakePool(t, "offline-cookie", 150)
+			fake.listGateways = []gwpoolFakeGateway{{Name: "unified-71", PairReady: true, UsedByYou: true}}
+			account := rotationAccount(40, 2)
+			fake.configure(account)
+			svc := rotationService(account)
+			pair := openAIGatewayPoolPair{cookie: "offline-cookie", gateway: "unified-71", version: "unused",
+				until: time.Now().Add(150 * time.Second), since: time.Now()}
+			if state == "spare" {
+				svc.codexCookies.gatewayPoolSpareShelve(gwpoolTestIdentity, &gatewayPoolTicketBatch{
+					store: &svc.codexCookies, account: account, identity: gwpoolTestIdentity,
+					pairs: []openAIGatewayPoolPair{pair},
+				})
+			} else {
+				svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, pair)
+				// next() reserves the local attempt before the probe starts.
+				svc.codexCookies.gatewayPoolMarkUsed(gwpoolTestIdentity, pair.gateway)
+			}
+			failure := &UpstreamFailoverError{GatewayPoolRotation: true, NextAccountAction: NextAccountStop}
+			group := int64(2)
+			svc.PrepareGatewayPoolAccountRotation(context.Background(), &group, account, failure)
+			require.False(t, failure.ShouldRetryNextAccount(), "delivered/local-reserved does not prove actually attempted")
+		})
+	}
+}
+
+func TestGatewayPoolRotationRechecksInventoryChangedDuringListing(t *testing.T) {
+	fake := newGwpoolFakePool(t, "offline-cookie", 150)
+	fake.listGateways = []gwpoolFakeGateway{{Name: "unified-71", PairReady: true, UsedByYou: true}}
+	account := rotationAccount(40, 2)
+	fake.configure(account)
+	svc := rotationService(account)
+	fake.onList = func() {
+		// An entire fetch/probe may complete while the remote listing is in
+		// flight; the listing predates that work even if active is back to zero.
+		finish := svc.codexCookies.gatewayPoolInventoryOperation(gwpoolTestIdentity)
+		finish()
+	}
+	require.False(t, svc.gatewayPoolNoRemainingRoutes(context.Background(), account))
+}
+
+func TestGatewayPoolRotationDoesNotSkipConcurrentWarmProbe(t *testing.T) {
+	fake := newGwpoolFakePool(t, "offline-cookie", 150)
+	fake.listGateways = []gwpoolFakeGateway{{Name: "unified-71", PairReady: true, UsedByYou: true}}
+	account := rotationAccount(40, 2)
+	fake.configure(account)
+	svc := rotationService(account)
+	started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _, _, _, _ = svc.codexCookies.gatewayPoolWarmVerdict(context.Background(), account, gwpoolTestIdentity,
+			OpenAIGatewayPoolApplied{Gateway: "unified-71", Version: "inflight"}, "offline-cookie", 1,
+			func(context.Context, string, string) (int, string, error) {
+				select {
+				case <-started:
+				default:
+					close(started)
+				}
+				<-release
+				return http.StatusOK, "", nil
+			})
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("probe did not start")
+	}
+	blocked := !svc.gatewayPoolNoRemainingRoutes(context.Background(), account)
+	close(release)
+	<-done
+	require.True(t, blocked)
+	require.Zero(t, fake.listHits.Load(), "local pending inventory should stop before remote listing")
+}

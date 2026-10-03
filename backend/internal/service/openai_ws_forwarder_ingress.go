@@ -810,6 +810,11 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if parseErr != nil {
 				return parseErr
 			}
+			// A new client turn gets a new wait budget. Same-turn failover
+			// reenters this function with the existing holder and keeps it.
+			if c != nil {
+				c.Set(gatewayPoolWaitGinKey, &gatewayPoolWaitHolder{})
+			}
 			currentBridgePayload = nextPayload
 		}
 	}

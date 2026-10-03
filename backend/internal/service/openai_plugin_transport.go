@@ -24,6 +24,9 @@ func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
 // 满足两个条件：响应头已经到手，而调用方还一个字节都没往下游写（调用方要等这个函数返回才开始
 // 解析响应）。所以「截断」在这里是干净的，不会留一个半截的 SSE 流。
 func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
+	if request != nil {
+		request = request.WithContext(s.gatewayPoolWaitContext(request.Context(), account))
+	}
 	// 业务请求只落在**验过满血**的槽上。判据跑在这一发之前、用便宜的垫话，所以用户的请求不会是
 	// 那个去试网关的人（openai_gwpool_warm.go）。验不出来就把错误往上抛，**绝不降级放行**。
 	// 显式关闭防护时跳过质量验证；取票、冷却和限流仍在后续路径生效。
@@ -62,7 +65,7 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 	if request != nil && request.URL != nil {
 		rawURL = request.URL.String()
 	}
-	release, err := s.codexCookies.AttachRoute(request.Context(), account, rawURL, request.Header)
+	release, err := s.attachGatewayPoolRouteWithWait(request.Context(), account, rawURL, request.Header)
 	if err != nil {
 		return nil, false, err
 	}

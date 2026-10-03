@@ -99,7 +99,9 @@
         {{ t('admin.accounts.openai.gatewayHistory.legend') }}
       </p>
     </template>
-    <details v-if="usesPool && runtime.hasData" class="text-[10px] text-gray-500" data-testid="account-gateway-runtime">
+    <details v-if="usesPool && (runtime.hasData || contacts.rounds.length)" class="text-[10px] text-gray-500" data-testid="account-gateway-diagnostics">
+      <summary class="cursor-pointer">{{ t('admin.accounts.openai.gatewayHistory.diagnostics') }}</summary>
+    <details v-if="runtime.hasData" class="mt-1" data-testid="account-gateway-runtime">
       <summary class="cursor-pointer">
         {{ t('admin.accounts.openai.gatewayHistory.runtimeSummary', { requests: runtime.requests, pending: runtime.pending }) }}
       </summary>
@@ -146,6 +148,7 @@
         </p>
       </div>
     </details>
+    </details>
   </div>
 </template>
 
@@ -170,6 +173,7 @@ import type { Account } from '@/types'
 import { targetsCodexUpstream } from '@/utils/turnState'
 import { formatRelativeTime } from '@/utils/format'
 import { useNowTicker } from '@/composables/useNowTicker'
+import { GATEWAY_REGION_KEYS, gatewayRegionDisplayKey } from '@/utils/gatewayRegionDisplay'
 import {
   CONTACT_MIN_RESULTS, CONTACT_MIN_WINDOWS,
   readGatewayContacts, groupGatewayContacts, forecastGatewayMinutes
@@ -180,18 +184,7 @@ import {
  * 最后那格 `''` 是「未归类」：老记录没带大区，以及被上游改派走的那些发（池子说的大区
  * 讲的是另一个网关的事，后端刻意不记）。
  */
-const REGION_KEYS = [
-  'us-east',
-  'us-west',
-  'south-america',
-  'west-europe',
-  'europe',
-  'east-asia',
-  'oceania',
-  'south-asia',
-  'middle-east',
-  ''
-] as const
+const REGION_KEYS = GATEWAY_REGION_KEYS
 
 /** 一个大区里列几个网关名，超出的折成 +N。正常情况恒为 1（网关 = 大区 × 账号）。 */
 const MAX_PER_REGION = 1
@@ -418,13 +411,13 @@ const cells = computed<RegionCell[]>(() => {
   if (!items.value.length) return []
   const byRegion = new Map<string, GatewayItem[]>()
   for (const item of items.value) {
-    const key = item.region
+    const key = gatewayRegionDisplayKey(item.region)
     const bucket = byRegion.get(key)
     if (bucket) bucket.push(item)
     else byRegion.set(key, [item])
   }
-  const customKeys = [...byRegion.keys()].filter((key) => !(REGION_KEYS as readonly string[]).includes(key)).sort()
-  return [...REGION_KEYS.filter((key) => key !== ''), ...customKeys, ...(byRegion.has('') ? [''] : [])]
+  return REGION_KEYS
+    .filter((key) => byRegion.has(key))
     .map((key) => {
       const bucket = byRegion.get(key) ?? []
       const shown = bucket.slice(0, MAX_PER_REGION)
@@ -545,8 +538,7 @@ function shortName(name: string): string {
 }
 
 function regionLabel(key: string): string {
-  if (key && !(REGION_KEYS as readonly string[]).includes(key)) return key
-  return t(`admin.accounts.openai.gatewayHistory.regions.${key || 'unknown'}`)
+  return t(`admin.accounts.openai.gatewayHistory.regions.${gatewayRegionDisplayKey(key) || 'unknown'}`)
 }
 
 /**
@@ -604,8 +596,9 @@ function titleOf(item: GatewayItem): string {
   const verdict = item.verdict
     ? t(`${base}.verdicts.${item.verdict}`)
     : t(`${base}.verdicts.none`)
-  return [regionLabel(item.region), shortName(item.name), fullHeldOf(item), state, verdict].join(
+  const summary = [regionLabel(item.region), shortName(item.name), fullHeldOf(item), state, verdict].join(
     TITLE_SEP
   )
+  return gatewayRegionDisplayKey(item.region) === item.region ? summary : `${summary} · ${item.region || '—'}`
 }
 </script>

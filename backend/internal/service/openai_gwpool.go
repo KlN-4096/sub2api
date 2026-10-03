@@ -111,9 +111,6 @@ const (
 	// openAIGatewayPoolListTimeout 兜住那次「列网关」。它是**优化**，绝不能吃掉取票的预算：
 	// 列不出来就退回池子自己挑，所以给一个远小于 FetchTimeout 的额度。
 	openAIGatewayPoolListTimeout = 2 * time.Second
-	// openAIGatewayPoolSteeringExtraKey 决定要不要自己挑落点（见 gatewayPoolPick）。
-	// **缺省即开**，与接这个键之前的写死行为一致；只有显式写 false 才退回「池子自己挑」。
-	openAIGatewayPoolSteeringExtraKey = "openai_gwpool_steering"
 	// openAIGatewayPoolGatewayWindowExtraKey 是本地账本的保留窗口（秒）。缺省 / 非正数走默认值。
 	//
 	// 没进 openAIGatewayPoolConfigExtraKeys：它没有跨字段约束，写什么都不会让账号配到一个
@@ -223,16 +220,6 @@ func (a *Account) gatewayPoolWarmTickets() int {
 	return gatewayPoolWarmMaxTickets
 }
 
-// gatewayPoolSteering 报告要不要自己挑落点。缺省 / 非 bool = 开（接这个键之前的写死行为），
-// 只有显式 false 才关 ⇒ getExtraBool 在这里用不了，它把「没配」和「配了 false」读成同一个值。
-func (a *Account) gatewayPoolSteering() bool {
-	if a == nil || a.Extra == nil {
-		return true
-	}
-	enabled, ok := a.Extra[openAIGatewayPoolSteeringExtraKey].(bool)
-	return !ok || enabled
-}
-
 // gatewayPoolPrewarmEnabled 报告要不要开后台预热（openai_gwpool_prewarm.go）。
 //
 // 缺省即关。业务触发，每个当前窗口最多尝试一个候选，不受前台张数配置影响。
@@ -330,6 +317,8 @@ var openAIGatewayPoolConfigExtraKeys = []string{
 	openAIGatewayPoolBaseURLExtraKey,
 	OpenAIGatewayPoolConsumerKeyExtraKey,
 	openAIGatewayPoolProbeModelExtraKey,
+	openAIGatewayPoolWaitEnabledExtraKey,
+	openAIGatewayPoolWaitSecondsExtraKey,
 }
 
 // touchesOpenAIGatewayPoolConfig 报告这份 extra 更新碰到了有跨字段约束的网关池配置。
@@ -380,6 +369,17 @@ func validateOpenAIGatewayPoolAccountExtra(account *Account, extra map[string]an
 				"account %d %s must be one of %s, %s, %s",
 				account.ID, openAIGatewayPoolProbeModelExtraKey,
 				gatewayPoolProbeModelAstra, gatewayPoolProbeModelSol, gatewayPoolProbeModelLuna)
+		}
+	}
+	if raw, exists := extra[openAIGatewayPoolWaitEnabledExtraKey]; exists && raw != nil {
+		if _, ok := raw.(bool); !ok {
+			return infraerrors.Newf(http.StatusBadRequest, "GWPOOL_WAIT_INVALID", "auto wait must be boolean")
+		}
+	}
+	if raw, exists := extra[openAIGatewayPoolWaitSecondsExtraKey]; exists && raw != nil {
+		if _, ok := gatewayPoolWaitSeconds(raw); !ok {
+			return infraerrors.Newf(http.StatusBadRequest, "GWPOOL_WAIT_INVALID",
+				"maximum ticket wait must be an integer between 1 and %d seconds", gatewayPoolWaitMaxSeconds)
 		}
 	}
 	// 降智防护的档位 2026-10-03 删了，所以这里也不再校验那个键。**刻意不改成「带这个键就报错」**：
@@ -934,9 +934,6 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 	account *Account,
 	identity string,
 ) string {
-	if !account.gatewayPoolSteering() {
-		return "" // 账号明确要求「由池子按调度选」。
-	}
 	listCtx, cancel := context.WithTimeout(ctx, account.gatewayPoolListTimeout())
 	defer cancel()
 	gateways, err := pool.Gateways(listCtx, gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(account, identity))
@@ -1004,6 +1001,12 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 // fresh 报告这张票是不是**这一发自己取回来的**（缓存复用时为 false）：只有自己取的那张才可能
 // 「取了票但一个字节都没发出去」，也只有它能还（见 gatewayPoolRelease）。
 func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *Account, identity string) (pair openAIGatewayPoolPair, fresh bool, err error) {
+	finish := s.gatewayPoolInventoryOperation(identity)
+	defer func() {
+		if finish != nil {
+			finish()
+		}
+	}()
 	cached, state := s.cachedPoolPair(identity)
 	if state == openAIGatewayPoolPairLive {
 		return cached, false, nil
@@ -1031,17 +1034,22 @@ func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *A
 	// 租着的那张过了建议窗口 ⇒ 要一张**不同的**网关（force=1）。池子的 valid_for_s 只是建议值
 	// （ttl_is_advisory），换不换由这边判；不带 force 的话池子可能把同一张再发回来。
 	force := state == openAIGatewayPoolPairStale
+	waitCtx, waitCancel := context.WithTimeout(ctx, gatewayPoolFetchTimeoutForContext(ctx, account))
+	defer waitCancel()
+	if err := waitCtx.Err(); err != nil {
+		return openAIGatewayPoolPair{}, false, err
+	}
 	fetchCtx := context.WithoutCancel(ctx)
-	// took 只在**这一发自己真的从池子取回一张**之后置真。不能只看 singleflight 的 shared：
-	// 领头者的闭包内层也会复查缓存（别人刚取完、键已删的那一刻），命中就直接返回别人那张，
-	// 而此时没有跟随者 ⇒ shared == false ⇒ 会被当成「我取的」而拿到还票闭包，于是把**别人正在
-	// 用的**那张还给池子并从缓存删掉。每个调用方有自己的 took，跟随者的闭包不在自己的 goroutine
-	// 里跑 ⇒ 恒 false，没有竞态。
-	took := false
-	fetched, err, shared := s.poolFetch.Do(identity, func() (any, error) {
+	// 共享取票独立存活，每位调用者按自己的取消/工作/等待预算退出。
+	// took 必须随结果返回，不能让 DoChan 的闭包写调用方变量。
+	type fetchResult struct {
+		pair openAIGatewayPoolPair
+		took bool
+	}
+	fetched := s.poolFetch.DoChan(identity, func() (any, error) {
 		// 排在后面的请求醒来时第一名可能已经取到了。
 		if pair, cached := s.cachedPoolPair(identity); cached == openAIGatewayPoolPairLive {
-			return pair, nil
+			return fetchResult{pair: pair}, nil
 		}
 		if _, hasSpare := s.poolSpare.Load(identity); hasSpare {
 			readCtx, readCancel := context.WithTimeout(fetchCtx, account.gatewayPoolFetchTimeout())
@@ -1056,9 +1064,8 @@ func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *A
 		// （gatewayPoolTakeBatch 的去重），刚被标 Stale 的那张也是这一批弹出去的
 		// ⇒ 备用票必然是另一个网关，force 要的就是这个。
 		if spare, ok := s.gatewayPoolSparePop(account, identity); ok {
-			took = true
 			s.poolPairs.Store(identity, spare)
-			return spare, nil
+			return fetchResult{pair: spare, took: true}, nil
 		}
 		callCtx, cancel := context.WithTimeout(fetchCtx, account.gatewayPoolFetchTimeout())
 		defer cancel()
@@ -1077,20 +1084,33 @@ func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *A
 		if !available {
 			return nil, &gwpool.PoolError{Code: gwpool.CodeAllCooling, RetryAfter: time.Minute}
 		}
-		took = true
 		s.poolPairs.Store(identity, pair)
 		// 剩下的上架**在写缓存之后**：架子只在这一条路上被填，而弹票的那一格在上面、同一个
 		// 闭包里 ⇒ 顺序固定，不会出现「刚上架就被自己弹掉」。
 		s.gatewayPoolSpareShelve(identity, batch)
-		return pair, nil
+		return fetchResult{pair: pair, took: true}, nil
 	})
-	if err != nil {
-		return openAIGatewayPoolPair{}, false, err
+	select {
+	case <-waitCtx.Done():
+		// 调用者退出后共享请求仍在途，耗尽判断不得在这段空隙错误切号。
+		fetchFinish := finish
+		finish = nil
+		go func() {
+			<-fetched
+			fetchFinish()
+		}()
+		return openAIGatewayPoolPair{}, false, waitCtx.Err()
+	case result := <-fetched:
+		if err := waitCtx.Err(); err != nil {
+			return openAIGatewayPoolPair{}, false, err
+		}
+		if result.Err != nil {
+			return openAIGatewayPoolPair{}, false, result.Err
+		}
+		taken, _ := result.Val.(fetchResult)
+		// 独占且确实新取的票才可还；内层缓存命中也不能拿到还票权。
+		return taken.pair, !result.Shared && taken.took, nil
 	}
-	taken, _ := fetched.(openAIGatewayPoolPair)
-	// 两个条件都要：shared = 这次结果是别人那一趟取回来的（singleflight 合并）；
-	// took = 闭包真的向池子取了一张（而不是在内层复查时命中了缓存）。
-	return taken, !shared && took, nil
 }
 
 // gatewayPoolTakeFresh 向池子要**一张新票**，并且**不碰 (身份 → pair) 缓存**。
@@ -1364,6 +1384,8 @@ const gatewayPoolBatchTickets = 3
 // 各弹一张的话 poolPairs 只留得下最后那张，另一张就成了「出过字节却没人记得」的票。
 // 代价是退避期里架子上的票也用不了，而那恰好是最想用它的时候；供给看紧了再说。
 func (s *openAICodexCookieStore) gatewayPoolSparePop(account *Account, identity string) (openAIGatewayPoolPair, bool) {
+	finish := s.gatewayPoolInventoryOperation(identity)
+	defer finish()
 	value, ok := s.poolSpare.LoadAndDelete(identity)
 	if !ok {
 		return openAIGatewayPoolPair{}, false
@@ -1392,6 +1414,8 @@ func (s *openAICodexCookieStore) gatewayPoolSparePop(account *Account, identity 
 // 池子取出来了**——没人还、也没人用，直接烂在堆上。正常路径走不到这一格（取新批之前先弹过一轮、
 // 弹空时架子上那条记录已经被删），撞上了就把这几张异步还回去。
 func (s *openAICodexCookieStore) gatewayPoolSpareShelve(identity string, batch *gatewayPoolTicketBatch) {
+	finish := s.gatewayPoolInventoryOperation(identity)
+	defer finish()
 	if batch == nil || batch.idx >= len(batch.pairs) {
 		return
 	}
@@ -1548,8 +1572,9 @@ type OpenAIGatewayPoolApplied struct {
 // **只写不清**：清的那一版有个真实的交错——侧信道（装饰性 GET，同 ctx）在主请求注入之后跑一遍
 // 「没注入」就会把标记擦掉。换号重试靠 AccountID 校验挡，不靠清。
 type openAIGatewayPoolSink struct {
-	mu      sync.Mutex
-	applied OpenAIGatewayPoolApplied
+	mu         sync.Mutex
+	waitBudget *gatewayPoolWaitHolder
+	applied    OpenAIGatewayPoolApplied
 	// discarded 是本次请求里被 state-echo 判成降智、整发丢掉的那些上游尝试
 	// （openai_gwpool_state_echo.go）。它们都是**真实发生过的**上游请求，要落可审计的用量行。
 	discarded []OpenAIGatewayPoolDiscardedAttempt
@@ -1577,8 +1602,15 @@ const openAIGatewayPoolSinkGinKey = "openai_gwpool_sink"
 // withOpenAIGatewayPoolSink 在转发入口挂一个 sink。**新增一条能打到 chatgpt.com 的转发入口时
 // 要加这一行**，否则那条路上的用量行恒为「没覆写」（安全方向：宁可少报，不许假报）。
 func withOpenAIGatewayPoolSink(ctx context.Context, c *gin.Context) (context.Context, *openAIGatewayPoolSink) {
-	sink := &openAIGatewayPoolSink{}
+	sink := &openAIGatewayPoolSink{waitBudget: &gatewayPoolWaitHolder{}}
 	if c != nil {
+		if value, exists := c.Get(gatewayPoolWaitGinKey); exists {
+			if budget, ok := value.(*gatewayPoolWaitHolder); ok {
+				sink.waitBudget = budget
+			}
+		} else {
+			c.Set(gatewayPoolWaitGinKey, sink.waitBudget)
+		}
 		c.Set(openAIGatewayPoolSinkGinKey, sink)
 	}
 	return context.WithValue(ctx, openAIGatewayPoolSinkCtxKey{}, sink), sink

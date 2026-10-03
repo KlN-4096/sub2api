@@ -101,10 +101,10 @@ func TestGatewayPoolCooldownRejectsInvalidPersistedState(t *testing.T) {
 }
 
 func TestGatewayPoolCooldownCannotBeBypassedByBareTakeOrSpares(t *testing.T) {
-	t.Run("steering disabled and pool ignores exclude", func(t *testing.T) {
+	t.Run("legacy steering opt-out and pool ignores exclude", func(t *testing.T) {
 		fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 		account := fake.account(1)
-		account.Extra[openAIGatewayPoolSteeringExtraKey] = false
+		account.Extra["openai_gwpool_steering"] = false
 		store := &openAICodexCookieStore{}
 		store.gatewayPoolMarkUsed(gwpoolTestIdentity, "unified-142")
 		headers := http.Header{}
