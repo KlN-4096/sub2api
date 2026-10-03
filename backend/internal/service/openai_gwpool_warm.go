@@ -329,7 +329,7 @@ func (s *OpenAIGatewayService) noteWarmVerdict(
 		context.WithoutCancel(request.Context()), gatewayPoolWarmNoteTimeout)
 	defer cancel()
 	s.noteOpenAIGatewayUse(ctx, account, applied.Gateway, applied.Region, verdict, advanceCurrent,
-		applied.PoolLive)
+		applied.PoolLive, applied.PoolFree)
 }
 
 // gatewayPoolWarmVerdict 跑一组判据，并把**同一张票上的并发预热收口成一次**（见 poolWarm）。

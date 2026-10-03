@@ -912,9 +912,15 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 	}
 	// /gateways 只列此刻有活 pair 的网关 ⇒ 列表长度就是池子的可交付网关数。账号卡片拿它当
 	// 「还剩几个落点没用」的分母（见 OpenAIGatewayPoolApplied.PoolLive）。
-	openAIGatewayPoolSinkFrom(ctx).notePoolLive(len(gateways))
 	var fresh, oldest string
 	var freshAt, oldestAt time.Time
+	// free 数「此刻可交付、而且这个号还没烧过」的落点 —— 就是下面这个循环挑 fresh 的那一档。
+	//
+	// **必须在这儿数，不能事后拿「可交付总数 − 账本里用过的个数」去减。** 那两个集合不是包含
+	// 关系：账本是过去一个窗口里碰过的网关名（票早过期的也在里面），清单是此刻还有活票的，
+	// 相减能得出负数，夹到 0 就成了「池子用完了」——而池子可能正有几十个落点可交付
+	// （2026-10-03 现网：账本 67、可交付 62，卡片报成 0）。
+	free := 0
 	window := account.gatewayPoolGatewayWindow()
 	for _, candidate := range gateways {
 		if !candidate.PairReady || candidate.UsedByYou {
@@ -922,6 +928,7 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 		}
 		at, burned := s.gatewayPoolUsedAt(identity, candidate.Name, window)
 		if !burned {
+			free++
 			// 没碰过：挑池子说**最久没人用**的。零值（池子说没碰过）早于任何时刻，天然最优。
 			if fresh == "" || candidate.LastUsedAt.Before(freshAt) {
 				fresh, freshAt = candidate.Name, candidate.LastUsedAt
@@ -933,6 +940,9 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 			oldest, oldestAt = candidate.Name, at
 		}
 	}
+	// 两个数一起记：live 是「池子此刻能交付几个」，free 是「其中这个号还没烧过几个」。
+	// 成对下发，卡片才能把 free=0（全烧过了）和「没问到清单」分开。
+	openAIGatewayPoolSinkFrom(ctx).notePoolCounts(len(gateways), free)
 	if fresh != "" {
 		return fresh, false
 	}
@@ -1431,11 +1441,17 @@ type OpenAIGatewayPoolApplied struct {
 	// PoolLive 是**池子此刻报的可交付网关数**（/gateways 只列有活 pair 的，所以列表长度
 	// 就是它）。0 = 这一发没问过池子要清单（关了 steering、或者列表打不开）。
 	//
-	// 它是整个池子的读数、不是这一发的，挂在这个快照上纯粹是搭车：账号卡片要拿它当
-	// 「还剩几个落点没用」的分母，而这条已经是「池子对这一发说了什么」通向用量侧的现成
-	// 管道。由 snapshot() 从 sink 合进来，不走 mark() —— 取清单发生在注入之前，让 mark
-	// 覆盖它就等于永远是 0。
+	// 它是整个池子的读数、不是这一发的，挂在这个快照上纯粹是搭车：这条已经是「池子对这一发
+	// 说了什么」通向用量侧的现成管道。由 snapshot() 从 sink 合进来，不走 mark() —— 取清单
+	// 发生在注入之前，让 mark 覆盖它就等于永远是 0。
 	PoolLive int
+	// PoolFree 是上面那些里**这个号还没烧过**的个数（gatewayPoolPick 挑 fresh 的那一档）。
+	//
+	// 必须由池子那一遍循环当场数出来，**不能用「PoolLive − 本地账本条目数」去减**：账本
+	// 装的是过去一个窗口里碰过的网关名（票早过期的也在），和「此刻还有活票的」不是包含
+	// 关系，相减会出负数，夹到 0 就成了「池子用完了」——而池子可能正有几十个落点可交付。
+	// 只在 PoolLive > 0 时有意义；那时 0 是**真的 0**（全烧过了），不是「没测到」。
+	PoolFree int
 }
 
 // openAIGatewayPoolSink 是 ctx 里承载的那个指针。
@@ -1458,9 +1474,10 @@ type openAIGatewayPoolSink struct {
 	// *http.Request —— 而且双开账号的出站体是 zstd，裸解 JSON 必然失败
 	// （compressCodexRequestBody）。所以在还看得见明文的那一层记下来。
 	model string
-	// poolLive 是池子最近一次报的可交付网关数（见 OpenAIGatewayPoolApplied.PoolLive）。
+	// poolLive / poolFree 是池子最近一次清单的两个读数（见 OpenAIGatewayPoolApplied）。
 	// 存在 sink 上而不是 applied 上：取清单发生在注入之前，放进 applied 会被 mark() 覆盖。
 	poolLive int
+	poolFree int
 }
 
 type openAIGatewayPoolSinkCtxKey struct{}
@@ -1587,15 +1604,18 @@ func (s *openAIGatewayPoolSink) noteVerdict(gateway, verdict string) {
 }
 
 // snapshot 读回这一发的标记（出站挂钩点之后、同一个 ctx 上的调用方用，见 gatewayPoolRenew）。
-// notePoolLive 记下池子这一发报的可交付网关数。0 不覆盖已有值：列表打不开时该保留上一次
-// 问到的数，报 0 会让卡片说「池子一个落点都没有」。
-func (s *openAIGatewayPoolSink) notePoolLive(n int) {
-	if s == nil || n <= 0 {
+// notePoolCounts 记下池子这一发清单的两个读数。live<=0 整对丢掉：列表打不开时该保留上一次
+// 问到的那一对，报 0 会让卡片说「池子一个落点都没有」。
+//
+// **成对写**：free 的含义依附于 live（「这 live 个里有 free 个没烧过」），拆开写会出现
+// 新 free 配旧 live 的组合，而那个组合从来没有同时成立过。
+func (s *openAIGatewayPoolSink) notePoolCounts(live, free int) {
+	if s == nil || live <= 0 {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.poolLive = n
+	s.poolLive, s.poolFree = live, free
 }
 
 func (s *openAIGatewayPoolSink) snapshot() OpenAIGatewayPoolApplied {
@@ -1606,7 +1626,7 @@ func (s *openAIGatewayPoolSink) snapshot() OpenAIGatewayPoolApplied {
 	defer s.mu.Unlock()
 	// 在读的时候合进来，不在 mark 里写：取清单在注入之前，让 mark 覆盖它就恒为 0。
 	applied := s.applied
-	applied.PoolLive = s.poolLive
+	applied.PoolLive, applied.PoolFree = s.poolLive, s.poolFree
 	return applied
 }
 

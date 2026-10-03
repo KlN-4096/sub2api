@@ -330,10 +330,12 @@ describe('AccountGatewayCell', () => {
     }
   })
 
-  // 窗口用量：已用来自本地账本（窗口内碰过的），**分母是池子报的可交付网关数**。
-  // 拿账本条目数当分母是错的：账本只装碰过的，那样算出来的「还剩多少没用」恒等于
-  // 「我碰过但已经凉了的」，答的是另一个问题。
-  it('窗口用量用池子的可交付网关数当分母', () => {
+  // 窗口用量三个数**各报各的，不做减法**。
+  //
+  // 第一版写的是 `pool_live - used` 再夹到 0：账本装的是过去一个窗口碰过的网关名（票早
+  // 过期的也在），pool_live 是此刻还有活票的，两个集合不是包含关系。现网当场撞上 ——
+  // 账本 67、可交付 62 ⇒ 渲染成「池子里还剩 0 个没用」，而池子好好的有 62 个。
+  it('窗口用量三个数各报各的，不在前端做减法', () => {
     const w = render(
       account({
         current: 'unified-1',
@@ -342,17 +344,40 @@ describe('AccountGatewayCell', () => {
           'unified-2': { at: isoAgo(120), region: 'us-west' }, // 窗口内 ⇒ 已用
           'unified-3': { at: isoAgo(5 * 3600), region: 'europe' } // 4h 窗口外 ⇒ 不算已用
         },
-        pool_live: 50,
+        pool_live: 62,
+        pool_free: 5,
         updated_at: isoAgo(60)
       })
     )
     const text = w.get('[data-testid="account-gateway-window-usage"]').text()
     expect(text).toContain('gatewayHistory.windowUsage:')
-    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 2, free: 48 })
+    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({
+      hours: 4,
+      used: 2,
+      live: 62,
+      free: 5
+    })
+  })
+
+  // 已用多于可交付是**正常的**（账本跨一个窗口、清单是此刻的快照），不许因此把「没烧过」
+  // 算成 0 —— 那正是现网报错的那一幕。free 来自后端，照原样显示。
+  it('已用多于可交付时照样报后端给的「没烧过」个数', () => {
+    const seen = Object.fromEntries(
+      Array.from({ length: 67 }, (_, i) => [`unified-${i}`, { at: isoAgo(60), region: 'us-east' }])
+    )
+    const w = render(
+      account({ current: 'unified-0', seen, pool_live: 62, pool_free: 7, updated_at: isoAgo(60) })
+    )
+    const text = w.get('[data-testid="account-gateway-window-usage"]').text()
+    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({
+      hours: 4,
+      used: 67,
+      live: 62,
+      free: 7
+    })
   })
 
   // 问不到池子清单（没开 steering / 列表打不开 ⇒ pool_live 缺省）时只报已用那一半。
-  // 退回「账本条目数」当分母是编数据，比不报更坏。
   it('拿不到池子清单时只报已用，不编一个分母', () => {
     const w = render(
       account({
@@ -366,15 +391,20 @@ describe('AccountGatewayCell', () => {
     expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 1 })
   })
 
-  // 账本是窗口期的、清单是此刻的 ⇒ 账本里的落点可能已经不在清单上（票过期）⇒ 差值可能
-  // 为负。夹到 0：报一个负数等于说谎。
-  it('已用多于池子清单长度时剩余夹到 0，不报负数', () => {
-    const seen = Object.fromEntries(
-      Array.from({ length: 6 }, (_, i) => [`unified-${i}`, { at: isoAgo(60), region: 'us-east' }])
+  // pool_live>0 时 free=0 是**真的 0**（可交付的全烧过了），要和「没问到清单」分开。
+  it('可交付的全烧过时报 0，不退回「只报已用」', () => {
+    const w = render(
+      account({
+        current: 'unified-1',
+        seen: { 'unified-1': { at: isoAgo(60), region: 'us-east' } },
+        pool_live: 62,
+        pool_free: 0,
+        updated_at: isoAgo(60)
+      })
     )
-    const w = render(account({ current: 'unified-0', seen, pool_live: 2, updated_at: isoAgo(60) }))
     const text = w.get('[data-testid="account-gateway-window-usage"]').text()
-    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 6, free: 0 })
+    expect(text).toContain('gatewayHistory.windowUsage:')
+    expect(JSON.parse(text.slice(text.indexOf('{'))).free).toBe(0)
   })
 
   // 0 的时候不能渲染成「至少 0 分钟满血」：那读起来像对这个号的判决，而它说的是

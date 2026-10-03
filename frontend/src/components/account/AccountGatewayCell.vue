@@ -61,10 +61,11 @@
         data-testid="account-gateway-window-usage"
       >
         {{
-          windowUsage.free >= 0
+          windowUsage.measured
             ? t('admin.accounts.openai.gatewayHistory.windowUsage', {
                 hours: windowHours,
                 used: windowUsage.used,
+                live: windowUsage.live,
                 free: windowUsage.free
               })
             : t('admin.accounts.openai.gatewayHistory.windowUsageUsedOnly', {
@@ -180,8 +181,10 @@ interface GatewayHistory {
   current?: string
   current_region?: string
   seen?: Record<string, GatewaySeen>
-  /** 池子最近一次报的可交付网关数，窗口用量的分母。缺省 / 0 = 没问到。 */
+  /** 池子最近一次报的可交付网关数。缺省 / 0 = 没问到清单。 */
   pool_live?: number
+  /** 上面那些里这个号还没烧过的个数（后端当场数的，不许在前端用减法算，见 windowUsage）。 */
+  pool_free?: number
   updated_at?: string
 }
 
@@ -364,14 +367,16 @@ const forecastMinutes = computed(() =>
 )
 
 /**
- * 本地账本窗口的用量：窗口内烧掉了几个落点、池子里还剩几个没用。
+ * 窗口用量：本地账本窗口里烧掉了几个落点，以及池子此刻能交付几个、其中还有几个没烧过。
  *
- * **分母是池子报的可交付网关数**（后端 openAIGatewayHistory.PoolLive，取自 /gateways 的
- * 清单长度），不是这一行账本里的条目数 —— 账本只装「我碰过的」，拿它当分母的话
- * 「还剩多少没用」恒等于「我碰过但已经凉了的」，答的是另一个问题。
+ * **free 直接读后端的 pool_free，不在这里减。** 2026-10-03 第一版写的是
+ * `pool_live - used`：账本装的是过去一个窗口里碰过的网关名（票早过期的也在里面），而
+ * pool_live 是此刻还有活票的，两个集合不是包含关系 ⇒ 相减能出负数，夹到 0 就渲染成
+ * 「池子里还剩 0 个没用」。现网当场撞上：账本 67、可交付 62，卡片报成 0，而池子好好的。
+ * 正确的数由后端 gatewayPoolPick 在遍历清单时当场数出来（那一遍本来就逐个问过本地账本）。
  *
- * 分母拿不到时（poolLive=0：这个号关了 steering 不取清单，或者清单一直打不开）**不显示
- * 剩余那一半**，只报已用。编一个分母比不报更坏。
+ * pool_live=0 = 没问到清单（关了 steering、或者清单一直打不开）⇒ 只报已用，不编分母。
+ * pool_live>0 时 pool_free=0 是**真的 0**（可交付的全烧过了），照报。
  *
  * 和 forecast 分开一行：这条回答「现在还有几个落点能用」，forecast 回答「接下来一小时能
  * 打多少分钟」。合成一句的话「0 个落点」和「0 分钟」会被读成同一件事。
@@ -384,9 +389,8 @@ const windowUsage = computed(() => {
     if (isHot(item.at)) used += 1
   }
   const live = typeof history.value.pool_live === 'number' ? history.value.pool_live : 0
-  // 池子的清单是**此刻可交付的**那些，而 used 来自本地 4 小时账本 —— 账本里的落点可能
-  // 此刻并不在清单上（票过期了）。所以差值可能是负的，夹到 0：报负数等于说谎。
-  return { used, free: live > 0 ? Math.max(0, live - used) : -1 }
+  const free = typeof history.value.pool_free === 'number' ? history.value.pool_free : 0
+  return { used, live, free, measured: live > 0 }
 })
 
 /**

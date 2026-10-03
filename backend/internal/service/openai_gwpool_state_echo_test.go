@@ -475,20 +475,24 @@ func TestDiscardedAttemptsWithoutSinkAreEmpty(t *testing.T) {
 // 现象是卡片上的分母恒为 0 —— 和「这个号没开 steering」长得一模一样，查不出来。
 func TestPoolLiveSurvivesMark(t *testing.T) {
 	_, sink := withOpenAIGatewayPoolSink(context.Background(), nil)
-	sink.notePoolLive(50)
+	sink.notePoolCounts(62, 5)
 	sink.mark(OpenAIGatewayPoolApplied{Gateway: "unified-142", Version: "tkt-1"})
 	snap := sink.snapshot()
-	require.Equal(t, 50, snap.PoolLive, "mark 把池子清单长度盖掉了")
+	require.Equal(t, 62, snap.PoolLive, "mark 把池子清单读数盖掉了")
+	require.Equal(t, 5, snap.PoolFree)
 	require.Equal(t, "unified-142", snap.Gateway)
 
-	// 0 不覆盖：列表打不开的那一发该留着上一次问到的数，报 0 会说成「池子是空的」。
-	sink.notePoolLive(0)
-	require.Equal(t, 50, sink.snapshot().PoolLive)
-	sink.notePoolLive(41)
+	// live<=0 整对不覆盖：列表打不开的那一发该留着上一次问到的，报 0 会说成「池子是空的」。
+	sink.notePoolCounts(0, 9)
+	require.Equal(t, 62, sink.snapshot().PoolLive)
+	require.Equal(t, 5, sink.snapshot().PoolFree, "free 跟着一个没落地的 live 被改掉了")
+	// 可交付的全烧过了：free=0 是真的 0，和 live 一起落地。
+	sink.notePoolCounts(41, 0)
 	require.Equal(t, 41, sink.snapshot().PoolLive)
+	require.Zero(t, sink.snapshot().PoolFree)
 
 	// 没挂 sink 的路径静默退化，不 panic。
-	require.NotPanics(t, func() { (*openAIGatewayPoolSink)(nil).notePoolLive(9) })
+	require.NotPanics(t, func() { (*openAIGatewayPoolSink)(nil).notePoolCounts(9, 1) })
 	require.Zero(t, (*openAIGatewayPoolSink)(nil).snapshot().PoolLive)
 }
 
