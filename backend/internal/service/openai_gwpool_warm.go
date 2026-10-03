@@ -1,22 +1,11 @@
 package service
 
-// queue 档的预热：业务请求只落在**已验满血**的槽上（openAIGatewayPoolGuardExtraKey）。
-//
-// 为什么要它：另外两档都是**事后**判。cut 判到降智就截断、让客户端自己重发，而判据对首轮请求
-// 结构性失效（客户端没送 turn-state ⇒ 没有回声 ⇒ 判不出来，见 gatewayPoolRouteDegraded）⇒
-// 那种请求的降智它一发都拦不住。queue 档把判据挪到业务请求**之前**，自己铸一张 state 当回声
-// 基准（shot A），拿便宜的垫话去试网关，验出满血才放业务请求进去。
-//
-// 成本是算过的：
-//   - **窗口内连打多发都满血**（2026-10-02 实测，窗口 ≥200s、窗口内 7/7）⇒ 验过一次就覆盖
-//     整个窗口里的所有请求，判据成本摊薄到接近零。所以手里那张还 Live 的时候一发都不打。
-//   - 判据只要 2 发，只读响应头、不等模型吐完 ⇒ 每发 3–6s。
-//   - state-echo 口径的命中率约 33% ⇒ 平均 3 张票 ≈ 6 发垫话换一个窗口。
-//
-// **这几发垫话不计费给任何 API Key**：它们不是客户端的请求，记到谁头上都是错的（判定点也在
-// 「响应头到手、响应体一个字节没读」的时刻，连 token 读数都观测不到，同 openai_gateway_usage.go
-// 里丢弃行那段论证）。但它们确实在烧上游账号的配额，所以每一发都打一条 gwpool_warm_probe —— 那
-// 是事后唯一能回答「这个号的配额花在哪了」的东西。
+// 网关质量防护默认开启，openai_gwpool_guard_enabled=false 时跳过。
+// 开启时业务只能使用已验证且仍在租约内的票；预算不足或结果未知均拒绝，不把未知记成降级。
+// 一组验证先取 state，再带回同一张 state 读响应头；验过的 Live 票复用，不每次重验。
+// 这些额外请求消耗上游配额，但没有实测 token，不能计费给客户端 API Key。
+// 请求尝试、结果、耗时落 openai_gwpool_metrics，详细过程仍记 gwpool_warm_probe；
+// 历史首次可见日志不是账号真实首次接触，不能当成首次满血率。
 //
 // 判据本体与纪律一个字不改，见 openai_gwpool_state_echo.go 的文件头。
 
@@ -86,7 +75,8 @@ type gatewayPoolWarmShooter func(ctx context.Context, cookie, state string) (int
 // 返回 nil 的三种情形：手里那张还在满血窗口里（一发都不打）、这一发池子根本不接管（没东西可
 // 验）、以及真的验出了一张满血的。非 nil 一律是「别放这发业务请求出去」。
 func (s *OpenAIGatewayService) gatewayPoolWarmUp(request *http.Request, proxyURL string, account *Account) error {
-	if s == nil || request == nil || request.URL == nil || !s.codexCookies.gatewayPoolTakeover(account) {
+	if s == nil || request == nil || request.URL == nil || !s.codexCookies.gatewayPoolTakeover(account) ||
+		!account.gatewayPoolGuardEnabled() {
 		return nil
 	}
 	// 只有推理面才有落点可验。先判路径再做别的：侧信道（装饰性 GET、/codex/alpha/search）
@@ -115,15 +105,16 @@ func (s *OpenAIGatewayService) gatewayPoolWarmUp(request *http.Request, proxyURL
 		// 不用在这里等（openai_gwpool_prewarm.go）。到点判据很便宜（两次 map 读），而读 model
 		// 要解请求体 —— 所以先问到点、再读 model。
 		if account.gatewayPoolPrewarmEnabled() {
-			if _, due := s.codexCookies.gatewayPoolPrewarmDue(identity); due {
-				s.gatewayPoolPrewarm(request, proxyURL, account, identity, gatewayPoolWarmModel(request))
+			if _, due := s.codexCookies.gatewayPoolPrewarmDue(identity, account); due {
+				s.gatewayPoolPrewarm(request, proxyURL, account, identity, account.gatewayPoolProbeModel(gatewayPoolWarmModel(request)))
 			}
 		}
 		return nil
 	}
-	// 模型必须和业务请求一致：state 绑在 (账号 × 模型 × 这张 cflb/oailb 对) 上，拿别的模型去
-	// 验等于验了另一件事。读在 Live 快路之后：绝大多数请求走快路，不该为它们解一遍体。
-	model := gatewayPoolWarmModel(request)
+	// Default follows business exactly. An explicit experimental selection uses
+	// only that model for both minting and echo; no cross-model state injection.
+	// Existing verified windows remain valid until their normal end.
+	model := account.gatewayPoolProbeModel(gatewayPoolWarmModel(request))
 	if model == "" {
 		// **fail closed，不是静默退回 retry**：运营方选这一档要的就是「绝不把降智交给客户端」，
 		// 悄悄降级成「先放行再重发一次」是把他的选择抹掉，而唯一线索是一条日志。
@@ -152,17 +143,14 @@ func (s *OpenAIGatewayService) gatewayPoolWarmUpWith(
 	// 的断开连坐）⇒ 最坏会被一次取票超时拖过线。文案照这个实情写。
 	budget, ok := gatewayPoolWarmBudgetFor(request.Context())
 	if !ok {
-		// 首输出守卫的额度已经不够验一张票 ⇒ **不预热，放行给业务请求**（退化成 cut 档）。
-		// 不这样做的话预热会把守卫那点额度吃光，业务请求带着一个已经过期的 ctx 出门，守卫当场
-		// 开火、报成 newOpenAIFirstOutputTimeoutError —— 那是个**按代理归因**的
-		// UpstreamFailoverError，恰好是降智路径刻意不产出的那一类（它包 gwpool.ErrPool 就是
-		// 为了让路由问题永远不去停一个真账号）。运营方会看到「首输出超时」挂在账号/代理上。
+		// 严格模式：没有足够预算验证，就不让业务请求带着未验证路由出站。
 		slog.Warn("gwpool_warm_no_budget", "account_id", account.ID,
 			"reason", "the first-output guard's remaining deadline is too short to verify a pair")
-		return nil
+		return errOpenAIGatewayPoolWarmUnverified
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), budget)
 	defer cancel()
+	ctx = context.WithValue(ctx, gatewayPoolProbeModelKey{}, model)
 	rawURL := request.URL.String()
 	tickets := account.gatewayPoolWarmTickets()
 	// burned 是这一轮判死的落点名，只为放弃时那条终态日志能一行答完「试了哪几个网关」。
@@ -186,8 +174,12 @@ attempts:
 			gatewayPoolReleaseUnsent(release)
 			return nil
 		}
-		full, conclusive, sent, perr := s.codexCookies.gatewayPoolWarmVerdict(
+		full, conclusive, sent, firstSent, perr := s.codexCookies.gatewayPoolWarmVerdict(
 			ctx, account, identity, applied, cookie, attempt, shoot)
+		if !firstSent.IsZero() {
+			// 同凭证的克隆行可能跟随同一次单飞；把领头者实际出站时刻带回本行缓存。
+			s.codexCookies.gatewayPoolMarkSent(identity, applied.Version, firstSent)
+		}
 		// 一个字节都没出去过的票还回池子（纯拨号失败那一格）。**不能指望业务请求那条路去还**：
 		// 那边的 gatewayPoolPair 命中「缓存里还 Live」的早返回 ⇒ 这次调用没向池子取票 ⇒
 		// fresh=false ⇒ release 恒为 nil ⇒ gatewayPoolReleasesUnsent 在 queue 档上是个空操作。
@@ -216,20 +208,11 @@ attempts:
 				"error", gatewayPoolWarmErrorText(perr))
 			break attempts
 		case !conclusive:
-			// 上游真的给了读数但下不了结论（非 200、没回 state），或者真的传输失败
-			// ⇒ **放行给业务请求**，不在这里把它判死。
-			//
-			// 理由不是宽容，是别把读数吞掉：非 200 的典型成因是限流/故障，而限流登记、瞬时熔断、
-			// 故障转移全挂在业务响应那条路上。在这里返回错误的话，一个 5h 额度打满的 queue 账号
-			// 永远不会被标限流 ⇒ 调度器继续选它 ⇒ 每一发客户端请求都换成「一次交付 + 一发真实
-			// 429」，而供给是个位数张/小时。
-			//
-			// 放行**不会**把降智交给客户端：业务请求上的判据还在（queue 档 judges()=true），
-			// 这一发退化成 cut 档的行为 —— 判到降智就截断回干净错误，让客户端自己重发。
+			// 无法判断也拒绝业务，但不把它记成降级；HTTP限流/认证状态由 WarmShot 登记。
 			slog.Warn("gwpool_warm_inconclusive", "account_id", account.ID,
 				"gateway", applied.Gateway, "attempt", attempt, "budget_exhausted", false,
 				"error", gatewayPoolWarmErrorText(perr))
-			return nil
+			return errOpenAIGatewayPoolWarmUnverified
 		case full:
 			s.codexCookies.gatewayPoolMarkVerifiedFull(identity, applied.Version)
 			// **验完要复查这张票还在不在交付窗口里**：池子保证的剩余寿命下限是
@@ -275,6 +258,9 @@ attempts:
 	slog.Warn("gwpool_warm_exhausted", "account_id", account.ID,
 		"tickets", len(burned), "gateways", strings.Join(burned, ","),
 		"budget_exhausted", ctx.Err() != nil)
+	if ctx.Err() == nil && len(burned) == tickets {
+		return errGatewayPoolWarmAttemptsFinished
+	}
 	return errOpenAIGatewayPoolWarmExhausted
 }
 
@@ -351,7 +337,7 @@ func (s *OpenAIGatewayService) noteWarmVerdict(
 // **不脱离取消**（和 gatewayPoolPair 里那次 /cookie 刻意相反）：那边脱离是因为 /cookie 便宜、
 // 共享、且不该被第一名的断开杀掉；这边两发垫话要吃调用方的预算（gatewayPoolWarmBudget）和
 // 首输出守卫的取消 —— 脱离了就等于「客户端这一发已经注定超时，垫话还在跑并占着并发槽」。
-// 代价是跟随者可能被领头者的取消连坐成「判不出来」，而那条路现在是放行给业务请求，不是失败。
+// 代价是跟随者可能被领头者的取消连坐成「判不出来」；严格模式会拒绝本次业务请求。
 //
 // 池子没报票号（version 为空）时不收口：那时没有稳定的键，宁可各打一遍也不许把两张不同的票
 // 的结论混成一个。
@@ -363,18 +349,61 @@ func (s *openAICodexCookieStore) gatewayPoolWarmVerdict(
 	cookie string,
 	attempt int,
 	shoot gatewayPoolWarmShooter,
-) (full, conclusive, sent bool, err error) {
-	if applied.Version == "" {
-		return gatewayPoolWarmProbe(ctx, account.ID, applied.Gateway, attempt, cookie, shoot)
+) (full, conclusive, sent bool, firstSent time.Time, err error) {
+	type verdict struct {
+		full, conclusive, sent bool
+		firstSent              time.Time
 	}
-	type verdict struct{ full, conclusive, sent bool }
+	probe := func() (verdict, error) {
+		start := time.Now()
+		trace := &gatewayPoolProbeTrace{onFirst: func(at time.Time) {
+			s.gatewayPoolMarkSent(identity, applied.Version, at)
+		}}
+		probeCtx := context.WithValue(ctx, gatewayPoolProbeTraceKey{}, trace)
+		steps := make([]gatewayPoolProbeStep, 0, 2)
+		wrapped := func(ctx context.Context, cookie, state string) (int, string, error) {
+			at := time.Now()
+			before := trace.shots
+			trace.actualGateway = ""
+			status, minted, err := shoot(ctx, cookie, state)
+			// 离线 shooter 或其它实现未显式打点时，有响应就能确认出站；
+			// 纯构造失败/未发出的错误不凭空算触碰或探测次数。
+			if status > 0 && trace.shots == before {
+				trace.markSent(at)
+			}
+			shot := "a"
+			if len(steps) > 0 {
+				shot = "b"
+			}
+			steps = append(steps, gatewayPoolProbeStep{Shot: shot, Sent: trace.shots > before, Status: status,
+				GotState: minted != "", EchoAccepted: state != "" && status == http.StatusOK && (minted == "" || minted == state),
+				ActualGateway: trace.actualGateway, DurationMS: time.Since(at).Milliseconds()})
+			return status, minted, err
+		}
+		full, conclusive, sent, err := gatewayPoolWarmProbe(probeCtx, account.ID, applied.Gateway, attempt, cookie, wrapped)
+		// Ambiguous transmission forbids returning a ticket but is not a measured contact.
+		sent = sent || trace.shots > 0 || trace.mayHaveSent
+		if conclusive && ctx.Err() == nil {
+			s.poolWarmDuration.Store(identity, time.Since(start))
+		}
+		if s.poolProbeObserved != nil {
+			model, _ := ctx.Value(gatewayPoolProbeModelKey{}).(string)
+			s.poolProbeObserved(ctx, account, gatewayPoolProbeObservation{
+				Source: gatewayPoolProbeSource(ctx), Shots: trace.shots, Full: full, Conclusive: conclusive,
+				DurationMS: time.Since(start).Milliseconds(),
+				Applied:    applied, Identity: identity, Model: model, FirstSent: trace.firstSent, LastSent: trace.lastSent, Steps: steps,
+			})
+		}
+		return verdict{full, conclusive, sent, trace.firstSent}, err
+	}
+	if applied.Version == "" {
+		v, err := probe()
+		return v.full, v.conclusive, v.sent, v.firstSent, err
+	}
 	key := gatewayPoolLedgerIdentity(identity) + "\x00" + applied.Version
-	got, err, _ := s.poolWarm.Do(key, func() (any, error) {
-		full, conclusive, sent, perr := gatewayPoolWarmProbe(ctx, account.ID, applied.Gateway, attempt, cookie, shoot)
-		return verdict{full: full, conclusive: conclusive, sent: sent}, perr
-	})
+	got, err, _ := s.poolWarm.Do(key, func() (any, error) { return probe() })
 	v, _ := got.(verdict)
-	return v.full, v.conclusive, v.sent, err
+	return v.full, v.conclusive, v.sent, v.firstSent, err
 }
 
 // gatewayPoolVerifiedFull 报告这个身份手上那张票验过满血、而且还在交付窗口里。
@@ -480,16 +509,36 @@ func (s *OpenAIGatewayService) gatewayPoolWarmShot(
 	// 业务请求走插件、裸打 httpUpstream 走的是另一条传输层（TLS 指纹都不同，见
 	// buildOpenAITurnStateProbe 的注释）—— 那就成了「在 A 上量、给 B 放行」的空闸。
 	// 判据必须和它要放行的那一发走同一条路。
-	resp, err := s.doOpenAIUpstreamRoundTrip(req, proxyURL, account)
+	resp, err, sentAt := s.gatewayPoolObservedRoundTrip(req, proxyURL, account, true)
+	if trace, ok := ctx.Value(gatewayPoolProbeTraceKey{}).(*gatewayPoolProbeTrace); ok {
+		trace.mayHaveSent = trace.mayHaveSent || !gatewayPoolReleasesUnsent(resp, err)
+		if !sentAt.IsZero() {
+			trace.markSent(sentAt)
+		}
+	}
 	if err != nil {
 		return 0, "", err
 	}
 	// 头到手即断：提前 Close 让 HTTP/2 发 RST_STREAM，上游立刻停止生成（同
 	// dropDegradedGatewayPoolRoute 的手法）。Drain 一点点是为了让非 200 的错误体不卡在内核缓冲。
+	if trace, ok := ctx.Value(gatewayPoolProbeTraceKey{}).(*gatewayPoolProbeTrace); ok {
+		for _, cookie := range resp.Cookies() {
+			if cookie.Name == "__oailb" {
+				trace.actualGateway = openAICodexRouteGateway("__oailb=" + cookie.Value)
+			}
+		}
+	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<10))
 		_ = resp.Body.Close()
 	}()
+	if resp.StatusCode >= http.StatusBadRequest {
+		// 严格模式不会再用业务请求“补取”错误响应，必须在探测处沿用账号错误登记。
+		// 不向日志或客户端传递响应原文；成功响应依旧只读头。
+		const probeErrorBodyLimit = 16 << 10
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, probeErrorBodyLimit))
+		s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, body, model)
+	}
 	return resp.StatusCode, extractOpenAICodexTurnState(resp.Header), nil
 }
 

@@ -56,10 +56,11 @@ const (
 
 // gwpoolFakeGateway 是假池子 /gateways 里的一项，字段名与池子契约一致。
 type gwpoolFakeGateway struct {
-	Name       string `json:"name"`
-	PairReady  bool   `json:"pair_ready"`
-	UsedByYou  bool   `json:"used_by_you"`
-	LastUsedAt string `json:"last_used_at,omitempty"`
+	Name       string                `json:"name"`
+	PairReady  bool                  `json:"pair_ready"`
+	UsedByYou  bool                  `json:"used_by_you"`
+	LastUsedAt string                `json:"last_used_at,omitempty"`
+	Contacts   []gwpool.ContactStats `json:"contacts,omitempty"`
 }
 
 // gwpoolFakePool 是假池子：记 /cookie 与 /gateways 的次数、/cookie 的查询串，以及**这两个之外**
@@ -75,6 +76,7 @@ type gwpoolFakePool struct {
 	gateway      string
 	validForS    int
 	forceCookie  string
+	cookieForHit func(int64) string // 固定回调，为连续验证提供互不相同的网关，不修改共享 fixture。
 	forceStatus  int
 	listHits     atomic.Int64
 	listQueries  chan string
@@ -137,6 +139,9 @@ func newGwpoolFakePool(t *testing.T, cookie string, validForS int) *gwpoolFakePo
 			cookie := fake.cookie
 			if forced && fake.forceCookie != "" {
 				cookie = fake.forceCookie
+			}
+			if fake.cookieForHit != nil {
+				cookie = fake.cookieForHit(hits)
 			}
 			if want, _ := strconv.Atoi(r.URL.Query().Get("count")); want > 1 && len(fake.batchGateways) > 0 {
 				tickets := make([]string, 0, want)

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,9 +13,46 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 )
+
+func TestGatewayPoolProbeModelOnlyOverridesProbeRequests(t *testing.T) {
+	for _, selected := range []string{"", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"} {
+		t.Run("selection="+selected, func(t *testing.T) {
+			fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+			account := fake.account(1)
+			account.Credentials["access_token"] = "offline-test-token"
+			if selected != "" {
+				account.Extra[openAIGatewayPoolProbeModelExtraKey] = selected
+			}
+			upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
+				{status: http.StatusOK, minted: "probe-state"},
+				{status: http.StatusOK},
+				{status: http.StatusOK},
+			}}
+			svc := &OpenAIGatewayService{httpUpstream: upstream}
+			req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
+			require.NoError(t, err)
+			req.Header.Set(openAICodexTurnStateHeader, "business-state")
+			ctx, _ := withOpenAIGatewayPoolSink(req.Context(), nil)
+			resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", account)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			require.Len(t, upstream.sentBodies, 3, "only selected-model mint/echo and the unchanged business request")
+			want := selected
+			if want == "" {
+				want = "gpt-6-astra"
+			}
+			require.Equal(t, want, gjson.Get(upstream.sentBodies[0], "model").String())
+			require.Equal(t, want, gjson.Get(upstream.sentBodies[1], "model").String())
+			require.Equal(t, gwpoolEchoBody1, upstream.sentBodies[2])
+			require.Equal(t, []string{"", "probe-state", "business-state"}, upstream.sentState,
+				"probe state never leaks into the business model")
+		})
+	}
+}
 
 // 预热（openai_gwpool_warm.go）。一律打假池子 + 假 shooter，**绝不打真实上游**。
 
@@ -186,7 +224,9 @@ func TestWarmUpRotatesPastADegradedGatewayAndServesTheFullOne(t *testing.T) {
 // 试满了也没验出满血 ⇒ **按失败处理，绝不降级放行**（queue 档唯一的承诺）。
 func TestWarmUpFailsClosedWhenNoTicketVerifiesFull(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-	fake.forceCookie = gwpoolTestPairCookie(t, "unified-84")
+	fake.cookieForHit = func(hit int64) string {
+		return gwpoolTestPairCookie(t, fmt.Sprintf("unified-%d", 140+hit))
+	}
 	svc := &OpenAIGatewayService{}
 	shooter := &gwpoolWarmShooter{}
 	// 每一发 B 都回一张不同的新票 ⇒ 恒判降智。
@@ -209,12 +249,8 @@ func TestWarmUpFailsClosedWhenNoTicketVerifiesFull(t *testing.T) {
 	require.NotEqual(t, openAIGatewayPoolPairLive, state, "不许留一张没验过的票给业务请求")
 }
 
-// 判据没下结论（非 200 / 传输失败）⇒ **放行给业务请求**，不在这里把它判死，也不判坏这张票。
-//
-// 纪律 1：非 200 一律不下结论。在这里返回错误会把读数吞掉 —— 非 200 的典型成因是限流/故障，
-// 而限流登记、瞬时熔断、故障转移全挂在业务响应那条路上。放行不会把降智交给客户端：业务请求
-// 上的判据还在（queue 档 judges()=true），这一发退化成 cut 档的行为。
-func TestWarmUpFallsThroughOnInconclusiveShots(t *testing.T) {
+// 非 200 / 传输失败不下质量结论；严格模式阻止业务，不能把无法判断标成降智。
+func TestWarmUpBlocksInconclusiveShotsWithoutCallingThemDegraded(t *testing.T) {
 	for name, tc := range map[string]struct {
 		replies []gwpoolWarmReply
 		sent    bool // 这张票有没有确证送达上游（拿到过状态码）
@@ -230,8 +266,9 @@ func TestWarmUpFallsThroughOnInconclusiveShots(t *testing.T) {
 			svc := &OpenAIGatewayService{}
 			shooter := &gwpoolWarmShooter{replies: replies}
 
-			require.NoError(t, gwpoolWarmRun(t, svc, gwpoolWarmAccount(fake), shooter),
-				"没下结论不许判死：限流登记/熔断/故障转移都挂在业务响应那条路上")
+			err := gwpoolWarmRun(t, svc, gwpoolWarmAccount(fake), shooter)
+			require.Error(t, err, "严格模式下无法判断必须停止业务出站")
+			require.NotErrorIs(t, err, errOpenAIGatewayPoolRouteDegraded, "无法判断不能冒充明确降级")
 			require.LessOrEqual(t, len(shooter.shots), 2, "本轮就停，不许换票再试")
 			// **不标验过**：业务请求那一发的内嵌判据还要再判一次（退化成 retry 档）。
 			require.False(t, svc.codexCookies.gatewayPoolVerifiedFull(gwpoolTestIdentity),
@@ -645,6 +682,7 @@ func TestWarmTicketsIsAnAccountKnobWithACeiling(t *testing.T) {
 // 旋钮真的管着循环次数，不是只读出来不用。
 func TestWarmUpStopsAtTheConfiguredTicketCount(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	fake.forceCookie = gwpoolTestPairCookie(t, "unified-84")
 	svc := &OpenAIGatewayService{}
 	acct := gwpoolWarmAccount(fake)
 	acct.Extra[openAIGatewayPoolWarmTicketsExtraKey] = 2

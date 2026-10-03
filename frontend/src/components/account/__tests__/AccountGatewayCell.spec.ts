@@ -29,6 +29,27 @@ const account = (gateways: unknown, extra: Record<string, unknown> = {}): Accoun
 
 const render = (acc: Account) => mount(AccountGatewayCell, { props: { account: acc } })
 
+// Deliberately not 183s or 100%: 3/5 full × 120s = 72 expected seconds per gateway.
+function accountWithSamples(history: { current: string; seen: Record<string, { at: string; region?: string }> }): Account {
+  const rounds = [5 * 3600, 7 * 3600].flatMap((gap, bucket) => Array.from({ length: 5 }, (_, index) => ({
+    report: {
+      id: `sample-${bucket}-${index}`, gateway: 'unified-sample', model: 'gpt-6-astra',
+      criterion: 'state-echo-v1', source: 'foreground', first: 'repeat', at: isoAgo(8 * 3600 + index),
+      gap_known: true, elapsed_seconds: gap, outcome: index < 3 ? 'full' : 'refreshed',
+      window_final: index < 3, full_window_ms: index < 3 ? 120000 : 0
+    }
+  })))
+  return account(history, {
+    openai_gwpool_ledger_tag: 'same-ledger',
+    openai_gwpool_contacts: {
+      ledger_tag: 'same-ledger',
+      seen: Object.fromEntries(Object.entries(history.seen).map(([name, row]) =>
+        [name, { first_at: isoAgo(24 * 3600), last_at: row.at }])),
+      rounds
+    }
+  })
+}
+
 const cell = (w: ReturnType<typeof render>, region: string) =>
   w.get(`[data-testid="account-gateway-region-${region}"]`)
 
@@ -65,6 +86,49 @@ const minutesOf = (w: ReturnType<typeof render>) => {
 }
 
 describe('AccountGatewayCell', () => {
+  it('没有同层实测样本时显示待统计，不把可重试网关乘以183秒', () => {
+    const w = render(account({
+      current: 'unified-1',
+      seen: { 'unified-1': { at: isoAgo(5 * 3600), region: 'us-west' } }
+    }))
+    expect(w.get('[data-testid="account-gateway-forecast"]').text()).toContain('forecastPending')
+  })
+  it('冷却完毕独立于旧库存快照，非法时间不冒充冷却完成', () => {
+    const w = render(account({
+      seen: {
+        'unified-1': { at: isoAgo(60), region: 'us-east' },
+        'unified-2': { at: isoAgo(5 * 3600), region: 'us-west' },
+        'unified-3': { at: isoAgo(6 * 3600), region: 'europe' },
+        'unified-4': { at: 'invalid', region: 'east-asia' }
+      },
+      pool_live: 98,
+      pool_free: 1
+    }))
+    const summary = w.get('[data-testid="account-gateway-window-usage"]').text()
+    expect(JSON.parse(summary.slice(summary.indexOf('{')))).toEqual({ hours: 4, used: 1, cooled: 2 })
+    expect(w.get('[data-testid="account-gateway-pool-snapshot"]').text()).toContain('"free":1')
+  })
+  it('验证统计与反馈状态没有网关历史也可见，不显示报告载荷', () => {
+    const w = render(account(null, {
+      openai_gwpool_metrics: {
+        foreground: { rounds: 3, requests: 6, full: 1, degraded: 1, inconclusive: 1, duration_ms: 1500 },
+        background: { rounds: 1, requests: 1, inconclusive: 1, duration_ms: 300 }
+      },
+      openai_gwpool_feedback_outbox: {
+        sent: 4, discarded: 2, pending: [{ report: { account_tag: 'must-not-render' } }, { permanent: true }]
+      }
+    }))
+    expect(w.get('[data-testid="account-gateway-runtime"]').text()).toContain('"requests":7,"pending":1')
+    expect(w.get('[data-testid="account-gateway-probes-foreground"]').text()).toContain('"perFull":"6.0"')
+    expect(w.get('[data-testid="account-gateway-feedback"]').text()).toContain('"failed":1')
+    expect(w.text()).not.toContain('must-not-render')
+  })
+  it('新出口区域独立显示稳定ID，不并入未归类', () => {
+    const w = render(account({ seen: { 'unified-99': { at: isoAgo(30), region: 'africa-south' } } }))
+    expect(cell(w, 'africa-south').text()).toContain('africa-south')
+    expect(gatewayOf(w, 'africa-south')).toBe('99')
+    expect(w.find('[data-testid="account-gateway-region-unknown"]').exists()).toBe(false)
+  })
   it('缺省冷却为1小时，学习档位和固定状态按网关分别显示', () => {
     const w = render(account({
       current: 'unified-73',
@@ -373,7 +437,8 @@ describe('AccountGatewayCell', () => {
     )
     const text = w.get('[data-testid="account-gateway-window-usage"]').text()
     expect(text).toContain('gatewayHistory.windowUsage:')
-    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 2, free: 5 })
+    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 2, cooled: 1 })
+    expect(w.get('[data-testid="account-gateway-pool-snapshot"]').text()).toContain('"free":5')
   })
 
   // 已用多于可交付是**正常的**（账本跨一个窗口、清单是此刻的快照），不许因此把「没烧过」
@@ -386,7 +451,8 @@ describe('AccountGatewayCell', () => {
       account({ current: 'unified-0', seen, pool_live: 62, pool_free: 7, updated_at: isoAgo(60) })
     )
     const text = w.get('[data-testid="account-gateway-window-usage"]').text()
-    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 67, free: 7 })
+    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 67, cooled: 0 })
+    expect(w.get('[data-testid="account-gateway-pool-snapshot"]').text()).toContain('"free":7')
   })
 
   // 问不到池子清单（没开 steering / 列表打不开 ⇒ pool_live 缺省）时只报已用那一半。
@@ -399,8 +465,9 @@ describe('AccountGatewayCell', () => {
       })
     )
     const text = w.get('[data-testid="account-gateway-window-usage"]').text()
-    expect(text).toContain('gatewayHistory.windowUsageUsedOnly:')
-    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 1 })
+    expect(text).toContain('gatewayHistory.windowUsage:')
+    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 1, cooled: 0 })
+    expect(w.find('[data-testid="account-gateway-pool-snapshot"]').exists()).toBe(false)
   })
 
   // 旧版本（klno.3 及更早）写下的记录有 pool_live、没有 pool_free。两个字段都在才算测到 ——
@@ -416,8 +483,8 @@ describe('AccountGatewayCell', () => {
       })
     )
     const text = w.get('[data-testid="account-gateway-window-usage"]').text()
-    expect(text).toContain('gatewayHistory.windowUsageUsedOnly:')
-    expect(text).not.toContain('gatewayHistory.windowUsage:')
+    expect(text).toContain('gatewayHistory.windowUsage:')
+    expect(w.find('[data-testid="account-gateway-pool-snapshot"]').exists()).toBe(false)
   })
 
   // pool_live>0 时 free=0 是**真的 0**（可交付的全烧过了），要和「没问到清单」分开。
@@ -433,7 +500,7 @@ describe('AccountGatewayCell', () => {
     )
     const text = w.get('[data-testid="account-gateway-window-usage"]').text()
     expect(text).toContain('gatewayHistory.windowUsage:')
-    expect(JSON.parse(text.slice(text.indexOf('{'))).free).toBe(0)
+    expect(w.get('[data-testid="account-gateway-pool-snapshot"]').text()).toContain('"free":0')
   })
 
   // 0 的时候不能渲染成「至少 0 分钟满血」：那读起来像对这个号的判决，而它说的是
@@ -483,7 +550,7 @@ describe('AccountGatewayCell', () => {
     expect(stale).not.toMatch(/-\d{4,}s-/)
   })
 
-  // 满血分钟预测：单位是 (账号 × 网关)，**一个网关名就是一个单位**，而且算**下界**。
+  // 满血分钟预测：每个网关各算一个单位，使用同层实测率和时长，不是保底。
   //
   // 第一版按大区去重（「一个号在一个大区同一时间只有一个网关」），2026-10-03 用户否了：
   // 「时间还是按网关来的，相同区域不同网关同一个号还是有不同的满血期的」。按大区数会把
@@ -492,7 +559,7 @@ describe('AccountGatewayCell', () => {
     // 三个网关名同属 us-west，全部已出冷却 ⇒ **3** 个单位，不是 1 个。
     // 这一条就是那次纠正本身，按大区并会让它掉回 1。
     const oneRegion = render(
-      account({
+      accountWithSamples({
         current: 'unified-1',
         seen: {
           'unified-1': { at: isoAgo(5 * 3600), region: 'us-west' },
@@ -501,12 +568,12 @@ describe('AccountGatewayCell', () => {
         }
       })
     )
-    expect(minutesOf(oneRegion)).toBe(Math.round((3 * 183) / 60))
+    expect(minutesOf(oneRegion)).toBe(Math.round((3 * 72) / 60))
 
     // 同一大区里新旧混着时**各算各的**：旧的那个已恢复、新的那个还在烧 ⇒ 1 个单位。
     // 按大区取「最近那次」当起点会让它变成 0。
     const staleAndFresh = render(
-      account({
+      accountWithSamples({
         current: 'unified-2',
         seen: {
           'unified-1': { at: isoAgo(5 * 3600), region: 'us-west' },
@@ -514,7 +581,7 @@ describe('AccountGatewayCell', () => {
         }
       })
     )
-    expect(minutesOf(staleAndFresh)).toBe(Math.round(183 / 60))
+    expect(minutesOf(staleAndFresh)).toBe(Math.round(72 / 60))
 
     // 全部刚烧过 ⇒ 一小时内一个都出不来 ⇒ 0 分钟。
     const allBurned = Object.fromEntries(
@@ -522,23 +589,23 @@ describe('AccountGatewayCell', () => {
     )
     expect(minutesOf(render(account({ current: 'unified-0', seen: allBurned })))).toBe(0)
 
-    // 封顶一小时：一小时里最多只能用一小时的满血，25 个单位 × 183 秒远超它。
+    // 足够多的可重试网关仍封顶一小时。
     const many = Object.fromEntries(
-      Array.from({ length: 25 }, (_, i) => [
+      Array.from({ length: 100 }, (_, i) => [
         `unified-${i}`,
         { at: isoAgo(5 * 3600), region: 'us-west' }
       ])
     )
-    expect(minutesOf(render(account({ current: 'unified-0', seen: many })))).toBe(60)
+    expect(minutesOf(render(accountWithSamples({ current: 'unified-0', seen: many })))).toBe(60)
 
     // 冷却剩余 ≤ 1 小时就算可用：4 小时窗口下，3.5 小时前烧的那个算回来。
     const recovering = render(
-      account({
+      accountWithSamples({
         current: 'unified-1',
         seen: { 'unified-1': { at: isoAgo(3.5 * 3600), region: 'us-west' } }
       })
     )
-    expect(minutesOf(recovering)).toBe(Math.round(183 / 60))
+    expect(minutesOf(recovering)).toBe(Math.round(72 / 60))
   })
 
   // region 完全不参与计数：没带 region 的落点一样是一个有名有姓的网关，照数。
@@ -548,7 +615,7 @@ describe('AccountGatewayCell', () => {
   // 按大区归类的漏，按网关数之后没有漏可补）。
   it('没带大区的落点照样算一个单位，不扣减也不另算', () => {
     const w = render(
-      account({
+      accountWithSamples({
         current: 'unified-1',
         seen: {
           'unified-1': { at: isoAgo(5 * 3600), region: 'us-west' },
@@ -557,11 +624,11 @@ describe('AccountGatewayCell', () => {
         }
       })
     )
-    expect(minutesOf(w)).toBe(Math.round((3 * 183) / 60))
+    expect(minutesOf(w)).toBe(Math.round((3 * 72) / 60))
 
     // 它还在窗口里的时候只是「这一个单位不可用」，不该再去扣别人。
     const hotBlind = render(
-      account({
+      accountWithSamples({
         current: 'unified-1',
         seen: {
           'unified-1': { at: isoAgo(5 * 3600), region: 'us-west' },
@@ -570,7 +637,7 @@ describe('AccountGatewayCell', () => {
         }
       })
     )
-    expect(minutesOf(hotBlind)).toBe(Math.round((2 * 183) / 60))
+    expect(minutesOf(hotBlind)).toBe(Math.round((2 * 72) / 60))
 
     // 那两条按大区的提示文案已经没了，页面上不该再出现它们。
     const text = w.get('[data-testid="account-gateway-forecast"]').text()

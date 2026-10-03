@@ -24,6 +24,22 @@ func gwpoolBackoffLeft(store *openAICodexCookieStore) time.Duration {
 	return left
 }
 
+func TestGatewayPoolProbeModelOverrideIsExplicitAndWhitelisted(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	require.Equal(t, "gpt-6-astra", account.gatewayPoolProbeModel("gpt-6-astra"))
+	account.Extra[openAIGatewayPoolProbeModelExtraKey] = "gpt-6-luna"
+	require.Equal(t, "gpt-6-luna", account.gatewayPoolProbeModel("gpt-6-astra"))
+	account.Extra[openAIGatewayPoolProbeModelExtraKey] = "gpt-99-test"
+	require.Equal(t, "gpt-6-astra", account.gatewayPoolProbeModel("gpt-6-astra"),
+		"invalid persisted values must fail closed to the business model")
+	require.Error(t, validateOpenAIGatewayPoolAccountExtra(account, map[string]any{
+		openAIGatewayPoolExtraKey:            true,
+		openAIGatewayPoolBaseURLExtraKey:     "https://pool.example.test",
+		OpenAIGatewayPoolConsumerKeyExtraKey: "key",
+		openAIGatewayPoolProbeModelExtraKey:  "gpt-99-test",
+	}))
+}
+
 // ---------------------------------------------------------------------------
 // 1. 本地账本当 exclude 带上去
 // ---------------------------------------------------------------------------
@@ -320,14 +336,20 @@ func TestGatewayPoolExcludesStaleTicketVersion(t *testing.T) {
 
 // gwpoolRunOnce 跑**预热下面那一层**。
 //
-// 预热 2026-10-03 起无条件跑在 doOpenAIUpstream 里（档位删了），而这一组用例验的是取票/注入/
+// 这一组用例关闭质量防护，只验取票/注入/
 // 还票协议：走上层的话每个用例都要先把判据那两发也配出来，而且它们的请求体里没有 model ⇒
 // 预热会先 fail closed（errOpenAIGatewayPoolWarmNoModel），一张票都取不到，测不到任何东西。
 //
 // 靶子选这一层是对的，不是绕过：还票判据本身就住在 doOpenAIUpstreamOnce 里
 // （gatewayPoolReleasesUnsent 的调用点）。预热与转发的组合由 openai_gwpool_warm_test.go 盯。
 func gwpoolRunOnce(svc *OpenAIGatewayService, req *http.Request, acct *Account) (*http.Response, error) {
-	resp, _, err := svc.doOpenAIUpstreamOnce(req, "", acct)
+	transportOnly := *acct
+	transportOnly.Extra = make(map[string]any, len(acct.Extra)+1)
+	for key, value := range acct.Extra {
+		transportOnly.Extra[key] = value
+	}
+	transportOnly.Extra[openAIGatewayPoolGuardEnabledExtraKey] = false
+	resp, _, err := svc.doOpenAIUpstreamOnce(req, "", &transportOnly)
 	return resp, err
 }
 

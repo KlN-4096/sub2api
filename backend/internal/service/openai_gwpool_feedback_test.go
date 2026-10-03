@@ -76,15 +76,20 @@ func TestGatewayPoolCooldownReportRetriesSameEvent(t *testing.T) {
 	account := gwpoolTestAccount(1)
 	account.Extra[openAIGatewayPoolBaseURLExtraKey] = server.URL
 	account.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = "test-consumer"
-	svc := &OpenAIGatewayService{}
+	svc, _ := gatewayRuntimeService(account)
 	svc.reportGatewayPoolCooldown(account, gwpoolTestIdentity, &gatewayPoolCooldownSample{
 		Gateway: "unified-142", AttemptAt: time.Now(), WindowSeconds: 3600, ElapsedSeconds: 3600, Full: true,
 	})
-	require.Eventually(t, func() bool { return len(got) == 2 }, 3*time.Second, 10*time.Millisecond)
+	svc.flushGatewayPoolReports(context.Background())
+	require.NoError(t, svc.changeGatewayPoolOutbox(context.Background(), 1, func(_ *Account, box *gatewayPoolOutbox) {
+		box.Pending[0].NextAt = time.Time{}
+	}))
+	svc.flushGatewayPoolReports(context.Background())
+	require.Equal(t, 2, len(got))
 	require.Equal(t, <-got, <-got, "重试必须保持ID和不可变载荷一致")
 }
 
-func TestGatewayPoolCooldownReportStopsOnPermanentFailureAndRetryLimit(t *testing.T) {
+func TestGatewayPoolCooldownReportStopsOnPermanentFailureAndBacksOffTemporary(t *testing.T) {
 	for _, status := range []int{http.StatusConflict, http.StatusServiceUnavailable} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			calls := 0
@@ -93,16 +98,21 @@ func TestGatewayPoolCooldownReportStopsOnPermanentFailureAndRetryLimit(t *testin
 				w.WriteHeader(status)
 			}))
 			defer server.Close()
-			_, err := sendGatewayPoolCooldownReport(gwpool.New(server.URL, "key", time.Second), gwpool.CooldownReport{
-				ID: strings.Repeat("a", 64), AccountTag: strings.Repeat("b", 64), Gateway: "g",
-				WindowSeconds: 3600, ElapsedSeconds: 3600, Result: "full",
+			account := gwpoolTestAccount(1)
+			account.Extra[openAIGatewayPoolBaseURLExtraKey] = server.URL
+			account.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = "test-key"
+			svc, repo := gatewayRuntimeService(account)
+			svc.reportGatewayPoolCooldown(account, gwpoolTestIdentity, &gatewayPoolCooldownSample{
+				Gateway: "g", AttemptAt: time.Now(), WindowSeconds: 3600, ElapsedSeconds: 3600, Full: true,
 			})
-			require.Error(t, err)
-			expected := 1
-			if status == http.StatusServiceUnavailable {
-				expected = gatewayPoolReportAttempts
-			}
-			require.Equal(t, expected, calls)
+			svc.flushGatewayPoolReports(context.Background())
+			svc.flushGatewayPoolReports(context.Background())
+			require.Equal(t, 1, calls, "永久失败停发；临时失败退避内也不得立即重发")
+			current, _ := repo.GetByID(context.Background(), 1)
+			box := readGatewayPoolOutbox(current, time.Now())
+			require.Len(t, box.Pending, 1)
+			require.Equal(t, status == http.StatusConflict, box.Pending[0].Permanent)
+			require.True(t, box.Pending[0].NextAt.After(time.Now()))
 		})
 	}
 }
@@ -125,10 +135,11 @@ func TestGatewayPoolCooldownReportIsAnonymousAndUsesExistingObservation(t *testi
 	account := gwpoolTestAccount(1)
 	account.Extra[openAIGatewayPoolBaseURLExtraKey] = server.URL
 	account.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = "test-consumer"
-	svc := &OpenAIGatewayService{}
+	svc, _ := gatewayRuntimeService(account)
 	svc.reportGatewayPoolCooldown(account, gwpoolTestIdentity, &gatewayPoolCooldownSample{
 		Gateway: "unified-142", AttemptAt: time.Now(), WindowSeconds: 3600, ElapsedSeconds: 3601, Full: true,
 	})
+	svc.flushGatewayPoolReports(context.Background())
 	select {
 	case report := <-got:
 		require.Len(t, report.ID, 64)
