@@ -2666,10 +2666,10 @@
                   <input
                     v-model.number="openAIGwpoolGatewayWindow"
                     type="number"
-                    min="1"
-                    max="86400"
+                    min="3600"
+                    max="36000"
                     step="1"
-                    placeholder="14400"
+                    placeholder="3600"
                     class="input text-xs"
                     data-testid="edit-openai-gwpool-gateway-window"
                     :title="t('admin.accounts.openai.gwpoolGatewayWindowDesc')"

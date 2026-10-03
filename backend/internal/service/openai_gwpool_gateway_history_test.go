@@ -258,6 +258,78 @@ func TestPruneOpenAIGatewayHistory(t *testing.T) {
 	require.Contains(t, rec.Seen, gatewayNameForTest(0), "最新的那条被裁掉了")
 }
 
+func TestGatewayPoolCooldownFreshPersistenceAndCrossRowRestart(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	repo := newTurnStateAutoRepo()
+	repo.latest = account
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	svc.codexCookies.accountByID = repo.GetByID
+	identity := openAIGatewayPoolAccountKey(account)
+	require.True(t, svc.codexCookies.beginGatewayPoolAttempt(identity, "unified-142", 30*time.Minute))
+	svc.codexCookies.observeGatewayPoolCooldown(identity, "unified-142", openAIGatewayVerdictDegraded, 30*time.Minute)
+	stale := *account
+	stale.Extra = map[string]any{} // 模拟五分钟前的请求快照。
+	svc.noteOpenAIGatewayUse(context.Background(), &stale, "unified-142", "europe", openAIGatewayVerdictDegraded, true, 0, 0, 75000)
+	require.Len(t, repo.extraWrites, 1)
+	written := repo.extraWrites[0]
+	require.Equal(t, gatewayPoolLedgerTag(identity), written[openAIGatewayLedgerTagExtraKey])
+	persisted := *account
+	persisted.Extra = written
+	history, _ := readOpenAIGatewayHistory(&persisted)
+	require.NotNil(t, history.Seen["unified-142"].Cooldown)
+	require.EqualValues(t, 75000, history.Seen["unified-142"].FullHeldMs)
+
+	// 新进程从另一克隆行进入，仍从共享标签查回前一行持久化的状态。
+	clone := gwpoolTestAccount(35)
+	restarted := &openAICodexCookieStore{
+		accountByID: func(context.Context, int64) (*Account, error) { return clone, nil },
+		historyByTag: func(_ context.Context, tag string) ([]Account, error) {
+			if tag == persisted.Extra[openAIGatewayLedgerTagExtraKey] {
+				return []Account{persisted}, nil
+			}
+			return nil, nil
+		},
+	}
+	require.NoError(t, restarted.hydrateGatewayPoolSharedHistory(context.Background(), clone, identity))
+	require.True(t, restarted.gatewayPoolUsedRecently(identity, "unified-142", 30*time.Minute))
+	// 另一个实例后来在原行写了更长退避，不能被“这个标签已加载”永久挡住。
+	seen := history.Seen["unified-142"]
+	updated := *seen.Cooldown
+	updated.WindowSeconds = 7200
+	updated.UpdatedAt = time.Now().UTC().Add(time.Millisecond)
+	updated.Until = updated.UpdatedAt.Add(2 * time.Hour)
+	seen.Cooldown = &updated
+	history.Seen["unified-142"] = seen
+	writeGatewayHistoryForTest(t, &persisted, history)
+	require.NoError(t, restarted.hydrateGatewayPoolSharedHistory(context.Background(), clone, identity))
+	loaded, _ := restarted.cooldownEntry(identity, "unified-142")
+	require.Equal(t, 7200, loaded.WindowSeconds)
+
+	// 同一行重新授权到另一个上游身份，绝不把原来的冷却转给它。
+	other := "chatgpt:another-account"
+	clone.Extra = written
+	require.NoError(t, restarted.hydrateGatewayPoolSharedHistory(context.Background(), clone, other))
+	require.False(t, restarted.gatewayPoolUsedRecently(other, "unified-142", 30*time.Minute))
+}
+
+func TestGatewayPoolLegacyHistoryMigratesOnlyBoundedTouchNotLearning(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	now := time.Now().UTC()
+	writeGatewayHistoryForTest(t, account, openAIGatewayHistory{Seen: map[string]openAIGatewaySeen{
+		"unified-142": {At: now.Add(-10 * time.Minute), Cooldown: &gatewayPoolCooldown{
+			WindowSeconds: 36000, FixedSeconds: 36000, Until: now.Add(10 * time.Hour), UpdatedAt: now,
+			Successes: map[int]int{36000: 2},
+		}},
+		"unified-143": {At: now.Add(-time.Hour)},
+	}})
+	store := &openAICodexCookieStore{}
+	store.gatewayPoolHydrateUsed(account, gwpoolTestIdentity)
+	require.True(t, store.gatewayPoolUsedRecently(gwpoolTestIdentity, "unified-142", 30*time.Minute))
+	require.False(t, store.gatewayPoolUsedRecently(gwpoolTestIdentity, "unified-143", 30*time.Minute))
+	_, learned := store.cooldownEntry(gwpoolTestIdentity, "unified-142")
+	require.False(t, learned, "无身份标签的旧记录不能迁移学习/固定档位")
+}
+
 func gatewayNameForTest(i int) string {
 	return fmt.Sprintf("unified-%d", i)
 }

@@ -399,7 +399,8 @@ func TestGatewayPoolBatchServesRotationFromTheSpareShelf(t *testing.T) {
 	// 架子空了 ⇒ 第四轮才真的再取一批。
 	cached, _ := store.cachedPoolPair(gwpoolTestIdentity)
 	store.gatewayPoolMarkStale(gwpoolTestIdentity, cached.version, cached.gateway)
-	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, http.Header{}))
+	err := attachRoute(context.Background(), store, acct, gwpoolTestURL, http.Header{})
+	require.ErrorIs(t, err, gwpool.ErrNoSlot, "假池子重复交付刚用过的三张，本地必须拒绝")
 	require.EqualValues(t, 2, fake.hits.Load(), "架子空了才再取")
 	require.Contains(t, fake.nextQuery(t), "force=1", "再取仍然要点明换网关")
 }
@@ -423,6 +424,8 @@ func TestGatewayPoolBatchDropsAgedSpares(t *testing.T) {
 
 	cached, _ := store.cachedPoolPair(gwpoolTestIdentity)
 	store.gatewayPoolMarkStale(gwpoolTestIdentity, cached.version, cached.gateway)
+	// 新一批是不同落点；否则测试会再次交付之前的备用网关，无法区分新取与旧架子。
+	fake.batchGateways = []string{"unified-44", "unified-55", "unified-66"}
 	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, http.Header{}))
 	require.EqualValues(t, 2, fake.hits.Load(), "架子上全过门槛 ⇒ 老老实实再取一批")
 	for _, spare := range []string{"unified-22", "unified-33"} {
@@ -1082,7 +1085,7 @@ func TestGatewayPoolFreeCountIgnoresPoolSideUsedByYou(t *testing.T) {
 	fake.listGateways = []gwpoolFakeGateway{
 		{Name: "unified-126", PairReady: true, UsedByYou: true}, // 池子说烧过，本地账本没记
 		{Name: "unified-188", PairReady: true, UsedByYou: true}, // 同上
-		{Name: "unified-195"},                                  // 没有活 pair ⇒ 不算
+		{Name: "unified-195"}, // 没有活 pair ⇒ 不算
 		{Name: "unified-167", PairReady: true},
 	}
 	store := &openAICodexCookieStore{}
@@ -1282,12 +1285,12 @@ func TestGatewayPoolLedgerIsKeyedByCredentialIdentityNotRowID(t *testing.T) {
 		"另一个上游账号：报自己的 account，且不受别人那本账影响")
 }
 
-// 账本的保留窗口默认 4 小时（(账号 × 网关) 的再生周期估算值），可按账号配；
+// 账本的初始冷却默认 1 小时，可按账号配置 1~10 小时；
 // 配坏了（0 / 负数 / 非数字）回默认，不该因为一个旋钮让账号挑不出网关。
 func TestGatewayPoolLedgerWindowIsConfigurable(t *testing.T) {
 	store := &openAICodexCookieStore{}
 	acct := gwpoolTestAccount(1)
-	require.Equal(t, 4*time.Hour, acct.gatewayPoolGatewayWindow())
+	require.Equal(t, time.Hour, acct.gatewayPoolGatewayWindow())
 
 	store.gatewayPoolMarkUsed(gwpoolTestIdentity, "unified-167")
 	require.True(t, store.gatewayPoolUsedRecently(gwpoolTestIdentity, "unified-167", acct.gatewayPoolGatewayWindow()))
@@ -1298,11 +1301,11 @@ func TestGatewayPoolLedgerWindowIsConfigurable(t *testing.T) {
 	store.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, "unified-167"), time.Now().Add(-5*time.Hour))
 	require.False(t, store.gatewayPoolUsedRecently(gwpoolTestIdentity, "unified-167", acct.gatewayPoolGatewayWindow()))
 
-	acct.Extra[openAIGatewayPoolGatewayWindowExtraKey] = 60
-	require.Equal(t, time.Minute, acct.gatewayPoolGatewayWindow())
-	for _, bad := range []any{0, -1, "nonsense", nil} {
+	acct.Extra[openAIGatewayPoolGatewayWindowExtraKey] = 7200
+	require.Equal(t, 2*time.Hour, acct.gatewayPoolGatewayWindow())
+	for _, bad := range []any{0, -1, 60, 1800, "nonsense", nil} {
 		acct.Extra[openAIGatewayPoolGatewayWindowExtraKey] = bad
-		require.Equal(t, 4*time.Hour, acct.gatewayPoolGatewayWindow(), "%v", bad)
+		require.Equal(t, time.Hour, acct.gatewayPoolGatewayWindow(), "%v", bad)
 	}
 }
 
@@ -1657,11 +1660,11 @@ func TestGatewayPoolAccountKnobDefaults(t *testing.T) {
 	require.Equal(t, 20*time.Second, tuned.gatewayPoolFetchTimeout())
 	require.Equal(t, 5*time.Second, tuned.gatewayPoolListTimeout())
 	require.Equal(t, 2*time.Hour, tuned.gatewayPoolGatewayWindow())
-	// 上限本身要收：1 天是合法配置。
+	// 自适应冷却上限 10 小时，其他超时旋钮的上限仍为 1 天。
 	atCap := &Account{ID: 1, Extra: map[string]any{
-		openAIGatewayPoolGatewayWindowExtraKey: openAIGatewayPoolMaxSeconds,
+		openAIGatewayPoolGatewayWindowExtraKey: 36000,
 	}}
-	require.Equal(t, 24*time.Hour, atCap.gatewayPoolGatewayWindow())
+	require.Equal(t, 10*time.Hour, atCap.gatewayPoolGatewayWindow())
 	require.False(t, tuned.gatewayPoolSteering())
 
 	// 只有显式 false 才关掉「自己挑落点」：写错类型不能把它关掉（那会静默改变调度行为）。

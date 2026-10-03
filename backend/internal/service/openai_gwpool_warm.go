@@ -252,7 +252,8 @@ attempts:
 			// 判成降智：标 Stale ⇒ 下一圈的 AttachRoute 天然带 force=1 + exclude_versions 换网关。
 			// 本地账本不用再记一笔 —— 取票那一刻 gatewayPoolPair 已经记过了（它按实际拿到的落点记）。
 			// **刻意不还槽位**：这一发真的打出去了，窗口真的烧了，还回去等于让池子再发一次。
-			s.codexCookies.gatewayPoolMarkStale(identity, applied.Version, applied.Gateway)
+			held := s.codexCookies.gatewayPoolMarkStale(identity, applied.Version, applied.Gateway)
+			applied.FullHeldMs = held.Milliseconds()
 			slog.Info("gwpool_warm_degraded", "account_id", account.ID,
 				"gateway", applied.Gateway, "attempt", attempt)
 			burned = append(burned, applied.Gateway)
@@ -328,6 +329,7 @@ func (s *OpenAIGatewayService) noteWarmVerdict(
 	ctx, cancel := context.WithTimeout(
 		context.WithoutCancel(request.Context()), gatewayPoolWarmNoteTimeout)
 	defer cancel()
+	s.noteGatewayPoolCooldownVerdict(ctx, account, applied, verdict)
 	s.noteOpenAIGatewayUse(ctx, account, applied.Gateway, applied.Region, verdict, advanceCurrent,
 		applied.PoolLive, applied.PoolFree, applied.FullHeldMs)
 }

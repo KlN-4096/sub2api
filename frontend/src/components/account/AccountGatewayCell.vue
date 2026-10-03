@@ -141,8 +141,9 @@ const REGION_KEYS = [
 /** 一个大区里列几个网关名，超出的折成 +N。正常情况恒为 1（网关 = 大区 × 账号）。 */
 const MAX_PER_REGION = 1
 
-/** 本地账本窗口默认 4 小时 = 槽位冷却，和后端 openai_gwpool_gateway_window_s 的默认值同一个数。 */
-const DEFAULT_WINDOW_MS = 4 * 60 * 60 * 1000
+/** 初始冷却默认 1 小时；有学习状态时优先使用每个网关自己的截止时间。 */
+const DEFAULT_WINDOW_MS = 60 * 60 * 1000
+const MAX_WINDOW_MS = 10 * 60 * 60 * 1000
 
 /**
  * 满血窗口 183 秒，**必须和后端 openAIGatewayFullWindow 同值**（跨语言，只能靠这条注释）。
@@ -176,6 +177,7 @@ interface GatewaySeen {
   full_at?: string
   /** 后端在判降智那一刻量到的满血时长（毫秒）。缺省 / 0 = 没量到。 */
   full_held_ms?: number
+  cooldown?: { until?: string; window_seconds?: number; fixed_seconds?: number; recommended_seconds?: number }
 }
 
 interface GatewayHistory {
@@ -197,6 +199,10 @@ interface GatewayItem {
   fullAt: string
   /** 后端量到的满血时长（毫秒）。0 = 没量到，见 fullHeldOf。 */
   fullHeldMs: number
+  cooldownUntil: string
+  cooldownWindowMs: number
+  fixedSeconds: number
+  recommendedSeconds: number
 }
 
 /**
@@ -248,7 +254,8 @@ const history = computed<GatewayHistory>(() => {
 const windowMs = computed(() => {
   const raw = extra.value.openai_gwpool_gateway_window_s
   const seconds = typeof raw === 'number' ? raw : Number.NaN
-  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : DEFAULT_WINDOW_MS
+  return Number.isFinite(seconds) && seconds * 1000 >= DEFAULT_WINDOW_MS && seconds * 1000 <= MAX_WINDOW_MS
+    ? seconds * 1000 : DEFAULT_WINDOW_MS
 })
 
 /** 按最近用过的在前排。后端存的是 map，顺序在这里定。 */
@@ -263,7 +270,14 @@ const items = computed<GatewayItem[]>(() => {
       region: typeof row.region === 'string' ? row.region : '',
       verdict: row.verdict === 'full' || row.verdict === 'degraded' ? row.verdict : '',
       fullAt: typeof row.full_at === 'string' ? row.full_at : '',
-      fullHeldMs: typeof row.full_held_ms === 'number' ? row.full_held_ms : 0
+      fullHeldMs: typeof row.full_held_ms === 'number' ? row.full_held_ms : 0,
+      cooldownUntil: typeof row.cooldown?.until === 'string' ? row.cooldown.until : '',
+      cooldownWindowMs: typeof row.cooldown?.window_seconds === 'number'
+        && row.cooldown.window_seconds > 0 && row.cooldown.window_seconds * 1000 <= MAX_WINDOW_MS
+        ? row.cooldown.window_seconds * 1000 : windowMs.value,
+      fixedSeconds: typeof row.cooldown?.fixed_seconds === 'number' ? row.cooldown.fixed_seconds : 0,
+      recommendedSeconds: typeof row.cooldown?.recommended_seconds === 'number'
+        ? row.cooldown.recommended_seconds : 0
     }))
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
 })
@@ -279,7 +293,11 @@ const current = computed<GatewayItem | null>(() => {
       region: history.value.current_region ?? '',
       verdict: '',
       fullAt: '',
-      fullHeldMs: 0
+      fullHeldMs: 0,
+      cooldownUntil: '',
+      cooldownWindowMs: windowMs.value,
+      fixedSeconds: 0,
+      recommendedSeconds: 0
     }
   )
 })
@@ -321,7 +339,7 @@ const cells = computed<RegionCell[]>(() => {
         // 一个大区里最新那个已出窗口而旧的还在窗口内时，外层按「烧着」渲染、内层按淡显渲染。
         // 统一按最近那一条（bucket 已按时间倒排）：一个大区正常只有一个网关，真出现多个时
         // 最新那条才是当前状态，老的在 tooltip 里。
-        hot: !!bucket.length && isHot(bucket[0].at),
+        hot: !!bucket.length && isHot(bucket[0]),
         tone: toneOf(bucket[0]),
         mark: verdictMark(bucket[0]),
         title: bucket.length
@@ -360,9 +378,9 @@ const cells = computed<RegionCell[]>(() => {
 const forecastUnits = computed(() => {
   let units = 0
   for (const item of items.value) {
-    const ts = Date.parse(item.at)
-    if (!Number.isFinite(ts)) continue
-    if (windowMs.value - (now.value - ts) <= FORECAST_HORIZON_MS) units += 1
+    const until = cooldownDeadline(item)
+    if (!Number.isFinite(until)) continue
+    if (until - now.value <= FORECAST_HORIZON_MS) units += 1
   }
   return units
 })
@@ -391,7 +409,7 @@ const windowHours = computed(() => +(windowMs.value / 3_600_000).toFixed(1))
 const windowUsage = computed(() => {
   let used = 0
   for (const item of items.value) {
-    if (isHot(item.at)) used += 1
+    if (isHot(item)) used += 1
   }
   const live = typeof history.value.pool_live === 'number' ? history.value.pool_live : 0
   const free = history.value.pool_free
@@ -424,15 +442,22 @@ function within(at: string, span: number): boolean {
   return Number.isFinite(ts) && now.value - ts < span
 }
 
-function isHot(at: string): boolean {
-  return within(at, windowMs.value)
+function cooldownDeadline(item: GatewayItem): number {
+  const legacy = Date.parse(item.at) + item.cooldownWindowMs
+  const learned = Date.parse(item.cooldownUntil)
+  if (!Number.isFinite(learned)) return legacy
+  return Number.isFinite(legacy) ? Math.max(learned, legacy) : learned
+}
+
+function isHot(item: GatewayItem): boolean {
+  return cooldownDeadline(item) > now.value
 }
 
 function toneOf(item: GatewayItem | null | undefined): GatewayTone {
   // 没开网关池的号一律中性：见 usesPool 的注释，它的 verdict 恒为空，不拦的话下面那条
   // 兜底会把每个最近用过的落点都染红。
   if (!usesPool.value) return 'idle'
-  if (!item || !isHot(item.at)) return 'idle'
+  if (!item || !isHot(item)) return 'idle'
   // 满血只在真实的满血窗口内才算（见 FULL_WINDOW_MS）。过了它、或者压根没判过，都是红：
   // 窗口内碰过 ⇒ 这一刻打过去就是降智，这三种情况对使用者是同一件事。
   if (item.verdict === 'full' && within(item.fullAt, FULL_WINDOW_MS)) return 'full'
@@ -500,9 +525,16 @@ function fullHeldOf(item: GatewayItem): string {
  */
 function cooldownOf(item: GatewayItem): string {
   const base = 'admin.accounts.openai.gatewayHistory'
-  if (!isHot(item.at)) return t(`${base}.regionCooled`)
-  const left = windowMs.value - (now.value - Date.parse(item.at))
-  return t(`${base}.regionHot`, { minutes: Math.max(1, Math.ceil(left / 60_000)) })
+  const left = cooldownDeadline(item) - now.value
+  const remaining = isHot(item)
+    ? t(`${base}.regionHot`, { minutes: Math.max(1, Math.ceil(left / 60_000)) })
+    : t(`${base}.regionCooled`)
+  if (item.fixedSeconds > 0) {
+    return `${remaining} ${t(`${base}.cooldownFixed`, { minutes: Math.ceil(item.fixedSeconds / 60) })}`
+  }
+  return item.recommendedSeconds > 0
+    ? `${remaining} ${t(`${base}.cooldownRecommended`, { minutes: Math.ceil(item.recommendedSeconds / 60) })}`
+    : remaining
 }
 
 function titleOf(item: GatewayItem): string {

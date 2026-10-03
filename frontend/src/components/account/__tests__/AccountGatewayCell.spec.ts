@@ -23,7 +23,8 @@ const account = (gateways: unknown, extra: Record<string, unknown> = {}): Accoun
     id: 1,
     platform: 'openai',
     type: 'oauth',
-    extra: { openai_gwpool: true, openai_gwpool_gateways: gateways, ...extra }
+    // 既有展示回归显式使用 4h；缺省 1h 与逐网关学习由独立用例验证。
+    extra: { openai_gwpool: true, openai_gwpool_gateway_window_s: 14400, openai_gwpool_gateways: gateways, ...extra }
   }) as unknown as Account
 
 const render = (acc: Account) => mount(AccountGatewayCell, { props: { account: acc } })
@@ -64,6 +65,24 @@ const minutesOf = (w: ReturnType<typeof render>) => {
 }
 
 describe('AccountGatewayCell', () => {
+  it('缺省冷却为1小时，学习档位和固定状态按网关分别显示', () => {
+    const w = render(account({
+      current: 'unified-73',
+      seen: {
+        'unified-73': { at: isoAgo(61 * 60), region: 'east-asia' },
+        'unified-142': {
+          at: isoAgo(60), region: 'us-east', full_held_ms: 75000,
+          cooldown: { until: isoAgo(-119 * 60), window_seconds: 7200, fixed_seconds: 7200 }
+        }
+      }
+    }, { openai_gwpool_gateway_window_s: undefined }))
+    expect(tone(w, 'east-asia')).toBe('idle')
+    expect(tone(w, 'us-east')).toBe('degraded')
+    const title = cell(w, 'us-east').attributes('title') ?? ''
+    expect(title).toContain('-75s-')
+    expect(title).toContain('regionHot:{"minutes":119}')
+    expect(title).toContain('cooldownFixed:{"minutes":120}')
+  })
   it('第一行是当前大区 · 当前网关', () => {
     const w = render(
       account({

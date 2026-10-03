@@ -1057,8 +1057,8 @@ describe('EditAccountModal', () => {
       'edit-openai-gwpool-list-timeout'
     ]) {
       const input = wrapper.get<HTMLInputElement>(`[data-testid="${testid}"]`)
-      expect(input.attributes('min')).toBe('1')
-      expect(input.attributes('max')).toBe('86400')
+      expect(input.attributes('min')).toBe(testid === 'edit-openai-gwpool-gateway-window' ? '3600' : '1')
+      expect(input.attributes('max')).toBe(testid === 'edit-openai-gwpool-gateway-window' ? '36000' : '86400')
     }
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
 

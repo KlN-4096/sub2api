@@ -163,6 +163,10 @@ func TestStateEchoDegradedTruncatesAndMarksPairStale(t *testing.T) {
 		require.NotNil(t, resp)
 		_ = resp.Body.Close()
 	}
+	mark, ok := svc.codexCookies.gatewayPoolVerifiedMarkOf(gwpoolTestIdentity)
+	require.True(t, ok)
+	mark.at = time.Now().Add(-75 * time.Second)
+	svc.codexCookies.poolVerified.Store(gwpoolTestIdentity, mark)
 
 	ginCtx, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
 	require.Nil(t, resp, "截断不许把降智的响应交给调用方")
@@ -189,7 +193,30 @@ func TestStateEchoDegradedTruncatesAndMarksPairStale(t *testing.T) {
 	discarded := takeDiscardedOpenAIGatewayPoolAttempts(ginCtx)
 	require.Len(t, discarded, 1)
 	require.Equal(t, "unified-142", discarded[0].Applied.Gateway)
+	require.InDelta(t, 75000, discarded[0].Applied.FullHeldMs, 3000,
+		"丢弃行必须携带这一张票刚量出的时长，不能发布计算前的旧快照")
 	require.Empty(t, takeDiscardedOpenAIGatewayPoolAttempts(ginCtx), "读数取走即清，不许落重复行")
+}
+
+func TestGatewayPoolSinkPublishesAttemptTimingWithoutLeakingToNextGateway(t *testing.T) {
+	sink := &openAIGatewayPoolSink{}
+	sink.notePoolCounts(50, 12)
+	sink.mark(OpenAIGatewayPoolApplied{Gateway: "unified-142", Version: "first"})
+	firstAttempt := sink.snapshot()
+	sink.noteFullHeld(firstAttempt, 75*time.Second)
+	var first OpenAIForwardResult
+	sink.publish(&first)
+	require.EqualValues(t, 75000, first.GatewayPoolApplied.FullHeldMs)
+	require.Equal(t, 50, first.GatewayPoolApplied.PoolLive)
+	require.Equal(t, 12, first.GatewayPoolApplied.PoolFree)
+
+	sink.mark(OpenAIGatewayPoolApplied{Gateway: "unified-143", Version: "second"})
+	sink.noteFullHeld(firstAttempt, 90*time.Second)
+	var second OpenAIForwardResult
+	sink.publish(&second)
+	require.Zero(t, second.GatewayPoolApplied.FullHeldMs,
+		"换网关后不许把上一发的满血时长归到新网关")
+	require.Zero(t, sink.snapshot().FullHeldMs)
 }
 
 // 送了票 + 上游不回新票 ⇒ **满血**，原样透传，什么都不碰。
@@ -511,6 +538,7 @@ func TestStateEchoRecordsBothVerdictsOnTheAppliedSnapshot(t *testing.T) {
 		req.Header.Set(openAICodexTurnStateHeader, gwpoolEchoLiveTicket)
 		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 		ctx, sink := withOpenAIGatewayPoolSink(req.Context(), ginCtx)
+		gwpoolEchoSeedVerified(t, svc, fake.account(1))
 		resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", fake.account(1))
 		require.NoError(t, err)
 		require.NotNil(t, resp)
@@ -564,6 +592,7 @@ func TestStateEchoRecordsBothVerdictsOnTheAppliedSnapshot(t *testing.T) {
 		require.NoError(t, err)
 		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 		ctx, sink := withOpenAIGatewayPoolSink(req.Context(), ginCtx)
+		gwpoolEchoSeedVerified(t, svc, fake.account(1))
 		resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", fake.account(1))
 		require.NoError(t, err)
 		require.NotNil(t, resp)

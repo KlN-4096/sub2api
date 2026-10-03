@@ -322,6 +322,7 @@ func (s *OpenAIGatewayService) notePrewarmVerdict(
 ) {
 	noteCtx, cancel := context.WithTimeout(ctx, gatewayPoolWarmNoteTimeout)
 	defer cancel()
+	s.noteGatewayPoolCooldownVerdict(noteCtx, account, applied, verdict)
 	s.noteOpenAIGatewayUse(noteCtx, account, applied.Gateway, applied.Region, verdict, advanceCurrent,
 		applied.PoolLive, applied.PoolFree, applied.FullHeldMs)
 }

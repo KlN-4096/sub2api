@@ -745,9 +745,9 @@ export default {
         gwpoolConsumerKeyDesc:
           'The pool issues one key per account, so it lives on the account rather than on the instance. Treated like an access token: it is never echoed back after saving and never returned in list or detail responses.',
         gwpoolAdvanced: 'Advanced (blank = default)',
-        gwpoolGatewayWindow: 'Local ledger window (s)',
+        gwpoolGatewayWindow: 'Initial cooldown (s)',
         gwpoolGatewayWindowDesc:
-          'How long this account treats a gateway it already touched as burnt when picking a landing spot. Default 14400 (4h). The pool keeps its own book per consumer key, which cannot see one Codex credential sitting on several account rows.',
+          'Default 3600 (1 hour). Learns per account and gateway: confirmed degradation backs off through 1/2/4/6/8/10h. Confirmed recovery resets the cycle. Two independent successes at the same interval lock it; another failed cooldown unlocks it. Network errors do not train it. Valid explicit settings from 1 to 10 hours are retained.',
         gwpoolFetchTimeout: 'Pair fetch timeout (s)',
         gwpoolFetchTimeoutDesc:
           'Caps one /cookie call. Default 25. It also decides how long we let the pool mint (the wait we send is this value minus 1s, capped at 30). The number has to cover everything the pool does for one delivery, not just the network round trip: with verify-before-deliver on, every gateway it tries costs a real state-echo request upstream. The old 8s did not cover it - on 2026-10-02, 301 of 458 production takes (66%) were cut off before a response was written, after the upstream call had already gone out and burned a slot for nothing. Lowering this brings that failure back.',
@@ -809,7 +809,7 @@ export default {
           // are left instead (against the local ledger window, 4h by default) so a vertical
           // scan picks out the one that comes back first.
           regionHot: 'CD left: {minutes}min',
-          regionCooled: 'usable',
+          regionCooled: 'retry eligible',
           regionIdle: 'never used',
           // Segment 3 is how LONG full strength held (full verdict → degraded verdict),
           // rendered straight as `180s` with no i18n key. This one is the placeholder when
@@ -817,20 +817,21 @@ export default {
           // readings landed in one write so the length cannot be measured — same thing to the
           // reader, so one label.
           fullUntimed: 'not timed',
+          cooldownFixed: 'fixed {minutes}min',
+          cooldownRecommended: 'pool suggests {minutes}min',
           legend:
-            '✓ verified full (inside the 183s window) · ! used inside the window, degraded right now · grey window elapsed, usable again',
+            '✓ recently verified full · ! local cooldown · grey retry eligible, recovery not yet confirmed',
           // Two independent numbers, NO subtraction: "landings" comes from this row's ledger
           // (gateway names touched over the past window), "left in pool" is the current
           // deliverable listing reconciled against that ledger. The two sets do not nest.
-          windowUsage: '{used} landing(s) in the last {hours}h; {free} left in the pool',
+          windowUsage: 'Initial cooldown {hours}h; {used} cooling; {free} left in the pool',
           // Without the pool listing, report only the landings: inventing a number is worse.
-          windowUsageUsedOnly: '{used} landing(s) in the last {hours}h',
+          windowUsageUsedOnly: 'Initial cooldown {hours}h; {used} cooling',
           windowUsageHint:
             '"Landings" counts gateways this row\'s ledger touched inside the window; "left in the pool" is how many of the gateways the pool can deliver RIGHT NOW this account has not burned according to the local ledger — recomputed against the ledger every time a ticket fetch pulls the listing, never cached. With "let the pool pick the landing" off there is no listing, so only the first number is shown.\n' +
             'The two must NOT be subtracted: landings span the local window (expired tickets included) while the listing is a snapshot of now. More landings than deliverable gateways is normal and does not mean the pool is exhausted.',
-          // Full-strength minutes forecast for the next hour, deliberately a LOWER bound.
-          // "at least" is required: "at most" would get read as a quota.
-          forecast: 'at least {minutes} min full-strength in the next hour',
+          // Expiry permits a retry; it does not prove recovery.
+          forecast: 'retry-eligible gateways suggest about {minutes} min of windows in the next hour',
           // At 0 this must not read "at least 0 minutes": that sounds like a verdict on the
           // account, when it actually states a fact about TIME — every landing in the ledger
           // comes out of cooldown more than an hour from now. And the number is a lower bound
@@ -838,8 +839,8 @@ export default {
           forecastNone: 'no landing comes out of cooldown within the hour',
           forecastHint:
             'Counted per (account × gateway): {units} gateways are in the ledger and come out of cooldown within the hour, each worth about {window}s of full strength. One gateway name is one unit — different gateways in the same region have separate full-strength windows, so do not collapse by region (region is only the grouping for the grid above).\n' +
-            'This is a **lower bound**: only units with positive evidence are counted. Gateways this row never touched are left out, so possibly more — no number is given because this row cannot work it out: it does not know how many gateways the pool has, and "this row never touched it" may well mean another row on the same credential burned it, or the record was pruned.\n' +
-            'One thing still optimistic: the 4h cooldown itself is not pinned down (resting 30 minutes vs 4 hours gave a constant full-strength rate, zero correlation), so if real recovery takes longer this number is still too high.',
+            'Only gateways recorded on this row are counted, using their individual adaptive cooldown deadlines. Other rows sharing the credential may have newer contacts.\n' +
+            'This estimates retry opportunities, not guaranteed full-strength time or quota. Existing traffic or warm-up results must still confirm recovery.',
           // state-echo verdict (backend openai_gwpool_state_echo.go).
           verdicts: {
             full: 'full',
