@@ -612,6 +612,7 @@ func (c *Client) Gateways(ctx context.Context, account string, accountTag ...str
 	if len(accountTag) > 0 && validCooldownTag(accountTag[0]) {
 		req.Header.Set(cooldownAccountHeader, accountTag[0])
 	}
+	req.Header.Set(cooldownMaxHeader, strconv.Itoa(CooldownMaxSeconds))
 	resp, err := c.do(req)
 	if err != nil {
 		return nil, err

@@ -634,10 +634,11 @@ export default {
         gwpoolAutoWaitDesc: 'Before business transmission only, wait when no gateway, no live ticket or all gateways cooling prevents acquisition. Never replays sent business requests or retries authentication, rate-limit or other upstream failures. With rotation enabled, wait on this account first; switching still requires confirmed exhaustion.',
         gwpoolMaxWait: 'Maximum ticket wait (seconds)',
         gwpoolMaxWaitDesc: '1–3600 seconds, default 120 when empty; cumulative for this request, not reset each round. Client, reverse-proxy and first-output deadlines still apply, so a long connection is not guaranteed. Waiting does not increase the candidate count or active verification budget.',
-        gwpoolProbeModel: 'State-echo probe model (experimental · untested)',
-        gwpoolProbeModelDefault: 'Default: follow the business model (unchanged behavior)',
-        gwpoolProbeModelDesc: 'Only an explicit selection changes the next foreground/background probe. Mint state and echo using only the selected model; no two-model comparison or cross-model state reuse. The business model and response checks stay unchanged. Not validated in a live environment; passing this probe does not guarantee full strength for the business model. Probes do not run while quality guard is off.',
-        gwpoolRotationDesc: 'Off by default. Only after this account has exhausted retry-eligible gateways, found no new full-strength route, and a fresh listing confirms exhaustion, an uncommitted request may move to another account in the same group with both pool delivery and this option enabled. Each account is tried once per request; the former account rests from ticket acquisition for at least one minute without being disabled. A single degraded gateway, probe attempt/time limits alone, timeouts, 429, authentication or other errors never trigger account switching, including ordinary failover while this option is enabled. The global switch limit still applies; first-output latency may increase.',
+        gwpoolProbeModel: 'State-echo probe model (experimental)',
+        gwpoolProbeModelDefault: 'Default: Luna (gpt-6-luna)',
+        gwpoolProbeModelBusiness: 'Follow the business model',
+        gwpoolProbeModelDesc: 'By default Luna retrieves state in request A and echoes it in request B, always using the same selected model. Choose Astra, Sol, or the business model for the next foreground/background probe. Business model and state stay unchanged. Existing samples do not establish cross-model equivalence or guarantee full strength for business requests. Probes do not run while quality guard is off.',
+        gwpoolRotationDesc: 'Off by default. After a fresh listing confirms that retry-eligible gateways are exhausted, mark this credential exhausted before choosing another eligible pool-and-rotation account in the group. Rounds are shared across requests in one instance; credential clones count once. A new round starts only when all eligible credentials are exhausted, preferring the longest actual rest, including probe contacts. Initial selection prefers more cooled gateways; a session keeps its verified live window. Restart rebuilds rounds without clearing gateway cooldown or rate limits. Each credential is tried once per request; strong continuation bindings are preserved. A single degraded gateway, probe attempt/budget limits, timeouts, 429 or authentication errors alone never trigger switching or ordinary failover. The existing switch limit remains; first-output latency may increase.',
         baseUrlHint: 'Leave default for official OpenAI API',
         apiKeyHint: 'Your OpenAI API Key',
         oauthPassthrough: 'Auto passthrough (auth only)',
@@ -756,7 +757,7 @@ export default {
         gwpoolAdvanced: 'Cooldown and wait limits (blank = default)',
         gwpoolGatewayWindow: 'Initial cooldown (s)',
         gwpoolGatewayWindowDesc:
-          'Default 3600 seconds (1 hour); accepts 1–10 hours. Cooldown is learned separately per account × gateway. Expiry permits another attempt; it does not guarantee recovery.',
+          'Default 3600 seconds (1 hour); accepts 1–24 hours. Cooldown is learned separately per account × gateway. Expiry permits another attempt; it does not guarantee recovery.',
         gwpoolFetchTimeout: 'Pair fetch timeout (s)',
         gwpoolFetchTimeoutDesc:
           'Default 25 seconds. Limits one ticket fetch, including preparation at the pool. Too short can cause fetch failures; too long increases request waits.',
@@ -778,7 +779,7 @@ export default {
         },
         gwpoolDetails: 'Cooldown, trigger conditions and troubleshooting',
         gwpoolCooldownDetails:
-          'Cooldown is tracked per account × gateway. Confirmed failure backs off through 1/2/4/6/8/10 hours; confirmed recovery ends the cycle. Two successes at the same interval in independent cycles lock it; another failure unlocks it. Network errors do not train it. Anonymous recommendations inform subsequent cycles, personal locks take priority, and active cooldowns are not suddenly shortened.',
+          'Cooldown is tracked per account × gateway. Confirmed failure backs off through 1/2/4/6/8/10/12/16/20/24 hours; confirmed recovery ends the cycle. Two successes at the same interval in independent cycles lock it; another failure unlocks it. Network errors do not train it. Anonymous recommendations inform subsequent cycles, personal locks take priority, and active cooldowns are not suddenly shortened.',
         gwpoolPrewarmDetails:
           'Preparation is triggered only by business requests, not by idle-account timers. Timing considers cache expiry, recent verification duration and, when enough samples exist, historical windows. History is shared in memory and resets on restart; the cache deadline works without history. Each current window gets at most one round and one candidate, for up to 90 seconds and no later than current-ticket expiry. A verified candidate needs at least 60 seconds of cache life left to replace it. No ticket, failed verification or errors end the round. Logs: gwpool_prewarm_start / gwpool_prewarm_ready / gwpool_prewarm_degraded / gwpool_prewarm_no_ticket / gwpool_prewarm_inconclusive.',
         gwpoolGuardDetails:
@@ -869,6 +870,7 @@ export default {
           // state-echo verdict (backend openai_gwpool_state_echo.go).
           verdicts: {
             full: 'full',
+            fullExpired: 'previously full (window expired, not current availability)',
             degraded: 'degraded',
             none: 'never judged'
           },

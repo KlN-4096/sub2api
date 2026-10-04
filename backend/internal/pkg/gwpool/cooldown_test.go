@@ -21,6 +21,9 @@ func TestCooldownReportWireAndRecommendationValidation(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer test-consumer" || r.URL.Path != "/cooldown/report" {
 			t.Error("上报认证或路径错误")
 		}
+		if r.Header.Get(cooldownMaxHeader) != "86400" {
+			t.Error("client must negotiate the 24h recommendation ceiling")
+		}
 		var got CooldownReport
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil || got != report {
 			t.Errorf("上报协议字段不一致：%v", err)
@@ -46,6 +49,11 @@ func TestCooldownReportWireAndRecommendationValidation(t *testing.T) {
 	} {
 		if rec.Valid() {
 			t.Fatalf("外部非法建议被当成决策依据：%+v", rec)
+		}
+	}
+	for _, seconds := range []int{43200, 57600, 72000, 86400} {
+		if !(CooldownRecommendation{Seconds: seconds, Samples: 2, Source: "account"}).Valid() {
+			t.Fatalf("new standard cooldown step rejected: %d", seconds)
 		}
 	}
 }

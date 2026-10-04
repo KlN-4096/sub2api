@@ -20,7 +20,7 @@ func TestGatewayPoolCooldownBackoffResetAndLock(t *testing.T) {
 	sample, _ := c.observe(now, openAIGatewayVerdictDegraded, base)
 	require.Nil(t, sample, "第一次接触失败没有冷却样本，不能直接升到 2 小时")
 	require.Equal(t, 3600, c.WindowSeconds)
-	for _, want := range []int{7200, 14400, 21600, 28800, 36000, 36000} {
+	for _, want := range []int{7200, 14400, 21600, 28800, 36000, 43200, 57600, 72000, 86400, 86400} {
 		now = c.Until
 		require.True(t, c.begin(now, time.Time{}, base))
 		sample, changed := c.observe(now, openAIGatewayVerdictDegraded, base)

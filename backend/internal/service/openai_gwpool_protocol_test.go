@@ -26,18 +26,26 @@ func gwpoolBackoffLeft(store *openAICodexCookieStore) time.Duration {
 
 func TestGatewayPoolProbeModelOverrideIsExplicitAndWhitelisted(t *testing.T) {
 	account := gwpoolTestAccount(1)
-	require.Equal(t, "gpt-6-astra", account.gatewayPoolProbeModel("gpt-6-astra"))
+	require.Equal(t, "gpt-6-luna", account.gatewayPoolProbeModel("gpt-6-astra"))
 	account.Extra[openAIGatewayPoolProbeModelExtraKey] = "gpt-6-luna"
 	require.Equal(t, "gpt-6-luna", account.gatewayPoolProbeModel("gpt-6-astra"))
 	account.Extra[openAIGatewayPoolProbeModelExtraKey] = "gpt-99-test"
-	require.Equal(t, "gpt-6-astra", account.gatewayPoolProbeModel("gpt-6-astra"),
-		"invalid persisted values must fail closed to the business model")
+	require.Equal(t, "gpt-6-luna", account.gatewayPoolProbeModel("gpt-6-astra"),
+		"invalid persisted values fall back to the default probe model")
 	require.Error(t, validateOpenAIGatewayPoolAccountExtra(account, map[string]any{
 		openAIGatewayPoolExtraKey:            true,
 		openAIGatewayPoolBaseURLExtraKey:     "https://pool.example.test",
 		OpenAIGatewayPoolConsumerKeyExtraKey: "key",
 		openAIGatewayPoolProbeModelExtraKey:  "gpt-99-test",
 	}))
+	account.Extra[openAIGatewayPoolProbeModelExtraKey] = gatewayPoolProbeModelBusiness
+	require.Equal(t, "gpt-6-astra", account.gatewayPoolProbeModel("gpt-6-astra"))
+	for _, model := range []string{gatewayPoolProbeModelAstra, gatewayPoolProbeModelSol, gatewayPoolProbeModelLuna, gatewayPoolProbeModelBusiness} {
+		require.NoError(t, validateOpenAIGatewayPoolAccountExtra(account, map[string]any{
+			openAIGatewayPoolExtraKey: true, openAIGatewayPoolBaseURLExtraKey: "https://pool.example.test",
+			OpenAIGatewayPoolConsumerKeyExtraKey: "key", openAIGatewayPoolProbeModelExtraKey: model,
+		}))
+	}
 }
 
 // ---------------------------------------------------------------------------

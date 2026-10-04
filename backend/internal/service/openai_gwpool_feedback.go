@@ -80,6 +80,7 @@ func (s *OpenAIGatewayService) reportGatewayPoolCooldown(account *Account, ident
 	report := gwpool.CooldownReport{
 		ID: hex.EncodeToString(sum[:]), AccountTag: tag, Gateway: sample.Gateway,
 		WindowSeconds: sample.WindowSeconds, ElapsedSeconds: sample.ElapsedSeconds, Result: result,
+		ObservedAt: sample.AttemptAt.UTC(),
 	}
 	s.enqueueGatewayPoolReport(account, report)
 }

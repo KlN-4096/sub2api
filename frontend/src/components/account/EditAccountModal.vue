@@ -2694,6 +2694,7 @@
                 :disabled="!openAIGwpoolGuardEnabled"
               >
                 <option value="">{{ t('admin.accounts.openai.gwpoolProbeModelDefault') }}</option>
+                <option value="business">{{ t('admin.accounts.openai.gwpoolProbeModelBusiness') }}</option>
                 <option v-for="model in gatewayPoolProbeModels" :key="model" :value="model">{{ model }}</option>
               </select>
               <p class="input-hint">{{ t('admin.accounts.openai.gwpoolProbeModelDesc') }}</p>
@@ -2707,7 +2708,7 @@
                     v-model.number="openAIGwpoolGatewayWindow"
                     type="number"
                     min="3600"
-                    max="36000"
+                    max="86400"
                     step="1"
                     placeholder="3600"
                     class="input text-xs"
@@ -4713,7 +4714,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	openAIGwpoolMaxWait.value = typeof extra?.openai_gwpool_max_wait_s === 'number' ? extra.openai_gwpool_max_wait_s : ''
 	openAIGwpoolGuardEnabled.value = extra?.openai_gwpool_guard_enabled !== false
 	openAIGwpoolProbeModel.value = typeof extra?.openai_gwpool_probe_model === 'string' &&
-    gatewayPoolProbeModels.some(model => model === extra.openai_gwpool_probe_model)
+    (extra.openai_gwpool_probe_model === 'business' || gatewayPoolProbeModels.some(model => model === extra.openai_gwpool_probe_model))
     ? extra.openai_gwpool_probe_model : ''
 	// 续期缺省即关：只有显式 true 才算开（与后端 gatewayPoolRenew 同口径）。
 	openAIGwpoolGatewayWindow.value = readGwpoolSeconds(extra?.openai_gwpool_gateway_window_s)

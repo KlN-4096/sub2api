@@ -42,6 +42,7 @@ func gatewayPoolProbeSource(ctx context.Context) string {
 }
 
 func (s *openAICodexCookieStore) gatewayPoolMarkSent(identity, version string, at time.Time) {
+	s.poolRounds.touch(identity, at)
 	if identity == "" || version == "" || at.IsZero() {
 		return
 	}

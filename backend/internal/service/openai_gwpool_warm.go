@@ -111,8 +111,8 @@ func (s *OpenAIGatewayService) gatewayPoolWarmUp(request *http.Request, proxyURL
 		}
 		return nil
 	}
-	// Default follows business exactly. An explicit experimental selection uses
-	// only that model for both minting and echo; no cross-model state injection.
+	// Luna is the default. Explicit "business" follows the request model.
+	// Both probe requests use one model; no cross-model state injection.
 	// Existing verified windows remain valid until their normal end.
 	model := account.gatewayPoolProbeModel(gatewayPoolWarmModel(request))
 	if model == "" {
@@ -392,6 +392,7 @@ func (s *openAICodexCookieStore) gatewayPoolWarmVerdict(
 			if status > 0 && trace.shots == before {
 				trace.markSent(at)
 			}
+			s.poolRounds.touch(identity, trace.lastSent)
 			shot := "a"
 			if len(steps) > 0 {
 				shot = "b"

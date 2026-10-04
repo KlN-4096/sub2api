@@ -19,6 +19,7 @@ type gatewayPoolRotationKey struct{}
 type gatewayPoolRotation struct {
 	groupID   int64
 	attempted map[int64]struct{}
+	domains   map[string]struct{}
 }
 
 func gatewayPoolRotationFrom(ctx context.Context) *gatewayPoolRotation {
@@ -77,25 +78,34 @@ func (s *OpenAIGatewayService) PrepareGatewayPoolAccountRotation(ctx context.Con
 		(state != nil && state.groupID != *groupID) {
 		return ctx
 	}
+	generation := s.codexCookies.poolRounds.generation(*groupID)
 	if !failure.GatewayPoolRotation || !s.gatewayPoolNoRemainingRoutes(ctx, fresh) {
 		return ctx
 	}
-	next := &gatewayPoolRotation{groupID: *groupID, attempted: map[int64]struct{}{source.ID: {}}}
+	identity, err := s.codexCookies.gatewayPoolIdentity(ctx, fresh)
+	if err != nil {
+		return ctx
+	}
+	// Mark before finding a replacement, including the last account in a round.
+	s.codexCookies.poolRounds.exhaust(*groupID, identity, generation)
+	next := &gatewayPoolRotation{groupID: *groupID, attempted: map[int64]struct{}{source.ID: {}},
+		domains: map[string]struct{}{gatewayPoolLedgerIdentity(identity): {}}}
 	if state != nil {
 		for id := range state.attempted {
 			next.attempted[id] = struct{}{}
+		}
+		for domain := range state.domains {
+			next.domains[domain] = struct{}{}
 		}
 	}
 	if failure.GatewayPoolRotation {
 		failure.NextAccountAction = NextAccountRetry // the existing bounded failover loop owns switching
 		// Rest only the credential's ticket acquisition, not account health or
 		// global schedulability. Never shorten an existing longer pool backoff.
-		if identity, err := s.codexCookies.gatewayPoolIdentity(ctx, fresh); err == nil {
-			if remaining, _ := s.codexCookies.gatewayPoolBackoffFor(identity); remaining < openAIGatewayPoolDefaultBackoff {
-				s.codexCookies.poolBackoff.Store(gatewayPoolLedgerIdentity(identity), gatewayPoolBackoffEntry{
-					Until: time.Now().Add(openAIGatewayPoolDefaultBackoff), Code: gwpool.CodeAllCooling,
-				})
-			}
+		if remaining, _ := s.codexCookies.gatewayPoolBackoffFor(identity); remaining < openAIGatewayPoolDefaultBackoff {
+			s.codexCookies.poolBackoff.Store(gatewayPoolLedgerIdentity(identity), gatewayPoolBackoffEntry{
+				Until: time.Now().Add(openAIGatewayPoolDefaultBackoff), Code: gwpool.CodeAllCooling,
+			})
 		}
 	}
 	return context.WithValue(ctx, gatewayPoolRotationKey{}, next)

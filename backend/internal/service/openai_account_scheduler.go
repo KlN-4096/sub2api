@@ -452,7 +452,8 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		}
 	}
 
-	if !req.StickyWeighted && !gatewayPoolPreferAlternative(ctx, req.StickyAccountID) {
+	if (!req.StickyWeighted || gatewayPoolPreferences(ctx)[req.StickyAccountID].verified) &&
+		!gatewayPoolPreferAlternative(ctx, req.StickyAccountID) {
 		selection, escapedSticky, err := s.selectBySessionHash(ctx, req)
 		if err != nil {
 			return nil, decision, err
@@ -2193,31 +2194,44 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	if err != nil {
 		return nil, decision, err
 	}
-	defer func() {
-		if err == nil && !gatewayPoolRotationRecheck(ctx, s.accountRepo, rotationAllowed, selection) {
+	strongBinding := (strings.TrimSpace(previousResponseID) != "" && !previousResponseCanMove) ||
+		s.resolveOpenAIGuardianParentAccountID(ctx, groupID) > 0
+	for range gatewayPoolSelectionRechecks {
+		selection, decision, err = s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+		if err != nil && !openAIProxyStreamQuarantineBypassed(ctx) &&
+			(errors.Is(err, ErrNoAvailableAccounts) || errors.Is(err, ErrNoAvailableCompactAccounts)) &&
+			NormalizeOpenAICompatiblePlatform(platform) == PlatformOpenAI {
+			if blocked := s.getOpenAIProxyStreamCircuit().activeBlockCount(time.Now()); blocked > 0 {
+				s.logOpenAIProxyStreamQuarantineFailOpen(requestedModel, blocked)
+				ctx = withOpenAIProxyStreamQuarantineBypass(ctx)
+				selection, decision, err = s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+			}
+		}
+		if err != nil {
+			return selection, decision, err
+		}
+		if !gatewayPoolRotationRecheck(ctx, s.accountRepo, rotationAllowed, selection) {
 			if selection != nil && selection.ReleaseFunc != nil {
 				selection.ReleaseFunc()
 			}
-			selection, err = nil, ErrNoAvailableAccounts
+			return nil, decision, ErrNoAvailableAccounts
 		}
-	}()
-	selection, decision, err = s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
-	if err == nil || openAIProxyStreamQuarantineBypassed(ctx) {
-		return selection, decision, err
+		if requiredImageCapability != "" || strongBinding || s.gatewayPoolRoundSelectionAllowed(ctx, groupID, selection) {
+			return selection, decision, nil
+		}
+		// A concurrent request exhausted the chosen credential after our snapshot.
+		// Release its slot and refresh selection, without sending or increasing the
+		// handler's bounded failover budget. Never retry the rejected row here.
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+		excludedIDs = cloneExcludedAccountIDs(excludedIDs)
+		if excludedIDs == nil {
+			excludedIDs = map[int64]struct{}{}
+		}
+		excludedIDs[selection.Account.ID] = struct{}{}
 	}
-	if !errors.Is(err, ErrNoAvailableAccounts) && !errors.Is(err, ErrNoAvailableCompactAccounts) {
-		return selection, decision, err
-	}
-	// The circuit only ever quarantines PlatformOpenAI accounts.
-	if NormalizeOpenAICompatiblePlatform(platform) != PlatformOpenAI {
-		return selection, decision, err
-	}
-	blocked := s.getOpenAIProxyStreamCircuit().activeBlockCount(time.Now())
-	if blocked == 0 {
-		return selection, decision, err
-	}
-	s.logOpenAIProxyStreamQuarantineFailOpen(requestedModel, blocked)
-	return s.selectAccountWithSchedulerOnce(withOpenAIProxyStreamQuarantineBypass(ctx), groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+	return nil, decision, ErrNoAvailableAccounts
 }
 
 type openAIGroupPrivacyRequirementContextKey struct{}
@@ -2346,12 +2360,17 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	// 仍须装门。其余媒体路径通过 WithOpenAIProfitControlSuppressed 显式跳过。
 	if requiredImageCapability == "" {
 		ctx = s.withOpenAIProfitControlGate(ctx, groupID)
-		ctx = s.withGatewayPoolAccountPreferences(ctx, OpenAIAccountScheduleRequest{
-			GroupID: groupID, Platform: platform, RequestedModel: requestedModel,
-			ExcludedIDs: excludedIDs, RequiredTransport: requiredTransport,
-			RequiredCapability: requiredCapability, RequireCompact: requireCompact,
-			RequirePrivacySet: s.openAIGroupRequiresPrivacySet(ctx, groupID),
-		})
+		strongBinding := (strings.TrimSpace(previousResponseID) != "" && !previousResponseCanMove) ||
+			s.resolveOpenAIGuardianParentAccountID(ctx, groupID) > 0
+		if !strongBinding {
+			ctx = s.withGatewayPoolAccountPreferences(ctx, OpenAIAccountScheduleRequest{
+				GroupID: groupID, Platform: platform, RequestedModel: requestedModel,
+				ExcludedIDs: excludedIDs, RequiredTransport: requiredTransport,
+				RequiredCapability: requiredCapability, RequireCompact: requireCompact,
+				RequirePrivacySet: s.openAIGroupRequiresPrivacySet(ctx, groupID),
+			})
+			excludedIDs = gatewayPoolRoundExclusions(ctx, excludedIDs)
+		}
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	decision := OpenAIAccountScheduleDecision{}

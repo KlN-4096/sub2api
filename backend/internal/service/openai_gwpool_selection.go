@@ -10,8 +10,10 @@ import (
 type gatewayPoolPreferenceKey struct{}
 
 type gatewayPoolAccountPreference struct {
-	verified bool
-	cooled   int
+	verified  bool
+	cooled    int
+	restFirst bool
+	lastTouch time.Time
 }
 
 type gatewayPoolAccountPreferences map[int64]gatewayPoolAccountPreference
@@ -27,16 +29,19 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 		return ctx
 	}
 	prefs := gatewayPoolAccountPreferences{}
+	domains := map[int64]string{}
+	complete := true
 	checker := &defaultOpenAIAccountScheduler{service: s}
 	for i := range accounts {
-		if _, excluded := req.ExcludedIDs[accounts[i].ID]; excluded {
-			continue
-		}
 		if !accounts[i].IsOpenAIOAuthLike() {
 			continue
 		}
 		account, err := s.accountRepo.GetByID(ctx, accounts[i].ID)
-		if err != nil || !gatewayPoolRotationAccount(account, *req.GroupID) || !account.IsSchedulable() {
+		if err != nil {
+			complete = false
+			continue
+		}
+		if !gatewayPoolRotationAccount(account, *req.GroupID) || !account.IsSchedulable() {
 			continue
 		}
 		compatible, _ := checker.isAccountRequestCompatibleReason(ctx, account, req)
@@ -45,7 +50,19 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 			continue
 		}
 		identity, err := s.codexCookies.gatewayPoolIdentity(ctx, account)
-		if err != nil || s.codexCookies.hydrateGatewayPoolSharedHistory(ctx, account, identity) != nil {
+		if err != nil {
+			complete = false
+			continue
+		}
+		domains[account.ID] = gatewayPoolLedgerIdentity(identity)
+		contacts := readGatewayPoolContacts(account, gatewayPoolLedgerTag(identity))
+		for _, seen := range contacts.Seen {
+			s.codexCookies.poolRounds.touch(identity, seen.LastAt)
+		}
+		if account.LastUsedAt != nil {
+			s.codexCookies.poolRounds.touch(identity, *account.LastUsedAt)
+		}
+		if s.codexCookies.hydrateGatewayPoolSharedHistory(ctx, account, identity) != nil {
 			continue
 		}
 		// Merge all matching credential-domain rows. Counting distinct names in
@@ -73,7 +90,45 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 			prefs[account.ID] = pref
 		}
 	}
+	shared, restFirst := s.codexCookies.poolRounds.snapshot(*req.GroupID, domains, complete)
+	if state := gatewayPoolRotationFrom(ctx); state != nil {
+		attempted := map[string]struct{}{}
+		for domain := range state.domains {
+			attempted[domain] = struct{}{}
+		}
+		for id := range state.attempted {
+			if domain := domains[id]; domain != "" {
+				attempted[domain] = struct{}{}
+			}
+		}
+		for id, domain := range domains {
+			if _, used := attempted[domain]; used {
+				shared[id] = struct{}{}
+			}
+		}
+	}
+	ctx = context.WithValue(ctx, gatewayPoolRoundExclusionsKey{}, shared)
+	for id, domain := range domains {
+		if _, excluded := req.ExcludedIDs[id]; excluded {
+			delete(prefs, id)
+			continue
+		}
+		if _, excluded := shared[id]; excluded {
+			delete(prefs, id)
+			continue
+		}
+		if restFirst {
+			pref := prefs[id]
+			pref.restFirst, pref.lastTouch = true, s.codexCookies.poolRounds.lastTouch(domain)
+			prefs[id] = pref
+		}
+	}
 	if len(prefs) < 2 {
+		for _, pref := range prefs {
+			if pref.verified {
+				return context.WithValue(ctx, gatewayPoolPreferenceKey{}, prefs)
+			}
+		}
 		return ctx
 	}
 	return context.WithValue(ctx, gatewayPoolPreferenceKey{}, prefs)
@@ -85,6 +140,9 @@ func gatewayPoolPreferences(ctx context.Context) gatewayPoolAccountPreferences {
 }
 
 func gatewayPoolPreferenceBetter(a, b gatewayPoolAccountPreference) bool {
+	if a.restFirst && b.restFirst && !a.lastTouch.Equal(b.lastTouch) {
+		return a.lastTouch.Before(b.lastTouch)
+	}
 	if a.verified != b.verified {
 		return a.verified
 	}
@@ -116,12 +174,12 @@ func gatewayPoolOrder[T any](ctx context.Context, values []T, accountOf func(T) 
 	}
 }
 
-// Soft session affinity must not hide a better observed pool account. Strong
-// previous-response and guardian-parent paths never call this preference gate.
+// Soft session affinity keeps its verified live window; otherwise it may yield.
+// Strong previous-response and guardian-parent paths never call this preference gate.
 func gatewayPoolPreferAlternative(ctx context.Context, accountID int64) bool {
 	prefs := gatewayPoolPreferences(ctx)
 	current, known := prefs[accountID]
-	if !known {
+	if !known || current.verified {
 		return false
 	}
 	for _, alternative := range prefs {

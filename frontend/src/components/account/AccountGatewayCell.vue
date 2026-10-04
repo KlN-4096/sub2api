@@ -99,56 +99,6 @@
         {{ t('admin.accounts.openai.gatewayHistory.legend') }}
       </p>
     </template>
-    <details v-if="usesPool && (runtime.hasData || contacts.rounds.length)" class="text-[10px] text-gray-500" data-testid="account-gateway-diagnostics">
-      <summary class="cursor-pointer">{{ t('admin.accounts.openai.gatewayHistory.diagnostics') }}</summary>
-    <details v-if="runtime.hasData" class="mt-1" data-testid="account-gateway-runtime">
-      <summary class="cursor-pointer">
-        {{ t('admin.accounts.openai.gatewayHistory.runtimeSummary', { requests: runtime.requests, pending: runtime.pending }) }}
-      </summary>
-      <p v-for="row in runtime.probes" :key="row.source" class="mt-1" :data-testid="`account-gateway-probes-${row.source}`">
-        {{ t(`admin.accounts.openai.gatewayHistory.probeSource.${row.source}`) }}:
-        {{ t('admin.accounts.openai.gatewayHistory.probeTotals', row) }}
-      </p>
-      <p class="mt-1" data-testid="account-gateway-feedback">
-        {{ t('admin.accounts.openai.gatewayHistory.feedbackTotals', runtime) }}
-      </p>
-      <p class="mt-1">{{ t('admin.accounts.openai.gatewayHistory.runtimeHint') }}</p>
-    </details>
-    <details v-if="usesPool && contacts.rounds.length" class="text-[10px] text-gray-500" data-testid="account-gateway-contacts">
-      <summary class="cursor-pointer">{{ t('admin.accounts.openai.gatewayHistory.contactSummary', { count: contacts.rounds.length }) }}</summary>
-      <p class="mt-1">{{ t('admin.accounts.openai.gatewayHistory.contactHint') }}</p>
-      <p v-if="contacts.truncated">{{ t('admin.accounts.openai.gatewayHistory.contactTruncated') }}</p>
-      <p v-for="group in contactGroups" :key="group.key" class="mt-1" data-testid="account-gateway-contact-group">
-        {{ group.model }} · {{ group.criterion }} · {{ contactSource(group.source) }} ·
-        {{ contactFirst(group.first) }} · {{ group.interval }}:
-        {{ t('admin.accounts.openai.gatewayHistory.contactRate', {
-          full: group.full, total: group.full + group.refreshed, unknown: group.unknown,
-          windows: group.windowSamples,
-          seconds: group.windowSamples ? Math.round(group.windowTotalMs / group.windowSamples / 1000) : '—'
-        }) }}
-      </p>
-      <div v-for="round in contacts.rounds.slice(-8).reverse()" :key="round.id" class="mt-2 border-t border-gray-100 pt-1 dark:border-gray-700" data-testid="account-gateway-contact-round">
-        <p>{{ shortName(round.gateway) }} · {{ round.model }} · {{ contactSource(round.source) }} · {{ contactFirst(round.first) }} · {{ contactOutcome(round.outcome) }}</p>
-        <p>{{ t('admin.accounts.openai.gatewayHistory.contactTimes', {
-          first: contactTime(contacts.seen[round.gateway]?.firstAt),
-          last: contactTime(contacts.seen[round.gateway]?.lastAt),
-          round: contactTime(round.at), gap: round.gapSeconds ?? '—'
-        }) }}</p>
-        <p>{{ t('admin.accounts.openai.gatewayHistory.contactWindow', {
-          seconds: round.windowMs === null ? '—' : Math.round(round.windowMs / 1000),
-          outcome: contactOutcome(round.lastOutcome), model: round.probeModel,
-          source: contactSource(round.probeSource), at: contactTime(round.probeAt)
-        }) }}</p>
-        <p v-for="step in round.steps" :key="step.shot">
-          {{ step.shot.toUpperCase() }}:
-          {{ t('admin.accounts.openai.gatewayHistory.contactStep', {
-            sent: step.sent ? '✓' : '—', status: step.status || '—', state: step.gotState ? '✓' : '—',
-            echo: step.echoAccepted ? '✓' : '—', gateway: step.actualGateway || '—', ms: step.durationMs
-          }) }}
-        </p>
-      </div>
-    </details>
-    </details>
   </div>
 </template>
 
@@ -176,7 +126,7 @@ import { useNowTicker } from '@/composables/useNowTicker'
 import { GATEWAY_REGION_KEYS, gatewayRegionDisplayKey } from '@/utils/gatewayRegionDisplay'
 import {
   CONTACT_MIN_RESULTS, CONTACT_MIN_WINDOWS,
-  readGatewayContacts, groupGatewayContacts, forecastGatewayMinutes
+  readGatewayContacts, forecastGatewayMinutes
 } from '@/utils/gatewayContactStats'
 
 /**
@@ -191,7 +141,7 @@ const MAX_PER_REGION = 1
 
 /** 初始冷却默认 1 小时；有学习状态时优先使用每个网关自己的截止时间。 */
 const DEFAULT_WINDOW_MS = 60 * 60 * 1000
-const MAX_WINDOW_MS = 10 * 60 * 60 * 1000
+const MAX_WINDOW_MS = 24 * 60 * 60 * 1000
 
 /**
  * 满血窗口 183 秒，**必须和后端 openAIGatewayFullWindow 同值**（跨语言，只能靠这条注释）。
@@ -292,50 +242,10 @@ const history = computed<GatewayHistory>(() => {
   return raw && typeof raw === 'object' ? (raw as GatewayHistory) : {}
 })
 
-function recordOf(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
-}
-
-function countOf(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0
-    ? Math.min(Math.floor(value), 1_000_000_000_000) : 0
-}
-
-const runtime = computed(() => {
-  const metrics = recordOf(extra.value.openai_gwpool_metrics)
-  const box = recordOf(extra.value.openai_gwpool_feedback_outbox)
-  const probes = ['foreground', 'background'].map((source) => {
-    const totals = recordOf(metrics[source])
-    const rounds = countOf(totals.rounds)
-    const requests = countOf(totals.requests)
-    const full = countOf(totals.full)
-    return {
-      source, rounds, requests, full,
-      degraded: countOf(totals.degraded), inconclusive: countOf(totals.inconclusive),
-      seconds: rounds ? (countOf(totals.duration_ms) / rounds / 1000).toFixed(1) : '—',
-      perFull: full ? (requests / full).toFixed(1) : '—'
-    }
-  })
-  const pending = Array.isArray(box.pending) ? box.pending : []
-  return {
-    hasData: Object.keys(metrics).length > 0 || Object.keys(box).length > 0,
-    probes, requests: probes.reduce((sum, row) => sum + row.requests, 0),
-    pending: pending.filter((item) => recordOf(item).permanent !== true).length,
-    failed: pending.filter((item) => recordOf(item).permanent === true).length,
-    sent: countOf(box.sent), discarded: countOf(box.discarded)
-  }
-})
-
 const contacts = computed(() => readGatewayContacts(
   extra.value.openai_gwpool_contacts, extra.value.openai_gwpool_ledger_tag, now.value
 ))
-const contactGroups = computed(() => groupGatewayContacts(contacts.value.rounds))
 const contactSource = (value: string) => t(`admin.accounts.openai.gatewayHistory.contactSources.${value}`)
-const contactFirst = (value: string) => t(`admin.accounts.openai.gatewayHistory.contactFirst.${value}`)
-const contactOutcome = (value: string) => t(`admin.accounts.openai.gatewayHistory.contactOutcomes.${value}`)
-function contactTime(at: number | undefined): string {
-  return typeof at === 'number' && Number.isFinite(at) ? new Date(at).toLocaleString() : '—'
-}
 
 /**
  * 判「还烧着」的窗口。账号自己配了本地账本窗口就按它 —— 后端拿同一个数判「这个网关
@@ -417,7 +327,7 @@ const cells = computed<RegionCell[]>(() => {
     else byRegion.set(key, [item])
   }
   return REGION_KEYS
-    .filter((key) => byRegion.has(key))
+    .filter((key) => key !== '' || byRegion.has(key))
     .map((key) => {
       const bucket = byRegion.get(key) ?? []
       const shown = bucket.slice(0, MAX_PER_REGION)
@@ -593,7 +503,9 @@ function cooldownOf(item: GatewayItem): string {
 function titleOf(item: GatewayItem): string {
   const base = 'admin.accounts.openai.gatewayHistory'
   const state = cooldownOf(item)
-  const verdict = item.verdict
+  const verdict = item.verdict === 'full' && !within(item.fullAt, FULL_WINDOW_MS)
+    ? t(`${base}.verdicts.fullExpired`)
+    : item.verdict
     ? t(`${base}.verdicts.${item.verdict}`)
     : t(`${base}.verdicts.none`)
   const summary = [regionLabel(item.region), shortName(item.name), fullHeldOf(item), state, verdict].join(

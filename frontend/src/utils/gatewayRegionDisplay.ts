@@ -1,8 +1,8 @@
 // Display-only buckets. They never merge per-gateway cooldown or contact state.
 export const GATEWAY_REGION_KEYS = [
   'north-america', 'south-america', 'europe',
-  'east-asia', 'oceania', 'south-asia', 'middle-east',
-  'southeast-asia', 'africa', ''
+  'east-asia', 'southeast-asia', 'south-asia', 'middle-east',
+  'africa', 'oceania', ''
 ] as const
 
 const countryGroups = new Map<string, string>()
@@ -12,8 +12,8 @@ for (const [key, countries] of [
   ['east-asia', 'CN HK JP KP KR MN MO TW'],
   ['south-asia', 'AF BD BT IN LK MV NP PK'],
   ['southeast-asia', 'BN ID KH LA MM MY PH SG TH TL VN'],
-  ['middle-east', 'AE BH IL IQ IR JO KW LB OM PS QA SA SY TR YE'],
-  ['africa', 'AO BF BI BJ BW CD CF CG CI CM CV DJ DZ EG EH ER ET GA GH GM GN GQ GW KE KM LR LS LY MA MG ML MR MU MW MZ NA NE NG RE RW SC SD SH SL SN SO SS ST SZ TD TG TN TZ UG YT ZA ZM ZW'],
+  ['middle-east', 'AE BH IL IQ IR JO KG KW KZ LB OM PS QA SA SY TJ TM TR UZ YE'],
+  ['africa', 'AO BF BI BJ BW CD CF CG CI CM CV DJ DZ EG EH ER ET GA GH GM GN GQ GW KE KM LR LS LY MA MG ML MR MU MW MZ NA NE NG RE RW SC SD SH SL SN SO SS ST SZ TD TF TG TN TZ UG YT ZA ZM ZW'],
   ['north-america', 'AG AI AW BB BL BM BQ BS BZ CA CR CU CW DM DO GD GL GP GT HN HT JM KN KY LC MF MQ MS MX NI PA PM PR SV SX TC TT US VC VG VI'],
   ['oceania', 'AS AU CC CK CX FJ FM GU KI MH MP NC NF NR NU NZ PF PG PN PW SB TK TO TV UM VU WF WS']
 ]) {

@@ -19,7 +19,7 @@ import (
 )
 
 func TestGatewayPoolProbeModelOnlyOverridesProbeRequests(t *testing.T) {
-	for _, selected := range []string{"", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"} {
+	for _, selected := range []string{"", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "business"} {
 		t.Run("selection="+selected, func(t *testing.T) {
 			fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 			account := fake.account(1)
@@ -43,6 +43,9 @@ func TestGatewayPoolProbeModelOnlyOverridesProbeRequests(t *testing.T) {
 			require.Len(t, upstream.sentBodies, 3, "only selected-model mint/echo and the unchanged business request")
 			want := selected
 			if want == "" {
+				want = "gpt-6-luna"
+			}
+			if want == "business" {
 				want = "gpt-6-astra"
 			}
 			require.Equal(t, want, gjson.Get(upstream.sentBodies[0], "model").String())
@@ -438,6 +441,7 @@ func TestWarmUpRunsWithoutAnyModeConfigured(t *testing.T) {
 	acct.Extra["openai_gwpool_guard"] = "off"
 	acct.Extra["openai_gwpool_state_echo"] = false
 	acct.Extra["openai_gwpool_degraded_retries"] = 0
+	acct.Extra[openAIGatewayPoolProbeModelExtraKey] = gatewayPoolProbeModelBusiness
 
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 	require.NoError(t, err)
@@ -555,7 +559,9 @@ func TestWarmUpFailsClosedWhenTheModelIsUnreadable(t *testing.T) {
 	require.NoError(t, err)
 	ctx, _ := withOpenAIGatewayPoolSink(req.Context(), nil)
 
-	err = svc.gatewayPoolWarmUp(req.WithContext(ctx), "", gwpoolWarmAccount(fake))
+	account := gwpoolWarmAccount(fake)
+	account.Extra[openAIGatewayPoolProbeModelExtraKey] = gatewayPoolProbeModelBusiness
+	err = svc.gatewayPoolWarmUp(req.WithContext(ctx), "", account)
 	require.ErrorIs(t, err, errOpenAIGatewayPoolWarmNoModel)
 	require.ErrorIs(t, err, gwpool.ErrPool, "必须包着 ErrPool，否则这条会被当成账号故障停调度")
 	require.Equal(t, gatewayPoolWarmNoModelClientMsg, gatewayPoolClientMessage(err))

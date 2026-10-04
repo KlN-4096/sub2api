@@ -74,6 +74,121 @@ func TestGatewayPoolSelectionReordersOnlyKnownOptedInSlots(t *testing.T) {
 	require.Equal(t, []int64{3, 99, 2, 1, 100}, ids, "ordinary positions and equal-score baseline order must survive")
 }
 
+func TestGatewayPoolSelectionKeepsSessionVerifiedWindowUntilItExpires(t *testing.T) {
+	prefs := gatewayPoolAccountPreferences{
+		1:  {verified: true, cooled: 1},
+		40: {verified: true, cooled: 20},
+	}
+	ctx := context.WithValue(context.Background(), gatewayPoolPreferenceKey{}, prefs)
+	require.False(t, gatewayPoolPreferAlternative(ctx, 1),
+		"a better future inventory must not evict this session's current verified window")
+	prefs[1] = gatewayPoolAccountPreference{cooled: 1}
+	require.True(t, gatewayPoolPreferAlternative(ctx, 1), "expired windows may yield to a better account")
+}
+
+func TestGatewayPoolSelectionWeightedSessionKeepsVerifiedWindow(t *testing.T) {
+	group := int64(7)
+	a, b := preferenceAccount(1, group, 1), preferenceAccount(2, group, 20)
+	repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*a, *b}}}
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.LBTopK = 1
+	svc := &OpenAIGatewayService{accountRepo: repo, cfg: cfg,
+		cache:              &schedulerTestGatewayCache{sessionBindings: map[string]int64{"openai:verified-session": a.ID}},
+		rateLimitService:   newOpenAIAdvancedSchedulerRateLimitService("true", "true"),
+		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{})}
+	for _, account := range []*Account{a, b} {
+		identity := openAIGatewayPoolAccountKey(account)
+		svc.codexCookies.poolPairs.Store(identity, openAIGatewayPoolPair{
+			cookie: "offline", version: "full", gateway: "unified-200", until: time.Now().Add(time.Minute),
+		})
+		svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, "full")
+	}
+	selection, _, err := svc.SelectAccountWithSchedulerForCapability(context.Background(), &group, "", "verified-session", "gpt-6-astra", nil,
+		OpenAIUpstreamTransportHTTPSSE, OpenAIEndpointCapabilityChatCompletions, false, false, true)
+	require.NoError(t, err)
+	if selection.ReleaseFunc != nil {
+		defer selection.ReleaseFunc()
+	}
+	require.Equal(t, a.ID, selection.Account.ID)
+}
+
+type gatewayRoundSelectionRace struct {
+	OpenAIAccountScheduler
+	selectFn func(context.Context, OpenAIAccountScheduleRequest) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error)
+}
+
+func (s gatewayRoundSelectionRace) Select(ctx context.Context, req OpenAIAccountScheduleRequest) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
+	return s.selectFn(ctx, req)
+}
+
+func TestGatewayPoolSelectionRechecksConcurrentExhaustionBySelectingRemainingAccount(t *testing.T) {
+	group := int64(7)
+	a, b := preferenceAccount(1, group, 20), preferenceAccount(2, group, 1)
+	repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*a, *b}}}
+	svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{},
+		rateLimitService: newOpenAIAdvancedSchedulerRateLimitService("true")}
+	calls, released := 0, 0
+	svc.openaiScheduler = gatewayRoundSelectionRace{selectFn: func(_ context.Context, req OpenAIAccountScheduleRequest) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
+		calls++
+		selected := b
+		if calls == 1 {
+			selected = a
+			svc.codexCookies.poolRounds.exhaust(group, openAIGatewayPoolAccountKey(a), 0)
+		} else {
+			require.Contains(t, req.ExcludedIDs, a.ID)
+		}
+		return &AccountSelectionResult{Account: selected, ReleaseFunc: func() { released++ }}, OpenAIAccountScheduleDecision{}, nil
+	}}
+	selection, _, err := svc.SelectAccountWithSchedulerForCapability(context.Background(), &group, "", "", "gpt-6-astra", nil,
+		OpenAIUpstreamTransportHTTPSSE, OpenAIEndpointCapabilityChatCompletions, false, false, true)
+	require.NoError(t, err)
+	require.Equal(t, b.ID, selection.Account.ID)
+	require.Equal(t, 2, calls)
+	require.Equal(t, 1, released, "release the rejected slot before retrying selection")
+	selection.ReleaseFunc()
+}
+
+func TestGatewayPoolSelectionRoundPersistsAcrossRequestsAndRestartsAfterLastAccount(t *testing.T) {
+	group := int64(7)
+	a, b := preferenceAccount(1, group, 20), preferenceAccount(2, group, 1)
+	fake := newGwpoolFakePool(t, "offline-cookie", 150)
+	fake.listGateways = []gwpoolFakeGateway{{Name: "unified-200", PairReady: true, UsedByYou: true}}
+	fake.configure(a, b)
+	repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*a, *b}}}
+	svc := &OpenAIGatewayService{accountRepo: repo, cache: &schedulerTestGatewayCache{}, cfg: &config.Config{},
+		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{})}
+	selectID := func(ctx context.Context) (int64, error) {
+		selection, _, err := svc.SelectAccountWithSchedulerForCapability(ctx, &group, "", "", "gpt-6-astra", nil,
+			OpenAIUpstreamTransportHTTPSSE, OpenAIEndpointCapabilityChatCompletions, false, false, true)
+		if err != nil {
+			return 0, err
+		}
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+		return selection.Account.ID, nil
+	}
+	id, err := selectID(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, a.ID, id, "the initial round keeps cooled-count priority")
+	exhaust := func(ctx context.Context, account *Account) context.Context {
+		failure := &UpstreamFailoverError{GatewayPoolRotation: true, NextAccountAction: NextAccountStop}
+		next := svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, failure)
+		require.True(t, failure.ShouldRetryNextAccount())
+		return next
+	}
+	ctx := exhaust(context.Background(), a)
+	id, err = selectID(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, b.ID, id, "a new request must not revisit this round's exhausted account")
+	ctx = exhaust(ctx, b)
+	_, err = selectID(ctx)
+	require.ErrorIs(t, err, ErrNoAvailableAccounts, "round reset cannot erase this request's attempts")
+	id, err = selectID(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, a.ID, id, "the last exhausted account must allow the next round to start")
+}
+
 func TestGatewayPoolSelectionFreshHistoryIgnoresPoolFreeAndWrongIdentity(t *testing.T) {
 	group := int64(7)
 	a, b := preferenceAccount(1, group, 1), preferenceAccount(2, group, 6)

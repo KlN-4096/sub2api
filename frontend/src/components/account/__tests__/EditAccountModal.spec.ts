@@ -1075,7 +1075,7 @@ describe('EditAccountModal', () => {
     ]) {
       const input = wrapper.get<HTMLInputElement>(`[data-testid="${testid}"]`)
       expect(input.attributes('min')).toBe(testid === 'edit-openai-gwpool-gateway-window' ? '3600' : '1')
-      expect(input.attributes('max')).toBe(testid === 'edit-openai-gwpool-gateway-window' ? '36000' : '86400')
+      expect(input.attributes('max')).toBe('86400')
     }
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
 
@@ -1192,6 +1192,7 @@ describe('EditAccountModal', () => {
     const wrapper = mountModal(account)
     const select = wrapper.get<HTMLSelectElement>('[data-testid="edit-openai-gwpool-probe-model"]')
     expect(select.element.value).toBe('')
+    expect(select.text()).toContain('gwpoolProbeModelDefault')
     await select.setValue('gpt-6-luna')
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
     expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_gwpool_probe_model).toBe('gpt-6-luna')
@@ -1201,6 +1202,10 @@ describe('EditAccountModal', () => {
     await loaded.get('[data-testid="edit-openai-gwpool-probe-model"]').setValue('')
     await loaded.get('form#edit-account-form').trigger('submit.prevent')
     expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_gwpool_probe_model')
+    await loaded.get('[data-testid="edit-openai-gwpool-probe-model"]').setValue('business')
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    await loaded.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_gwpool_probe_model).toBe('business')
     await loaded.get('[data-testid="edit-openai-gwpool-probe-model"]').setValue('gpt-6-sol')
     updateAccountMock.mockReset().mockResolvedValue(account)
     await loaded.get('[data-testid="edit-openai-gwpool-enabled"]').setValue(false)

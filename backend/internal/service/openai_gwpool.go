@@ -154,7 +154,7 @@ const (
 	// openAIGatewayPoolMaxSeconds 是所有「秒」旋钮的上限（1 天）。超了回默认值，
 	// 见 gatewayPoolSeconds。
 	openAIGatewayPoolMaxSeconds = 86400
-	// 初始冷却 1 小时；明确失败才按 1/2/4/6/8/10h 退避。它是本地尝试策略，
+	// 初始冷却 1 小时；明确失败按标准阶梯退避至24h。它是本地尝试策略，
 	// 不是上游恢复承诺；每账号×网关的学习与固定状态见 openai_gwpool_cooldown.go。
 	openAIGatewayPoolGatewayWindow = time.Hour
 )
@@ -176,7 +176,7 @@ func (a *Account) gatewayPoolConsumerKey() string {
 	return strings.TrimSpace(a.getExtraString(OpenAIGatewayPoolConsumerKeyExtraKey))
 }
 
-// gatewayPoolGatewayWindow 读初始冷却档位。1~10h 的显式配置保留，缺省/非法值回到 1h。
+// gatewayPoolGatewayWindow 读初始冷却档位。1~24h 的显式配置保留，缺省/非法值回到 1h。
 func (a *Account) gatewayPoolGatewayWindow() time.Duration {
 	return time.Duration(gatewayPoolCooldownBase(
 		a.gatewayPoolSeconds(openAIGatewayPoolGatewayWindowExtraKey, openAIGatewayPoolGatewayWindow))) * time.Second
@@ -229,22 +229,27 @@ func (a *Account) gatewayPoolPrewarmEnabled() bool {
 }
 
 const (
-	gatewayPoolProbeModelAstra = "gpt-6-astra"
-	gatewayPoolProbeModelSol   = "gpt-6-sol"
-	gatewayPoolProbeModelLuna  = "gpt-6-luna"
+	gatewayPoolProbeModelAstra    = "gpt-6-astra"
+	gatewayPoolProbeModelSol      = "gpt-6-sol"
+	gatewayPoolProbeModelLuna     = "gpt-6-luna"
+	gatewayPoolProbeModelBusiness = "business"
 )
 
 func validGatewayPoolProbeModel(model string) bool {
-	return model == gatewayPoolProbeModelAstra || model == gatewayPoolProbeModelSol || model == gatewayPoolProbeModelLuna
+	return model == gatewayPoolProbeModelAstra || model == gatewayPoolProbeModelSol ||
+		model == gatewayPoolProbeModelLuna || model == gatewayPoolProbeModelBusiness
 }
 
 func (a *Account) gatewayPoolProbeModel(businessModel string) string {
 	if a != nil {
 		if model, ok := a.Extra[openAIGatewayPoolProbeModelExtraKey].(string); ok && validGatewayPoolProbeModel(model) {
+			if model == gatewayPoolProbeModelBusiness {
+				return businessModel
+			}
 			return model
 		}
 	}
-	return businessModel
+	return gatewayPoolProbeModelLuna
 }
 
 func (a *Account) gatewayPoolGuardEnabled() bool {
@@ -366,9 +371,9 @@ func validateOpenAIGatewayPoolAccountExtra(account *Account, extra map[string]an
 	if model, ok := extra[openAIGatewayPoolProbeModelExtraKey]; ok && model != nil {
 		if selected, ok := model.(string); !ok || !validGatewayPoolProbeModel(selected) {
 			return infraerrors.Newf(http.StatusBadRequest, "GWPOOL_PROBE_MODEL_INVALID",
-				"account %d %s must be one of %s, %s, %s",
+				"account %d %s must be one of %s, %s, %s, %s",
 				account.ID, openAIGatewayPoolProbeModelExtraKey,
-				gatewayPoolProbeModelAstra, gatewayPoolProbeModelSol, gatewayPoolProbeModelLuna)
+				gatewayPoolProbeModelAstra, gatewayPoolProbeModelSol, gatewayPoolProbeModelLuna, gatewayPoolProbeModelBusiness)
 		}
 	}
 	if raw, exists := extra[openAIGatewayPoolWaitEnabledExtraKey]; exists && raw != nil {
@@ -964,6 +969,7 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 	window := account.gatewayPoolGatewayWindow()
 	for _, candidate := range gateways {
 		s.noteGatewayPoolRecommendation(identity, candidate.Name, candidate.Cooldown)
+		s.noteGatewayPoolFeedbackPolicy(account, identity, candidate.Name, candidate.Cooldown)
 		if !candidate.PairReady {
 			continue
 		}

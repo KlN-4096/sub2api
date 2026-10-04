@@ -1671,11 +1671,11 @@ func TestGatewayPoolAccountKnobDefaults(t *testing.T) {
 	require.Equal(t, 20*time.Second, tuned.gatewayPoolFetchTimeout())
 	require.Equal(t, 5*time.Second, tuned.gatewayPoolListTimeout())
 	require.Equal(t, 2*time.Hour, tuned.gatewayPoolGatewayWindow())
-	// 自适应冷却上限 10 小时，其他超时旋钮的上限仍为 1 天。
+	// 自适应冷却上限 24 小时，初始默认仍为 1 小时。
 	atCap := &Account{ID: 1, Extra: map[string]any{
-		openAIGatewayPoolGatewayWindowExtraKey: 36000,
+		openAIGatewayPoolGatewayWindowExtraKey: 86400,
 	}}
-	require.Equal(t, 10*time.Hour, atCap.gatewayPoolGatewayWindow())
+	require.Equal(t, 24*time.Hour, atCap.gatewayPoolGatewayWindow())
 }
 
 // 旧关闭值不再生效，冷却完毕的网关始终优先。

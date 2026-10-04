@@ -152,6 +152,7 @@ func TestGatewayPoolRotationUsesExistingSchedulerAndDoesNotRevisitAccounts(t *te
 	group := int64(7)
 	source := rotationAccount(1, group)
 	target := rotationAccount(2, group)
+	target.Credentials = map[string]any{"chatgpt_account_id": "rotation-target", "chatgpt_user_id": "user"}
 	off := rotationAccount(3, group)
 	off.Extra[openAIGatewayPoolRotationExtraKey] = false
 	source.Priority, target.Priority, off.Priority = 0, 2, 1

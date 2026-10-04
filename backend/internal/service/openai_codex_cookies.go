@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/chatgptcookies"
 	"golang.org/x/sync/singleflight"
@@ -44,11 +45,14 @@ type openAICodexCookieStore struct {
 	// （openai_gwpool_prewarm.go）。
 	poolVerified sync.Map // 凭证域身份 → gatewayPoolVerifiedMark
 	// 结束后保留当前窗口标记：失败不能在下一条业务请求上重新烧一轮。
-	poolPrewarm       sync.Map // 凭证域身份 → gatewayPoolPrewarmMark
-	poolWarmDuration  sync.Map // 凭证域身份 → 最近一次有结论的验证耗时
-	poolProbeObserved func(context.Context, *Account, gatewayPoolProbeObservation)
-	poolContactLocks  sync.Map // 凭证域摘要 -> *sync.Mutex；只协调本进程。
-	poolContactPicks  sync.Map // 凭证域摘要 -> *atomic.Uint64；每五次保留一次原顺序探索。
+	poolPrewarm             sync.Map // 凭证域身份 → gatewayPoolPrewarmMark
+	poolWarmDuration        sync.Map // 凭证域身份 → 最近一次有结论的验证耗时
+	poolProbeObserved       func(context.Context, *Account, gatewayPoolProbeObservation)
+	poolContactLocks        sync.Map // 凭证域摘要 -> *sync.Mutex；只协调本进程。
+	poolContactPicks        sync.Map // 凭证域摘要 -> *atomic.Uint64；每五次保留一次原顺序探索。
+	poolFeedbackPolicies    sync.Map // binding+gateway -> latest reporting-policy observation
+	poolFeedbackPolicyPrune atomic.Int64
+	poolRounds              gatewayPoolRounds
 	// 历史样本仅辅助提前准备，不能代替当前缓存的实际租约。
 	poolFullWindow gatewayPoolFullWindow
 	// poolWarm 把同一张票上的并发预热判据收口成一次（openai_gwpool_warm.go）。
