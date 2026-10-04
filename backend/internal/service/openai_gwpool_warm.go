@@ -101,14 +101,6 @@ func (s *OpenAIGatewayService) gatewayPoolWarmUp(request *http.Request, proxyURL
 	// 必须同时判「验过」和 Live，**不能只判 Live**：Live 的唯一含义是取票那一刻写的
 	// `until = now + valid_for_s`（见 poolVerified 的注释列的两条路）。
 	if s.codexCookies.gatewayPoolVerifiedFull(identity) {
-		// 快路上顺手看一眼「这张票是不是快到点了」：是就在后台换下一张，让客户端下一次请求
-		// 不用在这里等（openai_gwpool_prewarm.go）。到点判据很便宜（两次 map 读），而读 model
-		// 要解请求体 —— 所以先问到点、再读 model。
-		if account.gatewayPoolPrewarmEnabled() {
-			if _, due := s.codexCookies.gatewayPoolPrewarmDue(identity, account); due {
-				s.gatewayPoolPrewarm(request, proxyURL, account, identity, account.gatewayPoolProbeModel(gatewayPoolWarmModel(request)))
-			}
-		}
 		return nil
 	}
 	// Luna is the default. Explicit "business" follows the request model.
@@ -133,7 +125,17 @@ func (s *OpenAIGatewayService) gatewayPoolWarmUpWith(
 	account *Account,
 	identity, model string,
 	shoot gatewayPoolWarmShooter,
-) error {
+) (resultErr error) {
+	progress := s.codexCookies.poolProgress.start(account.ID, account.gatewayPoolWarmTickets())
+	phase := "unknown"
+	defer func() {
+		if request.Context().Err() != nil {
+			phase = "cancelled"
+		} else if errors.Is(resultErr, errOpenAIGatewayPoolWarmExhausted) {
+			phase = "exhausted"
+		}
+		s.codexCookies.poolProgress.update(progress, phase, 0, "", false, true)
+	}()
 	// 预算必须是一个**带截止时间的 ctx**，不能只在循环顶上判时间：一次 attempt 内部就能花掉
 	// 两发垫话各 35s，只判循环顶的话 5 张票最坏能让客户端等六分钟 —— 而这一档对运营方承诺的
 	// 是 90 秒。挂成 ctx 之后预算一到，排在后面的垫话立刻失败而不是各自再跑满 35s。
@@ -176,6 +178,7 @@ attempts:
 		if ctx.Err() != nil || activeRemaining() <= 0 {
 			break
 		}
+		s.codexCookies.poolProgress.update(progress, "fetching", attempt, "", false, false)
 		// 借 AttachRoute 取票：取票、本地账本筛选、exclude、force 换网关那一整套都在它里面，
 		// 这里不另写一份选票逻辑。头是个丢弃用的容器，只为把 Cookie 取出来。
 		headers := http.Header{}
@@ -191,6 +194,7 @@ attempts:
 			return nil
 		}
 		probeCtx, probeCancel := context.WithTimeout(ctx, activeRemaining())
+		s.codexCookies.poolProgress.update(progress, "verifying", attempt, applied.Gateway, false, false)
 		full, conclusive, sent, firstSent, perr := s.codexCookies.gatewayPoolWarmVerdict(
 			probeCtx, account, identity, applied, cookie, attempt, shoot)
 		probeBudgetExpired := probeCtx.Err() != nil
@@ -249,6 +253,7 @@ attempts:
 			// 满血这条连 `Current` 一起推进：它就是业务请求马上要落的那个网关。
 			s.noteWarmVerdict(request, account, applied, openAIGatewayVerdictFull, true)
 			// 票留在缓存里（Live + 已验）⇒ 紧接着业务请求那一发的 AttachRoute 会原样复用它。
+			phase = "ready"
 			return nil
 		default:
 			// 判成降智：标 Stale ⇒ 下一圈的 AttachRoute 天然带 force=1 + exclude_versions 换网关。
@@ -259,6 +264,7 @@ attempts:
 			slog.Info("gwpool_warm_degraded", "account_id", account.ID,
 				"gateway", applied.Gateway, "attempt", attempt)
 			burned = append(burned, applied.Gateway)
+			s.codexCookies.poolProgress.update(progress, "fetching", attempt, applied.Gateway, true, false)
 			// 判死的落点也记进卡里，但**不推进 `Current`**：没有业务请求会落上去，推进了会把
 			// 「当前网关」写成最后一个被判死的落点。不记的话这一档每轮真烧 4 个 (账号 × 网关)
 			// + 8 发上游配额，而事后在页面上一条痕迹都没有 —— 失败路径不落用量行（RecordUsage
@@ -405,9 +411,6 @@ func (s *openAICodexCookieStore) gatewayPoolWarmVerdict(
 		full, conclusive, sent, err := gatewayPoolWarmProbe(probeCtx, account.ID, applied.Gateway, attempt, cookie, wrapped)
 		// Ambiguous transmission forbids returning a ticket but is not a measured contact.
 		sent = sent || trace.shots > 0 || trace.mayHaveSent
-		if conclusive && ctx.Err() == nil {
-			s.poolWarmDuration.Store(identity, time.Since(start))
-		}
 		if s.poolProbeObserved != nil {
 			model, _ := ctx.Value(gatewayPoolProbeModelKey{}).(string)
 			s.poolProbeObserved(ctx, account, gatewayPoolProbeObservation{

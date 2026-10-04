@@ -41,6 +41,10 @@ type gatewayPoolWaitState struct {
 }
 
 func gatewayPoolWaitSeconds(raw any) (int, bool) {
+	return gatewayPoolInteger(raw, gatewayPoolWaitMaxSeconds)
+}
+
+func gatewayPoolInteger(raw any, limit int) (int, bool) {
 	var value float64
 	switch n := raw.(type) {
 	case int:
@@ -59,7 +63,7 @@ func gatewayPoolWaitSeconds(raw any) (int, bool) {
 		return 0, false
 	}
 	if math.IsNaN(value) || math.IsInf(value, 0) || value != math.Trunc(value) ||
-		value < 1 || value > gatewayPoolWaitMaxSeconds {
+		value < 1 || value > float64(limit) {
 		return 0, false
 	}
 	return int(value), true
@@ -70,7 +74,7 @@ func (a *Account) gatewayPoolMaxWait() time.Duration {
 		return 0
 	}
 	seconds := gatewayPoolWaitDefaultSeconds
-	if raw, exists := a.Extra[openAIGatewayPoolWaitSecondsExtraKey]; exists {
+	if raw, exists := a.Extra[openAIGatewayPoolWaitSecondsExtraKey]; exists && raw != nil {
 		var ok bool
 		seconds, ok = gatewayPoolWaitSeconds(raw)
 		if !ok {

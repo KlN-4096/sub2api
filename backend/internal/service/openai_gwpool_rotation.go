@@ -10,6 +10,17 @@ import (
 )
 
 const openAIGatewayPoolRotationExtraKey = "openai_gwpool_rotation"
+const openAIGatewayPoolRotationMinGatewaysExtraKey = "openai_gwpool_rotation_min_gateways"
+const gatewayPoolRotationMinGatewaysMax = 512
+
+func (a *Account) gatewayPoolRotationMinGateways() int {
+	if a != nil {
+		if n := a.getExtraInt(openAIGatewayPoolRotationMinGatewaysExtraKey); n >= 1 && n <= gatewayPoolRotationMinGatewaysMax {
+			return n
+		}
+	}
+	return 1
+}
 
 // Distinguishes completed, conclusive ticket attempts from time-budget expiry.
 // Reaching this limit alone still does NOT authorize account rotation.
@@ -88,6 +99,7 @@ func (s *OpenAIGatewayService) PrepareGatewayPoolAccountRotation(ctx context.Con
 	}
 	// Mark before finding a replacement, including the last account in a round.
 	s.codexCookies.poolRounds.exhaust(*groupID, identity, generation)
+	s.restGatewayPoolAccount(ctx, fresh, identity, *groupID)
 	next := &gatewayPoolRotation{groupID: *groupID, attempted: map[int64]struct{}{source.ID: {}},
 		domains: map[string]struct{}{gatewayPoolLedgerIdentity(identity): {}}}
 	if state != nil {
@@ -122,8 +134,8 @@ func (s *OpenAIGatewayService) gatewayPoolNoRemainingRoutes(ctx context.Context,
 	if err := s.codexCookies.hydrateGatewayPoolSharedHistory(ctx, account, identity); err != nil {
 		return false
 	}
-	generation, pending := s.codexCookies.gatewayPoolInventorySnapshot(identity, account)
-	if pending {
+	generation, active, available := s.codexCookies.gatewayPoolInventoryCandidates(identity, account)
+	if active {
 		return false
 	}
 	pool, err := s.codexCookies.poolClient(account)
@@ -133,22 +145,20 @@ func (s *OpenAIGatewayService) gatewayPoolNoRemainingRoutes(ctx context.Context,
 	listCtx, cancel := context.WithTimeout(ctx, account.gatewayPoolListTimeout())
 	defer cancel()
 	gateways, err := pool.Gateways(listCtx, gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(account, identity))
-	if err != nil || len(gateways) == 0 {
-		return false // supply outage / unreadable state is not account-specific exhaustion
+	if err != nil {
+		return false // unreadable state is not a zero inventory
 	}
-	ready := 0
 	for _, gateway := range gateways {
 		if !gateway.PairReady {
 			continue
 		}
-		ready++
 		_, cooling := s.codexCookies.gatewayPoolUsedAt(identity, gateway.Name, account.gatewayPoolGatewayWindow())
 		if !cooling && !gateway.UsedByYou {
-			return false
+			available[gateway.Name] = struct{}{}
 		}
 	}
-	after, pending := s.codexCookies.gatewayPoolInventorySnapshot(identity, account)
-	return ready > 0 && !pending && after == generation
+	after, pending, _ := s.codexCookies.gatewayPoolInventoryCandidates(identity, account)
+	return len(available) < account.gatewayPoolRotationMinGateways() && !pending && after == generation
 }
 
 // Read opt-ins from the repository, not scheduler snapshots. An explicit

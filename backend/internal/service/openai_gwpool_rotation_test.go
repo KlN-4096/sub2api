@@ -18,6 +18,16 @@ func (r gatewayRotationRepo) ListByPlatform(context.Context, string) ([]Account,
 	return r.accounts, nil
 }
 
+func (r gatewayRotationRepo) SetTempUnschedulable(_ context.Context, id int64, until time.Time, reason string) error {
+	for i := range r.accounts {
+		if r.accounts[i].ID == id && (r.accounts[i].TempUnschedulableUntil == nil || r.accounts[i].TempUnschedulableUntil.Before(until)) {
+			r.accounts[i].TempUnschedulableUntil = &until
+			r.accounts[i].TempUnschedulableReason = reason
+		}
+	}
+	return nil
+}
+
 func rotationAccount(id, group int64) *Account {
 	account := gwpoolTestAccount(id)
 	account.GroupIDs = []int64{group}
@@ -40,10 +50,10 @@ func TestGatewayPoolRotationOnlyAfterFreshCompleteExhaustion(t *testing.T) {
 	}{
 		{"all candidates cooling", []gwpoolFakeGateway{{Name: "unified-142", PairReady: true, UsedByYou: true}}, 0, true, false},
 		{"candidate still available", []gwpoolFakeGateway{{Name: "unified-142", PairReady: true, UsedByYou: true}, {Name: "unified-143", PairReady: true}}, 0, false, false},
-		{"empty supply is not proven exhaustion", nil, 0, false, false},
+		{"successful empty supply is zero", nil, 0, true, false},
 		{"list failure is not exhaustion", nil, http.StatusBadGateway, false, false},
 		{"local cooling independent of pool", []gwpoolFakeGateway{{Name: "unified-142", PairReady: true}}, 0, true, true},
-		{"nonready listing is not exhaustion", []gwpoolFakeGateway{{Name: "unified-142", PairReady: false, UsedByYou: true}}, 0, false, false},
+		{"nonready listing has zero candidates", []gwpoolFakeGateway{{Name: "unified-142", PairReady: false, UsedByYou: true}}, 0, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newGwpoolFakePool(t, "offline-cookie", 150)

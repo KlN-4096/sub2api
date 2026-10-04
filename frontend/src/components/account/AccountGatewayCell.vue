@@ -1,5 +1,16 @@
 <template>
   <div v-if="isCodexAccount" class="space-y-1" data-testid="account-gateway-cell">
+    <p v-if="usesPool && progress" class="text-[10px] text-primary-600 dark:text-primary-400"
+      role="status" aria-live="polite" data-testid="account-gateway-progress">
+      {{ t(`admin.accounts.openai.gatewayProgress.${progress.phase}`, {
+        attempt: progress.attempt, limit: progress.limit, seconds: Math.floor(progress.elapsed_ms / 1000)
+      }) }}
+      <span v-if="progress.rejected"> · {{ t('admin.accounts.openai.gatewayProgress.rejected', { count: progress.rejected }) }}</span>
+      <span v-if="progress.active_requests > 1"> · {{ t('admin.accounts.openai.gatewayProgress.concurrent', { count: progress.active_requests }) }}</span>
+    </p>
+    <p v-else-if="usesPool && progressUnavailable" class="text-[10px] text-gray-400" data-testid="account-gateway-progress-unavailable">
+      {{ t('admin.accounts.openai.gatewayProgress.unavailable') }}
+    </p>
     <!-- 没有读数也要占位：整块消失时，「没接网关池」「接了还没跑过流量」「落点读不出来」
          在页面上长得一模一样。非 Codex 上游的账号根本没有落点这回事，那才该整块消失。 -->
     <p v-if="!current && !cells.length" class="text-[10px] text-gray-400" data-testid="account-gateway-empty">
@@ -120,6 +131,7 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { Account } from '@/types'
+import type { GatewayPoolProgress } from '@/api/admin/accounts'
 import { targetsCodexUpstream } from '@/utils/turnState'
 import { formatRelativeTime } from '@/utils/format'
 import { useNowTicker } from '@/composables/useNowTicker'
@@ -161,7 +173,7 @@ const MAX_WINDOW_MS = 24 * 60 * 60 * 1000
  */
 const FULL_WINDOW_MS = 183 * 1000
 
-const props = defineProps<{ account: Account }>()
+const props = defineProps<{ account: Account; progress?: GatewayPoolProgress; progressUnavailable?: boolean }>()
 const { t } = useI18n()
 const now = useNowTicker()
 

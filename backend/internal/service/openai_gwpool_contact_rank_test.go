@@ -2,8 +2,6 @@ package service
 
 import (
 	"context"
-	"net/http"
-	"net/url"
 	"testing"
 	"time"
 
@@ -86,39 +84,4 @@ func TestGatewayPoolContactRankingFreshReadAndEveryFifthExploration(t *testing.T
 		require.Equal(t, want, svc.codexCookies.gatewayPoolRankContacts(ctx, account, gwpoolTestIdentity, candidates)[0].Name)
 	}
 	require.Equal(t, "low", svc.codexCookies.gatewayPoolRankContacts(context.Background(), account, gwpoolTestIdentity, candidates)[0].Name)
-}
-
-func TestGatewayPoolPrewarmRanksUsingBackgroundNotForegroundSamples(t *testing.T) {
-	fake := newGwpoolFakePool(t, "offline-cookie", 150)
-	fake.refuseStatus, fake.refuseCode = http.StatusServiceUnavailable, gwpool.CodeNoExit
-	for _, name := range []string{"front-best", "back-best"} {
-		front, back := contactRankCandidate(name, 5).Contacts[0], contactRankCandidate(name, 1).Contacts[0]
-		if name == "back-best" {
-			front.Full, front.Refreshed, back.Full, back.Refreshed = 1, 4, 5, 0
-		}
-		back.Source = "background"
-		fake.listGateways = append(fake.listGateways, gwpoolFakeGateway{Name: name, PairReady: true, Contacts: []gwpool.ContactStats{front, back}})
-	}
-	account := gwpoolTestAccount(1)
-	fake.configure(account)
-	svc, repo := gatewayRuntimeService(account)
-	now := time.Now().UTC()
-	require.NoError(t, repo.UpdateExtra(context.Background(), 1, map[string]any{
-		openAIGatewayPoolContactsExtraKey: gatewayPoolContacts{
-			LedgerTag: gatewayPoolLedgerTag(gwpoolTestIdentity), Seen: map[string]gatewayPoolContactSeen{
-				"front-best": {LastAt: now.Add(-90 * time.Minute)}, "back-best": {LastAt: now.Add(-90 * time.Minute)},
-			},
-		},
-	}))
-	current := openAIGatewayPoolPair{gateway: "current", version: "current", cookie: "offline-cookie", until: now.Add(3 * time.Minute)}
-	svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, current)
-	ctx := context.WithValue(context.Background(), gatewayPoolProbeModelKey{}, "astra")
-	svc.gatewayPoolPrewarmRound(ctx, account, gwpoolTestIdentity, current, time.Minute, nil)
-	select {
-	case query := <-fake.queries:
-		values, _ := url.ParseQuery(query)
-		require.Equal(t, "back-best", values.Get("gateway"))
-	default:
-		t.Fatal("prewarm did not ask for a candidate")
-	}
 }

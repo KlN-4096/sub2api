@@ -2196,7 +2196,9 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	}
 	strongBinding := (strings.TrimSpace(previousResponseID) != "" && !previousResponseCanMove) ||
 		s.resolveOpenAIGuardianParentAccountID(ctx, groupID) > 0
-	for range gatewayPoolSelectionRechecks {
+	selectionChecks := gatewayPoolSelectionRechecks
+	expandedPoolChecks := false
+	for check := 0; check < selectionChecks; check++ {
 		selection, decision, err = s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
 		if err != nil && !openAIProxyStreamQuarantineBypassed(ctx) &&
 			(errors.Is(err, ErrNoAvailableAccounts) || errors.Is(err, ErrNoAvailableCompactAccounts)) &&
@@ -2224,6 +2226,19 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 		// handler's bounded failover budget. Never retry the rejected row here.
 		if selection.ReleaseFunc != nil {
 			selection.ReleaseFunc()
+		}
+		// Capacity rejections are deliberate pre-send rotation, not a race.
+		// Give every opted-in row at most one chance in addition to the small
+		// race budget; request exclusions below still prohibit revisiting.
+		if !expandedPoolChecks && groupID != nil && s.accountRepo != nil {
+			expandedPoolChecks = true
+			if cohort, listErr := s.accountRepo.ListByPlatform(ctx, PlatformOpenAI); listErr == nil {
+				for i := range cohort {
+					if gatewayPoolRotationAccount(&cohort[i], *groupID) {
+						selectionChecks++
+					}
+				}
+			}
 		}
 		excludedIDs = cloneExcludedAccountIDs(excludedIDs)
 		if excludedIDs == nil {

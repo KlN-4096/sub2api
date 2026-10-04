@@ -629,7 +629,22 @@ export default {
       },
       // OpenAI specific hints
       openai: {
-        gwpoolRotation: 'Rotate accounts only after full-strength gateways are exhausted',
+        gatewayProgress: {
+          fetching: 'Fetching ticket {attempt}/{limit} · waiting {seconds}s',
+          verifying: 'Verifying ticket {attempt}/{limit} · waiting {seconds}s',
+          ready: 'Verified ticket found · {attempt}/{limit} · {seconds}s',
+          exhausted: 'Verification ended without a usable ticket · {attempt}/{limit}',
+          unknown: 'Verification incomplete (supply, timeout or upstream error) · {attempt}/{limit}',
+          cancelled: 'Request cancelled · {attempt}/{limit}',
+          rejected: '{count} did not pass',
+          concurrent: '{count} waiting requests',
+          unavailable: 'Live verification progress unavailable'
+        },
+        gwpoolRotation: 'Rotate accounts when gateway candidates are low',
+        gwpoolRotationMinGateways: 'Rotate below this many available gateways',
+        gwpoolRotationMinGatewaysDesc: '1–512; blank defaults to 1 (rotate at zero). Counts deliverable, non-cooling candidates, not verified full-strength tickets. Keep a live verified ticket; a failed listing is not zero.',
+        gwpoolBulkHint: 'Only checked fields change; others keep each account’s own value. Clear a number for its default. An empty Key keeps the existing key. Runtime statistics are not copied.',
+        gwpoolBulkApply: 'Change: {field}',
         gwpoolAutoWait: 'Wait for tickets (off by default)',
         gwpoolAutoWaitDesc: 'Before business transmission only, wait when no gateway, no live ticket or all gateways cooling prevents acquisition. Never replays sent business requests or retries authentication, rate-limit or other upstream failures. With rotation enabled, wait on this account first; switching still requires confirmed exhaustion.',
         gwpoolMaxWait: 'Maximum ticket wait (seconds)',
@@ -637,8 +652,8 @@ export default {
         gwpoolProbeModel: 'State-echo probe model (experimental)',
         gwpoolProbeModelDefault: 'Default: Luna (gpt-6-luna)',
         gwpoolProbeModelBusiness: 'Follow the business model',
-        gwpoolProbeModelDesc: 'By default Luna retrieves state in request A and echoes it in request B, always using the same selected model. Choose Astra, Sol, or the business model for the next foreground/background probe. Business model and state stay unchanged. Existing samples do not establish cross-model equivalence or guarantee full strength for business requests. Probes do not run while quality guard is off.',
-        gwpoolRotationDesc: 'Off by default. After a fresh listing confirms that retry-eligible gateways are exhausted, mark this credential exhausted before choosing another eligible pool-and-rotation account in the group. Rounds are shared across requests in one instance; credential clones count once. A new round starts only when all eligible credentials are exhausted, preferring the longest actual rest, including probe contacts. Initial selection prefers more cooled gateways; a session keeps its verified live window. Restart rebuilds rounds without clearing gateway cooldown or rate limits. Each credential is tried once per request; strong continuation bindings are preserved. A single degraded gateway, probe attempt/budget limits, timeouts, 429 or authentication errors alone never trigger switching or ordinary failover. The existing switch limit remains; first-output latency may increase.',
+        gwpoolProbeModelDesc: 'By default Luna retrieves state in request A and echoes it in request B, always using the same selected model. Choose Astra, Sol, or the business model for the next foreground probe. Business model and state stay unchanged. Existing samples do not establish cross-model equivalence or guarantee full strength for business requests. Probes do not run while quality guard is off.',
+        gwpoolRotationDesc: 'Off by default. Keep the current consumer identity within the group on this instance, finishing live verified windows first. With no live verified ticket, a fresh candidate count below the threshold permits pre-send rotation to eligible opted-in accounts in the same group. The old account becomes temporarily unschedulable for an estimated 30 seconds to 10 minutes (60 seconds if unknown), then is evaluated again, not assumed full strength. Clone identities share the round; requests do not revisit identities or break strong continuations. Manual, auth and rate-limit blocks remain intact. Listing failures are not zero; no additional upstream probes are generated. Restart rebuilds current-account memory without clearing cooldowns or temporary rests.',
         baseUrlHint: 'Leave default for official OpenAI API',
         apiKeyHint: 'Your OpenAI API Key',
         oauthPassthrough: 'Auto passthrough (auth only)',
@@ -766,13 +781,10 @@ export default {
           'Default 2 seconds. Limits the candidate-list request. On failure or timeout, the pool selects a gateway; local cooldown still applies.',
         gwpoolWarmTickets: 'Foreground candidate limit',
         gwpoolWarmTicketsDesc:
-          'Default 5 tickets, maximum 8. Higher values spend more verification requests, time and gateways entering cooldown, without guaranteeing success. Foreground only; background preparation tries at most 1 candidate per current window.',
-        gwpoolPrewarm: 'Prepare the next gateway early (off by default)',
-        gwpoolPrewarmDesc:
-          'When a business request arrives near the current verified gateway’s switch time, try at most 1 candidate in the background to reduce the next wait. This spends extra upstream requests and starts the candidate’s cooldown. Failure keeps the current ticket, with no retry in the same window. Wait-free switching is not guaranteed.',
+          'Default 5 tickets, maximum 8. Higher values spend more verification requests, time and gateways entering cooldown, without guaranteeing success. Verification runs only when business traffic needs a new ticket; no next ticket is prepared in advance.',
         gwpoolGuard: 'Degradation protection (on by default)',
         gwpoolGuardDesc:
-          'When on, verification is strict: an inconclusive result or insufficient budget blocks the business request, without calling it degraded. When off, skip quality checks, degradation blocking and background preparation; ticket fetching, cooldown and rate limits still apply. Verification is a routing-state signal, not a guarantee of answer quality.',
+          'When on, verification is strict: an inconclusive result or insufficient budget blocks the business request, without calling it degraded. When off, skip quality checks and degradation blocking; ticket fetching, cooldown and rate limits still apply. Verification is a routing-state signal, not a guarantee of answer quality.',
         gwpoolGuardDescs: {
           queue:
             'When protection is on, a new ticket takes 2 short verification requests before business traffic is sent. A degraded verdict tries another ticket; reaching the foreground limit without a pass fails the request. Verified tickets are reused while their cache lease is valid.'
@@ -780,13 +792,13 @@ export default {
         gwpoolDetails: 'Cooldown, trigger conditions and troubleshooting',
         gwpoolCooldownDetails:
           'Cooldown is tracked per account × gateway. Confirmed failure backs off through 1/2/4/6/8/10/12/16/20/24 hours; confirmed recovery ends the cycle. Two successes at the same interval in independent cycles lock it; another failure unlocks it. Network errors do not train it. Anonymous recommendations inform subsequent cycles, personal locks take priority, and active cooldowns are not suddenly shortened.',
-        gwpoolPrewarmDetails:
-          'Preparation is triggered only by business requests, not by idle-account timers. Timing considers cache expiry, recent verification duration and, when enough samples exist, historical windows. History is shared in memory and resets on restart; the cache deadline works without history. Each current window gets at most one round and one candidate, for up to 90 seconds and no later than current-ticket expiry. A verified candidate needs at least 60 seconds of cache life left to replace it. No ticket, failed verification or errors end the round. Logs: gwpool_prewarm_start / gwpool_prewarm_ready / gwpool_prewarm_degraded / gwpool_prewarm_no_ticket / gwpool_prewarm_inconclusive.',
         gwpoolGuardDetails:
-          'State-echo compares turn-state response headers across two requests: the second sends the first value and passes on HTTP 200 if it is not replaced. Rate limiting, faults or a missing baseline yield no quality verdict. Consecutive-refresh checks on business responses remain a heuristic and cannot guarantee detection of all degradation.',
+          'Foreground A/B retrieves state and echoes it. When a business state is refreshed, immediately confirm the newest state up to 3 times below 90 seconds of ticket age, 2 at 90–140 seconds, or 1 at 140 seconds and above. Any HTTP 200 with the same or absent state stops confirmation and retains the original business response; all refreshes discard the route. No cross-request counting or business-body replay. Errors, rate limits and timeouts are unknown and block delivery. Confirmation adds latency and quota usage; this heuristic does not guarantee detection of all degradation.',
         gwpoolWarmDetails:
           'Foreground verification has a default 90-second budget; ticket fetching can add more waiting, as can retries on other accounts. Verification uses at most half of the remaining server first-output deadline; insufficient budget blocks the business request. Verification spends upstream quota but is not billed as business traffic. Logs: gwpool_warm_probe (verification), gwpool_warm_inconclusive (no verdict; request blocked), gwpool_warm_no_budget (insufficient budget).',
         gwpoolErrors: {
+          GWPOOL_SETTING_INVALID: 'Invalid gateway pool setting; check field types and numeric ranges.',
+          GWPOOL_TARGET_INVALID: 'Bulk gateway pool settings require OpenAI OAuth or Setup Token accounts.',
           GWPOOL_PROBE_MODEL_INVALID: 'The experimental probe model must be Astra, Sol or Luna; default follows the business model.',
           GWPOOL_WAIT_INVALID: 'Ticket waiting must be boolean; the maximum wait must be an integer from 1 to 3600 seconds.',
           GWPOOL_BASE_URL_INVALID:

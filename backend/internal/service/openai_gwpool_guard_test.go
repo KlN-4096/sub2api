@@ -16,7 +16,7 @@ func TestGatewayPoolGuardOffSkipsVerificationAndResponseJudgment(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 	account := fake.account(1)
 	account.Extra["openai_gwpool_guard_enabled"] = false
-	account.Extra[openAIGatewayPoolPrewarmExtraKey] = true
+	account.Extra["openai_gwpool_prewarm"] = true // Legacy setting is ignored.
 	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
 		{status: http.StatusOK, minted: "changed-state"},
 		{status: http.StatusOK, minted: "changed-state"},
@@ -39,8 +39,6 @@ func TestGatewayPoolGuardOffSkipsVerificationAndResponseJudgment(t *testing.T) {
 	require.EqualValues(t, 1, fake.hits.Load(), "取票和缓存仍然生效")
 	require.True(t, svc.codexCookies.gatewayPoolUsedRecently(gwpoolTestIdentity, "unified-142", time.Hour))
 	require.False(t, svc.codexCookies.gatewayPoolVerifiedFull(gwpoolTestIdentity), "关防护不等于验证成功")
-	_, running := svc.codexCookies.poolPrewarm.Load(gwpoolTestIdentity)
-	require.False(t, running)
 }
 
 func TestGatewayPoolStrictGuardBlocksInsufficientBudgetBeforeFetching(t *testing.T) {
@@ -84,7 +82,5 @@ func TestGatewayPoolGuardOnlyExplicitBooleanFalseDisables(t *testing.T) {
 	}
 	account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = false
 	require.False(t, account.gatewayPoolGuardEnabled())
-	account.Extra[openAIGatewayPoolPrewarmExtraKey] = true
-	require.False(t, account.gatewayPoolPrewarmEnabled())
 	require.Equal(t, gatewayPoolWarmUnverifiedClientMsg, gatewayPoolClientMessage(errOpenAIGatewayPoolWarmUnverified))
 }

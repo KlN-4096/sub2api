@@ -334,7 +334,7 @@
             </div>
           </template>
           <template #cell-gateway="{ row }">
-            <AccountGatewayCell :account="row" />
+            <AccountGatewayCell :account="row" :progress="gatewayProgress[row.id]" :progress-unavailable="gatewayProgressUnavailable" />
           </template>
           <template #cell-proxy="{ row }">
             <div class="flex flex-col gap-1">
@@ -543,6 +543,7 @@ import type { SelectOption } from '@/components/common/Select.vue'
 import AccountStatusIndicator from '@/components/account/AccountStatusIndicator.vue'
 import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
 import AccountGatewayCell from '@/components/account/AccountGatewayCell.vue'
+import { useGatewayPoolProgress } from '@/composables/useGatewayPoolProgress'
 import AccountTurnStateCell from '@/components/account/AccountTurnStateCell.vue'
 import AccountTodayStatsCell from '@/components/account/AccountTodayStatsCell.vue'
 import AccountGroupsCell from '@/components/account/AccountGroupsCell.vue'
@@ -1123,6 +1124,12 @@ const {
     sort_order: sortState.sort_order
   }
 })
+
+const { progress: gatewayProgress, unavailable: gatewayProgressUnavailable } = useGatewayPoolProgress(computed(() =>
+  hiddenColumns.has('gateway') ? [] : accounts.value
+    .filter(account => account.extra?.openai_gwpool === true)
+    .map(account => account.id)
+))
 
 const {
   selectedSet,

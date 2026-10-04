@@ -38,19 +38,20 @@ func (s *openAICodexCookieStore) gatewayPoolInventoryOperation(identity string) 
 // batch cursor mutation; the generation lets callers reject a listing observed
 // across an intervening fetch/probe, including one that has already completed.
 func (s *openAICodexCookieStore) gatewayPoolInventorySnapshot(identity string, account *Account) (generation uint64, pending bool) {
+	generation, active, candidates := s.gatewayPoolInventoryCandidates(identity, account)
+	return generation, active || len(candidates) > 0
+}
+
+func (s *openAICodexCookieStore) gatewayPoolInventoryCandidates(identity string, account *Account) (generation uint64, active bool, candidates map[string]struct{}) {
 	state := s.gatewayPoolInventory(identity)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	candidates = map[string]struct{}{}
 	if state.active > 0 {
-		return state.generation, true
+		return state.generation, true, candidates
 	}
-	if _, live := s.cachedPoolPair(identity); live == openAIGatewayPoolPairLive {
-		return state.generation, true // verified OR not yet conclusively tested
-	}
-	if value, ok := s.poolPrewarm.Load(identity); ok {
-		if mark, valid := value.(gatewayPoolPrewarmMark); valid && mark.running {
-			return state.generation, true
-		}
+	if pair, live := s.cachedPoolPair(identity); live == openAIGatewayPoolPairLive {
+		candidates[pair.gateway] = struct{}{} // verified OR not yet conclusively tested
 	}
 	if value, ok := s.poolSpare.Load(identity); ok {
 		if batch, valid := value.(*gatewayPoolTicketBatch); valid {
@@ -59,10 +60,10 @@ func (s *openAICodexCookieStore) gatewayPoolInventorySnapshot(identity string, a
 					continue
 				}
 				if _, cooling := s.gatewayPoolUsedAt(identity, pair.gateway, account.gatewayPoolGatewayWindow()); !cooling {
-					return state.generation, true
+					candidates[pair.gateway] = struct{}{}
 				}
 			}
 		}
 	}
-	return state.generation, false
+	return state.generation, false, candidates
 }

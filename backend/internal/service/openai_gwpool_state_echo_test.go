@@ -48,6 +48,7 @@ type gwpoolEchoUpstream struct {
 	sentCookies []string
 	sentBodies  []string
 	bodies      []*gwpoolEchoBody
+	beforeReply func(*http.Request, int) error
 }
 
 func (u *gwpoolEchoUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
@@ -62,6 +63,11 @@ func (u *gwpoolEchoUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*h
 		sent = string(raw)
 	}
 	u.sentBodies = append(u.sentBodies, sent)
+	if u.beforeReply != nil {
+		if err := u.beforeReply(req, len(u.sentBodies)); err != nil {
+			return nil, err
+		}
+	}
 
 	reply := gwpoolEchoReply{status: http.StatusOK}
 	if n := len(u.sentBodies) - 1; n < len(u.replies) {
@@ -147,22 +153,17 @@ func gwpoolEchoSeedVerified(t *testing.T, svc *OpenAIGatewayService, acct *Accou
 // retries=0 = 只截断那一档。
 func TestStateEchoDegradedTruncatesAndMarksPairStale(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-	// 票龄不到 90 秒要连着三发被刷新才判死（gatewayPoolEchoStrikes），所以这里要
-	// 攒满三发才看得到截断。前两发是放行的，它们的响应体照常交给调用方。
+	// 一次业务刷新后连续三次确认均刷新，不交付原业务。
 	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
 		{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
-		{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
-		{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
+		{status: http.StatusOK, minted: "confirm-2"},
+		{status: http.StatusOK, minted: "confirm-3"},
+		{status: http.StatusOK, minted: "confirm-4"},
 	}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	acct := gwpoolEchoAccount(fake)
 
-	for i := 1; i <= 2; i++ {
-		_, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
-		require.NoError(t, err, "第 %d 发还没攒满，该照常放行", i)
-		require.NotNil(t, resp)
-		_ = resp.Body.Close()
-	}
+	gwpoolEchoSeedVerified(t, svc, acct)
 	mark, ok := svc.codexCookies.gatewayPoolVerifiedMarkOf(gwpoolTestIdentity)
 	require.True(t, ok)
 	mark.at = time.Now().Add(-75 * time.Second)
@@ -175,7 +176,9 @@ func TestStateEchoDegradedTruncatesAndMarksPairStale(t *testing.T) {
 		"必须包着 ErrPool：classifyUpstreamTransportError 据此豁免「按代理持久故障停调度 10 分钟」")
 	require.ErrorIs(t, err, errOpenAIGatewayPoolRouteDegraded)
 
-	require.Len(t, upstream.sentBodies, 3, "三发判据 + 一发都不许重发")
+	require.Len(t, upstream.sentBodies, 4, "一次业务 + 三次最小确认，不重发业务")
+	require.True(t, upstream.bodies[0].closed)
+	require.Zero(t, upstream.bodies[0].reads)
 	last := len(upstream.bodies) - 1
 	require.True(t, upstream.bodies[last].closed, "丢弃的响应体必须当场关掉")
 	require.Zero(t, upstream.bodies[last].reads, "判据只读响应头，一个字节的响应体都不许读")
@@ -308,11 +311,12 @@ func TestStateEchoIgnoresNon200EvenWithFreshTicket(t *testing.T) {
 // 所以「读到了就关掉防护」是一个**能在现网发生**的回归，不是假想。
 func TestGatewayPoolGuardHasNoModesLeft(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-	// 票龄不到 90 秒要连着三发被刷新才判死（gatewayPoolEchoStrikes）。
+	// 旧键不绕过单轮三次确认。
 	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
 		{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
-		{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
-		{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
+		{status: http.StatusOK, minted: "confirm-2"},
+		{status: http.StatusOK, minted: "confirm-3"},
+		{status: http.StatusOK, minted: "confirm-4"},
 	}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	acct := fake.account(1)
@@ -321,12 +325,6 @@ func TestGatewayPoolGuardHasNoModesLeft(t *testing.T) {
 	acct.Extra["openai_gwpool_state_echo"] = false
 	acct.Extra["openai_gwpool_degraded_retries"] = 0
 
-	for i := 1; i <= 2; i++ {
-		_, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
-		require.NoError(t, err, "第 %d 发还没攒满，该照常放行", i)
-		require.NotNil(t, resp)
-		_ = resp.Body.Close()
-	}
 	_, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
 	require.Nil(t, resp, "死键不许把降智的响应放出去")
 	require.ErrorIs(t, err, errOpenAIGatewayPoolRouteDegraded)
@@ -450,40 +448,6 @@ func TestEchoStrikeLadderByTicketAge(t *testing.T) {
 	require.Equal(t, 1, gatewayPoolEchoStrikes(time.Since(time.Time{})))
 }
 
-// 连续计数：被刷新累加，中间读到一发满血就归零。
-//
-// 归零是承重的：窗口真烧完之后每一发都会被刷新，所以夹着一发没被刷新的就说明这条
-// 路由还好着。不归零的话 刷新/满血/刷新 会被数成「连着两发」，而 90 秒内本该要三发。
-func TestNoteEchoCountsConsecutiveRefreshesAndResets(t *testing.T) {
-	store := &openAICodexCookieStore{}
-	store.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
-		cookie: "__cflb=a", gateway: "unified-142", version: "tkt-1",
-		until: time.Now().Add(time.Minute), since: time.Now(), firstSent: time.Now(),
-	})
-
-	misses, age := store.gatewayPoolNoteEcho(gwpoolTestIdentity, "tkt-1", "unified-142", true)
-	require.Equal(t, 1, misses)
-	require.Less(t, age, gatewayPoolEchoYoungAge, "刚进缓存的票该算「年轻」")
-
-	misses, _ = store.gatewayPoolNoteEcho(gwpoolTestIdentity, "tkt-1", "unified-142", true)
-	require.Equal(t, 2, misses)
-
-	misses, _ = store.gatewayPoolNoteEcho(gwpoolTestIdentity, "tkt-1", "unified-142", false)
-	require.Equal(t, 0, misses, "读到一发满血要归零")
-
-	misses, _ = store.gatewayPoolNoteEcho(gwpoolTestIdentity, "tkt-1", "unified-142", true)
-	require.Equal(t, 1, misses, "归零之后要从 1 重新数")
-
-	// 票号和落点都对不上 ⇒ 缓存里已经是另一张票，这一发的读数无处可归，回 0。
-	// 调用方按最严办（判死），所以这里绝不能回一个「还没攒满」的数。
-	misses, _ = store.gatewayPoolNoteEcho(gwpoolTestIdentity, "tkt-9", "unified-999", true)
-	require.Equal(t, 0, misses)
-
-	require.NotPanics(t, func() {
-		(*openAICodexCookieStore)(nil).gatewayPoolNoteEcho("x", "y", "z", true)
-	})
-}
-
 // 丢弃读数的入口在没有 gin 上下文时静默退化（裸结构体单测、WS 之类没挂 sink 的路径）。
 func TestDiscardedAttemptsWithoutSinkAreEmpty(t *testing.T) {
 	require.Empty(t, takeDiscardedOpenAIGatewayPoolAttempts(nil))
@@ -551,22 +515,15 @@ func TestStateEchoRecordsBothVerdictsOnTheAppliedSnapshot(t *testing.T) {
 
 	t.Run("降智那一发自己带着降智读数", func(t *testing.T) {
 		fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-		// 半程 state-echo：票龄不到 90 秒要**连着三发**被刷新才判死，所以前两发
-		// 照常交付、第三发才丢弃（gatewayPoolEchoStrikes）。
+		// 原业务刷新后，三发确认均刷新才落降级读数。
 		upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
 			{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
-			{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
-			{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
+			{status: http.StatusOK, minted: "confirm-2"},
+			{status: http.StatusOK, minted: "confirm-3"},
+			{status: http.StatusOK, minted: "confirm-4"},
 		}}
 		svc := &OpenAIGatewayService{httpUpstream: upstream}
 		acct := gwpoolEchoAccount(fake)
-
-		for i := 1; i <= 2; i++ {
-			_, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
-			require.NoError(t, err, "第 %d 发还没攒满，该照常放行", i)
-			require.NotNil(t, resp)
-			_ = resp.Body.Close()
-		}
 
 		ginCtx, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
 		require.ErrorIs(t, err, errOpenAIGatewayPoolRouteDegraded, "连着三发被刷新就该判死")
