@@ -94,7 +94,7 @@ func TestGatewayPoolCooldownRejectsInvalidPersistedState(t *testing.T) {
 	pending.AttemptAt, pending.AttemptSeconds, pending.ElapsedSeconds = now, 3600, 3600
 	store := &openAICodexCookieStore{}
 	store.hydrateCooldown(gwpoolTestIdentity, "unified-142", &pending, 3600)
-	sample := store.observeGatewayPoolCooldown(gwpoolTestIdentity, "unified-142", openAIGatewayVerdictFull, time.Hour)
+	sample := store.observeGatewayPoolCooldown(gwpoolTestIdentity, "unified-142", openAIGatewayVerdictFull, time.Hour, time.Time{})
 	require.Nil(t, sample, "恢复的是冷却，不是别的请求的在途学习分数")
 	c, _ := store.cooldownEntry(gwpoolTestIdentity, "unified-142")
 	require.Empty(t, c.Successes)
@@ -149,7 +149,7 @@ func TestGatewayPoolCooldownPersistsAndScopesByUpstreamAccount(t *testing.T) {
 	store := &openAICodexCookieStore{}
 	identity := "chatgpt:acct-a:user:one"
 	require.True(t, store.beginGatewayPoolAttempt(identity, "unified-142", time.Hour))
-	store.observeGatewayPoolCooldown(identity, "unified-142", openAIGatewayVerdictDegraded, time.Hour)
+	store.observeGatewayPoolCooldown(identity, "unified-142", openAIGatewayVerdictDegraded, time.Hour, time.Time{})
 	require.False(t, store.beginGatewayPoolAttempt("chatgpt:acct-a:user:two", "unified-142", time.Hour))
 	require.True(t, store.beginGatewayPoolAttempt("chatgpt:acct-b", "unified-142", time.Hour))
 	require.True(t, store.beginGatewayPoolAttempt(identity, "unified-143", time.Hour))

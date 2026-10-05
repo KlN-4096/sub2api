@@ -651,6 +651,11 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	// 与非透传路径同一条规则（openai_codex_wire_user_location.go）。
 	body = rewriteCodexWebSearchUserLocation(c, account, body)
 
+	openAIGatewayPoolSinkFrom(ctx).noteModel(gjson.GetBytes(body, "model").String())
+	if account.UsesGatewayPool() && account.gatewayPoolGuardEnabled() {
+		ctx = context.WithValue(ctx, gatewayPoolConfirmBodyKey{}, gatewayPoolConfirmBody(body))
+	}
+
 	// 上线字节：双开 /responses 的请求体按真客户端默认做 zstd 压缩，与非透传路径同一条规则。
 	wireBody, contentEncoding, err := compressCodexRequestBody(c, account, targetURL, body)
 	if err != nil {

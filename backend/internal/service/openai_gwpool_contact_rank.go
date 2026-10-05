@@ -189,7 +189,7 @@ func (b *gatewayPoolTicketBatch) rankRemaining(ctx context.Context) {
 		// eligible global candidate is available.
 		var additional []gwpool.Gateway
 		for _, candidate := range catalog {
-			if held[candidate.Name] || !candidate.PairReady || candidate.UsedByYou {
+			if held[candidate.Name] || !candidate.PairReady {
 				continue
 			}
 			if _, cooling := b.store.gatewayPoolUsedAt(b.identity, candidate.Name, b.account.gatewayPoolGatewayWindow(), b.account.gatewayPoolUseRecommendation()); !cooling {

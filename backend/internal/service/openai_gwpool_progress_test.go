@@ -96,3 +96,30 @@ func TestGatewayPoolProgressDoesNotCountMissingOrUnconfirmedTicket(t *testing.T)
 		require.Zero(t, svc.GatewayPoolProgress([]int64{1})[1].Attempt)
 	}
 }
+
+func TestGatewayPoolProgressEndsWithUsageCycle(t *testing.T) {
+	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	account := fake.account(1)
+	svc, _ := gatewayRuntimeService(account)
+	ctx, finish := svc.beginGatewayPoolUsageRequest(context.Background(), account)
+	defer finish()
+	ctx, _ = withOpenAIGatewayPoolSink(ctx, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
+	require.NoError(t, err)
+	err = svc.gatewayPoolWarmUpWith(req, account, gwpoolTestIdentity, gwpoolWarmModel,
+		func(context.Context, string, string) (int, string, error) { return 200, "same-state", nil })
+	require.NoError(t, err)
+	before, err := svc.GatewayPoolRuntimeProgress(ctx, []int64{1})
+	require.NoError(t, err)
+	require.Equal(t, "ready", before[1].Phase)
+	svc.changeGatewayPoolUsage(ctx, account, gwpoolTestIdentity, func(state *gatewayPoolUsageLedger) bool {
+		return state.end(time.Now().UTC(), "temporarily_unschedulable")
+	})
+	after, err := svc.GatewayPoolRuntimeProgress(ctx, []int64{1})
+	require.NoError(t, err)
+	require.Equal(t, "idle", after[1].Phase)
+	require.Empty(t, after[1].RunID)
+	require.Zero(t, after[1].Attempt)
+	require.Zero(t, after[1].ElapsedMS)
+	require.NotNil(t, after[1].Runtime, "ending a cycle must not erase inventory/history")
+}

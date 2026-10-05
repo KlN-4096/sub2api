@@ -91,11 +91,15 @@ var schedulerNeutralExtraKeys = map[string]struct{}{
 	"openai_gwpool_feedback_outbox":   {},
 	"openai_gwpool_contacts":          {},
 	// 同一上游身份的历史查询标签；运行态中立键，消费端使用 GetByID / FindByExtraField 新鲜读取。
-	"openai_gwpool_ledger_tag":          {},
-	"openai_gwpool_previous_ledger_tag": {},
-	"openai_gwpool_usage_rounds":        {},
-	"openai_gwpool_usage_tag":           {},
-	"openai_gwpool_usage_previous_tag":  {},
+	"openai_gwpool_ledger_tag":           {},
+	"openai_gwpool_previous_ledger_tag":  {},
+	"openai_gwpool_usage_rounds":         {},
+	service.GatewayPoolUsageBlockedAtKey: {},
+	"openai_gwpool_usage_tag":            {},
+	"openai_gwpool_usage_previous_tag":   {},
+	"openai_gwpool_rest_state":           {},
+	"openai_gwpool_rest_tag":             {},
+	"openai_gwpool_rest_previous_tag":    {},
 }
 
 const postgresParameterBatchSize = 50000
@@ -2506,16 +2510,55 @@ func (r *accountRepository) SetOverloaded(ctx context.Context, id int64, until t
 	return nil
 }
 
+// SetGatewayPoolRest persists the recovery latch and scheduling block as one
+// mutation. A longer unrelated block retains both its deadline and reason.
+func (r *accountRepository) SetGatewayPoolRest(ctx context.Context, id int64, until time.Time, reason string, patch map[string]any) error {
+	data, err := json.Marshal(patch)
+	if err != nil {
+		return err
+	}
+	result, err := r.sql.ExecContext(ctx, `
+		WITH updated AS (
+			UPDATE accounts
+			SET temp_unschedulable_until = GREATEST(temp_unschedulable_until, $1),
+				temp_unschedulable_reason = CASE
+					WHEN temp_unschedulable_until IS NULL OR temp_unschedulable_until < $1 THEN $2
+					ELSE temp_unschedulable_reason END,
+				extra = COALESCE(extra, '{}'::jsonb) || $4::jsonb || jsonb_build_object($5::text, NOW()),
+				updated_at = NOW()
+			WHERE id = $3 AND deleted_at IS NULL
+			RETURNING id
+		)
+		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+		SELECT $6, updated.id, NULL, NULL FROM updated
+	`, until, reason, id, string(data), service.GatewayPoolUsageBlockedAtKey, service.SchedulerOutboxEventAccountChanged)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return service.ErrAccountNotFound
+	}
+	r.syncSchedulerAccountSnapshot(ctx, id)
+	return nil
+}
+
 func (r *accountRepository) SetTempUnschedulable(ctx context.Context, id int64, until time.Time, reason string) error {
 	result, err := r.sql.ExecContext(ctx, `
 		UPDATE accounts
 		SET temp_unschedulable_until = $1,
 			temp_unschedulable_reason = $2,
+			extra = CASE WHEN platform = 'openai' AND extra->'openai_gwpool' = 'true'::jsonb
+				THEN COALESCE(extra, '{}'::jsonb) || jsonb_build_object($4::text, NOW())
+				ELSE extra END,
 			updated_at = NOW()
 		WHERE id = $3
 			AND deleted_at IS NULL
 			AND (temp_unschedulable_until IS NULL OR temp_unschedulable_until < $1)
-	`, until, reason, id)
+	`, until, reason, id, service.GatewayPoolUsageBlockedAtKey)
 	if err != nil {
 		return err
 	}

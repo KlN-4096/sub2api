@@ -68,6 +68,9 @@ func (t gatewayPoolUsageTicket) duration(now time.Time) int64 {
 }
 
 func (r *GatewayPoolUsageRound) fullUseDuration(now time.Time) int64 {
+	if !r.EndedAt.IsZero() && r.EndedAt.Before(now) {
+		now = r.EndedAt
+	}
 	var total int64
 	for _, ticket := range r.Tickets {
 		total += ticket.duration(now)
@@ -153,6 +156,7 @@ func (s *OpenAIGatewayService) noteGatewayPoolFullUse(ctx context.Context, accou
 	if at.IsZero() || applied.Version == "" || account == nil || applied.AccountID != account.ID {
 		return
 	}
+	at = gatewayPoolUsageEventAt(ctx, at)
 	pair, _ := s.codexCookies.cachedPoolPair(identity)
 	mark, ok := s.codexCookies.gatewayPoolVerifiedMarkOf(identity)
 	if pair.version != applied.Version || pair.invalidated || !ok || mark.version != applied.Version {
@@ -161,6 +165,9 @@ func (s *OpenAIGatewayService) noteGatewayPoolFullUse(ctx context.Context, accou
 	ticket := gatewayPoolUsageTicketKey(applied.Gateway, applied.Version)
 	session := s.codexCookies.gatewayPoolUsageSession()
 	s.changeGatewayPoolUsage(ctx, account, identity, func(state *gatewayPoolUsageLedger) bool {
+		if state.requestClosed(ctx) {
+			return false
+		}
 		noted := state.note(gatewayPoolUsageSharedModel, ticket, at, true)
 		return state.startFullUse(ticket, at, pair.routeExpiresAt, session) || noted
 	}, func(state *gatewayPoolUsageLedger) bool {
@@ -197,12 +204,18 @@ func (r GatewayPoolUsageRound) fullUsageView(live map[string]openAIGatewayPoolPa
 		return r
 	}
 	r.FullDurationMS, r.FullActiveUntil = 0, nil
+	if !r.EndedAt.IsZero() && r.EndedAt.Before(now) {
+		now = r.EndedAt
+	}
 	for key, ticket := range r.Tickets {
 		pair, known := live[key]
 		end, incomplete := ticket.useEnd(pair, known, session, now)
 		r.DurationIncomplete = r.DurationIncomplete || incomplete
 		if !end.IsZero() {
 			ticket.UseEndedAt = end
+		}
+		if !r.EndedAt.IsZero() && (ticket.UseEndedAt.IsZero() || ticket.UseEndedAt.After(r.EndedAt)) {
+			ticket.UseEndedAt = r.EndedAt
 		}
 		r.FullDurationMS += ticket.duration(now)
 		if !ticket.UseStartedAt.IsZero() && ticket.UseEndedAt.IsZero() && r.EndedAt.IsZero() {

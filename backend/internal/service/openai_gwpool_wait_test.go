@@ -25,6 +25,7 @@ func ticketWaitFixture(t *testing.T) (*OpenAIGatewayService, *gatewayRuntimeRepo
 	svc, repo := gatewayRuntimeService(account)
 	request, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
 	require.NoError(t, err)
+	request.Header.Set(openAICodexTurnStateHeader, "business-state")
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ctx, _ := withOpenAIGatewayPoolSink(context.Background(), ginCtx)
 	ctx = svc.gatewayPoolWaitContext(ctx, account)

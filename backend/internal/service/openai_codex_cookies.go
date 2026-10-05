@@ -37,6 +37,7 @@ type openAICodexCookieStore struct {
 	poolFetch      singleflight.Group
 	poolEarlyAt    sync.Map // credential domain -> last durable early reservation
 	poolEarlyLocks sync.Map // ledger domain (may span distinct pair-cache identities) -> *sync.Mutex
+	poolEarlySkips sync.Map // account ID -> last throttled skip reason
 	poolEarlyClaim func(context.Context, *Account, string, time.Time) error
 	// poolVerified 是「这个身份手上那张票**验过是满血**」（openai_gwpool_warm.go）。
 	//
@@ -54,6 +55,8 @@ type openAICodexCookieStore struct {
 	poolFeedbackPolicies    sync.Map // binding+gateway -> latest reporting-policy observation
 	poolFeedbackPolicyPrune atomic.Int64
 	poolRounds              gatewayPoolRounds
+	poolRestLocks           sync.Map // ledger tag -> *sync.Mutex, serialized recovery decisions
+	poolRestState           sync.Map // ledger tag -> gatewayPoolRestState; includes fail-closed pending writes
 	poolUsageLocks          sync.Map // ledger tag -> *sync.Mutex, durable usage rounds
 	poolUsageCache          sync.Map // ledger tag -> *gatewayPoolUsageLedger, immutable committed snapshot
 	poolUsageSessionOnce    sync.Once
@@ -71,15 +74,17 @@ type openAICodexCookieStore struct {
 	// poolUsed 是「这个凭证域身份最近碰过哪些网关」的本地账本，用来挑一个没烧过的落点，
 	// 并作为 /cookie 的 exclude 带给池子（裸取时也能避开烧过的落点）。
 	// 池子按它发的 consumer key 记账，认不出同一份凭据挂在多个账号行上（见 gatewayPoolLedgerKey）。
-	poolUsed            sync.Map // 凭证域身份 + "\x00" + 网关名 → time.Time
-	poolCooldownMu      sync.Mutex
-	poolCooldown        map[string]gatewayPoolCooldown
-	poolRecommendations sync.Map // ledger identity × gateway → gatewayPoolRecommendation
-	poolCooldownPersist func(context.Context, *Account, string)
-	poolHistoryLocks    sync.Map // 本地行 ID → *sync.Mutex，串行合并已有 history。
-	accountByID         func(context.Context, int64) (*Account, error)
-	historyByTag        func(context.Context, string) ([]Account, error)
-	poolHistoryLoad     singleflight.Group
+	poolUsed               sync.Map // 凭证域身份 + "\x00" + 网关名 → time.Time
+	poolCooldownMu         sync.Mutex
+	poolCooldown           map[string]gatewayPoolCooldown
+	poolCooldownReset      sync.Map // ledger identity -> last committed reset barrier; writes hold poolCooldownMu
+	poolCooldownResetLocks sync.Map // ledger identity -> *sync.Mutex; timer writes only
+	poolRecommendations    sync.Map // ledger identity × gateway → gatewayPoolRecommendation
+	poolCooldownPersist    func(context.Context, *Account, string)
+	poolHistoryLocks       sync.Map // 本地行 ID → *sync.Mutex，串行合并已有 history。
+	accountByID            func(context.Context, int64) (*Account, error)
+	historyByTag           func(context.Context, string) ([]Account, error)
+	poolHistoryLoad        singleflight.Group
 	// poolBackoff 是「池子让这个身份先别取票」的到点（见 gatewayPoolBackoff）。
 	// 按**上游账号**记而不是按请求：退避只对本次请求生效的话，重试环照旧每轮都去敲池子。
 	poolBackoff sync.Map // 账本身份（上游账号粒度）→ time.Time

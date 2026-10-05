@@ -81,10 +81,13 @@ function mountModal(extraProps: Record<string, unknown> = {}) {
 }
 
 describe('BulkEditAccountModal', () => {
-  it('网关池仅发送显式勾选字段，空Key保留且无后台预热', async () => {
+  it('网关池发送勾选字段及固定防护/Luna策略，空Key保留且无后台预热', async () => {
     const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth', 'setup-token'] })
     expect(wrapper.find('[data-testid="bulk-gwpool"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid*="prewarm"]').exists()).toBe(false)
+    for (const key of ['guard_enabled', 'probe_model', 'rotation']) {
+      expect(wrapper.find(`[data-testid="bulk-gwpool-apply-openai_gwpool_${key}"]`).exists()).toBe(false)
+    }
     await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_warm_tickets"]').setValue(true)
     await wrapper.get('[data-testid="bulk-gwpool-value-openai_gwpool_warm_tickets"]').setValue(3)
     await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_rotation_min_gateways"]').setValue(true)
@@ -93,7 +96,8 @@ describe('BulkEditAccountModal', () => {
     await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
     await flushPromises()
     expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], expect.objectContaining({
-      extra: { openai_gwpool_warm_tickets: 3, openai_gwpool_rotation_min_gateways: 4 }
+      extra: { openai_gwpool_warm_tickets: 3, openai_gwpool_rotation_min_gateways: 4,
+        openai_gwpool_guard_enabled: true, openai_gwpool_probe_model: 'gpt-6-luna' }
     }))
     wrapper.unmount()
   })
@@ -103,12 +107,30 @@ describe('BulkEditAccountModal', () => {
     expect(mixed.find('[data-testid="bulk-gwpool"]').exists()).toBe(false)
     mixed.unmount()
     const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth'] })
-    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_rotation"]').setValue(true)
-    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_rotation"]').setValue(false)
+    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_rotation_min_gateways"]').setValue(true)
+    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_rotation_min_gateways"]').setValue(false)
     await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
     await flushPromises()
     expect(adminAPI.accounts.bulkUpdate).not.toHaveBeenCalled()
     expect(showError).toHaveBeenCalledWith('admin.accounts.bulkEdit.noFieldsSelected')
+    wrapper.unmount()
+  })
+
+  it('恢复阈值独立勾选默认50，留空恢复默认且不改停调阈值', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth'] })
+    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_resume_gateways"]').setValue(true)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="bulk-gwpool-value-openai_gwpool_resume_gateways"]').element.value).toBe('50')
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenLastCalledWith([1, 2], expect.objectContaining({
+      extra: { openai_gwpool_resume_gateways: 50, openai_gwpool_guard_enabled: true, openai_gwpool_probe_model: 'gpt-6-luna' }
+    }))
+    await wrapper.get('[data-testid="bulk-gwpool-value-openai_gwpool_resume_gateways"]').setValue('')
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenLastCalledWith([1, 2], expect.objectContaining({
+      extra: { openai_gwpool_resume_gateways: null, openai_gwpool_guard_enabled: true, openai_gwpool_probe_model: 'gpt-6-luna' }
+    }))
     wrapper.unmount()
   })
   beforeEach(() => {
@@ -902,6 +924,23 @@ describe('BulkEditAccountModal', () => {
         openai_passthrough: false,
         openai_oauth_passthrough: false
       }
+    })
+  })
+
+  it('explicitly applies a 24-hour cooldown reset or disables it with zero', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth'] })
+    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_cooldown_reset_hours"]').setValue(true)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
+      extra: { openai_gwpool_cooldown_reset_hours: 24, openai_gwpool_guard_enabled: true, openai_gwpool_probe_model: 'gpt-6-luna' }
+    })
+    vi.mocked(adminAPI.accounts.bulkUpdate).mockClear()
+    await wrapper.get('[data-testid="bulk-gwpool-value-openai_gwpool_cooldown_reset_hours"]').setValue(0)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
+      extra: { openai_gwpool_cooldown_reset_hours: 0, openai_gwpool_guard_enabled: true, openai_gwpool_probe_model: 'gpt-6-luna' }
     })
   })
 

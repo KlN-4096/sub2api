@@ -23,6 +23,7 @@ const (
 // gatewayPoolCooldown 持久化在已有的 seen[gateway] 中。Until 是本地下一次允许试用的时刻，
 // 不是上游保证恢复的时刻；成功样本只在不同尝试对应的独立冷却周期里计一次。
 type gatewayPoolCooldown struct {
+	ResetAt              time.Time   `json:"reset_at,omitzero"`
 	SourcesKnown         bool        `json:"sources_known,omitempty"`
 	BaseSeconds          int         `json:"base_seconds,omitempty"`
 	LocalFloorSeconds    int         `json:"local_floor_seconds,omitempty"`
@@ -220,6 +221,9 @@ func validGatewayPoolCooldown(c *gatewayPoolCooldown, now time.Time, base int) b
 	if c == nil {
 		return false
 	}
+	if c.ResetAt.After(now.Add(gatewayPoolCooldownGrace)) {
+		return false
+	}
 	anchor := c.UpdatedAt
 	if c.SourcesKnown {
 		if c.CycleAt.IsZero() || c.CycleAt.After(now.Add(gatewayPoolCooldownGrace)) ||
@@ -259,20 +263,29 @@ func validGatewayPoolCooldown(c *gatewayPoolCooldown, now time.Time, base int) b
 	return c.FixedSeconds == 0 || c.Successes[c.FixedSeconds] == gatewayPoolCooldownLocks
 }
 
-func (s *openAICodexCookieStore) hydrateCooldown(identity, gateway string, c *gatewayPoolCooldown, base int) {
+func (s *openAICodexCookieStore) hydrateCooldown(identity, gateway string, c *gatewayPoolCooldown, base int, touched ...time.Time) {
 	if !validGatewayPoolCooldown(c, time.Now().UTC(), base) {
 		return
 	}
 	s.poolCooldownMu.Lock()
 	defer s.poolCooldownMu.Unlock()
 	key := gatewayPoolLedgerKey(identity, gateway)
-	if prev, ok := s.poolCooldown[key]; ok && !c.changedAt().After(prev.changedAt()) {
+	restored := c.clone()
+	var at time.Time
+	if len(touched) > 0 {
+		at = touched[0]
+	}
+	resetAt := s.gatewayPoolCooldownResetAt(identity)
+	if prev, ok := s.poolCooldown[key]; ok && c.ResetAt.Before(resetAt) && !prev.ResetAt.Before(resetAt) {
+		return // old-generation late writes cannot erase post-reset learning either
+	}
+	restored.resetBackoff(resetAt, at, base)
+	if prev, ok := s.poolCooldown[key]; ok && !newerGatewayPoolCooldown(&restored, &prev) {
 		return
 	}
 	if s.poolCooldown == nil {
 		s.poolCooldown = map[string]gatewayPoolCooldown{}
 	}
-	restored := c.clone()
 	// 未完成的尝试属于写入它的请求/进程。恢复冷却，不恢复可供下一次响应计分的在途样本。
 	if restored.Outcome == "" {
 		restored.AttemptAt = time.Time{}
@@ -364,12 +377,15 @@ func (s *openAICodexCookieStore) beginGatewayPoolEarlyAttempt(identity, gateway 
 	s.poolCooldown[key] = c
 }
 
-func (s *openAICodexCookieStore) observeGatewayPoolCooldown(identity, gateway, verdict string, window time.Duration, enabled ...bool) *gatewayPoolCooldownSample {
+func (s *openAICodexCookieStore) observeGatewayPoolCooldown(identity, gateway, verdict string, window time.Duration, resetAt time.Time, enabled ...bool) *gatewayPoolCooldownSample {
 	if identity == "" || gateway == "" {
 		return nil
 	}
 	s.poolCooldownMu.Lock()
 	defer s.poolCooldownMu.Unlock()
+	if !resetAt.Equal(s.gatewayPoolCooldownResetAt(identity)) {
+		return nil // an old attempt cannot train a new reset generation
+	}
 	key := gatewayPoolLedgerKey(identity, gateway)
 	c := s.poolCooldown[key]
 	base, recommendation := s.gatewayPoolInitialCooldown(identity, gateway, window, enabled...)
@@ -428,6 +444,7 @@ func (s *OpenAIGatewayService) noteGatewayPoolCooldownVerdict(
 	if applied.LedgerTag != "" && applied.LedgerTag != gatewayPoolLedgerTag(identity) {
 		return
 	}
-	sample := s.codexCookies.observeGatewayPoolCooldown(identity, applied.Gateway, verdict, account.gatewayPoolGatewayWindow(), account.gatewayPoolUseRecommendation())
+	sample := s.codexCookies.observeGatewayPoolCooldown(identity, applied.Gateway, verdict,
+		account.gatewayPoolGatewayWindow(), applied.cooldownResetAt, account.gatewayPoolUseRecommendation())
 	s.reportGatewayPoolCooldown(account, identity, sample)
 }

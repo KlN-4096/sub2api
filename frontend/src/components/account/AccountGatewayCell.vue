@@ -6,7 +6,7 @@
         {{ t('admin.accounts.openai.gatewayProgress.unavailable') }}
       </p>
       <template v-else>
-        <span v-if="progress?.run_id">{{ t('admin.accounts.openai.gatewayProgress.run', { id: progress.run_id }) }} · </span>
+        <span v-if="progress?.sequence">{{ t('admin.accounts.openai.gatewayProgress.run', { id: progress.sequence }) }} · </span>
         {{ t(`admin.accounts.openai.gatewayProgress.${progress?.phase || 'idle'}`) }}
       </template>
       <p v-if="progress && progress.phase !== 'idle'" class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
@@ -43,6 +43,10 @@
         <span class="tabular-nums">{{ t('admin.accounts.openai.gatewayRuntime.active', { duration: fullUseTime(round) }) }}</span>
         <span v-if="round.incomplete">{{ t('admin.accounts.openai.gatewayRuntime.incomplete') }}</span>
         <span v-if="round.duration_incomplete">{{ t('admin.accounts.openai.gatewayRuntime.durationIncomplete') }}</span>
+      </p>
+      <p v-if="usesPool && runtime && !activeRounds.length" class="flex flex-wrap justify-between gap-x-3 text-[11px] text-gray-500 dark:text-gray-400" data-testid="account-gateway-usage-idle">
+        <span>{{ t('admin.accounts.openai.gatewayRuntime.counts', { full: 0, attempted: 0 }) }}</span>
+        <span>{{ t('admin.accounts.openai.gatewayRuntime.active', { duration: formatUseTime(0) }) }}</span>
       </p>
       <!-- 九个大区各自落在哪个网关。满血窗口的单位是 (账号 × 网关)，而网关 = (大区 × 账号)
            ⇒ 这张格子回答的是「这个号现在还能去哪个大区铸没烧过的票」：窗口内打过的高亮

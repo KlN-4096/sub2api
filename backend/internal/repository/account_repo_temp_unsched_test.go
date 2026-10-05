@@ -23,7 +23,35 @@ func TestAccountRepository_SetTempUnschedulable_NoRowsAffectedDoesNotWriteOutbox
 	require.NoError(t, err)
 	require.Len(t, exec.execQueries, 1)
 	require.Contains(t, exec.execQueries[0], "UPDATE accounts")
+	require.Contains(t, exec.execQueries[0], "extra->'openai_gwpool' = 'true'::jsonb")
+	require.Contains(t, exec.execQueries[0], "jsonb_build_object($4::text, NOW())")
+	require.Equal(t, service.GatewayPoolUsageBlockedAtKey, exec.execArgs[0][3])
 	require.NotContains(t, strings.Join(exec.execQueries, "\n"), "scheduler_outbox")
+}
+
+func TestAccountRepository_SetGatewayPoolRestIsAtomicAndPreservesLongerBlock(t *testing.T) {
+	exec := &recordingSQLExecutor{result: rowsAffectedResult(1)}
+	repo := newAccountRepositoryWithSQL(nil, exec, nil)
+	until := time.Now().Add(time.Minute)
+	err := repo.SetGatewayPoolRest(context.Background(), 42, until, "pool rest",
+		map[string]any{"openai_gwpool_rest_state": map[string]any{"active": true}})
+	require.NoError(t, err)
+	require.Len(t, exec.execQueries, 1)
+	query := normalizeSQLWhitespace(exec.execQueries[0])
+	require.Contains(t, query, "WITH updated AS")
+	require.Contains(t, query, "GREATEST(temp_unschedulable_until, $1)")
+	require.Contains(t, query, "ELSE temp_unschedulable_reason END")
+	require.Contains(t, query, "|| $4::jsonb || jsonb_build_object($5::text, NOW())")
+	require.Contains(t, query, "INSERT INTO scheduler_outbox")
+	require.JSONEq(t, `{"openai_gwpool_rest_state":{"active":true}}`, exec.execArgs[0][3].(string))
+	require.Equal(t, service.GatewayPoolUsageBlockedAtKey, exec.execArgs[0][4])
+}
+
+func TestAccountRepository_SetGatewayPoolRestMissingAccountFails(t *testing.T) {
+	exec := &recordingSQLExecutor{result: rowsAffectedResult(0)}
+	repo := newAccountRepositoryWithSQL(nil, exec, nil)
+	err := repo.SetGatewayPoolRest(context.Background(), 42, time.Now(), "pool rest", nil)
+	require.ErrorIs(t, err, service.ErrAccountNotFound)
 }
 
 func TestAccountRepository_ResetQuotaUsedAndClearRateLimitCooldown_NoRowsAffectedReturnsNotFoundWithoutOutbox(t *testing.T) {

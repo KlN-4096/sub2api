@@ -57,13 +57,18 @@ type GatewayPoolUsageArchive struct {
 }
 
 type gatewayPoolUsageLedger struct {
-	Tag          string                             `json:"tag"`
-	UpdatedAt    time.Time                          `json:"updated_at"`
-	Rounds       []GatewayPoolUsageRound            `json:"rounds"`
-	Archived     map[string]GatewayPoolUsageArchive `json:"archived"`
-	ClosedBefore map[string]time.Time               `json:"closed_before"`
-	Incomplete   bool                               `json:"incomplete,omitempty"`
-	Previous     *gatewayPoolUsageLedger            `json:"previous,omitempty"`
+	Tag                    string                             `json:"tag"`
+	UpdatedAt              time.Time                          `json:"updated_at"`
+	Rounds                 []GatewayPoolUsageRound            `json:"rounds"`
+	Archived               map[string]GatewayPoolUsageArchive `json:"archived"`
+	ClosedBefore           map[string]time.Time               `json:"closed_before"`
+	Incomplete             bool                               `json:"incomplete,omitempty"`
+	Previous               *gatewayPoolUsageLedger            `json:"previous,omitempty"`
+	LastRequestStartedAt   time.Time                          `json:"last_request_started_at,omitzero"`
+	LastRequestCompletedAt time.Time                          `json:"last_request_completed_at,omitzero"`
+	BlockedAt              time.Time                          `json:"blocked_at,omitzero"`
+	VerificationSequence   uint64                             `json:"verification_sequence,omitempty"`
+	VerificationStartedAt  time.Time                          `json:"verification_started_at,omitzero"`
 }
 
 func gatewayPoolUsageDigest(value string) string {
@@ -101,9 +106,9 @@ func readGatewayPoolUsage(account *Account, tag string) gatewayPoolUsageLedger {
 func (s *OpenAIGatewayService) changeGatewayPoolUsage(ctx context.Context, account *Account, identity string,
 	change func(*gatewayPoolUsageLedger) bool,
 	alreadyRecorded ...func(*gatewayPoolUsageLedger) bool,
-) {
+) bool {
 	if s == nil || s.accountRepo == nil || account == nil || identity == "" {
-		return
+		return false
 	}
 	tag := gatewayPoolLedgerTag(identity)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gatewayPoolWarmNoteTimeout)
@@ -112,46 +117,50 @@ func (s *OpenAIGatewayService) changeGatewayPoolUsage(ctx context.Context, accou
 	lock, ok := value.(*sync.Mutex)
 	if !ok || lock == nil {
 		slog.Warn("gwpool_usage_lock_unavailable", "account_id", account.ID)
-		return
+		return false
 	}
 	if !gatewayPoolLockWithin(ctx, lock) {
 		slog.Warn("gwpool_usage_lock_timeout", "account_id", account.ID)
-		return
+		return false
 	}
 	defer lock.Unlock()
 	if cached, exists := s.codexCookies.poolUsageCache.Load(tag); exists && len(alreadyRecorded) > 0 {
 		if state, ok := cached.(*gatewayPoolUsageLedger); ok && alreadyRecorded[0](state) {
-			return
+			return true
 		}
 	}
 	value, _ = s.codexCookies.poolHistoryLocks.LoadOrStore(account.ID, &sync.Mutex{})
 	historyLock, ok := value.(*sync.Mutex)
 	if !ok || historyLock == nil {
 		slog.Warn("gwpool_usage_history_lock_unavailable", "account_id", account.ID)
-		return
+		return false
 	}
 	if !gatewayPoolLockWithin(ctx, historyLock) {
 		slog.Warn("gwpool_usage_history_lock_timeout", "account_id", account.ID)
-		return
+		return false
 	}
 	defer historyLock.Unlock()
 	fresh, err := s.accountRepo.GetByID(ctx, account.ID)
 	if err != nil || fresh == nil {
 		slog.Warn("gwpool_usage_read_failed", "account_id", account.ID)
-		return
+		return false
 	}
 	current, err := s.codexCookies.gatewayPoolIdentity(ctx, fresh)
 	if err != nil || gatewayPoolLedgerTag(current) != tag {
-		return // identity changed while an old request was in flight
+		return false // identity changed while an old request was in flight
 	}
 	state := readGatewayPoolUsage(fresh, tag)
+	blockedAt := gatewayPoolUsageBlockedAt(fresh)
 	for _, key := range []string{gatewayPoolUsageTagKey, gatewayPoolUsagePreviousTagKey} {
 		peers, err := s.accountRepo.FindByExtraField(ctx, key, tag)
 		if err != nil {
 			slog.Warn("gwpool_usage_peers_unavailable", "account_id", account.ID)
-			return // do not overwrite a possibly newer clone snapshot
+			return false // do not overwrite a possibly newer clone snapshot
 		}
 		for i := range peers {
+			if blocked := gatewayPoolUsageBlockedAt(&peers[i]); blocked.After(blockedAt) {
+				blockedAt = blocked
+			}
 			other := readGatewayPoolUsage(&peers[i], tag)
 			if other.UpdatedAt.After(state.UpdatedAt) {
 				previous := state.Previous
@@ -161,9 +170,10 @@ func (s *OpenAIGatewayService) changeGatewayPoolUsage(ctx context.Context, accou
 		}
 	}
 	settled := state.settleFullUsage(s.codexCookies.gatewayPoolUsageLive(identity), s.codexCookies.gatewayPoolUsageSession(), time.Now())
-	if !change(&state) && !settled {
+	boundary := state.applyGatewayPoolBlock(blockedAt)
+	if !change(&state) && !settled && !boundary {
 		s.codexCookies.poolUsageCache.Store(tag, &state)
-		return
+		return true
 	}
 	state.prune()
 	updated := time.Now().UTC()
@@ -179,9 +189,10 @@ func (s *OpenAIGatewayService) changeGatewayPoolUsage(ctx context.Context, accou
 		gatewayPoolUsageExtraKey: state, gatewayPoolUsageTagKey: tag, gatewayPoolUsagePreviousTagKey: previousTag,
 	}); err != nil {
 		slog.Warn("gwpool_usage_write_failed", "account_id", account.ID)
-		return
+		return false
 	}
 	s.codexCookies.poolUsageCache.Store(tag, &state)
+	return true
 }
 
 func (r *gatewayPoolUsageLedger) note(model, ticket string, at time.Time, full bool) bool {
@@ -193,6 +204,9 @@ func (r *gatewayPoolUsageLedger) note(model, ticket string, at time.Time, full b
 		round := &r.Rounds[i]
 		if round.Model != model {
 			continue
+		}
+		if !round.EndedAt.IsZero() && at.After(round.EndedAt) {
+			continue // the same physical ticket may be used in a later cycle
 		}
 		if seen, exists := round.Tickets[ticket]; exists {
 			changed := false
@@ -267,17 +281,36 @@ func gatewayPoolLockWithin(ctx context.Context, lock *sync.Mutex) bool {
 	}
 }
 
-func (r *gatewayPoolUsageLedger) end(at time.Time) bool {
+func (r *gatewayPoolUsageLedger) end(at time.Time, reasons ...string) bool {
+	reason := "observed_exhausted"
+	if len(reasons) > 0 {
+		reason = reasons[0]
+	}
 	changed := false
 	if r.ClosedBefore == nil {
 		r.ClosedBefore = map[string]time.Time{}
+	}
+	if at.After(r.ClosedBefore[gatewayPoolUsageSharedModel]) {
+		r.ClosedBefore[gatewayPoolUsageSharedModel] = at
+		changed = true
+	}
+	if !r.VerificationStartedAt.IsZero() && !at.Before(r.VerificationStartedAt) {
+		r.VerificationSequence = 0
+		r.VerificationStartedAt = time.Time{}
+		changed = true
 	}
 	for i := range r.Rounds {
 		round := &r.Rounds[i]
 		if round.Model != gatewayPoolUsageSharedModel || !round.EndedAt.IsZero() || at.Before(round.StartedAt) {
 			continue
 		}
-		round.EndedAt, round.EndReason = at, "observed_exhausted"
+		round.EndedAt, round.EndReason = at, reason
+		for key, ticket := range round.Tickets {
+			if !ticket.UseStartedAt.IsZero() && (ticket.UseEndedAt.IsZero() || ticket.UseEndedAt.After(at)) {
+				ticket.UseEndedAt = at
+				round.Tickets[key] = ticket
+			}
+		}
 		r.ClosedBefore[round.Model] = at
 		changed = true
 	}
@@ -317,12 +350,16 @@ func (s *OpenAIGatewayService) noteGatewayPoolUsage(ctx context.Context, account
 	if at.IsZero() || applied.AccountID != account.ID || applied.Version == "" || applied.Gateway == "" {
 		return
 	}
+	at = gatewayPoolUsageEventAt(ctx, at)
 	ticket := gatewayPoolUsageDigest(applied.Gateway + "\x00" + applied.Version)
 	s.changeGatewayPoolUsage(ctx, account, identity, func(state *gatewayPoolUsageLedger) bool {
+		if state.requestClosed(ctx) {
+			return false
+		}
 		return state.note(model, ticket, at, full)
 	}, func(state *gatewayPoolUsageLedger) bool {
 		for _, round := range state.Rounds {
-			if round.Model != gatewayPoolUsageSharedModel {
+			if round.Model != gatewayPoolUsageSharedModel || !round.EndedAt.IsZero() {
 				continue
 			}
 			if seen, exists := round.Tickets[ticket]; exists {
@@ -368,14 +405,12 @@ func (s *OpenAIGatewayService) finishGatewayPoolUsageIfExhausted(ctx context.Con
 	for _, gateway := range gateways {
 		s.codexCookies.noteGatewayPoolRecommendationAt(identity, gateway.Name, gateway.Cooldown, listedAt)
 		_, cooling := s.codexCookies.gatewayPoolUsedAt(identity, gateway.Name, fresh.gatewayPoolGatewayWindow(), fresh.gatewayPoolUseRecommendation())
-		if gateway.PairReady && !gateway.UsedByYou && !cooling {
+		if gateway.PairReady && !cooling {
 			return
 		}
 	}
-	if len(s.codexCookies.gatewayPoolEarlyCandidates(fresh, identity, gateways)) > 0 &&
-		s.codexCookies.gatewayPoolEarlyDue(ctx, fresh, identity) {
-		return
-	}
+	// An unreserved experimental early opportunity is not a normal candidate
+	// or work in flight. Its next foreground attempt starts a new cycle.
 	s.changeGatewayPoolUsage(ctx, fresh, identity, func(state *gatewayPoolUsageLedger) bool {
 		after, busy, remaining := s.codexCookies.gatewayPoolInventoryCandidates(identity, fresh)
 		if after != generation || busy || len(remaining) != 0 {

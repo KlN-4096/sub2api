@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -16,6 +17,27 @@ type gatewayRotationRepo struct{ schedulerTestOpenAIAccountRepo }
 
 func (r gatewayRotationRepo) ListByPlatform(context.Context, string) ([]Account, error) {
 	return r.accounts, nil
+}
+
+func (r gatewayRotationRepo) FindByExtraField(_ context.Context, key string, value any) ([]Account, error) {
+	var found []Account
+	for _, account := range r.accounts {
+		if account.Extra[key] == value {
+			found = append(found, account)
+		}
+	}
+	return found, nil
+}
+
+func (r gatewayRotationRepo) UpdateExtra(_ context.Context, id int64, patch map[string]any) error {
+	for i := range r.accounts {
+		if r.accounts[i].ID == id {
+			for key, value := range patch {
+				r.accounts[i].Extra[key] = value
+			}
+		}
+	}
+	return nil
 }
 
 func (r gatewayRotationRepo) SetTempUnschedulable(_ context.Context, id int64, until time.Time, reason string) error {
@@ -48,7 +70,7 @@ func TestGatewayPoolRotationOnlyAfterFreshCompleteExhaustion(t *testing.T) {
 		rotate       bool
 		localCooling bool
 	}{
-		{"all candidates cooling", []gwpoolFakeGateway{{Name: "unified-142", PairReady: true, UsedByYou: true}}, 0, true, false},
+		{"historical pool use does not block candidates", []gwpoolFakeGateway{{Name: "unified-142", PairReady: true, UsedByYou: true}}, 0, false, false},
 		{"candidate still available", []gwpoolFakeGateway{{Name: "unified-142", PairReady: true, UsedByYou: true}, {Name: "unified-143", PairReady: true}}, 0, false, false},
 		{"successful empty supply is zero", nil, 0, true, false},
 		{"list failure is not exhaustion", nil, http.StatusBadGateway, false, false},
@@ -120,6 +142,99 @@ func TestGatewayPoolRotationNeverSwitchesOnAnyOtherError(t *testing.T) {
 	}
 }
 
+func TestGatewayPoolRotationPreservesConfirmedTransient429SameAccountRetry(t *testing.T) {
+	group := int64(7)
+	account, other := rotationAccount(1, group), rotationAccount(2, group)
+	repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*account, *other}}}
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	body := []byte(`{"detail":"Rate limit exceeded"}`)
+	failure := svc.newOpenAIAccountFailoverError(account, http.StatusTooManyRequests, nil, body, "Rate limit exceeded", false, false)
+	require.True(t, failure.RetryableOnSameAccount)
+	ctx := svc.PrepareGatewayPoolAccountRotation(context.Background(), &group, account, failure)
+	require.True(t, failure.RetryableOnSameAccount, "pool rotation may forbid switching, not erase a confirmed transient retry")
+	require.False(t, failure.ShouldRetryNextAccount(), "429 never authorizes a gateway-pool account switch")
+	omit, allowed, err := gatewayPoolRotationExclusions(ctx, repo, &group, nil)
+	require.NoError(t, err)
+	require.Contains(t, omit, other.ID)
+	require.Equal(t, map[int64]struct{}{account.ID: {}}, allowed)
+	require.False(t, gatewayPoolRotationRecheck(ctx, repo, allowed, &AccountSelectionResult{Account: other}))
+	require.True(t, failure.SameAccountRetryOnly)
+	require.False(t, GatewayPoolAccountRotationActive(ctx), "waiting must not start a shortage rotation")
+	ctx = svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, failure)
+	require.True(t, failure.SameAccountRetryOnly, "preparing an already-classified retry is idempotent")
+	firstDeadline := failure.SameAccountRetryDeadline
+	// A different request can succeed and reset the account-wide retry clock;
+	// this request still retains its original bounded deadline.
+	svc.openaiOAuth429RetryStartedAt.Delete(account.ID)
+	next := svc.newOpenAIAccountFailoverError(account, http.StatusTooManyRequests, nil, body, "Rate limit exceeded", false, false)
+	ctx = svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, next)
+	require.Equal(t, firstDeadline, next.SameAccountRetryDeadline)
+	require.True(t, next.SameAccountRetryOnly)
+	expired := context.WithValue(ctx, gatewayPoolRetryOnlyKey{}, gatewayPoolRetryOnly{
+		accountID: account.ID, groupID: group, deadline: time.Now().Add(-time.Second),
+	})
+	next = svc.newOpenAIAccountFailoverError(account, http.StatusTooManyRequests, nil, body, "Rate limit exceeded", false, false)
+	svc.PrepareGatewayPoolAccountRotation(expired, &group, account, next)
+	require.False(t, next.RetryableOnSameAccount)
+	require.False(t, next.ShouldRetryNextAccount())
+}
+
+func TestGatewayPoolRotationDoesNotRetryQuotaOrUnclassified429(t *testing.T) {
+	group := int64(7)
+	account := rotationAccount(1, group)
+	svc := rotationService(account)
+	for _, failure := range []*UpstreamFailoverError{
+		svc.newOpenAIAccountFailoverError(account, http.StatusTooManyRequests, nil,
+			[]byte(`{"error":{"type":"usage_limit_reached","resets_in_seconds":3600}}`), "limit", false, false),
+		{StatusCode: http.StatusTooManyRequests, RetryableOnSameAccount: true},
+		{StatusCode: http.StatusTooManyRequests, RetryableOnSameAccount: true, SameAccountRetryDeadline: time.Now().Add(-time.Second)},
+		{StatusCode: http.StatusTooManyRequests, RetryableOnSameAccount: true, SameAccountRetryDeadline: time.Now().Add(time.Minute),
+			NextAccountAction: NextAccountStop},
+	} {
+		svc.PrepareGatewayPoolAccountRotation(context.Background(), &group, account, failure)
+		require.False(t, failure.RetryableOnSameAccount)
+		require.False(t, failure.SameAccountRetryOnly)
+		require.False(t, failure.ShouldRetryNextAccount())
+	}
+}
+
+func TestGatewayPoolRetryDeadlinePreventsLateBusinessDispatch(t *testing.T) {
+	for _, expiresDuringFetch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("during_fetch=%t", expiresDuringFetch), func(t *testing.T) {
+			account := gwpoolTestAccount(1)
+			account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = false
+			fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+			fake.configure(account)
+			upstream := &gwpoolEchoUpstream{}
+			svc := &OpenAIGatewayService{httpUpstream: upstream}
+			deadline := time.Now().Add(-time.Second)
+			if expiresDuringFetch {
+				deadline = time.Now().Add(30 * time.Millisecond)
+				fake.onCookie = func() {
+					delay := time.Until(deadline)
+					if delay > 0 {
+						time.Sleep(delay + time.Millisecond)
+					}
+				}
+			}
+			ctx := context.WithValue(context.Background(), gatewayPoolRetryOnlyKey{}, gatewayPoolRetryOnly{
+				accountID: account.ID, deadline: deadline,
+				failure: &UpstreamFailoverError{StatusCode: 429, ResponseBody: []byte(`{"detail":"Rate limit exceeded"}`)},
+			})
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, gwpoolTestURL, nil)
+			require.NoError(t, err)
+			response, err := svc.doOpenAIUpstream(req, "", account)
+			require.Nil(t, response)
+			var failure *UpstreamFailoverError
+			require.ErrorAs(t, err, &failure)
+			require.Equal(t, 429, failure.StatusCode)
+			require.False(t, failure.RetryableOnSameAccount)
+			require.Empty(t, upstream.sentBodies)
+			require.NoError(t, ctx.Err(), "dispatch admission must not impose a response-stream deadline")
+		})
+	}
+}
+
 func TestGatewayPoolRotationFreshOptInsAndGroupIsolation(t *testing.T) {
 	group := int64(7)
 	source := rotationAccount(1, group)
@@ -137,8 +252,8 @@ func TestGatewayPoolRotationFreshOptInsAndGroupIsolation(t *testing.T) {
 	})
 	omit, allowed, err := gatewayPoolRotationExclusions(ctx, repo, &group, nil)
 	require.NoError(t, err)
-	require.Equal(t, map[int64]struct{}{2: {}}, allowed)
-	for _, id := range []int64{1, 3, 4, 5, 6} {
+	require.Equal(t, map[int64]struct{}{2: {}, 3: {}}, allowed, "rotation is mandatory even with legacy false")
+	for _, id := range []int64{1, 4, 5, 6} {
 		require.Contains(t, omit, id)
 	}
 	for _, bad := range []*int64{nil, &other.GroupIDs[0]} {
@@ -146,13 +261,13 @@ func TestGatewayPoolRotationFreshOptInsAndGroupIsolation(t *testing.T) {
 		require.Error(t, err)
 	}
 	// Simulate changing an opt-in after the listing but before final selection.
-	repo.accounts[1].Extra[openAIGatewayPoolRotationExtraKey] = false
+	repo.accounts[1].Extra[openAIGatewayPoolExtraKey] = false
 	require.False(t, gatewayPoolRotationRecheck(ctx, repo, allowed, &AccountSelectionResult{Account: eligible}))
 	// A stale enabled source cannot initiate rotation after its DB setting was disabled.
 	failure := &UpstreamFailoverError{GatewayPoolRotation: true, NextAccountAction: NextAccountStop}
 	stale := *source
 	stale.Extra = map[string]any{openAIGatewayPoolExtraKey: true, openAIGatewayPoolRotationExtraKey: true}
-	repo.accounts[0].Extra[openAIGatewayPoolRotationExtraKey] = false
+	repo.accounts[0].Extra[openAIGatewayPoolExtraKey] = false
 	svc := &OpenAIGatewayService{accountRepo: repo}
 	svc.PrepareGatewayPoolAccountRotation(context.Background(), &group, &stale, failure)
 	require.False(t, failure.ShouldRetryNextAccount())

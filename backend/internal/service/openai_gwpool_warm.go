@@ -95,15 +95,14 @@ func (s *OpenAIGatewayService) gatewayPoolWarmUp(request *http.Request, proxyURL
 	if err != nil {
 		return err
 	}
-	businessModel := gatewayPoolWarmModel(request)
-	if !s.codexCookies.gatewayPoolEarlyModelMatches(identity, businessModel) {
+	if !s.codexCookies.gatewayPoolEarlyModelMatches(identity, gatewayPoolProbeModelLuna) {
 		return errOpenAIGatewayPoolWarmUnverified
 	}
 	// A locally verified current ticket is shared across models. Live means
 	// neither rejected nor past its route credential deadline; no reference TTL.
 	model := account.gatewayPoolProbeModel(gatewayPoolWarmModel(request))
 	if pair, state := s.codexCookies.cachedPoolPair(identity); state == openAIGatewayPoolPairLive && pair.early != nil {
-		model = businessModel
+		model = pair.early.model
 	}
 	if s.codexCookies.gatewayPoolVerifiedFullFor(identity, model) {
 		return nil
@@ -118,9 +117,9 @@ func (s *OpenAIGatewayService) gatewayPoolWarmUp(request *http.Request, proxyURL
 			"reason", "model unreadable from the pool sink, the turn-metadata header and the request body")
 		return errOpenAIGatewayPoolWarmNoModel
 	}
-	if account.gatewayPoolEarlyEnabled() && businessModel != "" {
+	if account.gatewayPoolEarlyEnabled() {
 		ctx := context.WithValue(request.Context(), gatewayPoolEarlyIntentKey{}, &gatewayPoolEarlyIntent{
-			ctx: request.Context(), model: businessModel,
+			ctx: request.Context(), model: gatewayPoolProbeModelLuna,
 		})
 		request = request.WithContext(ctx)
 	}
@@ -139,7 +138,7 @@ func (s *OpenAIGatewayService) gatewayPoolWarmUpWith(
 ) (resultErr error) {
 	work := gatewayPoolWarmWorkFrom(request.Context())
 	if work.progress == nil {
-		work.progress = s.codexCookies.poolProgress.start(account.ID, account.gatewayPoolWarmTickets())
+		work.progress = s.startGatewayPoolProgress(request.Context(), account, identity)
 	} else {
 		s.codexCookies.poolProgress.resume(work.progress)
 	}
@@ -484,12 +483,20 @@ func (s *openAICodexCookieStore) gatewayPoolWarmVerdict(
 		originalProbe := probe
 		probe = func(work context.Context) (verdict, error) {
 			early.once.Do(func() {
+				started := time.Now()
 				v, err := originalProbe(work)
+				if !v.conclusive {
+					// A one-shot result is immutable. Retire only this exact early
+					// ticket; unknown is not a quality failure or cooldown sample.
+					s.gatewayPoolMarkStaleMatched(identity, applied.Version, applied.Gateway, true)
+				}
 				v.err = err
 				early.result = v
 				close(early.done)
 				slog.Info("gwpool_early_result", "account_id", account.ID, "gateway", applied.Gateway,
-					"model", early.model, "full", v.full, "conclusive", v.conclusive, "sent", v.sent)
+					"model", early.model, "full", v.full, "conclusive", v.conclusive,
+					"sent", !v.firstSent.IsZero(), "may_have_sent", v.sent, "first_sent_at", v.firstSent,
+					"reserved_at", early.reservedAt, "duration_ms", time.Since(started).Milliseconds())
 			})
 			return early.result, early.result.err
 		}
@@ -608,7 +615,7 @@ func (s *openAICodexCookieStore) gatewayPoolMarkVerifiedFull(identity, version s
 // 看上游还不还新的。
 //
 // conclusive=false 表示**没下结论**（传输失败、非 200、A 没回 state），调用方不许把它当降智 ——
-// 判据纪律 1：非 200 一律不下结论。A 不可省：state 绑在这张票上，换一张就得重新取。
+// 判据纪律 1：非 200 一律不下结论。这里保留当前票的A/B初验；不是说state不能跨票复用。
 //
 // sent 报告这张票**有没有确证送达上游**（至少拿到过一个状态码）。只有它为假（纯拨号/传输失败）
 // 时才允许把槽位还回池子：拿到过状态码就意味着窗口真的烧了，还回去会让池子把它当新鲜的再发给

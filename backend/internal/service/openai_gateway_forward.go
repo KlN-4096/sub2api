@@ -1487,7 +1487,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	body = rewriteCodexWebSearchUserLocation(c, account, body)
 
 	// 趁 body 还是明文，把出站模型名记进本次请求的网关池 sink：queue 档的预热垫话必须用同一个
-	// 模型（state 绑在 (账号 × 模型 × 这张票) 上），而它跑在传输层、只拿到 *http.Request ——
+	// 模型（后置回声复验沿用本次业务模型），而它跑在传输层、只拿到 *http.Request ——
 	// 到那时双开账号的体已经是 zstd 了，解不出来（openai_gwpool_warm.go 的 gatewayPoolWarmModel）。
 	// 没挂 sink 的路径（猎手探测等）这一行是空操作。
 	openAIGatewayPoolSinkFrom(ctx).noteModel(gjson.GetBytes(body, "model").String())

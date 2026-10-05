@@ -142,12 +142,20 @@ func TestGatewayPoolFullUsageStartsOnBusinessWriteBeforeResponse(t *testing.T) {
 	ctx, _ := withOpenAIGatewayPoolSink(context.Background(), nil)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
 	require.NoError(t, err)
+	request.Header.Set(openAICodexTurnStateHeader, "business-state")
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		_, _ = svc.doOpenAIUpstream(request, "", account)
 	}()
-	<-upstream.written
+	select {
+	case <-upstream.written:
+	case <-done:
+		t.Fatal("business returned before the expected write")
+	case <-time.After(time.Second):
+		close(upstream.release)
+		t.Fatal("business write did not start")
+	}
 	fresh, readErr := repo.GetByID(context.Background(), 1)
 	close(upstream.release)
 	<-done

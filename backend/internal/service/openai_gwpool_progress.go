@@ -11,6 +11,7 @@ type gatewayPoolProgressTriedKey struct{}
 type GatewayPoolProgress struct {
 	Runtime        *GatewayPoolRuntimeView `json:"runtime,omitempty"`
 	RunID          string                  `json:"run_id"`
+	Sequence       uint64                  `json:"sequence"`
 	Phase          string                  `json:"phase"`
 	Attempt        int                     `json:"attempt"`
 	Limit          int                     `json:"limit"`
@@ -28,6 +29,14 @@ type gatewayPoolProgressRun struct {
 	tickets  map[string]struct{}
 	account  int64
 	order    uint64
+	scope    gatewayPoolProgressScope
+}
+
+type gatewayPoolProgressScope struct {
+	tag            string
+	requestStarted time.Time
+	sequence       uint64
+	closedBefore   time.Time
 }
 
 type gatewayPoolProgressTracker struct {
@@ -36,22 +45,35 @@ type gatewayPoolProgressTracker struct {
 	next uint64
 }
 
-func (p *gatewayPoolProgressTracker) start(account int64, limit int) *gatewayPoolProgressRun {
+func (p *gatewayPoolProgressTracker) start(account int64, limit int, scopes ...gatewayPoolProgressScope) *gatewayPoolProgressRun {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.runs == nil {
 		p.runs = map[int64][]*gatewayPoolProgressRun{}
 	}
 	now := time.Now()
+	scope := gatewayPoolProgressScope{requestStarted: now}
+	if len(scopes) > 0 {
+		scope = scopes[0]
+	}
 	p.next++
-	run := &gatewayPoolProgressRun{account: account, order: p.next, tickets: map[string]struct{}{}, progress: GatewayPoolProgress{
-		RunID: strconv.FormatUint(p.next, 10), Phase: "fetching", Limit: limit, StartedAt: now, UpdatedAt: now,
+	run := &gatewayPoolProgressRun{account: account, order: p.next, scope: scope, tickets: map[string]struct{}{}, progress: GatewayPoolProgress{
+		RunID: strconv.FormatUint(p.next, 10), Sequence: scope.sequence, Phase: "fetching", Limit: limit, StartedAt: now, UpdatedAt: now,
 	}}
 	var active []*gatewayPoolProgressRun
+	var latestDone *gatewayPoolProgressRun
 	for _, prev := range p.runs[account] {
 		if !prev.done {
 			active = append(active, prev)
+		} else if latestDone == nil || prev.scope.requestStarted.After(latestDone.scope.requestStarted) ||
+			(prev.scope.requestStarted.Equal(latestDone.scope.requestStarted) && prev.order > latestDone.order) {
+			latestDone = prev
 		}
+	}
+	// A pre-block request may reach warm late. Do not let its start discard
+	// the newer cycle's terminal progress before the read-side scope filter.
+	if latestDone != nil {
+		active = append(active, latestDone)
 	}
 	p.runs[account] = append(active, run)
 	return run
@@ -103,7 +125,7 @@ func (p *gatewayPoolProgressTracker) update(run *gatewayPoolProgressRun, phase s
 	run.done = done
 }
 
-func (p *gatewayPoolProgressTracker) snapshot(ids []int64, now time.Time) map[int64]GatewayPoolProgress {
+func (p *gatewayPoolProgressTracker) snapshot(ids []int64, now time.Time, filters ...map[int64]gatewayPoolProgressScope) map[int64]GatewayPoolProgress {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := map[int64]GatewayPoolProgress{}
@@ -112,6 +134,12 @@ func (p *gatewayPoolProgressTracker) snapshot(ids []int64, now time.Time) map[in
 		active := 0
 		var retained []*gatewayPoolProgressRun
 		for _, run := range p.runs[id] {
+			if len(filters) > 0 {
+				scope, ok := filters[0][id]
+				if !ok || run.scope.tag != scope.tag || !run.scope.requestStarted.After(scope.closedBefore) {
+					continue
+				}
+			}
 			retained = append(retained, run)
 			if !run.done {
 				active++
