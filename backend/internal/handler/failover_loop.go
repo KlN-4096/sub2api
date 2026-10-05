@@ -59,6 +59,12 @@ func sameAccountRetryDelayFor(failoverErr *service.UpstreamFailoverError, retryC
 	if failoverErr == nil {
 		return sameAccountRetryDelay
 	}
+	if !failoverErr.SameAccountRetryNotBefore.IsZero() {
+		if remaining := time.Until(failoverErr.SameAccountRetryNotBefore); remaining > 0 {
+			return remaining
+		}
+		return 0
+	}
 	if failoverErr.SameAccountRetryDelay > 0 {
 		return failoverErr.SameAccountRetryDelay
 	}

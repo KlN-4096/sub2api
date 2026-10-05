@@ -977,8 +977,16 @@ const (
 	ImageConcurrencyOverflowModeWait   = "wait"
 )
 
+type GatewayOpenAIRecordingConfig struct {
+	Directory string `mapstructure:"directory"`
+	KeyFile   string `mapstructure:"key_file"`
+	MaxBytes  int64  `mapstructure:"max_bytes"`
+}
+
 // GatewayConfig API网关相关配置
 type GatewayConfig struct {
+	// Independent account opt-in; no files are created while every account is off.
+	OpenAIRecording GatewayOpenAIRecordingConfig `mapstructure:"openai_recording"`
 	// 等待上游响应头的超时时间（秒），0表示无超时
 	// 注意：这不影响流式数据传输，只控制等待响应头的时间
 	ResponseHeaderTimeout int `mapstructure:"response_header_timeout"`
@@ -2525,6 +2533,9 @@ func setDefaults() {
 	viper.SetDefault("gateway.text_max_body_size", int64(32*1024*1024))
 	viper.SetDefault("gateway.upstream_response_read_max_bytes", DefaultUpstreamResponseReadMaxBytes)
 	viper.SetDefault("gateway.models_list_read_max_bytes", DefaultModelsListReadMaxBytes)
+	viper.SetDefault("gateway.openai_recording.directory", "")
+	viper.SetDefault("gateway.openai_recording.key_file", "")
+	viper.SetDefault("gateway.openai_recording.max_bytes", int64(2<<30))
 	viper.SetDefault("gateway.proxy_probe_response_read_max_bytes", int64(1024*1024))
 	viper.SetDefault("gateway.gemini_debug_response_headers", false)
 	viper.SetDefault("gateway.connection_pool_isolation", ConnectionPoolIsolationAccountProxy)
@@ -3338,6 +3349,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.MaxBodySize <= 0 {
 		return fmt.Errorf("gateway.max_body_size must be positive")
+	}
+	if c.Gateway.OpenAIRecording.MaxBytes < 0 {
+		return fmt.Errorf("gateway.openai_recording.max_bytes must be non-negative")
 	}
 	if c.Gateway.TextMaxBodySize <= 0 || c.Gateway.TextMaxBodySize > c.Gateway.MaxBodySize {
 		return fmt.Errorf("gateway.text_max_body_size must be positive and no greater than gateway.max_body_size")
