@@ -23,9 +23,9 @@ def service_batches(listing):
     return [names[index::SERVICE_SHARDS] for index in range(min(SERVICE_SHARDS, len(names)))]
 
 
-def run(args, capture=False):
+def run(args, capture=False, cwd=BACKEND):
     return subprocess.run(
-        args, cwd=BACKEND, check=True, text=True,
+        args, cwd=cwd, check=True, text=True,
         stdout=subprocess.PIPE if capture else None,
     ).stdout
 
@@ -40,13 +40,14 @@ def main():
     with tempfile.TemporaryDirectory(prefix="sub2api-unit-") as directory:
         binary = pathlib.Path(directory) / ("service.test.exe" if os.name == "nt" else "service.test")
         run(["go", "test", "-c", "-tags=unit", "-o", str(binary), service])
-        batches = service_batches(run([str(binary), "-test.list=."], capture=True))
+        package_directory = BACKEND / "internal" / "service"
+        batches = service_batches(run([str(binary), "-test.list=."], capture=True, cwd=package_directory))
         total = sum(map(len, batches))
         print(f"Service unit inventory: {total} tests across {len(batches)} batches", flush=True)
         for index, names in enumerate(batches, 1):
             pattern = "^(" + "|".join(map(re.escape, names)) + ")$"
             print(f"Service unit batch {index}/{len(batches)}: {len(names)} tests", flush=True)
-            run([str(binary), "-test.timeout=" + TEST_TIMEOUT, "-test.run=" + pattern])
+            run([str(binary), "-test.timeout=" + TEST_TIMEOUT, "-test.run=" + pattern], cwd=package_directory)
 
 
 if __name__ == "__main__":

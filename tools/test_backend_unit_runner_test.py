@@ -39,9 +39,11 @@ class ServiceBatchesTest(unittest.TestCase):
 
     def test_main_keeps_other_packages_and_runs_each_service_batch(self):
         commands = []
+        working_directories = []
 
-        def fake_run(args, capture=False):
+        def fake_run(args, capture=False, cwd=runner.BACKEND):
             commands.append(args)
+            working_directories.append(cwd)
             if args[:2] == ["go", "list"]:
                 return "example/internal/service\n" if "./internal/service" in args else (
                     "example/internal/service\nexample/internal/service/child\nexample/other\n"
@@ -58,6 +60,9 @@ class ServiceBatchesTest(unittest.TestCase):
         )
         batches = [args for args in commands if "-test.timeout=60s" in args]
         self.assertEqual(3, len(batches))
+        for args, cwd in zip(commands, working_directories):
+            expected = runner.BACKEND if args[0] == "go" else runner.BACKEND / "internal" / "service"
+            self.assertEqual(expected, cwd, "compiled tests must use the package directory, like go test")
         for name in ("TestOne", "Example_demo", "FuzzInput"):
             self.assertEqual(
                 1, sum(bool(re.fullmatch(args[-1].removeprefix("-test.run="), name)) for args in batches)
