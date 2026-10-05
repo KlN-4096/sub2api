@@ -213,7 +213,10 @@ func (s *OpenAIGatewayService) maintainGatewayPoolCooldownReset(ctx context.Cont
 		return nil // ordinary feedback wakes must not cause extra DB scans/writes
 	}
 	lock, _ := s.codexCookies.poolCooldownResetLocks.LoadOrStore(gatewayPoolLedgerIdentity(identity), &sync.Mutex{})
-	mu := lock.(*sync.Mutex)
+	mu, ok := lock.(*sync.Mutex)
+	if !ok || mu == nil {
+		return errors.New("invalid gateway cooldown reset lock")
+	}
 	if !gatewayPoolLockWithin(ctx, mu) {
 		return ctx.Err()
 	}
@@ -259,7 +262,10 @@ func (s *OpenAIGatewayService) writeGatewayPoolCooldownReset(ctx context.Context
 	now, latest time.Time, advance bool,
 ) error {
 	lock, _ := s.codexCookies.poolHistoryLocks.LoadOrStore(id, &sync.Mutex{})
-	mu := lock.(*sync.Mutex)
+	mu, ok := lock.(*sync.Mutex)
+	if !ok || mu == nil {
+		return errors.New("invalid gateway cooldown history lock")
+	}
 	if !gatewayPoolLockWithin(ctx, mu) {
 		return ctx.Err()
 	}

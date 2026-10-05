@@ -224,7 +224,7 @@ func (r *gatewayRestWriteFails) SetGatewayPoolRest(ctx context.Context, id int64
 	if err := r.gatewayRotationRepo.UpdateExtra(ctx, id, patch); err != nil {
 		return err
 	}
-	return r.gatewayRotationRepo.SetTempUnschedulable(ctx, id, until, reason)
+	return r.SetTempUnschedulable(ctx, id, until, reason)
 }
 
 func (r *gatewayRestWriteFails) UpdateExtra(ctx context.Context, id int64, patch map[string]any) error {

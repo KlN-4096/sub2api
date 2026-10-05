@@ -43,7 +43,9 @@ func TestAccountRepository_SetGatewayPoolRestIsAtomicAndPreservesLongerBlock(t *
 	require.Contains(t, query, "ELSE temp_unschedulable_reason END")
 	require.Contains(t, query, "|| $4::jsonb || jsonb_build_object($5::text, NOW())")
 	require.Contains(t, query, "INSERT INTO scheduler_outbox")
-	require.JSONEq(t, `{"openai_gwpool_rest_state":{"active":true}}`, exec.execArgs[0][3].(string))
+	patch, ok := exec.execArgs[0][3].(string)
+	require.True(t, ok)
+	require.JSONEq(t, `{"openai_gwpool_rest_state":{"active":true}}`, patch)
 	require.Equal(t, service.GatewayPoolUsageBlockedAtKey, exec.execArgs[0][4])
 }
 

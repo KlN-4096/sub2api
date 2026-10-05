@@ -128,7 +128,10 @@ func (s *openAICodexCookieStore) gatewayPoolEarlySkipDue(id int64, reason string
 		if !loaded {
 			return true
 		}
-		previous := value.(gatewayPoolEarlySkip)
+		previous, ok := value.(gatewayPoolEarlySkip)
+		if !ok {
+			return false
+		}
 		if previous.reason == reason && now.Sub(previous.at) < gatewayPoolEarlyLogInterval {
 			return false
 		}
