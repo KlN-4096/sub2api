@@ -67,7 +67,7 @@ func (s *openAICodexCookieStore) gatewayPoolInventoryCandidates(identity string,
 		}
 		if batch, valid := value.(*gatewayPoolTicketBatch); valid {
 			for _, pair := range batch.pairs[batch.idx:] {
-				if pair.cookie == "" || time.Until(pair.until) < openAIGatewayPoolMinRemaining {
+				if pair.cookie == "" || pair.invalidated || pair.routeExpired(time.Now()) {
 					continue
 				}
 				if _, cooling := s.gatewayPoolUsedAt(identity, pair.gateway, account.gatewayPoolGatewayWindow(), account.gatewayPoolUseRecommendation()); !cooling {

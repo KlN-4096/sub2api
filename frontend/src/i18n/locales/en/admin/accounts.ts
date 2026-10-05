@@ -636,24 +636,31 @@ export default {
         gwpoolUseRecommendationDesc: 'When off, use local configuration and learned backoff only. Recommendations may add waiting but never erase a failure lower bound; fixed cooldowns take priority. Legacy mixed records keep their existing period until a real new cycle.',
         gwpoolMemberIsolationDesc: 'Off by default. Partition only sub2api gateway records and the gwpool consumer reference by the access-token workspace/user pair. Upstream workspace headers and session identity stay unchanged; undecodable tokens use the previous policy. This does not prove independent upstream cooldowns.',
         gatewayRuntime: {
-          live: 'Live ticket {gateway} · lease {seconds}s left · verified models: {models}',
+          live: 'Verified · {gateway} · probe models: {models}',
           unverified: 'not verified',
-          active: '{model} round total {full}/{attempted} verified/attempted tickets · {seconds}s elapsed',
-          history: 'Usage history (latest 100 rounds + archived totals)',
-          hint: 'Per model and deduplicated ticket, starting at the actual foreground attempt including A/B. Ends when zero candidates and no live, spare or in-flight work are observed. Includes idle time, not a measured capability lifetime. Verification does not transfer across models.',
-          ended: '{model} {full}/{attempted} verified/attempted · {seconds}s · started {start}, exhaustion observed {end}',
-          archived: '{model}: {count} archived rounds · {full}/{attempted} tickets · {seconds}s total',
-          incomplete: ' (details limited; counts are lower bounds)'
+          counts: 'Round verified / attempted {full} / {attempted} tickets',
+          active: 'Full-strength use {duration}',
+          duration: '{minutes}m {seconds}s',
+          history: 'Usage history',
+          ended: '{full}/{attempted} tickets · full-strength use {duration} · ended {end}',
+          archived: '{count} archived rounds · {full}/{attempted} tickets · full-strength use {duration}',
+          legacy: 'Legacy · {model} · {full}/{attempted} tickets',
+          legacyArchived: 'Legacy archive · {model} · {count} rounds · {full}/{attempted} tickets',
+          durationIncomplete: ' (some duration unobserved)',
+          incomplete: ' (counts are lower bounds)'
         },
         gatewayProgress: {
           run: 'Verification run #{id}',
-          waiting: 'Waiting to retry verification · {attempt}/{limit} attempts · {seconds}s elapsed',
-          fetching: 'Fetching ticket {attempt}/{limit} · waiting {seconds}s',
-          verifying: 'Verifying ticket {attempt}/{limit} · waiting {seconds}s',
-          ready: 'Verified ticket found · {attempt}/{limit} · {seconds}s',
-          exhausted: 'Verification ended without a usable ticket · {attempt}/{limit}',
-          unknown: 'Verification incomplete (supply, timeout or upstream error) · {attempt}/{limit}',
-          cancelled: 'Request cancelled · {attempt}/{limit}',
+          idle: 'No active verification',
+          count: 'Tickets tried {attempt} / {limit} · {seconds}s',
+          lastCount: 'Last observation: {attempt} / {limit} tickets · {seconds}s',
+          waiting: 'Waiting to retry verification',
+          fetching: 'Fetching a candidate ticket',
+          verifying: 'Verifying a candidate ticket',
+          ready: '✓ Verified ticket found',
+          exhausted: 'Verification ended · no usable ticket',
+          unknown: 'Verification ended · incomplete (supply, timeout or error)',
+          cancelled: 'Verification ended · request cancelled',
           rejected: '{count} did not pass',
           concurrent: '{count} requests in preflight (including this request)',
           unavailable: 'Live verification progress unavailable'
@@ -672,7 +679,7 @@ export default {
         gwpoolProbeModel: 'State-echo probe model (experimental)',
         gwpoolProbeModelDefault: 'Default: Luna (gpt-6-luna)',
         gwpoolProbeModelBusiness: 'Follow the business model',
-        gwpoolProbeModelDesc: 'By default Luna retrieves state in request A and echoes it in request B, always using the same selected model. Choose Astra, Sol, or the business model for the next foreground probe. Business model and state stay unchanged. Existing samples do not establish cross-model equivalence or guarantee full strength for business requests. Probes do not run while quality guard is off.',
+        gwpoolProbeModelDesc: 'By default Luna retrieves state in A and echoes it in B, using one selected model. The same account and ticket share verification eligibility; the actual probe model is retained and business requests keep their own state-echo checks. Changes apply to the next probe. Probes do not run while quality guard is off.',
         gwpoolRotationDesc: 'Off by default. Keep the current consumer identity within the group on this instance, finishing live verified windows first. With no live verified ticket, a fresh candidate count below the threshold permits pre-send rotation to eligible opted-in accounts in the same group. The old account becomes temporarily unschedulable for an estimated 30 seconds to 10 minutes (60 seconds if unknown), then is evaluated again, not assumed full strength. Clone identities share the round; requests do not revisit identities or break strong continuations. Manual, auth and rate-limit blocks remain intact. Listing failures are not zero; no additional upstream probes are generated. Restart rebuilds current-account memory without clearing cooldowns or temporary rests.',
         baseUrlHint: 'Leave default for official OpenAI API',
         apiKeyHint: 'Your OpenAI API Key',
@@ -871,7 +878,7 @@ export default {
           cooldownFixed: 'fixed {minutes}min',
           cooldownRecommended: 'pool suggests {minutes}min',
           legend:
-            '✓ current live ticket has model verification (models above) · ! local cooldown · grey retry eligible; historical full does not mean available now',
+            '✓ current ticket verified · ! local cooldown · grey retry eligible; historical full does not mean available now',
           // Two independent numbers, NO subtraction: "landings" comes from this row's ledger
           // (gateway names touched over the past window), "left in pool" is the current
           // deliverable listing reconciled against that ledger. The two sets do not nest.

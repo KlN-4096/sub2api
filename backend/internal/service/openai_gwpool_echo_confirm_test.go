@@ -90,7 +90,7 @@ func TestStateEchoConfirmationUnknownClosesBusinessWithoutDegrading(t *testing.T
 					if failure == "changed-pair" {
 						pair.version = "new-pair"
 					} else {
-						pair.until = time.Now().Add(-time.Second)
+						pair.routeExpiresAt = time.Now().Add(-time.Second)
 					}
 					svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, pair)
 				}

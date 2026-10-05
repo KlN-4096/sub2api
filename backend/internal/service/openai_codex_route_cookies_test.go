@@ -16,7 +16,7 @@ func routeCookieTestOailb(t *testing.T, host string) string {
 		"host": host,
 		"iss":  "edge-gateway",
 		"aud":  []string{"chatgpt.com"},
-		"exp":  1790454095,
+		"exp":  4102444800, // stable future fixture; expiry behavior has dedicated tests
 	})
 	require.NoError(t, err)
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","kid":"oailb-v1","typ":"JWT"}`))

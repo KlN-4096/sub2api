@@ -1,45 +1,27 @@
 <template>
-  <div v-if="isCodexAccount" class="space-y-1" data-testid="account-gateway-cell">
-    <p v-if="usesPool && progress && progress.phase !== 'idle'" class="text-[10px] text-primary-600 dark:text-primary-400"
+  <div v-if="isCodexAccount" class="min-w-[280px] space-y-2" data-testid="account-gateway-cell">
+    <div v-if="usesPool" class="min-h-[60px] rounded-md bg-primary-50 px-2.5 py-2 text-[11px] text-primary-700 dark:bg-primary-900/20 dark:text-primary-300"
       role="status" aria-live="polite" data-testid="account-gateway-progress">
-      <span v-if="progress.run_id">{{ t('admin.accounts.openai.gatewayProgress.run', { id: progress.run_id }) }} · </span>
-      {{ t(`admin.accounts.openai.gatewayProgress.${progress.phase}`, {
-        attempt: progress.attempt, limit: progress.limit, seconds: Math.floor(progress.elapsed_ms / 1000)
-      }) }}
-      <span v-if="progress.rejected"> · {{ t('admin.accounts.openai.gatewayProgress.rejected', { count: progress.rejected }) }}</span>
-      <span v-if="progress.active_requests > 1"> · {{ t('admin.accounts.openai.gatewayProgress.concurrent', { count: progress.active_requests }) }}</span>
-    </p>
-    <template v-if="usesPool && runtime">
-      <p v-for="ticket in liveTickets" :key="ticket.gateway" class="text-[10px] text-gray-500" data-testid="account-gateway-live">
-        {{ t('admin.accounts.openai.gatewayRuntime.live', { gateway: ticket.gateway, seconds: Math.max(0, Math.floor((Date.parse(ticket.expires_at) - now) / 1000)), models: ticket.verified_models.join(', ') || t('admin.accounts.openai.gatewayRuntime.unverified') }) }}
+      <p v-if="progressUnavailable" data-testid="account-gateway-progress-unavailable">
+        {{ t('admin.accounts.openai.gatewayProgress.unavailable') }}
       </p>
-      <p v-for="round in activeRounds" :key="round.id" class="text-[10px] text-gray-500" data-testid="account-gateway-usage-round">
-        {{ t('admin.accounts.openai.gatewayRuntime.active', { model: round.model, full: round.full, attempted: round.attempted, seconds: roundSeconds(round) }) }}
-        <span v-if="round.incomplete">{{ t('admin.accounts.openai.gatewayRuntime.incomplete') }}</span>
+      <template v-else>
+        <span v-if="progress?.run_id">{{ t('admin.accounts.openai.gatewayProgress.run', { id: progress.run_id }) }} · </span>
+        {{ t(`admin.accounts.openai.gatewayProgress.${progress?.phase || 'idle'}`) }}
+      </template>
+      <p v-if="progress && progress.phase !== 'idle'" class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+        {{ t(`admin.accounts.openai.gatewayProgress.${progressUnavailable ? 'lastCount' : 'count'}`, {
+          attempt: progress.attempt, limit: progress.limit, seconds: Math.floor(progress.elapsed_ms / 1000)
+        }) }}
+        <span v-if="progress.rejected"> · {{ t('admin.accounts.openai.gatewayProgress.rejected', { count: progress.rejected }) }}</span>
+        <span v-if="progress.active_requests > 1 && !progressUnavailable"> · {{ t('admin.accounts.openai.gatewayProgress.concurrent', { count: progress.active_requests }) }}</span>
       </p>
-      <details v-if="runtime.rounds.length || Object.keys(runtime.archived || {}).length" class="text-[10px] text-gray-500" data-testid="account-gateway-usage-history">
-        <summary>{{ t('admin.accounts.openai.gatewayRuntime.history') }}</summary>
-        <p>{{ t('admin.accounts.openai.gatewayRuntime.hint') }}</p>
-        <p v-for="round in endedRounds" :key="round.id">
-          {{ t('admin.accounts.openai.gatewayRuntime.ended', { model: round.model, full: round.full, attempted: round.attempted, seconds: roundSeconds(round), start: formatRelativeTime(round.started_at), end: formatRelativeTime(round.ended_at!) }) }}
-          <span v-if="round.incomplete">{{ t('admin.accounts.openai.gatewayRuntime.incomplete') }}</span>
-        </p>
-        <p v-for="(total, model) in runtime.archived" :key="model">
-          {{ t('admin.accounts.openai.gatewayRuntime.archived', { model, count: total.rounds, full: total.full, attempted: total.attempted, seconds: Math.floor(total.duration_ms / 1000) }) }}
-          <span v-if="total.incomplete">{{ t('admin.accounts.openai.gatewayRuntime.incomplete') }}</span>
-        </p>
-        <p v-if="runtime.incomplete">{{ t('admin.accounts.openai.gatewayRuntime.incomplete') }}</p>
-      </details>
-    </template>
-    <p v-if="usesPool && progressUnavailable" class="text-[10px] text-gray-400" data-testid="account-gateway-progress-unavailable">
-      {{ t('admin.accounts.openai.gatewayProgress.unavailable') }}
-    </p>
+    </div>
     <!-- 没有读数也要占位：整块消失时，「没接网关池」「接了还没跑过流量」「落点读不出来」
          在页面上长得一模一样。非 Codex 上游的账号根本没有落点这回事，那才该整块消失。 -->
     <p v-if="!current && !cells.length" class="text-[10px] text-gray-400" data-testid="account-gateway-empty">
       {{ t('admin.accounts.openai.gatewayHistory.empty') }}
     </p>
-    <template v-else>
       <!-- 第一行是「当前大区 · 当前网关」：整块里最要紧的一个事实。 -->
       <div v-if="current" class="flex items-center gap-1" data-testid="account-gateway-current">
         <span class="shrink-0 text-[10px] text-gray-400">
@@ -54,13 +36,19 @@
         >
           {{ verdictMark(current) }}{{ regionLabel(current.region) }} · {{ current.name }}
         </span>
-        <span class="shrink-0 text-[10px] text-gray-400">{{ formatRelativeTime(current.at) }}</span>
+        <span class="ml-auto shrink-0 text-[10px] text-gray-400" data-testid="account-gateway-current-time">{{ safeRelativeTime(liveTickets[0]?.verified_at || current.at) }}</span>
       </div>
+      <p v-for="round in (usesPool ? activeRounds : [])" :key="round.id" class="flex flex-wrap justify-between gap-x-3 text-[11px] text-gray-500 dark:text-gray-400" data-testid="account-gateway-usage-round">
+        <span>{{ t('admin.accounts.openai.gatewayRuntime.counts', { full: round.full, attempted: round.attempted }) }}</span>
+        <span class="tabular-nums">{{ t('admin.accounts.openai.gatewayRuntime.active', { duration: fullUseTime(round) }) }}</span>
+        <span v-if="round.incomplete">{{ t('admin.accounts.openai.gatewayRuntime.incomplete') }}</span>
+        <span v-if="round.duration_incomplete">{{ t('admin.accounts.openai.gatewayRuntime.durationIncomplete') }}</span>
+      </p>
       <!-- 九个大区各自落在哪个网关。满血窗口的单位是 (账号 × 网关)，而网关 = (大区 × 账号)
            ⇒ 这张格子回答的是「这个号现在还能去哪个大区铸没烧过的票」：窗口内打过的高亮
            （还烧着），窗口外的淡显（那个大区又能用了）。和网关池页面那张九宫格同一把尺子。
            窗口内再按 state-echo 判定分色：绿=验过满血、红=判过降智、黄=碰过但没判据。 -->
-      <div v-if="usesPool && cells.length" class="grid grid-cols-3 gap-x-1" data-testid="account-gateway-regions">
+      <div v-if="usesPool && cells.length" class="grid grid-cols-3 gap-x-3 border-y border-gray-100 py-2 dark:border-gray-700" data-testid="account-gateway-regions">
         <span
           v-for="cell in cells"
           :key="cell.key"
@@ -132,7 +120,29 @@
       >
         {{ t('admin.accounts.openai.gatewayHistory.legend') }}
       </p>
-    </template>
+    <details v-if="usesPool && runtime && (runtime.rounds.length || Object.keys(runtime.archived || {}).length)"
+      class="border-t border-gray-100 pt-2 text-[11px] text-gray-500 dark:border-gray-700 dark:text-gray-400" data-testid="account-gateway-usage-history">
+      <summary class="cursor-pointer">{{ t('admin.accounts.openai.gatewayRuntime.history') }}</summary>
+      <p v-for="round in endedRounds" :key="round.id" class="mt-1">
+        {{ t('admin.accounts.openai.gatewayRuntime.ended', { full: round.full, attempted: round.attempted, duration: fullUseTime(round), end: safeRelativeTime(round.ended_at) }) }}
+        <span v-if="round.incomplete">{{ t('admin.accounts.openai.gatewayRuntime.incomplete') }}</span>
+        <span v-if="round.duration_incomplete">{{ t('admin.accounts.openai.gatewayRuntime.durationIncomplete') }}</span>
+      </p>
+      <p v-if="runtime.archived?.all" class="mt-1">
+        {{ t('admin.accounts.openai.gatewayRuntime.archived', { count: runtime.archived.all.rounds, full: runtime.archived.all.full, attempted: runtime.archived.all.attempted, duration: formatUseTime(runtime.archived.all.duration_ms) }) }}
+        <span v-if="runtime.archived.all.incomplete">{{ t('admin.accounts.openai.gatewayRuntime.incomplete') }}</span>
+        <span v-if="runtime.archived.all.duration_incomplete">{{ t('admin.accounts.openai.gatewayRuntime.durationIncomplete') }}</span>
+      </p>
+      <p v-for="round in legacyRounds" :key="round.id" class="mt-1">
+        {{ t('admin.accounts.openai.gatewayRuntime.legacy', { model: round.model, full: round.full, attempted: round.attempted }) }}
+        <span v-if="round.incomplete">{{ t('admin.accounts.openai.gatewayRuntime.incomplete') }}</span>
+      </p>
+      <p v-for="[model, total] in legacyArchived" :key="model" class="mt-1">
+        {{ t('admin.accounts.openai.gatewayRuntime.legacyArchived', { model, count: total.rounds, full: total.full, attempted: total.attempted }) }}
+        <span v-if="total.incomplete">{{ t('admin.accounts.openai.gatewayRuntime.incomplete') }}</span>
+      </p>
+    </details>
+    <p v-if="usesPool && runtime?.incomplete" class="text-[11px] text-gray-500">{{ t('admin.accounts.openai.gatewayRuntime.incomplete') }}</p>
   </div>
 </template>
 
@@ -184,16 +194,36 @@ const LIVE_SNAPSHOT_MAX_AGE_MS = 6_000
 const props = defineProps<{ account: Account; progress?: GatewayPoolProgress; progressUnavailable?: boolean }>()
 const { t } = useI18n()
 const now = useNowTicker()
-const runtime = computed(() => props.progressUnavailable ? undefined : props.progress?.runtime)
+const runtime = computed(() => props.progress?.runtime)
 const liveTickets = computed(() => {
   const snapshot = runtime.value
-  if (!snapshot || now.value - Date.parse(snapshot.observed_at) > LIVE_SNAPSHOT_MAX_AGE_MS) return []
-  return snapshot.tickets.filter((ticket) => Date.parse(ticket.expires_at) > now.value)
+  if (props.progressUnavailable || !snapshot || !validTimestamp(snapshot.observed_at) || now.value - Date.parse(snapshot.observed_at) > LIVE_SNAPSHOT_MAX_AGE_MS) return []
+  return snapshot.tickets.filter((ticket) => !validTimestamp(ticket.expires_at) || Date.parse(ticket.expires_at!) > now.value)
 })
-const activeRounds = computed(() => runtime.value?.rounds.filter((round) => !round.ended_at) || [])
-const endedRounds = computed(() => runtime.value?.rounds.filter((round) => !!round.ended_at) || [])
-function roundSeconds(round: GatewayPoolUsageRound): number {
-  return Math.max(0, Math.floor(((round.ended_at ? Date.parse(round.ended_at) : now.value) - Date.parse(round.started_at)) / 1000))
+const activeRounds = computed(() => runtime.value?.rounds.filter((round) => round.model === 'all' && !round.ended_at) || [])
+const endedRounds = computed(() => runtime.value?.rounds.filter((round) => round.model === 'all' && !!round.ended_at) || [])
+const legacyRounds = computed(() => runtime.value?.rounds.filter((round) => round.model !== 'all') || [])
+const legacyArchived = computed(() => Object.entries(runtime.value?.archived || {}).filter(([model]) => model !== 'all'))
+function validTimestamp(value?: string): boolean {
+  return !!value && Number.isFinite(Date.parse(value)) && Date.parse(value) > 0
+}
+function safeRelativeTime(value?: string): string {
+  return validTimestamp(value) ? formatRelativeTime(value!) : '—'
+}
+function formatUseTime(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000))
+  return t('admin.accounts.openai.gatewayRuntime.duration', { minutes: Math.floor(seconds / 60), seconds: seconds % 60 })
+}
+function fullUseTime(round: GatewayPoolUsageRound): string {
+  let total = Math.max(0, round.full_duration_ms || 0)
+  const observed = Date.parse(runtime.value?.observed_at || '')
+  if (!props.progressUnavailable && !round.ended_at && Number.isFinite(observed) && now.value - observed <= LIVE_SNAPSHOT_MAX_AGE_MS) {
+    for (const until of round.full_active_until || []) {
+      const end = validTimestamp(until) ? Math.min(now.value, Date.parse(until)) : now.value
+      total += Math.max(0, end - observed)
+    }
+  }
+  return formatUseTime(total)
 }
 
 interface GatewaySeen {
@@ -517,6 +547,10 @@ function cooldownOf(item: GatewayItem): string {
 
 function titleOf(item: GatewayItem): string {
   const base = 'admin.accounts.openai.gatewayHistory'
+  const live = liveTickets.value.find((ticket) => ticket.gateway === item.name && ticket.verified_models.length > 0)
+  if (live) {
+    return t('admin.accounts.openai.gatewayRuntime.live', { gateway: item.name, models: live.verified_models.join(', ') })
+  }
   const state = cooldownOf(item)
   const verdict = item.verdict === 'full'
     ? t(`${base}.verdicts.fullExpired`)

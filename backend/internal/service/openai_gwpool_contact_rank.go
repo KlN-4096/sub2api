@@ -171,7 +171,7 @@ func (b *gatewayPoolTicketBatch) rankRemaining(ctx context.Context) {
 	held := map[string]bool{}
 	for _, pair := range b.pairs[b.idx:] {
 		held[pair.gateway] = true
-		if time.Until(pair.until) < openAIGatewayPoolMinRemaining {
+		if pair.invalidated || pair.routeExpired(time.Now()) {
 			continue
 		}
 		if _, cooling := b.store.gatewayPoolUsedAt(b.identity, pair.gateway, b.account.gatewayPoolGatewayWindow(), b.account.gatewayPoolUseRecommendation()); cooling {

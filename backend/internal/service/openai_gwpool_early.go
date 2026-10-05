@@ -172,5 +172,6 @@ func (s *openAICodexCookieStore) gatewayPoolPickEarly(ctx context.Context, accou
 
 func (s *openAICodexCookieStore) gatewayPoolEarlyModelMatches(identity, model string) bool {
 	pair, state := s.cachedPoolPair(identity)
-	return state != openAIGatewayPoolPairLive || pair.early == nil || pair.early.model == model
+	return state != openAIGatewayPoolPairLive || pair.early == nil || pair.early.model == model ||
+		s.gatewayPoolVerifiedFull(identity)
 }

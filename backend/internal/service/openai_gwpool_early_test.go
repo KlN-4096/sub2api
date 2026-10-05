@@ -167,7 +167,7 @@ func TestGatewayPoolEarlyStaleTicketDoesNotBlockNormalDifferentModel(t *testing.
 	}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
-		cookie: "old-cookie", gateway: "unified-142", version: "old-v", until: time.Now().Add(-time.Second),
+		cookie: "old-cookie", gateway: "unified-142", version: "old-v", routeExpiresAt: time.Now().Add(-time.Second),
 		early: newGatewayPoolEarlyAttempt("unified-142", "gpt-6-astra"),
 	})
 	body := `{"model":"gpt-6-sol","input":"x"}`
@@ -325,7 +325,7 @@ func TestGatewayPoolEarlyVerdictOnlyOneABAndModelBound(t *testing.T) {
 		require.True(t, full && known)
 	}
 	require.Equal(t, 2, shots)
-	require.False(t, store.gatewayPoolEarlyModelMatches(gwpoolTestIdentity, "gpt-5.6-luna"))
+	require.True(t, store.gatewayPoolEarlyModelMatches(gwpoolTestIdentity, "gpt-5.6-luna"), "verified early tickets share eligibility")
 	require.True(t, store.gatewayPoolEarlyModelMatches(gwpoolTestIdentity, "gpt-6-astra"))
 	store.gatewayPoolMarkStale(gwpoolTestIdentity, "v", early.gateway)
 	require.True(t, store.gatewayPoolEarlyModelMatches(gwpoolTestIdentity, "gpt-6-sol"),

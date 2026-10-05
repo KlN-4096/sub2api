@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -23,7 +24,7 @@ func TestGatewayPoolProgressShowsActiveAttemptAndRetiresCompletedRun(t *testing.
 	require.NotContains(t, snapshot, int64(2))
 	tracker.update(first, "ready", 2, "", false, true)
 	require.Zero(t, tracker.snapshot([]int64{1}, time.Now())[1].ActiveRequests)
-	require.Empty(t, tracker.snapshot([]int64{1}, time.Now().Add(2*gatewayPoolProgressRetention)))
+	require.Equal(t, "ready", tracker.snapshot([]int64{1}, time.Now().Add(2*time.Hour))[1].Phase)
 }
 
 func TestGatewayPoolProgressWiredToActualWarmLoop(t *testing.T) {
@@ -40,7 +41,7 @@ func TestGatewayPoolProgressWiredToActualWarmLoop(t *testing.T) {
 			calls++
 			progress := svc.GatewayPoolProgress([]int64{1})[1]
 			require.Equal(t, "verifying", progress.Phase)
-			require.Equal(t, 1, progress.Attempt)
+			require.Equal(t, min(calls-1, 1), progress.Attempt, "count only after a verified send")
 			require.Equal(t, 4, progress.Limit)
 			require.Equal(t, "unified-142", progress.Gateway)
 			return 200, "same-state", nil
@@ -48,4 +49,50 @@ func TestGatewayPoolProgressWiredToActualWarmLoop(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, calls)
 	require.Equal(t, "ready", svc.GatewayPoolProgress([]int64{1})[1].Phase)
+	require.Equal(t, 1, svc.GatewayPoolProgress([]int64{1})[1].Attempt)
+}
+
+func TestGatewayPoolProgressCountsTwoTicketsNotFourShots(t *testing.T) {
+	var tracker gatewayPoolProgressTracker
+	run := tracker.start(1, 8)
+	for _, ticket := range []string{"v1", "v1", "v2", "v2"} {
+		tracker.tried(run, ticket)
+	}
+	tracker.update(run, "ready", 0, "", false, true)
+	require.Equal(t, 2, tracker.snapshot([]int64{1}, time.Now())[1].Attempt)
+}
+
+func TestGatewayPoolProgressResumesAfterConcurrentRunReplacedIt(t *testing.T) {
+	var tracker gatewayPoolProgressTracker
+	first := tracker.start(1, 8)
+	tracker.update(first, "ready", 0, "", false, true)
+	second := tracker.start(1, 8)
+	tracker.resume(first)
+	tracker.tried(first, "next")
+	snapshot := tracker.snapshot([]int64{1}, time.Now())[1]
+	require.Equal(t, first.progress.RunID, snapshot.RunID)
+	require.Equal(t, 2, snapshot.ActiveRequests)
+	tracker.update(second, "ready", 0, "", false, true)
+	require.Equal(t, 1, tracker.snapshot([]int64{1}, time.Now())[1].ActiveRequests)
+}
+
+func TestGatewayPoolProgressDoesNotCountMissingOrUnconfirmedTicket(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+		if missing {
+			fake.refuseStatus = http.StatusServiceUnavailable
+		}
+		svc := &OpenAIGatewayService{}
+		req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
+		require.NoError(t, err)
+		ctx, _ := withOpenAIGatewayPoolSink(req.Context(), nil)
+		err = svc.gatewayPoolWarmUpWith(req.WithContext(ctx), fake.account(1), gwpoolTestIdentity, gwpoolWarmModel,
+			func(ctx context.Context, _, _ string) (int, string, error) {
+				trace, _ := ctx.Value(gatewayPoolProbeTraceKey{}).(*gatewayPoolProbeTrace)
+				trace.mayHaveSent = true
+				return 0, "", errors.New("ambiguous send")
+			})
+		require.Error(t, err)
+		require.Zero(t, svc.GatewayPoolProgress([]int64{1})[1].Attempt)
+	}
 }

@@ -17,32 +17,43 @@ const (
 	gatewayPoolUsagePreviousTagKey = "openai_gwpool_usage_previous_tag"
 	gatewayPoolUsageHistoryLimit   = 100
 	gatewayPoolUsageTicketLimit    = 8192
-	gatewayPoolUsageModelLimit     = 32
+	gatewayPoolUsageSharedModel    = "all"
 )
 
 type gatewayPoolUsageTicket struct {
-	At   time.Time `json:"at"`
-	Full bool      `json:"full"`
+	At            time.Time `json:"at"`
+	Full          bool      `json:"full"`
+	UseStartedAt  time.Time `json:"use_started_at,omitzero"`
+	UseObservedAt time.Time `json:"use_observed_at,omitzero"`
+	UseEndedAt    time.Time `json:"use_ended_at,omitzero"`
+	UseExpiresAt  time.Time `json:"use_expires_at,omitzero"`
+	UseSession    string    `json:"use_session,omitempty"`
+	UseMS         int64     `json:"use_ms,omitempty"`
 }
 
 type GatewayPoolUsageRound struct {
-	ID         string                            `json:"id"`
-	Model      string                            `json:"model"`
-	StartedAt  time.Time                         `json:"started_at"`
-	EndedAt    time.Time                         `json:"ended_at,omitzero"`
-	EndReason  string                            `json:"end_reason,omitempty"`
-	Attempted  int                               `json:"attempted"`
-	Full       int                               `json:"full"`
-	Incomplete bool                              `json:"incomplete,omitempty"`
-	Tickets    map[string]gatewayPoolUsageTicket `json:"tickets,omitempty"`
+	ID                 string                            `json:"id"`
+	Model              string                            `json:"model"`
+	StartedAt          time.Time                         `json:"started_at"`
+	EndedAt            time.Time                         `json:"ended_at,omitzero"`
+	EndReason          string                            `json:"end_reason,omitempty"`
+	Attempted          int                               `json:"attempted"`
+	Full               int                               `json:"full"`
+	Incomplete         bool                              `json:"incomplete,omitempty"`
+	Tickets            map[string]gatewayPoolUsageTicket `json:"tickets,omitempty"`
+	FullStartedAt      time.Time                         `json:"full_started_at,omitzero"`
+	FullDurationMS     int64                             `json:"full_duration_ms"`
+	FullActiveUntil    []time.Time                       `json:"full_active_until,omitempty"`
+	DurationIncomplete bool                              `json:"duration_incomplete,omitempty"`
 }
 
 type GatewayPoolUsageArchive struct {
-	Rounds     int64 `json:"rounds"`
-	Attempted  int64 `json:"attempted"`
-	Full       int64 `json:"full"`
-	DurationMS int64 `json:"duration_ms"`
-	Incomplete bool  `json:"incomplete,omitempty"`
+	Rounds             int64 `json:"rounds"`
+	Attempted          int64 `json:"attempted"`
+	Full               int64 `json:"full"`
+	DurationMS         int64 `json:"duration_ms"`
+	Incomplete         bool  `json:"incomplete,omitempty"`
+	DurationIncomplete bool  `json:"duration_incomplete,omitempty"`
 }
 
 type gatewayPoolUsageLedger struct {
@@ -149,7 +160,8 @@ func (s *OpenAIGatewayService) changeGatewayPoolUsage(ctx context.Context, accou
 			}
 		}
 	}
-	if !change(&state) {
+	settled := state.settleFullUsage(s.codexCookies.gatewayPoolUsageLive(identity), s.codexCookies.gatewayPoolUsageSession(), time.Now())
+	if !change(&state) && !settled {
 		s.codexCookies.poolUsageCache.Store(tag, &state)
 		return
 	}
@@ -176,6 +188,7 @@ func (r *gatewayPoolUsageLedger) note(model, ticket string, at time.Time, full b
 	if model == "" || len(model) > 128 || ticket == "" || at.IsZero() {
 		return false
 	}
+	model = gatewayPoolUsageSharedModel
 	for i := range r.Rounds {
 		round := &r.Rounds[i]
 		if round.Model != model {
@@ -208,21 +221,6 @@ func (r *gatewayPoolUsageLedger) note(model, ticket string, at time.Time, full b
 		}
 	}
 	if round == nil {
-		models := map[string]struct{}{}
-		for _, old := range r.Rounds {
-			models[old.Model] = struct{}{}
-		}
-		for model := range r.Archived {
-			models[model] = struct{}{}
-		}
-		for model := range r.ClosedBefore {
-			models[model] = struct{}{}
-		}
-		if _, known := models[model]; !known && len(models) >= gatewayPoolUsageModelLimit {
-			changed := !r.Incomplete
-			r.Incomplete = true
-			return changed
-		}
 		r.Rounds = append(r.Rounds, GatewayPoolUsageRound{ID: gatewayPoolUsageDigest(r.Tag + "\x00" + model + "\x00" + ticket + "\x00" + at.UTC().Format(time.RFC3339Nano)),
 			Model: model, StartedAt: at, Tickets: map[string]gatewayPoolUsageTicket{}})
 		round = &r.Rounds[len(r.Rounds)-1]
@@ -276,7 +274,7 @@ func (r *gatewayPoolUsageLedger) end(at time.Time) bool {
 	}
 	for i := range r.Rounds {
 		round := &r.Rounds[i]
-		if !round.EndedAt.IsZero() || at.Before(round.StartedAt) {
+		if round.Model != gatewayPoolUsageSharedModel || !round.EndedAt.IsZero() || at.Before(round.StartedAt) {
 			continue
 		}
 		round.EndedAt, round.EndReason = at, "observed_exhausted"
@@ -301,9 +299,12 @@ func (r *gatewayPoolUsageLedger) prune() {
 		total.Rounds++
 		total.Attempted += int64(round.Attempted)
 		total.Full += int64(round.Full)
-		if duration := round.EndedAt.Sub(round.StartedAt).Milliseconds(); duration > 0 {
-			total.DurationMS += duration
+		if round.Model == gatewayPoolUsageSharedModel {
+			total.DurationMS += round.fullUseDuration(round.EndedAt)
+		} else if duration := round.EndedAt.Sub(round.StartedAt).Milliseconds(); duration > 0 {
+			total.DurationMS += duration // legacy wall-clock data remains separate
 		}
+		total.DurationIncomplete = total.DurationIncomplete || round.DurationIncomplete
 		total.Incomplete = total.Incomplete || round.Incomplete
 		r.Archived[round.Model] = total
 	}
@@ -321,7 +322,7 @@ func (s *OpenAIGatewayService) noteGatewayPoolUsage(ctx context.Context, account
 		return state.note(model, ticket, at, full)
 	}, func(state *gatewayPoolUsageLedger) bool {
 		for _, round := range state.Rounds {
-			if round.Model != model {
+			if round.Model != gatewayPoolUsageSharedModel {
 				continue
 			}
 			if seen, exists := round.Tickets[ticket]; exists {

@@ -16,6 +16,7 @@ type gatewayPoolWarmWork struct {
 	waitedAtStart time.Duration
 	attempts      int
 	limit         int
+	progress      *gatewayPoolProgressRun
 }
 
 func (w *gatewayPoolWarmWork) remaining(wait *gatewayPoolWaitState) time.Duration {
