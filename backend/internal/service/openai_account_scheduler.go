@@ -44,7 +44,6 @@ const (
 )
 
 type cachedOpenAIAdvancedSchedulerSetting struct {
-	gatewayPoolActiveAccounts      int
 	lowUpstreamRatePriorityEnabled bool
 	oauthSchedulingRateMultiplier  *float64
 	enabled                        bool
@@ -56,7 +55,6 @@ type cachedOpenAIAdvancedSchedulerSetting struct {
 }
 
 type openAIAdvancedSchedulerRuntimeSettings struct {
-	gatewayPoolActiveAccounts      int
 	lowUpstreamRatePriorityEnabled bool
 	oauthSchedulingRateMultiplier  *float64
 	enabled                        bool
@@ -1911,7 +1909,6 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 	if cached, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting); ok && cached != nil {
 		if time.Now().UnixNano() < cached.expiresAt {
 			return openAIAdvancedSchedulerRuntimeSettings{
-				gatewayPoolActiveAccounts:      normalizeGatewayPoolActiveAccounts(cached.gatewayPoolActiveAccounts),
 				lowUpstreamRatePriorityEnabled: cached.lowUpstreamRatePriorityEnabled,
 				oauthSchedulingRateMultiplier:  cached.oauthSchedulingRateMultiplier,
 				enabled:                        cached.enabled,
@@ -1927,7 +1924,6 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 		if cached, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting); ok && cached != nil {
 			if time.Now().UnixNano() < cached.expiresAt {
 				return openAIAdvancedSchedulerRuntimeSettings{
-					gatewayPoolActiveAccounts:      normalizeGatewayPoolActiveAccounts(cached.gatewayPoolActiveAccounts),
 					lowUpstreamRatePriorityEnabled: cached.lowUpstreamRatePriorityEnabled,
 					oauthSchedulingRateMultiplier:  cached.oauthSchedulingRateMultiplier,
 					enabled:                        cached.enabled,
@@ -1940,7 +1936,6 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 		}
 
 		lowUpstreamRatePriorityEnabled := false
-		gatewayPoolActiveAccounts := gatewayPoolActiveAccountsDefault
 		oauthSchedulingRateMultiplier := parseOpenAIOAuthSchedulingRateMultiplier(nil)
 		enabled := false
 		stickyWeightedEnabled := false
@@ -1952,7 +1947,6 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 			defer cancel()
 
 			if values, err := repo.GetMultiple(dbCtx, openAIAdvancedSchedulerRuntimeSettingKeys()); err == nil {
-				gatewayPoolActiveAccounts = parseGatewayPoolActiveAccounts(values[SettingKeyOpenAIGatewayPoolActiveAccounts])
 				lowUpstreamRatePriorityEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeyOpenAILowUpstreamRatePriorityEnabled]), "true")
 				oauthSchedulingRateMultiplier = parseOpenAIOAuthSchedulingRateMultiplier(values)
 				enabled = strings.EqualFold(strings.TrimSpace(values[openAIAdvancedSchedulerSettingKey]), "true")
@@ -1971,7 +1965,6 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 					}
 				}
 				lowUpstreamRatePriorityEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAILowUpstreamRatePriorityEnabled]), "true")
-				gatewayPoolActiveAccounts = parseGatewayPoolActiveAccounts(fallbackValues[SettingKeyOpenAIGatewayPoolActiveAccounts])
 				oauthSchedulingRateMultiplier = parseOpenAIOAuthSchedulingRateMultiplier(fallbackValues)
 				enabled = strings.EqualFold(strings.TrimSpace(fallbackValues[openAIAdvancedSchedulerSettingKey]), "true")
 				stickyWeightedEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled]), "true")
@@ -1982,7 +1975,6 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 		}
 
 		openAIAdvancedSchedulerSettingCache.Store(&cachedOpenAIAdvancedSchedulerSetting{
-			gatewayPoolActiveAccounts:      gatewayPoolActiveAccounts,
 			lowUpstreamRatePriorityEnabled: lowUpstreamRatePriorityEnabled,
 			oauthSchedulingRateMultiplier:  oauthSchedulingRateMultiplier,
 			enabled:                        enabled,
@@ -1993,7 +1985,6 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 			expiresAt:                      time.Now().Add(openAIAdvancedSchedulerSettingCacheTTL).UnixNano(),
 		})
 		return openAIAdvancedSchedulerRuntimeSettings{
-			gatewayPoolActiveAccounts:      gatewayPoolActiveAccounts,
 			lowUpstreamRatePriorityEnabled: lowUpstreamRatePriorityEnabled,
 			oauthSchedulingRateMultiplier:  oauthSchedulingRateMultiplier,
 			enabled:                        enabled,
@@ -2033,7 +2024,6 @@ func (s *OpenAIGatewayService) isOpenAIAdvancedSchedulerSubscriptionPriorityEnab
 
 func openAIAdvancedSchedulerRuntimeSettingKeys() []string {
 	keys := []string{
-		SettingKeyOpenAIGatewayPoolActiveAccounts,
 		SettingKeyOpenAILowUpstreamRatePriorityEnabled,
 		SettingKeyOpenAIOAuthSchedulingRateMultiplier,
 		openAIAdvancedSchedulerSettingKey,
@@ -2207,6 +2197,9 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	previousResponseCanMove bool,
 	useUpstreamTokenCost bool,
 ) (selection *AccountSelectionResult, decision OpenAIAccountScheduleDecision, err error) {
+	if _, ok := ctx.Value(gatewayPoolGroupLimitsKey{}).(*gatewayPoolGroupLimits); !ok {
+		ctx = context.WithValue(ctx, gatewayPoolGroupLimitsKey{}, &gatewayPoolGroupLimits{})
+	}
 	if sessionHash != "" && s.cache != nil {
 		if bound, bindErr := s.getStickySessionAccountID(ctx, groupID, sessionHash); bindErr == nil && bound > 0 {
 			ctx = context.WithValue(ctx, gatewayPoolExistingBindingKey{}, bound)
@@ -2246,7 +2239,7 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 			boundID, _ := ctx.Value(gatewayPoolExistingBindingKey{}).(int64)
 			if restErr == nil && allowed && !strongBinding && selection.Account.ID != boundID && groupID != nil && selection.Account.UsesGatewayPool() {
 				identity, identityErr := s.codexCookies.gatewayPoolIdentity(ctx, selection.Account)
-				allowed = identityErr == nil && s.codexCookies.poolRounds.claim(*groupID, identity, s.gatewayPoolActiveAccountLimit(ctx))
+				allowed = identityErr == nil && s.codexCookies.poolRounds.claim(*groupID, identity, s.gatewayPoolActiveAccountLimit(ctx, groupID))
 			}
 			if restErr == nil && allowed {
 				return selection, decision, nil

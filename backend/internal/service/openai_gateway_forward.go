@@ -1059,6 +1059,11 @@ func (s *OpenAIGatewayService) Forward(
 	if reqStream && account.Platform == PlatformOpenAI {
 		firstOutputTimeout = s.openAIFirstOutputTimeout(reasoningEffortValue)
 	}
+	var poolFirstOutputBudget *gatewayPoolFirstOutputBudget
+	if firstOutputTimeout > 0 && !isCompactRequest && s.codexCookies.gatewayPoolTakeover(account) {
+		poolFirstOutputBudget = &gatewayPoolFirstOutputBudget{timeout: firstOutputTimeout}
+		ctx = context.WithValue(ctx, gatewayPoolFirstOutputBudgetKey{}, poolFirstOutputBudget)
+	}
 
 	httpInvalidEncryptedContentRetryTried := false
 	compactModelFallbackRetried := false
@@ -1068,7 +1073,9 @@ func (s *OpenAIGatewayService) Forward(
 		// Build upstream request
 		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
 		var headerGuard *openAIFirstOutputHeaderGuard
-		if firstOutputTimeout > 0 {
+		if poolFirstOutputBudget != nil {
+			upstreamCtx, headerGuard = newGatewayPoolFirstOutputGuard(upstreamCtx, releaseUpstreamCtx, poolFirstOutputBudget)
+		} else if firstOutputTimeout > 0 {
 			upstreamCtx, headerGuard = newOpenAIFirstOutputHeaderGuard(
 				upstreamCtx, releaseUpstreamCtx, startTime.Add(firstOutputTimeout),
 			)

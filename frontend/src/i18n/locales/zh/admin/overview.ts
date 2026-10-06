@@ -1260,6 +1260,9 @@ export default {
         unsupportedMessage: '当前 Sub2API 服务端无法生成 Live 所需的设备证明，即使开启也不能使用。是否仍然开启？',
         enableAnyway: '仍然开启'
       },
+      gatewayPoolActiveAccounts: '网关池同时使用账号数',
+      gatewayPoolActiveAccountsHint: '仅本分组生效，默认1，范围1–64。新会话先用主号，硬并发满才用次号；全部满时排队，不扩到候补。主号休息后次号接任、候补补位。已有会话保留原账号，可能暂时超过此数，仍受并发、休息和限流约束。',
+      gatewayPoolActiveAccountsInvalid: '网关池同时使用账号数必须为1–64的整数',
       openaiFast: {
         title: 'OpenAI Fast 模式',
         force: '强制使用 Fast（priority）',

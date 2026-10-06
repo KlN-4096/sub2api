@@ -26,6 +26,7 @@ type GatewayPoolRuntimeView struct {
 	GatewayWindowSeconds int                                `json:"gateway_window_seconds"`
 	CurrentConcurrency   *int                               `json:"current_concurrency"`
 	ConcurrencyLimit     int                                `json:"concurrency_limit"`
+	CooldownEstimate     GatewayPoolCooldownEstimate        `json:"cooldown_estimate"`
 }
 
 // Read-only local snapshot. This endpoint never fetches tickets, lists gateways,
@@ -48,6 +49,7 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 		}
 	}
 	historyPeers := map[string][]Account{}
+	displayCache := gatewayPoolDisplayCache{}
 	for _, account := range accounts {
 		if account == nil || !s.codexCookies.gatewayPoolTakeover(account) {
 			continue
@@ -71,23 +73,22 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 				state = *other
 			}
 		} else {
-			for _, key := range []string{gatewayPoolUsageTagKey, gatewayPoolUsagePreviousTagKey} {
-				peers, err := s.accountRepo.FindByExtraField(ctx, key, tag)
-				if err != nil {
-					return nil, err
-				}
-				for i := range peers {
-					other := readGatewayPoolUsage(&peers[i], tag)
-					if other.UpdatedAt.After(state.UpdatedAt) {
-						state = other
-					}
+			usagePeers, err := s.gatewayPoolStatePeers(ctx, tag, "usage")
+			if err != nil {
+				return nil, err
+			}
+			for i := range usagePeers {
+				other := readGatewayPoolUsage(&usagePeers[i], tag)
+				if other.UpdatedAt.After(state.UpdatedAt) {
+					state = other
 				}
 			}
 			s.codexCookies.poolUsageCache.LoadOrStore(tag, &state)
 		}
 		runtime := &GatewayPoolRuntimeView{ObservedAt: time.Now().UTC(), Tickets: []GatewayPoolLiveTicket{},
 			Rounds: make([]GatewayPoolUsageRound, len(state.Rounds)), Archived: state.Archived, Incomplete: state.Incomplete}
-		runtime.History, runtime.Contacts = s.gatewayPoolDisplaySnapshot(account, identity, peers)
+		runtime.History, runtime.Contacts = s.gatewayPoolDisplaySnapshot(account, identity, peers, displayCache)
+		runtime.CooldownEstimate = s.codexCookies.gatewayPoolCooldownEstimate(identity, account, runtime.History, runtime.ObservedAt)
 		runtime.LedgerTag, runtime.ConcurrencyLimit = tag, account.Concurrency
 		runtime.GatewayWindowSeconds = int(account.gatewayPoolGatewayWindow().Seconds())
 		if count, known := concurrency[account.ID]; known {
@@ -99,7 +100,7 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 		var idleAt time.Time
 		inventory := s.codexCookies.gatewayPoolInventory(identity)
 		inventory.mu.Lock()
-		if inventory.active == 0 {
+		if inventory.active == 0 && inventory.requests == 0 {
 			idleAt = state.idleCutoff(runtime.ObservedAt)
 		}
 		inventory.mu.Unlock()
@@ -150,6 +151,11 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 		}
 		if progress.Phase == "" {
 			progress.Phase = "idle"
+		}
+		if progress.Phase == "ready" && !s.codexCookies.gatewayPoolVerifiedFull(identity) {
+			// A completed run is historical evidence, not proof that its ticket
+			// is still live. Only active preparation may claim to be fetching.
+			progress.Phase = "pending"
 		}
 		progress.Runtime = runtime
 		out[account.ID] = progress

@@ -85,6 +85,8 @@ it('网关落点在没有历史时也显示真实验证进度，失败不继续�
     started_at: new Date().toISOString(), updated_at: new Date().toISOString(), active_requests: 1
   } } })
   expect(wrapper.get('[data-testid="account-gateway-progress"]').text()).toContain('"attempt":2,"seconds":8')
+  expect(wrapper.get('[data-testid="account-gateway-progress"]').classes()).toContain('whitespace-normal')
+  expect(wrapper.get('[data-testid="account-gateway-progress"]').classes()).toContain('break-words')
   await wrapper.setProps({ progress: undefined, progressUnavailable: true })
   expect(wrapper.find('[data-testid="account-gateway-progress"]').exists()).toBe(true)
   expect(wrapper.find('[data-testid="account-gateway-progress-unavailable"]').exists()).toBe(false)

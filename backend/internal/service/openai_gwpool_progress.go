@@ -7,6 +7,7 @@ import (
 )
 
 type gatewayPoolProgressTriedKey struct{}
+type gatewayPoolProgressRunKey struct{}
 
 type GatewayPoolProgress struct {
 	Runtime        *GatewayPoolRuntimeView `json:"runtime,omitempty"`

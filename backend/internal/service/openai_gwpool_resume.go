@@ -82,14 +82,12 @@ func (s *OpenAIGatewayService) loadGatewayPoolRest(ctx context.Context, account 
 		}
 	}
 	if s.accountRepo != nil {
-		for _, key := range []string{gatewayPoolRestTagKey, gatewayPoolRestPreviousTagKey} {
-			peers, err := s.accountRepo.FindByExtraField(ctx, key, tag)
-			if err != nil {
-				return state, fresh, err
-			}
-			for i := range peers {
-				adopt(readGatewayPoolRest(&peers[i], tag))
-			}
+		peers, err := s.gatewayPoolStatePeers(ctx, tag, "rest")
+		if err != nil {
+			return state, fresh, err
+		}
+		for i := range peers {
+			adopt(readGatewayPoolRest(&peers[i], tag))
 		}
 	}
 	if cached, ok := s.codexCookies.poolRestState.Load(tag); ok {

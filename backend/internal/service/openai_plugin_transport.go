@@ -151,9 +151,13 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 		gatewayPoolReleaseUnsent(release)
 		return nil, false, failure
 	}
+	if poolRequest {
+		gatewayPoolUsageMarkSending(request.Context(), identity)
+	}
 	resp, sentAt, err := s.gatewayPoolObservedRoundTrip(request, proxyURL, account, poolRequest, func(at time.Time) {
-		s.noteGatewayPoolUsage(request.Context(), account, identity, gatewayPoolWarmModel(request), applied, at, false)
-		s.noteGatewayPoolFullUse(request.Context(), account, identity, applied, at)
+		if !s.noteGatewayPoolFullUse(request.Context(), account, identity, applied, at) {
+			s.noteGatewayPoolUsage(request.Context(), account, identity, gatewayPoolWarmModel(request), applied, at, false)
+		}
 	})
 	if !sentAt.IsZero() {
 		s.codexCookies.gatewayPoolMarkSent(identity, applied.Version, sentAt)
@@ -302,6 +306,11 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamRoundTrip(request *http.Request, 
 }
 
 func (s *OpenAIGatewayService) doOpenAIUpstreamRoundTripUnrecorded(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
+	if request.Context().Value(gatewayPoolProbeTraceKey{}) == nil {
+		// Fresh rest/deadline checks and the optional recording-policy read are
+		// preparation, not upstream first-output time. A/B probes never arm it.
+		startGatewayPoolFirstOutputGuard(request.Context())
+	}
 	if s.pluginManager != nil {
 		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(request.Context(), request, proxyURL, account)
 		if handled {

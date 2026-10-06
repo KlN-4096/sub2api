@@ -1264,8 +1264,6 @@ export default {
         sourceRequiredError: 'Select a payment source before enabling {title}.'
       },
       openaiExperimentalScheduler: {
-        gatewayPoolActiveAccounts: 'Active gateway-pool accounts',
-        gatewayPoolActiveAccountsDesc: 'Independent per business group; default 1, range 1–64. New sessions fill the primary before its standby; queue when full without spilling to reserves. Resting accounts are replaced at the tail. Existing sessions keep their account and may temporarily exceed this count, but still obey hard concurrency, rest and rate limits.',
         title: 'OpenAI experimental scheduler policy',
         description: "Disabled by default. When enabled, this only changes the gateway's experimental account-selection policy for OpenAI traffic; it does not indicate an upstream OpenAI capability.",
         lowRatePriorityTitle: 'Prefer lower rates',

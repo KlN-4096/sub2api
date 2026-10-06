@@ -22,6 +22,24 @@ vi.mock('@/utils/format', async () => {
   }
 })
 
+it('网关池休息不把复评期限写成恢复承诺，普通封禁保持原文案', async () => {
+  const wrapper = mount(AccountStatusIndicator, {
+    props: { account: makeAccount({
+      temp_unschedulable_until: '2099-01-01T00:00:00Z',
+      temp_unschedulable_reason: '网关候选低于10，休息后达到50才恢复'
+    }) },
+    global: { stubs: { Icon: true } }
+  })
+  expect(wrapper.text()).toContain('admin.accounts.tempUnschedulable.poolRestPending')
+  expect(wrapper.text()).not.toContain('admin.accounts.status.tempUnschedulableUntil')
+  expect(wrapper.find('span.whitespace-normal').exists()).toBe(true)
+  await wrapper.setProps({ account: makeAccount({
+    temp_unschedulable_until: '2099-01-01T00:00:00Z', temp_unschedulable_reason: 'ordinary-error'
+  }) })
+  expect(wrapper.text()).toContain('admin.accounts.status.tempUnschedulableUntil')
+  wrapper.unmount()
+})
+
 function makeAccount(overrides: Partial<Account>): Account {
   return {
     id: 1,

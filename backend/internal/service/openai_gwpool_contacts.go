@@ -440,7 +440,9 @@ func (s *OpenAIGatewayService) noteGatewayPoolBusinessContact(request *http.Requ
 		Model: gatewayPoolWarmModel(request), Source: "business", Outcome: outcome, FirstSent: started, LastSent: started})
 	if outcome == "full" && snapshot.Version == applied.Version {
 		s.codexCookies.gatewayPoolMarkVerifiedFull(identity, applied.Version, gatewayPoolWarmModel(request))
-		s.noteGatewayPoolFullUse(request.Context(), account, identity, applied, started)
+		if s.noteGatewayPoolFullUse(request.Context(), account, identity, applied, started) {
+			return
+		}
 	}
 	s.noteGatewayPoolUsage(request.Context(), account, identity, gatewayPoolWarmModel(request), applied, started, outcome == "full")
 }

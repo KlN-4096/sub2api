@@ -1,6 +1,6 @@
 <template>
   <div v-if="isCodexAccount" class="w-[260px] min-w-[260px] max-w-[260px] space-y-2 overflow-hidden text-[11px] tabular-nums" data-testid="account-gateway-cell">
-    <div v-if="usesPool" class="min-h-[60px] rounded-md bg-primary-50 px-2.5 py-2 text-[11px] text-primary-700 dark:bg-primary-900/20 dark:text-primary-300"
+    <div v-if="usesPool" class="min-h-[60px] whitespace-normal break-words rounded-md bg-primary-50 px-2.5 py-2 text-[11px] text-primary-700 dark:bg-primary-900/20 dark:text-primary-300"
       role="status" aria-live="polite" data-testid="account-gateway-progress">
       <p :class="{ 'text-gray-500 dark:text-gray-400': progressUnavailable }">
         <span v-if="progress?.sequence">{{ t('admin.accounts.openai.gatewayProgress.run', { id: progress.sequence }) }} · </span>
@@ -120,7 +120,7 @@ import type { Account } from '@/types'
 import type { GatewayPoolProgress, GatewayPoolUsageRound } from '@/api/admin/accounts'
 import { targetsCodexUpstream } from '@/utils/turnState'
 import { formatRelativeTime } from '@/utils/format'
-import { useNowTicker } from '@/composables/useNowTicker'
+import { useSharedNowTicker } from '@/composables/useNowTicker'
 import Icon from '@/components/icons/Icon.vue'
 import { GATEWAY_REGION_KEYS, gatewayRegionDisplayKey } from '@/utils/gatewayRegionDisplay'
 
@@ -144,7 +144,7 @@ const LIVE_SNAPSHOT_MAX_AGE_MS = 3_000
 const props = defineProps<{ account: Account; progress?: GatewayPoolProgress; progressUnavailable?: boolean; retryPending?: boolean }>()
 const emit = defineEmits<{ retry: [id: number] }>()
 const { t } = useI18n()
-const wallTime = useNowTicker(1000)
+const wallTime = useSharedNowTicker(1000)
 const frozenTime = ref(wallTime.value)
 watch(() => props.progressUnavailable, unavailable => {
   if (unavailable) frozenTime.value = wallTime.value

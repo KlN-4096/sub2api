@@ -1017,6 +1017,27 @@ func (_u *GroupUpdate) SetNillableFreeOpenaiFast(v *bool) *GroupUpdate {
 	return _u
 }
 
+// SetOpenaiGwpoolActiveAccounts sets the "openai_gwpool_active_accounts" field.
+func (_u *GroupUpdate) SetOpenaiGwpoolActiveAccounts(v int) *GroupUpdate {
+	_u.mutation.ResetOpenaiGwpoolActiveAccounts()
+	_u.mutation.SetOpenaiGwpoolActiveAccounts(v)
+	return _u
+}
+
+// SetNillableOpenaiGwpoolActiveAccounts sets the "openai_gwpool_active_accounts" field if the given value is not nil.
+func (_u *GroupUpdate) SetNillableOpenaiGwpoolActiveAccounts(v *int) *GroupUpdate {
+	if v != nil {
+		_u.SetOpenaiGwpoolActiveAccounts(*v)
+	}
+	return _u
+}
+
+// AddOpenaiGwpoolActiveAccounts adds value to the "openai_gwpool_active_accounts" field.
+func (_u *GroupUpdate) AddOpenaiGwpoolActiveAccounts(v int) *GroupUpdate {
+	_u.mutation.AddOpenaiGwpoolActiveAccounts(v)
+	return _u
+}
+
 // SetRequireOauthOnly sets the "require_oauth_only" field.
 func (_u *GroupUpdate) SetRequireOauthOnly(v bool) *GroupUpdate {
 	_u.mutation.SetRequireOauthOnly(v)
@@ -1533,6 +1554,11 @@ func (_u *GroupUpdate) check() error {
 			return &ValidationError{Name: "audio_stt_price_per_hour", err: fmt.Errorf(`ent: validator failed for field "Group.audio_stt_price_per_hour": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.OpenaiGwpoolActiveAccounts(); ok {
+		if err := group.OpenaiGwpoolActiveAccountsValidator(v); err != nil {
+			return &ValidationError{Name: "openai_gwpool_active_accounts", err: fmt.Errorf(`ent: validator failed for field "Group.openai_gwpool_active_accounts": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.DefaultMappedModel(); ok {
 		if err := group.DefaultMappedModelValidator(v); err != nil {
 			return &ValidationError{Name: "default_mapped_model", err: fmt.Errorf(`ent: validator failed for field "Group.default_mapped_model": %w`, err)}
@@ -1863,6 +1889,12 @@ func (_u *GroupUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.FreeOpenaiFast(); ok {
 		_spec.SetField(group.FieldFreeOpenaiFast, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.OpenaiGwpoolActiveAccounts(); ok {
+		_spec.SetField(group.FieldOpenaiGwpoolActiveAccounts, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedOpenaiGwpoolActiveAccounts(); ok {
+		_spec.AddField(group.FieldOpenaiGwpoolActiveAccounts, field.TypeInt, value)
 	}
 	if value, ok := _u.mutation.RequireOauthOnly(); ok {
 		_spec.SetField(group.FieldRequireOauthOnly, field.TypeBool, value)
@@ -3211,6 +3243,27 @@ func (_u *GroupUpdateOne) SetNillableFreeOpenaiFast(v *bool) *GroupUpdateOne {
 	return _u
 }
 
+// SetOpenaiGwpoolActiveAccounts sets the "openai_gwpool_active_accounts" field.
+func (_u *GroupUpdateOne) SetOpenaiGwpoolActiveAccounts(v int) *GroupUpdateOne {
+	_u.mutation.ResetOpenaiGwpoolActiveAccounts()
+	_u.mutation.SetOpenaiGwpoolActiveAccounts(v)
+	return _u
+}
+
+// SetNillableOpenaiGwpoolActiveAccounts sets the "openai_gwpool_active_accounts" field if the given value is not nil.
+func (_u *GroupUpdateOne) SetNillableOpenaiGwpoolActiveAccounts(v *int) *GroupUpdateOne {
+	if v != nil {
+		_u.SetOpenaiGwpoolActiveAccounts(*v)
+	}
+	return _u
+}
+
+// AddOpenaiGwpoolActiveAccounts adds value to the "openai_gwpool_active_accounts" field.
+func (_u *GroupUpdateOne) AddOpenaiGwpoolActiveAccounts(v int) *GroupUpdateOne {
+	_u.mutation.AddOpenaiGwpoolActiveAccounts(v)
+	return _u
+}
+
 // SetRequireOauthOnly sets the "require_oauth_only" field.
 func (_u *GroupUpdateOne) SetRequireOauthOnly(v bool) *GroupUpdateOne {
 	_u.mutation.SetRequireOauthOnly(v)
@@ -3740,6 +3793,11 @@ func (_u *GroupUpdateOne) check() error {
 			return &ValidationError{Name: "audio_stt_price_per_hour", err: fmt.Errorf(`ent: validator failed for field "Group.audio_stt_price_per_hour": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.OpenaiGwpoolActiveAccounts(); ok {
+		if err := group.OpenaiGwpoolActiveAccountsValidator(v); err != nil {
+			return &ValidationError{Name: "openai_gwpool_active_accounts", err: fmt.Errorf(`ent: validator failed for field "Group.openai_gwpool_active_accounts": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.DefaultMappedModel(); ok {
 		if err := group.DefaultMappedModelValidator(v); err != nil {
 			return &ValidationError{Name: "default_mapped_model", err: fmt.Errorf(`ent: validator failed for field "Group.default_mapped_model": %w`, err)}
@@ -4087,6 +4145,12 @@ func (_u *GroupUpdateOne) sqlSave(ctx context.Context) (_node *Group, err error)
 	}
 	if value, ok := _u.mutation.FreeOpenaiFast(); ok {
 		_spec.SetField(group.FieldFreeOpenaiFast, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.OpenaiGwpoolActiveAccounts(); ok {
+		_spec.SetField(group.FieldOpenaiGwpoolActiveAccounts, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedOpenaiGwpoolActiveAccounts(); ok {
+		_spec.AddField(group.FieldOpenaiGwpoolActiveAccounts, field.TypeInt, value)
 	}
 	if value, ok := _u.mutation.RequireOauthOnly(); ok {
 		_spec.SetField(group.FieldRequireOauthOnly, field.TypeBool, value)

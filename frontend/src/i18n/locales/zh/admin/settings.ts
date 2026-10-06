@@ -1258,8 +1258,6 @@ export default {
         sourceRequiredError: '{title} 已启用，请先选择支付来源。'
       },
       openaiExperimentalScheduler: {
-        gatewayPoolActiveAccounts: '网关池同时使用账号数',
-        gatewayPoolActiveAccountsDesc: '每个业务分组独立生效，默认1，范围1–64。新会话优先集中主号，满载才使用次号；全部满载时排队，不扩到候补号。主号休息后次号接任、候补补位。已有会话保留原账号，可能暂时超过此数；仍受账号硬并发、休息和限流约束。',
         title: 'OpenAI 实验调度策略',
         description: '默认关闭。开启后仅影响本网关在 OpenAI 账号间的实验性调度选择逻辑，不代表上游 OpenAI 官方能力。',
         lowRatePriorityTitle: '低倍率优先',

@@ -151,22 +151,20 @@ func (s *OpenAIGatewayService) changeGatewayPoolUsage(ctx context.Context, accou
 	}
 	state := readGatewayPoolUsage(fresh, tag)
 	blockedAt := gatewayPoolUsageBlockedAt(fresh)
-	for _, key := range []string{gatewayPoolUsageTagKey, gatewayPoolUsagePreviousTagKey} {
-		peers, err := s.accountRepo.FindByExtraField(ctx, key, tag)
-		if err != nil {
-			slog.Warn("gwpool_usage_peers_unavailable", "account_id", account.ID)
-			return false // do not overwrite a possibly newer clone snapshot
+	peers, err := s.gatewayPoolStatePeers(ctx, tag, "usage")
+	if err != nil {
+		slog.Warn("gwpool_usage_peers_unavailable", "account_id", account.ID)
+		return false // do not overwrite a possibly newer clone snapshot
+	}
+	for i := range peers {
+		if blocked := gatewayPoolUsageBlockedAt(&peers[i]); blocked.After(blockedAt) {
+			blockedAt = blocked
 		}
-		for i := range peers {
-			if blocked := gatewayPoolUsageBlockedAt(&peers[i]); blocked.After(blockedAt) {
-				blockedAt = blocked
-			}
-			other := readGatewayPoolUsage(&peers[i], tag)
-			if other.UpdatedAt.After(state.UpdatedAt) {
-				previous := state.Previous
-				state = other
-				state.Previous = previous
-			}
+		other := readGatewayPoolUsage(&peers[i], tag)
+		if other.UpdatedAt.After(state.UpdatedAt) {
+			previous := state.Previous
+			state = other
+			state.Previous = previous
 		}
 	}
 	settled := state.settleFullUsage(s.codexCookies.gatewayPoolUsageLive(identity), s.codexCookies.gatewayPoolUsageSession(), time.Now())
