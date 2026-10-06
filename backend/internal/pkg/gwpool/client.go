@@ -108,9 +108,9 @@ const (
 	defaultRequestTimeout = 5 * time.Second
 	// maxResponseBytes 读响应的上限。pair 里 __oailb 是约 300 字符的 JWT，4 KiB 足够。
 	maxResponseBytes = 4 << 10
-	// maxListBytes 是 /gateways 的上限。cookie 那 4 KiB 对一张列表太紧，而截断会让整份 JSON
-	// 解不开（= 挑不出网关，退回池子自己挑），所以这里给宽一点。
-	maxListBytes = 64 << 10
+	// Catalogs include contact/recommendation history; ordinary 106-gateway
+	// responses already exceed 64 KiB. Bound the whole response, not a JSON prefix.
+	maxListBytes = 2 << 20
 	// MaxRetryAfter 钳住 retry_after_seconds / Retry-After。池子报一个 10 年会把这个身份
 	// **永久饿死**（消费端按身份记退避），所以上限硬钳在这里。
 	MaxRetryAfter = time.Hour
@@ -656,12 +656,16 @@ func (c *Client) GatewaysForModel(ctx context.Context, account, accountTag, mode
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%w: gateways request returned HTTP %d", ErrPool, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxListBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("%w: read gateways response: %w", ErrPool, err)
+	}
+	if len(body) > maxListBytes {
+		return nil, fmt.Errorf("%w: gateways response exceeds %d bytes", ErrPool, maxListBytes)
 	}
 	var payload struct {
 		// Account 是池子回显的「这次是替谁问的」，用来自检有没有报对账号。
@@ -679,7 +683,7 @@ func (c *Client) GatewaysForModel(ctx context.Context, account, accountTag, mode
 			DatacenterCountry string                  `json:"datacenter_country"`
 		} `json:"gateways"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxListBytes)).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("%w: decode gateways response: %w", ErrPool, err)
 	}
 	// 自检：回显的身份必须就是报上去的那个，不然 used_by_you / last_used_at 是**别人的**历史，

@@ -16,7 +16,7 @@ func (s *OpenAIGatewayService) startGatewayPoolProgress(ctx context.Context, acc
 	if original, _ := ctx.Value(gatewayPoolUsageIdentityKey{}).(string); original != "" {
 		tag = original
 	}
-	scope := gatewayPoolProgressScope{tag: tag, requestStarted: start}
+	scope := gatewayPoolProgressScope{tag: tag, requestStarted: start, identity: identity}
 	if tag == gatewayPoolLedgerTag(identity) {
 		var sequence uint64
 		committed := s.changeGatewayPoolUsage(ctx, account, identity, func(state *gatewayPoolUsageLedger) bool {
@@ -42,5 +42,5 @@ func (s *OpenAIGatewayService) startGatewayPoolProgress(ctx context.Context, acc
 			scope.sequence = sequence
 		}
 	}
-	return s.codexCookies.poolProgress.start(account.ID, account.gatewayPoolWarmTickets(), scope)
+	return s.codexCookies.poolProgress.start(account.ID, 0, scope)
 }

@@ -43,10 +43,10 @@ describe('gateway pool locale keys', () => {
       'gwpoolFetchTimeoutDesc',
       'gwpoolListTimeout',
       'gwpoolListTimeoutDesc',
-      'gwpoolWarmTickets',
-      'gwpoolWarmTicketsDesc',
-      'gwpoolAutoWait',
-      'gwpoolAutoWaitDesc',
+      'gwpoolPrepareRetries',
+      'gwpoolPrepareRetriesDesc',
+      'gwpoolManualRetry',
+      'gwpoolManualRetryHint',
       'gwpoolMaxWait',
       'gwpoolMaxWaitDesc',
       'gwpoolGuard',
@@ -66,13 +66,9 @@ describe('gateway pool locale keys', () => {
     }
     expect(typeof openai.gwpoolGuardDescs.queue).toBe('string')
     expect(openai.gwpoolGuardDescs.queue.length).toBeGreaterThan(40)
-    // 排障细节移到展开说明，正常配置区只显示用途、默认值和代价。
-    for (const log of ['gwpool_warm_probe', 'gwpool_warm_inconclusive', 'gwpool_warm_no_budget']) {
-      expect(openai.gwpoolWarmDetails).toContain(log)
-    }
-    expect(openai.gwpoolWarmTicketsDesc).toContain('5')
-    expect(openai.gwpoolWarmTicketsDesc).toContain('8')
-    expect(openai.gwpoolWarmTicketsDesc).not.toMatch(/4 小时|4-hour|82%|25.*hour/)
+    expect(openai.gwpoolWarmDetails).toMatch(/共享候选队列|shared candidate queue/)
+    expect(openai.gwpoolPrepareRetriesDesc).toContain('0')
+    expect(openai.gwpoolMaxWaitDesc).toContain('120')
     expect(openai.gwpoolPrewarm).toBeUndefined()
     expect(openai.gwpoolPrewarmDesc).toBeUndefined()
     expect(openai.gwpoolPrewarmDetails).toBeUndefined()

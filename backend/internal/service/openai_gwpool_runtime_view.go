@@ -15,11 +15,17 @@ type GatewayPoolLiveTicket struct {
 }
 
 type GatewayPoolRuntimeView struct {
-	ObservedAt time.Time                          `json:"observed_at"`
-	Tickets    []GatewayPoolLiveTicket            `json:"tickets"`
-	Rounds     []GatewayPoolUsageRound            `json:"rounds"`
-	Archived   map[string]GatewayPoolUsageArchive `json:"archived"`
-	Incomplete bool                               `json:"incomplete,omitempty"`
+	ObservedAt           time.Time                          `json:"observed_at"`
+	Tickets              []GatewayPoolLiveTicket            `json:"tickets"`
+	Rounds               []GatewayPoolUsageRound            `json:"rounds"`
+	Archived             map[string]GatewayPoolUsageArchive `json:"archived"`
+	Incomplete           bool                               `json:"incomplete,omitempty"`
+	History              openAIGatewayHistory               `json:"history"`
+	Contacts             gatewayPoolContacts                `json:"contacts"`
+	LedgerTag            string                             `json:"ledger_tag"`
+	GatewayWindowSeconds int                                `json:"gateway_window_seconds"`
+	CurrentConcurrency   *int                               `json:"current_concurrency"`
+	ConcurrencyLimit     int                                `json:"concurrency_limit"`
 }
 
 // Read-only local snapshot. This endpoint never fetches tickets, lists gateways,
@@ -33,6 +39,15 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 	if err != nil {
 		return nil, err
 	}
+	var concurrency map[int64]int
+	if s.concurrencyService != nil {
+		// A failed/missing result stays nil. It must not render as measured zero.
+		concurrency, err = s.concurrencyService.GetAccountConcurrencyBatch(ctx, ids)
+		if err != nil {
+			concurrency = nil
+		}
+	}
+	historyPeers := map[string][]Account{}
 	for _, account := range accounts {
 		if account == nil || !s.codexCookies.gatewayPoolTakeover(account) {
 			continue
@@ -42,6 +57,14 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 			continue
 		}
 		tag := gatewayPoolLedgerTag(identity)
+		peers, loaded := historyPeers[tag]
+		if !loaded {
+			peers, err = s.gatewayPoolHistoryPeers(ctx, tag)
+			if err != nil {
+				return nil, err
+			}
+			historyPeers[tag] = peers
+		}
 		state := readGatewayPoolUsage(account, tag)
 		if cached, ok := s.codexCookies.poolUsageCache.Load(tag); ok {
 			if other, valid := cached.(*gatewayPoolUsageLedger); valid && other.UpdatedAt.After(state.UpdatedAt) {
@@ -64,6 +87,12 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 		}
 		runtime := &GatewayPoolRuntimeView{ObservedAt: time.Now().UTC(), Tickets: []GatewayPoolLiveTicket{},
 			Rounds: make([]GatewayPoolUsageRound, len(state.Rounds)), Archived: state.Archived, Incomplete: state.Incomplete}
+		runtime.History, runtime.Contacts = s.gatewayPoolDisplaySnapshot(account, identity, peers)
+		runtime.LedgerTag, runtime.ConcurrencyLimit = tag, account.Concurrency
+		runtime.GatewayWindowSeconds = int(account.gatewayPoolGatewayWindow().Seconds())
+		if count, known := concurrency[account.ID]; known {
+			runtime.CurrentConcurrency = &count
+		}
 		live := s.codexCookies.gatewayPoolUsageLive(identity)
 		session := s.codexCookies.gatewayPoolUsageSession()
 		blockedAt := gatewayPoolUsageBlockedAt(account)
@@ -106,8 +135,19 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 		}
 		// Scope filtering must precede selection and retention: otherwise a
 		// late old run can evict the new cycle's last completed progress.
-		progress := s.codexCookies.poolProgress.snapshot([]int64{account.ID}, runtime.ObservedAt,
-			map[int64]gatewayPoolProgressScope{account.ID: {tag: tag, closedBefore: closedBefore}})[account.ID]
+		progressAccount := account.ID
+		sharedProgress := false
+		if value, ok := s.codexCookies.poolPrepareProgress.Load(identity); ok {
+			if run, ok := value.(*gatewayPoolProgressRun); ok {
+				progressAccount = run.account
+				sharedProgress = true
+			}
+		}
+		progress := s.codexCookies.poolProgress.snapshot([]int64{progressAccount}, runtime.ObservedAt,
+			map[int64]gatewayPoolProgressScope{progressAccount: {tag: tag, closedBefore: closedBefore, identity: identity}})[progressAccount]
+		if sharedProgress && progress.RunID != "" {
+			progress.ActiveRequests = s.codexCookies.gatewayPoolPreparationWaiters(identity)
+		}
 		if progress.Phase == "" {
 			progress.Phase = "idle"
 		}

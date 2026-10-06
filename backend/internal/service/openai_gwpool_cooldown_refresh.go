@@ -14,6 +14,7 @@ func (c gatewayPoolCooldown) changedAt() time.Time {
 }
 
 func (c *gatewayPoolCooldown) initSources(previous gatewayPoolCooldown, base int, now time.Time) {
+	c.Cleared = false
 	c.SourcesKnown, c.BaseSeconds, c.CycleAt = true, base, now
 	if !previous.SourcesKnown && previous.WindowSeconds > base && previous.Outcome != openAIGatewayVerdictFull {
 		// The old combined record cannot tell failure backoff from a recommendation.
@@ -30,8 +31,9 @@ func (c *gatewayPoolCooldown) initSources(previous gatewayPoolCooldown, base int
 func (s *openAICodexCookieStore) refreshGatewayPoolCooldown(c *gatewayPoolCooldown,
 	identity, gateway string, window time.Duration, touched, now time.Time, enabled ...bool,
 ) {
+	c.clearCooldown(s.gatewayPoolCooldownClearAt(identity), gatewayPoolCooldownBase(window))
 	c.resetBackoff(s.gatewayPoolCooldownResetAt(identity), touched, gatewayPoolCooldownBase(window))
-	if !c.SourcesKnown {
+	if c.Cleared || !c.SourcesKnown {
 		return // conservative migration of old, irreversibly mixed records
 	}
 	beforeWindow, beforeUntil, beforeBase := c.WindowSeconds, c.Until, c.BaseSeconds

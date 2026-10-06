@@ -397,7 +397,7 @@ func (s *OpenAIGatewayService) noteGatewayPoolProbeAndContact(ctx context.Contex
 			}
 			s.noteGatewayPoolCooldownVerdict(ctx, account, observation.Applied, verdict)
 		}
-		s.noteOpenAIGatewayUse(ctx, account, observation.Applied.Gateway, observation.Applied.Region, verdict, false,
+		s.noteOpenAIGatewayUse(context.WithValue(ctx, gatewayPoolObservationEpochKey{}, observation.Applied.cooldownResetAt), account, observation.Applied.Gateway, observation.Applied.Region, verdict, false,
 			observation.Applied.PoolLive, observation.Applied.PoolFree, observation.Applied.FullHeldMs, observation.Applied.LedgerTag)
 	}
 	outcome := "unknown"

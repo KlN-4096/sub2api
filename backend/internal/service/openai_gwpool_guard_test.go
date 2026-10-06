@@ -43,12 +43,12 @@ func TestGatewayPoolGuardOffSkipsVerificationAndResponseJudgment(t *testing.T) {
 	require.False(t, svc.codexCookies.gatewayPoolVerifiedFull(gwpoolTestIdentity), "关防护不等于验证成功")
 }
 
-func TestGatewayPoolStrictGuardBlocksInsufficientBudgetBeforeFetching(t *testing.T) {
+func TestGatewayPoolStrictGuardBlocksExpiredBudgetBeforeFetching(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 	svc := &OpenAIGatewayService{}
 	request, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
 	require.NoError(t, err)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
 	shooter := &gwpoolWarmShooter{}
 	err = svc.gatewayPoolWarmUpWith(request.WithContext(ctx), fake.account(1), gwpoolTestIdentity, gwpoolWarmModel, shooter.shoot)

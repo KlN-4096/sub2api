@@ -37,6 +37,7 @@ const (
 func gwpoolTestAccount(id int64) *Account {
 	return &Account{
 		ID: id, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Status: StatusActive, Schedulable: true,
 		Credentials: map[string]any{"chatgpt_account_id": "acc-a", "chatgpt_user_id": "user-a"},
 		Extra:       map[string]any{openAIGatewayPoolExtraKey: true},
 	}
@@ -100,8 +101,9 @@ type gwpoolFakePool struct {
 	renewStatus    int // 非 0 时 /pair/renew 回这个状态码（默认 200 + ok:true）
 	// omitVersion 模拟不报 cookie_version 的老池子；onCookie 在 /cookie 被打到时回调
 	// （用来复现「取到票之后、发送之前客户端就走了」）。
-	omitVersion bool
-	onCookie    func()
+	omitVersion  bool
+	onCookie     func()
+	beforeCookie func()
 	// batchGateways 非空 = 这个池子认 count，回 {tickets:[...]} 那个形状，每张一个落点。
 	// 默认空 ⇒ **不管带不带 count 都回扁平那一张**，也就是线上那台老池子（d6edc7e）的行为
 	// —— 本文件其余用例因此全是老池子兼容的回归测试。
@@ -120,6 +122,9 @@ func newGwpoolFakePool(t *testing.T, cookie string, validForS int) *gwpoolFakePo
 		switch r.URL.Path {
 		case "/cookie":
 			hits := fake.hits.Add(1)
+			if fake.beforeCookie != nil {
+				fake.beforeCookie()
+			}
 			fake.queries <- r.URL.RawQuery
 			forced := r.URL.Query().Get("force") == "1"
 			if fake.refuseStatus != 0 {
@@ -978,9 +983,19 @@ func TestGatewayPoolFetchSurvivesCallerCancel(t *testing.T) {
 		done <- err
 	}()
 	<-arrived // 请求已到池子 ⇒ 取 pair 确实在飞
-	cancel()  // 客户端断开
+	follower := make(chan error, 1)
+	go func() {
+		follower <- attachRoute(context.Background(), store, acct, gwpoolTestURL, http.Header{})
+	}()
+	require.Eventually(t, func() bool {
+		store.poolFetch.mu.Lock()
+		defer store.poolFetch.mu.Unlock()
+		return store.poolFetch.calls[gwpoolTestIdentity].waiters == 2
+	}, time.Second, time.Millisecond)
+	cancel() // 客户端断开
 	close(release)
-	require.ErrorIs(t, <-done, context.Canceled, "调用者退出，但共享取票不被取消")
+	require.ErrorIs(t, <-done, context.Canceled, "另有等待者时共享取票不被取消")
+	require.NoError(t, <-follower)
 	require.Eventually(t, func() bool {
 		_, state := store.cachedPoolPair(gwpoolTestIdentity)
 		return state == openAIGatewayPoolPairLive

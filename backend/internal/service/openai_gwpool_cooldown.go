@@ -24,6 +24,7 @@ const (
 // 不是上游保证恢复的时刻；成功样本只在不同尝试对应的独立冷却周期里计一次。
 type gatewayPoolCooldown struct {
 	ResetAt              time.Time   `json:"reset_at,omitzero"`
+	Cleared              bool        `json:"cleared,omitempty"`
 	SourcesKnown         bool        `json:"sources_known,omitempty"`
 	BaseSeconds          int         `json:"base_seconds,omitempty"`
 	LocalFloorSeconds    int         `json:"local_floor_seconds,omitempty"`
@@ -94,6 +95,9 @@ func (c *gatewayPoolCooldown) resetWindow(base int) {
 
 // begin 在真正取出一张新票时调用。旧的 Until 已到才允许开始，重复/并发取票不会穿过冷却。
 func (c *gatewayPoolCooldown) begin(now, usedAt time.Time, base int) bool {
+	if c.Cleared {
+		usedAt = time.Time{}
+	}
 	if c.WindowSeconds < int(openAIGatewayPoolGatewayWindow.Seconds()) || c.WindowSeconds > int(gatewayPoolCooldownCeiling.Seconds()) {
 		if c.FixedSeconds < int(openAIGatewayPoolGatewayWindow.Seconds()) {
 			c.FixedSeconds = 0
@@ -101,6 +105,9 @@ func (c *gatewayPoolCooldown) begin(now, usedAt time.Time, base int) bool {
 		c.resetWindow(base)
 	}
 	until := c.Until
+	if c.Cleared {
+		until = time.Time{} // no real waiting sample was observed after a manual clear
+	}
 	if !usedAt.IsZero() {
 		if touchedUntil := usedAt.Add(time.Duration(c.WindowSeconds) * time.Second); touchedUntil.After(until) {
 			until = touchedUntil
@@ -109,6 +116,7 @@ func (c *gatewayPoolCooldown) begin(now, usedAt time.Time, base int) bool {
 	if now.Before(until) {
 		return false
 	}
+	c.Cleared = false
 	c.AttemptSeconds, c.ElapsedSeconds = 0, 0
 	c.Early = false
 	if !until.IsZero() {
@@ -279,6 +287,7 @@ func (s *openAICodexCookieStore) hydrateCooldown(identity, gateway string, c *ga
 	if prev, ok := s.poolCooldown[key]; ok && c.ResetAt.Before(resetAt) && !prev.ResetAt.Before(resetAt) {
 		return // old-generation late writes cannot erase post-reset learning either
 	}
+	restored.clearCooldown(s.gatewayPoolCooldownClearAt(identity), base)
 	restored.resetBackoff(resetAt, at, base)
 	if prev, ok := s.poolCooldown[key]; ok && !newerGatewayPoolCooldown(&restored, &prev) {
 		return
@@ -328,11 +337,18 @@ func (s *openAICodexCookieStore) hydrateGatewayPoolSharedHistory(ctx context.Con
 }
 
 func (s *openAICodexCookieStore) beginGatewayPoolAttempt(identity, gateway string, window time.Duration, enabled ...bool) bool {
+	return s.beginGatewayPoolAttemptAt(identity, gateway, window, nil, enabled...)
+}
+
+func (s *openAICodexCookieStore) beginGatewayPoolAttemptAt(identity, gateway string, window time.Duration, expected *time.Time, enabled ...bool) bool {
 	if identity == "" || gateway == "" {
 		return true
 	}
 	s.poolCooldownMu.Lock()
 	defer s.poolCooldownMu.Unlock()
+	if expected != nil && !expected.Equal(s.gatewayPoolCooldownResetAt(identity)) {
+		return false
+	}
 	key := gatewayPoolLedgerKey(identity, gateway)
 	c := s.poolCooldown[key]
 	var usedAt time.Time
@@ -357,12 +373,16 @@ func (s *openAICodexCookieStore) beginGatewayPoolAttempt(identity, gateway strin
 		s.poolCooldown = map[string]gatewayPoolCooldown{}
 	}
 	s.poolCooldown[key] = c
+	s.poolUsed.Store(key, now)
 	return true
 }
 
-func (s *openAICodexCookieStore) beginGatewayPoolEarlyAttempt(identity, gateway string, window time.Duration, enabled ...bool) {
+func (s *openAICodexCookieStore) beginGatewayPoolEarlyAttemptAt(identity, gateway string, window time.Duration, expected *time.Time, enabled ...bool) bool {
 	s.poolCooldownMu.Lock()
 	defer s.poolCooldownMu.Unlock()
+	if expected != nil && !expected.Equal(s.gatewayPoolCooldownResetAt(identity)) {
+		return false
+	}
 	key := gatewayPoolLedgerKey(identity, gateway)
 	c := s.poolCooldown[key]
 	base, recommendation := s.gatewayPoolInitialCooldown(identity, gateway, window, enabled...)
@@ -375,6 +395,8 @@ func (s *openAICodexCookieStore) beginGatewayPoolEarlyAttempt(identity, gateway 
 		s.poolCooldown = map[string]gatewayPoolCooldown{}
 	}
 	s.poolCooldown[key] = c
+	s.poolUsed.Store(key, now)
+	return true
 }
 
 func (s *openAICodexCookieStore) observeGatewayPoolCooldown(identity, gateway, verdict string, window time.Duration, resetAt time.Time, enabled ...bool) *gatewayPoolCooldownSample {

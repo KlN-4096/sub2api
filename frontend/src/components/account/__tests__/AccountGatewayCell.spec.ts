@@ -30,15 +30,65 @@ const account = (gateways: unknown, extra: Record<string, unknown> = {}): Accoun
 
 const render = (acc: Account) => mount(AccountGatewayCell, { props: { account: acc } })
 
+it('手动重试只发出账号动作，清冷却墓碑不被最近历史染红', async () => {
+  const w = render(account({ current: 'g', seen: {
+    g: { at: isoAgo(5), region: 'east-asia', cooldown: { cleared: true, until: isoAgo(2), window_seconds: 3600 } }
+  } }))
+  expect(w.get('[data-testid="account-gateway-region-east-asia"]').attributes('data-tone')).toBe('idle')
+  const retry = w.get('[data-testid="account-gateway-retry"]')
+  expect(retry.element.parentElement?.classList.contains('justify-end')).toBe(true)
+  expect(retry.element.parentElement).toBe(w.get('[data-testid="account-gateway-window-usage"]').element.parentElement)
+  expect(retry.classes()).toContain('border')
+  expect(retry.get('svg').attributes('aria-hidden')).toBe('true')
+  expect(retry.text()).toBe('admin.accounts.openai.gwpoolManualRetry')
+  await retry.trigger('click')
+  expect(w.emitted('retry')).toEqual([[1]])
+  await w.setProps({ retryPending: true })
+  expect(w.get('[data-testid="account-gateway-retry"]').attributes('disabled')).toBeDefined()
+  expect(retry.attributes('aria-busy')).toBe('true')
+  expect(retry.text()).toBe('admin.accounts.openai.gwpoolManualRetryPending')
+})
+
+it('完整快照覆盖陈旧落点但不修改编辑账号，失焦保留数字且撤绿冻结', async () => {
+  vi.useFakeTimers()
+  const at = new Date().toISOString()
+  const acc = account({ current: 'old', seen: { old: { at, region: 'east-asia' } } })
+  const wrapper = mount(AccountGatewayCell, { props: {
+    account: acc,
+    progress: {
+      phase: 'ready', attempt: 1, limit: 0, rejected: 0, elapsed_ms: 1000,
+      active_requests: 0, started_at: at, updated_at: at,
+      runtime: {
+        observed_at: at,
+        history: { current: 'new', seen: { new: { at, region: 'east-asia' } } },
+        tickets: [{ gateway: 'new', region: 'east-asia', verified_at: at, verified_models: ['gpt-6-luna'] }],
+        rounds: [{ id: 'round', model: 'all', started_at: at, full: 1, attempted: 1, full_duration_ms: 61000 }],
+        archived: null
+      }
+    }
+  } })
+  expect(wrapper.get('[data-testid="account-gateway-current"]').text()).toContain('new')
+  expect((acc.extra?.openai_gwpool_gateways as { current: string }).current).toBe('old')
+  expect(wrapper.get('[data-testid="account-gateway-region-east-asia"]').attributes('data-tone')).toBe('full')
+  const duration = wrapper.get('[data-testid="account-gateway-usage-round"]').text()
+  await wrapper.setProps({ progressUnavailable: true })
+  await vi.advanceTimersByTimeAsync(20_000)
+  expect(wrapper.get('[data-testid="account-gateway-usage-round"]').text()).toBe(duration)
+  expect(wrapper.get('[data-testid="account-gateway-region-east-asia"]').attributes('data-tone')).toBe('idle')
+  wrapper.unmount()
+  vi.useRealTimers()
+})
+
 it('网关落点在没有历史时也显示真实验证进度，失败不继续假装寻找', async () => {
   const wrapper = mount(AccountGatewayCell, { props: { account: account(undefined), progress: {
     phase: 'verifying', attempt: 2, limit: 5, rejected: 1, elapsed_ms: 8200,
     started_at: new Date().toISOString(), updated_at: new Date().toISOString(), active_requests: 1
   } } })
-  expect(wrapper.get('[data-testid="account-gateway-progress"]').text()).toContain('"attempt":2,"limit":5,"seconds":8')
+  expect(wrapper.get('[data-testid="account-gateway-progress"]').text()).toContain('"attempt":2,"seconds":8')
   await wrapper.setProps({ progress: undefined, progressUnavailable: true })
   expect(wrapper.find('[data-testid="account-gateway-progress"]').exists()).toBe(true)
-  expect(wrapper.get('[data-testid="account-gateway-progress-unavailable"]').text()).toContain('unavailable')
+  expect(wrapper.find('[data-testid="account-gateway-progress-unavailable"]').exists()).toBe(false)
+  expect(wrapper.get('[data-testid="account-gateway-cell"]').classes()).toContain('w-[260px]')
   wrapper.unmount()
 })
 
@@ -64,7 +114,7 @@ it('验证编号使用周期内sequence，结束隐藏旧进度，新周期从1�
   wrapper.unmount()
 })
 
-it('失联或无落点历史仍保留轮次计数，旧归档不混入新时长且保留完整性提示', () => {
+it('失联仍保留已观测时长，归档同排展示且不混入旧模型墙钟', () => {
   const wrapper = mount(AccountGatewayCell, { props: {
     account: account(undefined), progressUnavailable: true,
     progress: {
@@ -88,10 +138,10 @@ it('失联或无落点历史仍保留轮次计数，旧归档不混入新时长�
   expect(current).toContain('"full":7,"attempted":9')
   expect(current).toContain('\\"minutes\\":1,\\"seconds\\":1')
   const history = wrapper.get('[data-testid="account-gateway-usage-history"]').text()
-  expect(history).toContain('legacyArchived')
-  expect(history).toContain('"model":"gpt-6-luna","count":3,"full":19,"attempted":71')
+  expect(history).toContain('"count":1')
+  expect(history).not.toContain('legacyArchived')
   expect(history).not.toContain('3418')
-  expect(history.match(/gatewayRuntime.incomplete/g)).toHaveLength(2)
+  expect(history).not.toContain('gatewayRuntime.incomplete')
   expect(history).not.toContain('gatewayRuntime.durationIncomplete')
   wrapper.unmount()
 })
@@ -143,15 +193,6 @@ const isHot = (w: ReturnType<typeof render>, region: string) => tone(w, region) 
 /** 格子的状态色：full / degraded / idle（见 AccountGatewayCell 的 TONE_CLASS）。 */
 const tone = (w: ReturnType<typeof render>, region: string) => cell(w, region).attributes('data-tone')
 
-/** 预测那行里的分钟数。t() 是桩，渲染出来是 `key:{"minutes":N}`。 */
-const minutesOf = (w: ReturnType<typeof render>) => {
-  const text = w.get('[data-testid="account-gateway-forecast"]').text()
-  // 0 分钟那一档换成了另一句话（forecastNone，不带插值）—— 没有 `{` 就是那一档。
-  // 措辞由专门那条用例钉，这里只把它折回 0，免得每个算单位数的断言都要分两种写法。
-  if (!text.includes('{')) return 0
-  return JSON.parse(text.slice(text.indexOf('{'), text.indexOf('}') + 1)).minutes as number
-}
-
 describe('AccountGatewayCell', () => {
   it('诊断不展示，国家城市合入固定九大区', () => {
     const w = render(account({
@@ -168,12 +209,15 @@ describe('AccountGatewayCell', () => {
     expect(w.find('[data-testid="account-gateway-diagnostics"]').exists()).toBe(false)
     expect(w.find('[data-testid="account-gateway-runtime"]').exists()).toBe(false)
   })
-  it('没有同层实测样本时显示待统计，不把可重试网关乘以183秒', () => {
+  it('无样本时不展示满血预测、图例、候选快照或详情按钮', () => {
     const w = render(account({
       current: 'unified-1',
       seen: { 'unified-1': { at: isoAgo(5 * 3600), region: 'us-west' } }
     }))
-    expect(w.get('[data-testid="account-gateway-forecast"]').text()).toContain('forecastPending')
+    for (const id of ['forecast', 'legend', 'pool-snapshot']) {
+      expect(w.find(`[data-testid="account-gateway-${id}"]`).exists()).toBe(false)
+    }
+    expect(w.find('details').exists()).toBe(false)
   })
   it('冷却完毕独立于旧库存快照，非法时间不冒充冷却完成', () => {
     const w = render(account({
@@ -187,8 +231,8 @@ describe('AccountGatewayCell', () => {
       pool_free: 1
     }))
     const summary = w.get('[data-testid="account-gateway-window-usage"]').text()
-    expect(JSON.parse(summary.slice(summary.indexOf('{')))).toEqual({ hours: 4, used: 1, cooled: 2 })
-    expect(w.get('[data-testid="account-gateway-pool-snapshot"]').text()).toContain('"free":1')
+    expect(JSON.parse(summary.slice(summary.indexOf('{')))).toEqual({ used: 1, cooled: 2 })
+    expect(w.find('[data-testid="account-gateway-pool-snapshot"]').exists()).toBe(false)
   })
   it('验证统计与反馈保留在数据中但常规界面不展示', () => {
     const w = render(account(null, {
@@ -224,7 +268,7 @@ describe('AccountGatewayCell', () => {
     expect(cell(w, 'europe').attributes('title')).toContain('de-central')
     expect(cell(w, 'europe').attributes('title')).toContain('country-at')
     const summary = w.get('[data-testid="account-gateway-window-usage"]').text()
-    expect(JSON.parse(summary.slice(summary.indexOf('{')))).toEqual({ hours: 4, used: 1, cooled: 3 })
+    expect(JSON.parse(summary.slice(summary.indexOf('{')))).toEqual({ used: 1, cooled: 3 })
   })
   it('美国与西雅图共用北美格，当前落点和区域提示都保留具体出口', () => {
     const w = render(account({
@@ -451,10 +495,10 @@ describe('AccountGatewayCell', () => {
     expect(w.get('[data-testid="account-gateway-usage-round"]').text()).toContain('"full":3,"attempted":8')
     expect(w.find('[data-testid="account-gateway-progress"]').exists()).toBe(true)
     await w.setProps({ progress: { ...progress, runtime: { ...progress.runtime, observed_at: isoAgo(10) } } })
-    expect(tone(w, 'east-asia')).toBe('degraded')
+    expect(tone(w, 'east-asia')).toBe('idle')
     await w.setProps({ progress, progressUnavailable: true })
     expect(w.find('[data-testid="account-gateway-live"]').exists()).toBe(false)
-    expect(tone(w, 'east-asia')).toBe('degraded')
+    expect(tone(w, 'east-asia')).toBe('idle')
     w.unmount()
   })
 
@@ -609,13 +653,13 @@ describe('AccountGatewayCell', () => {
     )
     const text = w.get('[data-testid="account-gateway-window-usage"]').text()
     expect(text).toContain('gatewayHistory.windowUsage:')
-    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 2, cooled: 1 })
-    expect(w.get('[data-testid="account-gateway-pool-snapshot"]').text()).toContain('"free":5')
+    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ used: 2, cooled: 1 })
+    expect(w.find('[data-testid="account-gateway-pool-snapshot"]').exists()).toBe(false)
   })
 
   // 已用多于可交付是**正常的**（账本跨一个窗口、清单是此刻的快照），不许因此把「没烧过」
   // 算成 0 —— 那正是现网报错的那一幕。free 来自后端，照原样显示。
-  it('已用多于可交付时照样报后端给的「没烧过」个数', () => {
+  it('历史多于可交付时仍独立统计冷却，不展示旧候选数', () => {
     const seen = Object.fromEntries(
       Array.from({ length: 67 }, (_, i) => [`unified-${i}`, { at: isoAgo(60), region: 'us-east' }])
     )
@@ -623,8 +667,8 @@ describe('AccountGatewayCell', () => {
       account({ current: 'unified-0', seen, pool_live: 62, pool_free: 7, updated_at: isoAgo(60) })
     )
     const text = w.get('[data-testid="account-gateway-window-usage"]').text()
-    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 67, cooled: 0 })
-    expect(w.get('[data-testid="account-gateway-pool-snapshot"]').text()).toContain('"free":7')
+    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ used: 67, cooled: 0 })
+    expect(w.find('[data-testid="account-gateway-pool-snapshot"]').exists()).toBe(false)
   })
 
   // 问不到池子清单（没开 steering / 列表打不开 ⇒ pool_live 缺省）时只报已用那一半。
@@ -638,7 +682,7 @@ describe('AccountGatewayCell', () => {
     )
     const text = w.get('[data-testid="account-gateway-window-usage"]').text()
     expect(text).toContain('gatewayHistory.windowUsage:')
-    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 1, cooled: 0 })
+    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ used: 1, cooled: 0 })
     expect(w.find('[data-testid="account-gateway-pool-snapshot"]').exists()).toBe(false)
   })
 
@@ -672,7 +716,7 @@ describe('AccountGatewayCell', () => {
     )
     const text = w.get('[data-testid="account-gateway-window-usage"]').text()
     expect(text).toContain('gatewayHistory.windowUsage:')
-    expect(w.get('[data-testid="account-gateway-pool-snapshot"]').text()).toContain('"free":0')
+    expect(w.find('[data-testid="account-gateway-pool-snapshot"]').exists()).toBe(false)
   })
 
   // 0 的时候不能渲染成「至少 0 分钟满血」：那读起来像对这个号的判决，而它说的是
@@ -686,9 +730,7 @@ describe('AccountGatewayCell', () => {
         updated_at: isoAgo(30)
       })
     )
-    const text = w.get('[data-testid="account-gateway-forecast"]').text()
-    expect(text).toContain('gatewayHistory.forecastNone')
-    expect(text).not.toContain('gatewayHistory.forecast:')
+    expect(w.find('[data-testid="account-gateway-forecast"]').exists()).toBe(false)
   })
 
   // 没有 full_held_ms 就写「未计时」，**绝不拿 at − full_at 顶上**。
@@ -727,7 +769,7 @@ describe('AccountGatewayCell', () => {
   // 第一版按大区去重（「一个号在一个大区同一时间只有一个网关」），2026-10-03 用户否了：
   // 「时间还是按网关来的，相同区域不同网关同一个号还是有不同的满血期的」。按大区数会把
   // us-west 那 20 个网关名算成 1 个单位，预测值低一个数量级。
-  it('满血分钟预测按网关名数单位，同一大区的多个网关各算一个', () => {
+  it('冷却统计按网关计数，即使有预测样本也不展示预测', () => {
     // 三个网关名同属 us-west，全部已出冷却 ⇒ **3** 个单位，不是 1 个。
     // 这一条就是那次纠正本身，按大区并会让它掉回 1。
     const oneRegion = render(
@@ -740,7 +782,8 @@ describe('AccountGatewayCell', () => {
         }
       })
     )
-    expect(minutesOf(oneRegion)).toBe(Math.round((3 * 72) / 60))
+    expect(oneRegion.get('[data-testid="account-gateway-window-usage"]').text()).toContain('"used":0,"cooled":3')
+    expect(oneRegion.find('[data-testid="account-gateway-forecast"]').exists()).toBe(false)
 
     // 同一大区里新旧混着时**各算各的**：旧的那个已恢复、新的那个还在烧 ⇒ 1 个单位。
     // 按大区取「最近那次」当起点会让它变成 0。
@@ -753,13 +796,13 @@ describe('AccountGatewayCell', () => {
         }
       })
     )
-    expect(minutesOf(staleAndFresh)).toBe(Math.round(72 / 60))
+    expect(staleAndFresh.get('[data-testid="account-gateway-window-usage"]').text()).toContain('"used":1,"cooled":1')
 
     // 全部刚烧过 ⇒ 一小时内一个都出不来 ⇒ 0 分钟。
     const allBurned = Object.fromEntries(
       Array.from({ length: 9 }, (_, i) => [`unified-${i}`, { at: isoAgo(60), region: 'us-west' }])
     )
-    expect(minutesOf(render(account({ current: 'unified-0', seen: allBurned })))).toBe(0)
+    expect(render(account({ current: 'unified-0', seen: allBurned })).get('[data-testid="account-gateway-window-usage"]').text()).toContain('"used":9,"cooled":0')
 
     // 足够多的可重试网关仍封顶一小时。
     const many = Object.fromEntries(
@@ -768,7 +811,7 @@ describe('AccountGatewayCell', () => {
         { at: isoAgo(5 * 3600), region: 'us-west' }
       ])
     )
-    expect(minutesOf(render(accountWithSamples({ current: 'unified-0', seen: many })))).toBe(60)
+    expect(render(accountWithSamples({ current: 'unified-0', seen: many })).get('[data-testid="account-gateway-window-usage"]').text()).toContain('"used":0,"cooled":100')
 
     // 冷却剩余 ≤ 1 小时就算可用：4 小时窗口下，3.5 小时前烧的那个算回来。
     const recovering = render(
@@ -777,7 +820,7 @@ describe('AccountGatewayCell', () => {
         seen: { 'unified-1': { at: isoAgo(3.5 * 3600), region: 'us-west' } }
       })
     )
-    expect(minutesOf(recovering)).toBe(Math.round(72 / 60))
+    expect(recovering.get('[data-testid="account-gateway-window-usage"]').text()).toContain('"used":1,"cooled":0')
   })
 
   // region 完全不参与计数：没带 region 的落点一样是一个有名有姓的网关，照数。
@@ -796,7 +839,7 @@ describe('AccountGatewayCell', () => {
         }
       })
     )
-    expect(minutesOf(w)).toBe(Math.round((3 * 72) / 60))
+    expect(w.get('[data-testid="account-gateway-window-usage"]').text()).toContain('"used":0,"cooled":3')
 
     // 它还在窗口里的时候只是「这一个单位不可用」，不该再去扣别人。
     const hotBlind = render(
@@ -809,10 +852,10 @@ describe('AccountGatewayCell', () => {
         }
       })
     )
-    expect(minutesOf(hotBlind)).toBe(Math.round((2 * 72) / 60))
+    expect(hotBlind.get('[data-testid="account-gateway-window-usage"]').text()).toContain('"used":1,"cooled":2')
 
     // 那两条按大区的提示文案已经没了，页面上不该再出现它们。
-    const text = w.get('[data-testid="account-gateway-forecast"]').text()
+    const text = w.text()
     expect(text).not.toContain('forecastUntouched')
     expect(text).not.toContain('forecastBlind')
   })

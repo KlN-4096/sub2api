@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"syscall"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 )
 
 const gatewayPoolVerificationRetryGap = 5 * time.Second
@@ -17,6 +19,17 @@ var errGatewayPoolProbeMissingState = errors.New("gateway probe returned no stat
 
 type gatewayPoolProbeHTTPError struct {
 	status int
+}
+
+func gatewayPoolRetryablePreparationError(err error) bool {
+	var poolErr *gwpool.PoolError
+	if errors.As(err, &poolErr) {
+		// Shortages use their own queue wait; authentication and 429 do not
+		// acquire a second recovery budget here.
+		return poolErr.Code == "" && (poolErr.Status == http.StatusBadGateway ||
+			poolErr.Status == http.StatusServiceUnavailable || poolErr.Status == http.StatusGatewayTimeout)
+	}
+	return gatewayPoolRetryableProbeError(err) && !errors.Is(err, context.Canceled)
 }
 
 func (e *gatewayPoolProbeHTTPError) Error() string {

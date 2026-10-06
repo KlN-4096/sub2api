@@ -48,12 +48,6 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 	}
 	if request != nil {
 		ctx := s.gatewayPoolWaitContext(request.Context(), account)
-		budget, _ := gatewayPoolWarmBudgetFor(ctx)
-		work := &gatewayPoolWarmWork{started: time.Now(), budget: budget, limit: account.gatewayPoolWarmTickets()}
-		if wait := gatewayPoolWaitFrom(ctx); wait != nil {
-			_, _, work.waitedAtStart = wait.snapshot()
-		}
-		ctx = context.WithValue(ctx, gatewayPoolWarmWorkKey{}, work)
 		request = request.WithContext(ctx)
 	}
 	// 业务请求只落在**验过满血**的槽上。判据跑在这一发之前、用便宜的垫话，所以用户的请求不会是
@@ -68,10 +62,6 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 		}
 		resp, degraded, err = s.doOpenAIUpstreamOnce(request, proxyURL, account)
 		if !errors.Is(err, errGatewayPoolPreflightChanged) || gatewayPoolWaitFrom(request.Context()) == nil {
-			break
-		}
-		work := gatewayPoolWarmWorkFrom(request.Context())
-		if work.attempts >= work.limit || work.remaining(gatewayPoolWaitFrom(request.Context())) <= 0 {
 			break
 		}
 		retry, waitErr := s.waitGatewayPoolRetry(request.Context(), account, gatewayPoolVerificationRetryGap)
@@ -104,6 +94,9 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 	account *Account,
 ) (*http.Response, bool, error) {
 	if err := requireOpenAIProxyBinding(account, proxyURL); err != nil {
+		return nil, false, err
+	}
+	if err := gatewayPoolPreparationDeadlineError(request.Context()); err != nil {
 		return nil, false, err
 	}
 	// ChatGPT cookie 回放（openai_codex_cookies.go）：出站前带上该账号罐里的 cookie，拿到响应
@@ -225,6 +218,9 @@ func (s *OpenAIGatewayService) gatewayPoolObservedRoundTrip(request *http.Reques
 	if request.Context().Value(gatewayPoolProbeTraceKey{}) == nil {
 		if failure := GatewayPoolRetryFailure(request.Context()); failure != nil {
 			return nil, time.Time{}, failure
+		}
+		if err := gatewayPoolPreparationDeadlineError(request.Context()); err != nil {
+			return nil, time.Time{}, err
 		}
 	}
 	started := time.Now()

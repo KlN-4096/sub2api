@@ -232,6 +232,10 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 		rec.LedgerTag = tag
 		resetChanged = s.codexCookies.syncGatewayPoolCooldownResetHistory(&rec, identity,
 			gatewayPoolCooldownBase(account.gatewayPoolGatewayWindow()))
+		if epoch, ok := ctx.Value(gatewayPoolObservationEpochKey{}).(time.Time); ok &&
+			epoch.Before(s.codexCookies.gatewayPoolCooldownClearAt(identity)) {
+			return // a pre-clear completion must not restore its touch as a new contact
+		}
 		if c, exists := s.codexCookies.cooldownEntry(identity, gateway); exists {
 			cooldown = &c
 		}

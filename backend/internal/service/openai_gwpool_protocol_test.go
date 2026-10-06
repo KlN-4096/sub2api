@@ -436,8 +436,8 @@ func TestGatewayPoolReleasesNearExpiryTicketFromCacheToo(t *testing.T) {
 	require.Equal(t, openAIGatewayPoolPairNone, state, "还掉的票不许留在缓存里继续出站")
 }
 
-// 客户端在共享取票完成前离开：调用者及时退出，独立取票留缓存供下一发使用，不发送业务。
-func TestGatewayPoolKeepsPendingTicketWhenClientVanishedBeforeSend(t *testing.T) {
+// 最后一个客户端在取票完成前离开：取消网络工作，不发送业务。
+func TestGatewayPoolCancelsPendingTicketWhenLastClientVanishedBeforeSend(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 	upstream := &gwpoolErrorUpstream{}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
@@ -454,10 +454,12 @@ func TestGatewayPoolKeepsPendingTicketWhenClientVanishedBeforeSend(t *testing.T)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Zero(t, upstream.calls, "客户端已经走了就不该再打上游")
 	require.Eventually(t, func() bool {
-		_, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
-		return state == openAIGatewayPoolPairLive
+		svc.codexCookies.poolFetch.mu.Lock()
+		defer svc.codexCookies.poolFetch.mu.Unlock()
+		return len(svc.codexCookies.poolFetch.calls) == 0
 	}, time.Second, time.Millisecond)
-	require.Zero(t, fake.releaseHits.Load(), "共享取票可能已被其它调用者接用，不异步还票")
+	_, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
+	require.NotEqual(t, openAIGatewayPoolPairLive, state)
 }
 
 // 对照组一：请求真发出去了（拿到响应）⇒ 绝不还票。满血窗口是**首次接触**就烧掉的。
