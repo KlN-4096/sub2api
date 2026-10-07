@@ -11,6 +11,16 @@ export interface ReleaseInfo {
   html_url: string
 }
 
+// 上游版本监测：只提示有没有新版，不提供升级
+export interface UpstreamVersionInfo {
+  current_version: string
+  latest_version: string
+  has_update: boolean
+  html_url?: string
+  published_at?: string
+  warning?: string
+}
+
 export interface VersionInfo {
   current_version: string
   latest_version: string
@@ -19,6 +29,7 @@ export interface VersionInfo {
   cached: boolean
   warning?: string
   build_type: string // "source" for manual builds, "release" for CI builds
+  upstream?: UpstreamVersionInfo
 }
 
 /**
