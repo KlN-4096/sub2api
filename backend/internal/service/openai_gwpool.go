@@ -319,6 +319,8 @@ var openAIGatewayPoolConfigExtraKeys = []string{
 	openAIGatewayPoolProbeModelExtraKey,
 	openAIGatewayPoolWaitEnabledExtraKey,
 	openAIGatewayPoolWaitSecondsExtraKey,
+	openAIGatewayPoolMemberIsolationKey,
+	openAIGatewayPoolUseRecommendationKey,
 }
 
 // touchesOpenAIGatewayPoolConfig 报告这份 extra 更新碰到了有跨字段约束的网关池配置。
@@ -345,7 +347,8 @@ func validateOpenAIGatewayPoolAccountExtra(account *Account, extra map[string]an
 		return nil
 	}
 	for _, key := range []string{openAIGatewayPoolExtraKey, openAIGatewayPoolRotationExtraKey,
-		openAIGatewayPoolGuardEnabledExtraKey, openAIGatewayPoolWaitEnabledExtraKey} {
+		openAIGatewayPoolGuardEnabledExtraKey, openAIGatewayPoolWaitEnabledExtraKey,
+		openAIGatewayPoolMemberIsolationKey, openAIGatewayPoolUseRecommendationKey} {
 		if raw := extra[key]; raw != nil {
 			if _, ok := raw.(bool); !ok {
 				return infraerrors.Newf(http.StatusBadRequest, "GWPOOL_SETTING_INVALID", "%s must be boolean", key)
@@ -618,6 +621,7 @@ type openAIGatewayPoolPair struct {
 	// 不包括备用架等待；续票保留。缺失时票龄回落最严档，不编造首次接触。
 	firstSent time.Time
 	roundID   string // 不含票据/凭据；同缓存窗口续票时保留。
+	early     *gatewayPoolEarlyAttempt
 }
 
 // openAICodexCredentialIdentity 解析「凭证域身份」：影子行自己不持凭据，必须按母账号算。
@@ -640,12 +644,22 @@ func (s *OpenAIGatewayService) codexCredentialIdentity(ctx context.Context, acco
 		}
 		source = resolved
 	}
-	return openAIGatewayPoolAccountKey(source), nil
+	if identity := gatewayPoolMemberIdentity(source, account); identity != "" {
+		return identity, nil
+	}
+	return openAIGatewayPoolAccountKeyLegacy(source), nil
 }
 
 // openAIGatewayPoolAccountKey 是池子侧的账号标识，缺凭证域身份时退回本地行
 // （与 turn-state 溯源的 id:N 兜底同口径）。
 func openAIGatewayPoolAccountKey(account *Account) string {
+	if identity := gatewayPoolMemberIdentity(account, account); identity != "" {
+		return identity
+	}
+	return openAIGatewayPoolAccountKeyLegacy(account)
+}
+
+func openAIGatewayPoolAccountKeyLegacy(account *Account) string {
 	if namespace := codexAccountIdentityNamespace(account); namespace != "" {
 		return namespace
 	}
@@ -669,6 +683,9 @@ func openAIGatewayPoolAccountKey(account *Account) string {
 // 换句话说**解析失败是静默降级而不是报错**：少一点精度，不会让任何一发请求失败。
 // 其余形态（seed: / setup-token: / id:<行> 兜底）本来就没有上游 account_id，走的是同一条降级路。
 func gatewayPoolUpstreamAccountID(identity string) string {
+	if member, ok := strings.CutPrefix(identity, gatewayPoolMemberIdentityPrefix); ok {
+		return member
+	}
 	rest, ok := strings.CutPrefix(identity, "chatgpt:")
 	if !ok {
 		return ""
@@ -690,16 +707,12 @@ func (s *openAICodexCookieStore) gatewayPoolIdentity(ctx context.Context, accoun
 	return openAIGatewayPoolAccountKey(account), nil
 }
 
-// gatewayPoolLedgerIdentity 把凭证域身份收敛到**上游账号**粒度：去掉 :user:<user_id> 那一段。
-//
-// 降智的作用单位是 (上游账号 × 网关)。同一个 chatgpt_account_id 下的两份凭据（两个
-// chatgpt_user_id，例如工作区里的两个人）对 OpenAI 就是同一个账号，烧的是同一个窗口——
-// 分开记账会让第二个 user 以为自己还有满血落点。池子的 used_by_you 正好也按 account_id 算、
-// 能兜住这一条，但那是撞巧，账本自己就该对。
-//
-// 其余形态（seed: / setup-token: / id:<行> 兜底）本来就没有上游 account_id，原样当键：
-// 它们只能按自己那份凭据算，收不动。
+// Preserve the opt-in member partition, otherwise retain the old account-level
+// policy. Neither local policy proves whether upstream cooldowns are independent.
 func gatewayPoolLedgerIdentity(identity string) string {
+	if strings.HasPrefix(identity, gatewayPoolMemberIdentityPrefix) {
+		return identity
+	}
 	if accountID := gatewayPoolUpstreamAccountID(identity); accountID != "" {
 		return "chatgpt:" + accountID
 	}
@@ -719,27 +732,32 @@ func gatewayPoolLedgerKey(identity, gateway string) string {
 //
 // 为什么不能只信池子的 used_by_you：池子按它发的 consumer key 认账号，而同一份 Codex 凭据
 // 可能挂在多个账号行、各自配着不同的 key；池子那本账对不上真正被烧掉的那个单位。
-func (s *openAICodexCookieStore) gatewayPoolUsedRecently(identity, gateway string, window time.Duration) bool {
-	_, used := s.gatewayPoolUsedAt(identity, gateway, window)
+func (s *openAICodexCookieStore) gatewayPoolUsedRecently(identity, gateway string, window time.Duration, enabled ...bool) bool {
+	_, used := s.gatewayPoolUsedAt(identity, gateway, window, enabled...)
 	return used
 }
 
 // gatewayPoolUsedAt 同上，但把**什么时候碰的**一起带回来：挑落点时要在「全都碰过」的那一格里
 // 挑碰得最早的那个（见 gatewayPoolPick），光一个 bool 排不出序。
-func (s *openAICodexCookieStore) gatewayPoolUsedAt(identity, gateway string, window time.Duration) (time.Time, bool) {
+func (s *openAICodexCookieStore) gatewayPoolUsedAt(identity, gateway string, window time.Duration, enabled ...bool) (time.Time, bool) {
 	value, ok := s.poolUsed.Load(gatewayPoolLedgerKey(identity, gateway))
 	var at time.Time
 	if ok {
 		at, _ = value.(time.Time)
 	}
-	base, _ := s.gatewayPoolInitialCooldown(identity, gateway, window)
+	base, _ := s.gatewayPoolInitialCooldown(identity, gateway, window, enabled...)
 	until := at.Add(time.Duration(base) * time.Second)
-	if c, found := s.cooldownEntry(identity, gateway); found {
+	s.poolCooldownMu.Lock()
+	key := gatewayPoolLedgerKey(identity, gateway)
+	if c, found := s.poolCooldown[key]; found {
+		s.refreshGatewayPoolCooldown(&c, identity, gateway, window, at, time.Now().UTC(), enabled...)
+		s.poolCooldown[key] = c
 		until = c.Until
 		if touchedUntil := at.Add(time.Duration(c.WindowSeconds) * time.Second); touchedUntil.After(until) {
 			until = touchedUntil
 		}
 	}
+	s.poolCooldownMu.Unlock()
 	return at, time.Now().Before(until)
 }
 
@@ -773,9 +791,10 @@ func (s *openAICodexCookieStore) gatewayPoolHydrateUsed(account *Account, identi
 		return
 	}
 	rec, ok := readOpenAIGatewayHistory(account)
-	if !ok || (rec.LedgerTag != "" && rec.LedgerTag != gatewayPoolLedgerTag(identity)) {
+	if !ok {
 		return
 	}
+	rec = gatewayPoolHistoryForTag(rec, gatewayPoolLedgerTag(identity))
 	for gateway, seen := range rec.Seen {
 		if gateway == "" || seen.At.IsZero() {
 			continue
@@ -802,7 +821,7 @@ func (s *openAICodexCookieStore) gatewayPoolHydrateUsed(account *Account, identi
 //
 // 排序而不是随便给 64 项：池子的 exclude 有 64 项上限，超了会拒掉**整条**请求，所以超限时
 // 必须自己裁，而最近烧的那些最可能还在冷却期里（最该排除）。
-func (s *openAICodexCookieStore) gatewayPoolBurnedGateways(identity string, window time.Duration, limit int) []string {
+func (s *openAICodexCookieStore) gatewayPoolBurnedGateways(identity string, window time.Duration, limit int, enabled ...bool) []string {
 	if s == nil || identity == "" || limit <= 0 {
 		return nil
 	}
@@ -822,7 +841,7 @@ func (s *openAICodexCookieStore) gatewayPoolBurnedGateways(identity string, wind
 			return true
 		}
 		at, ok := value.(time.Time)
-		if !ok || !s.gatewayPoolUsedRecently(identity, gateway, window) {
+		if !ok || !s.gatewayPoolUsedRecently(identity, gateway, window, enabled...) {
 			return true
 		}
 		all = append(all, burned{gateway: gateway, at: at})
@@ -956,6 +975,7 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 	listCtx, cancel := context.WithTimeout(ctx, account.gatewayPoolListTimeout())
 	defer cancel()
 	model, _ := ctx.Value(gatewayPoolProbeModelKey{}).(string)
+	listStarted := time.Now()
 	gateways, err := pool.GatewaysForModel(listCtx, gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(account, identity), model)
 	if err != nil {
 		// 列表是优化不是闸门：池子没加这个端点 / 临时打不开时照常裸取。绝不能因为列不出来
@@ -964,6 +984,9 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 		return ""
 	}
 	s.noteGatewayPoolCountries(account, gateways)
+	if s.poolCooldownPersist != nil {
+		defer s.poolCooldownPersist(ctx, account, identity)
+	}
 	// /gateways 只列此刻有活 pair 的网关 ⇒ 列表长度就是池子的可交付网关数。账号卡片拿它当
 	// 「还剩几个落点没用」的分母（见 OpenAIGatewayPoolApplied.PoolLive）。
 	var eligible []gwpool.Gateway
@@ -984,12 +1007,12 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 	free := 0
 	window := account.gatewayPoolGatewayWindow()
 	for _, candidate := range gateways {
-		s.noteGatewayPoolRecommendation(identity, candidate.Name, candidate.Cooldown)
+		s.noteGatewayPoolRecommendationAt(identity, candidate.Name, candidate.Cooldown, listStarted)
 		s.noteGatewayPoolFeedbackPolicy(account, identity, candidate.Name, candidate.Cooldown)
+		_, burned := s.gatewayPoolUsedAt(identity, candidate.Name, window, account.gatewayPoolUseRecommendation())
 		if !candidate.PairReady {
 			continue
 		}
-		_, burned := s.gatewayPoolUsedAt(identity, candidate.Name, window)
 		if !burned {
 			free++
 		}
@@ -1011,7 +1034,7 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 		return eligible[0].Name
 	}
 	// 冷却期是硬闸，不再强行轮到最旧那个。裸取也必须经过 next 的同一道本地闸。
-	return ""
+	return s.gatewayPoolPickEarly(ctx, account, identity, gateways)
 }
 
 // gatewayPoolPair 取该身份当前可用的 pair：窗口内复用缓存，否则向池子要一张。
@@ -1181,7 +1204,11 @@ func (b *gatewayPoolTicketBatch) next(ctx context.Context) (openAIGatewayPoolPai
 			pair = openAIGatewayPoolPair{}
 			continue
 		}
-		if b.store.beginGatewayPoolAttempt(b.identity, pair.gateway, b.account.gatewayPoolGatewayWindow()) {
+		if pair.early != nil {
+			b.store.beginGatewayPoolEarlyAttempt(b.identity, pair.gateway, b.account.gatewayPoolGatewayWindow(), b.account.gatewayPoolUseRecommendation())
+			break
+		}
+		if b.store.beginGatewayPoolAttempt(b.identity, pair.gateway, b.account.gatewayPoolGatewayWindow(), b.account.gatewayPoolUseRecommendation()) {
 			break
 		}
 		// exclude 有长度上限，池子也可能忽略它；出站前仍必须守本地冷却。
@@ -1274,7 +1301,24 @@ func (s *openAICodexCookieStore) gatewayPoolTakeBatch(
 	steer := s.gatewayPoolPick(ctx, pool, account, identity)
 	// 本地账本里还在窗口内的网关：点名时它是多余的（挑的时候已经滤过），
 	// **裸取时它是唯一能把这份知识用上的地方**。
-	exclude := s.gatewayPoolBurnedGateways(identity, account.gatewayPoolGatewayWindow(), gwpool.MaxExcludeItems)
+	exclude := s.gatewayPoolBurnedGateways(identity, account.gatewayPoolGatewayWindow(), gwpool.MaxExcludeItems, account.gatewayPoolUseRecommendation())
+	var early *gatewayPoolEarlyAttempt
+	if intent, _ := ctx.Value(gatewayPoolEarlyIntentKey{}).(*gatewayPoolEarlyIntent); intent != nil &&
+		intent.attempt != nil && intent.attempt.gateway == steer {
+		early = intent.attempt
+		// Early acquisition is not detached from the waiting business request.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(intent.ctx, account.gatewayPoolFetchTimeout())
+		defer cancel()
+		count = 1
+		kept := exclude[:0]
+		for _, gateway := range exclude {
+			if gateway != steer {
+				kept = append(kept, gateway)
+			}
+		}
+		exclude = kept
+	}
 	request := gwpool.CookieRequest{
 		// Account = 这一发真正要用的那个上游账号（池子的 ?account=）：池子按它记槽位，
 		// 不报就记在 consumer key 上传者的头上。
@@ -1288,7 +1332,7 @@ func (s *openAICodexCookieStore) gatewayPoolTakeBatch(
 	}
 	request.Count = count
 	got, err := pool.Cookies(ctx, request)
-	if steer != "" && gatewayPoolRetriesBare(err) {
+	if early == nil && steer != "" && gatewayPoolRetriesBare(err) {
 		// 点名的那个在「列表」与「取票」之间被别人租走了。这一发什么都没交付、没烧任何
 		// 槽位，所以退回裸取一次——不然自己挑网关反而把本来能成的请求打成失败。
 		//
@@ -1333,6 +1377,10 @@ func (s *openAICodexCookieStore) gatewayPoolTakeBatch(
 			// 池子没报网关名就自己从 __oailb 里解——回报必须记**实际注入的那张**。
 			gateway = openAICodexRouteGateway(cookie)
 		}
+		if early != nil && (gateway != early.gateway || openAICodexRouteGateway(cookie) != early.gateway ||
+			one.Version == "" || one.ValidFor < minRemaining) {
+			continue // no wrong-gateway, unidentified or short-lived early probes
+		}
 		// 同一个落点在一批里只留一张。池子承诺每张不同落点，但那是**它的**承诺：
 		// 重了的话第二张的窗口已经被第一张烧掉，当成两张用就是明知故犯发降智。
 		if gateway != "" && seen[gateway] {
@@ -1356,6 +1404,7 @@ func (s *openAICodexCookieStore) gatewayPoolTakeBatch(
 			until:             now.Add(one.ValidFor),
 			since:             now,
 			roundID:           gatewayPoolContactRoundID(identity, one.Version, now),
+			early:             early,
 		})
 	}
 	if len(batch.pairs) == 0 {
@@ -1530,6 +1579,8 @@ func (s *openAICodexCookieStore) gatewayPoolDropPair(identity, version string) {
 // AccountID 是**这一发实际用的账号**：故障转移在同一个 ctx 里换号重试，不带账号就会把前一个号
 // 注入过的读数记到后一个号的用量行上。用量侧按它校验（见 routePairInUse）。
 type OpenAIGatewayPoolApplied struct {
+	early             *gatewayPoolEarlyAttempt
+	LedgerTag         string
 	AccountID         int64
 	Cookie            string
 	Gateway           string
@@ -1846,8 +1897,10 @@ func (s *openAICodexCookieStore) AttachRoute(
 	// 写完头**之后**才记标记：使用记录那张卡片据此断言「这一发真的注入了」。
 	openAIGatewayPoolSinkFrom(ctx).mark(OpenAIGatewayPoolApplied{
 		AccountID: account.ID, Cookie: pair.cookie, Gateway: pair.gateway,
-		Region: pair.region, Version: pair.version, RoundID: pair.roundID,
+		LedgerTag: gatewayPoolLedgerTag(identity),
+		Region:    pair.region, Version: pair.version, RoundID: pair.roundID,
 		DatacenterCountry: pair.datacenterCountry,
+		early:             pair.early,
 	})
 	return release, nil
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/chatgptcookies"
 	"golang.org/x/sync/singleflight"
@@ -31,9 +32,12 @@ type openAICodexCookieStore struct {
 	poolClients sync.Map // base_url + "\x00" + consumer key → *gwpool.Client
 	// identity 解析凭证域身份（影子行按母账号算），是 pair 缓存键。
 	// 由构造器注入；裸结构体（单元测试）里为 nil，退回按本地行算。
-	identity  openAICodexCredentialIdentity
-	poolPairs sync.Map // 凭证域身份 → openAIGatewayPoolPair
-	poolFetch singleflight.Group
+	identity       openAICodexCredentialIdentity
+	poolPairs      sync.Map // 凭证域身份 → openAIGatewayPoolPair
+	poolFetch      singleflight.Group
+	poolEarlyAt    sync.Map // credential domain -> last durable early reservation
+	poolEarlyLocks sync.Map // ledger domain (may span distinct pair-cache identities) -> *sync.Mutex
+	poolEarlyClaim func(context.Context, *Account, string, time.Time) error
 	// poolVerified 是「这个身份手上那张票**验过是满血**」（openai_gwpool_warm.go）。
 	//
 	// 必须单独记，**不能拿 poolPairs 的 Live 当「验过」**：Live 的唯一含义是取票那一刻写的
@@ -50,13 +54,17 @@ type openAICodexCookieStore struct {
 	poolFeedbackPolicies    sync.Map // binding+gateway -> latest reporting-policy observation
 	poolFeedbackPolicyPrune atomic.Int64
 	poolRounds              gatewayPoolRounds
+	poolUsageLocks          sync.Map // ledger tag -> *sync.Mutex, durable usage rounds
+	poolUsageCache          sync.Map // ledger tag -> *gatewayPoolUsageLedger, immutable committed snapshot
+	poolUsageAttempt        func(context.Context, *Account, string, string, OpenAIGatewayPoolApplied, time.Time, bool)
+	poolUsageFinished       func(context.Context, *Account)
 	poolProgress            gatewayPoolProgressTracker
 	poolRotationAccounts    sync.Map // account ID -> fresh opt-in observed during preference hydration
 	// poolWarm 把同一张票上的并发预热判据收口成一次（openai_gwpool_warm.go）。
 	// 取票本身已经被 poolFetch 收成一次 ⇒ 同身份的并发请求手里是**同一张票**、同一个
-	// (上游账号 × 网关) 单元、同一个满血窗口 ⇒ 结论必然相同，各自打一遍纯属白烧配额，
+	// (上游账号 × 网关) 单元；同验证模型共享 A/B，各自取消不影响其它等待者，
 	// 而供给只有个位数张/小时。键按票号分，换了票要重新验。
-	poolWarm singleflight.Group
+	poolWarm gatewayPoolProbeFlights
 	// poolUsed 是「这个凭证域身份最近碰过哪些网关」的本地账本，用来挑一个没烧过的落点，
 	// 并作为 /cookie 的 exclude 带给池子（裸取时也能避开烧过的落点）。
 	// 池子按它发的 consumer key 记账，认不出同一份凭据挂在多个账号行上（见 gatewayPoolLedgerKey）。
@@ -64,6 +72,7 @@ type openAICodexCookieStore struct {
 	poolCooldownMu      sync.Mutex
 	poolCooldown        map[string]gatewayPoolCooldown
 	poolRecommendations sync.Map // ledger identity × gateway → gatewayPoolRecommendation
+	poolCooldownPersist func(context.Context, *Account, string)
 	poolHistoryLocks    sync.Map // 本地行 ID → *sync.Mutex，串行合并已有 history。
 	accountByID         func(context.Context, int64) (*Account, error)
 	historyByTag        func(context.Context, string) ([]Account, error)

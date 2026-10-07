@@ -62,6 +62,12 @@ func (s *OpenAIGatewayService) forwardOpenAIRawRelay(ctx context.Context, c *gin
 
 	outBody, plainBody, encoding, err := s.openAIRawRelayOutboundBody(ctx, c, account, body)
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeOpenAIRawRelayLocalRejection(c, http.StatusRequestEntityTooLarge, "request_too_large",
+				fmt.Sprintf("Request body too large, limit is %d bytes", tooLarge.Limit))
+			return nil, openAIRawRelayNotAccountFault(err)
+		}
 		var blocked *OpenAIFastBlockedError
 		if errors.As(err, &blocked) {
 			writeOpenAIFastPolicyBlockedResponse(c, blocked)
@@ -135,7 +141,11 @@ func (s *OpenAIGatewayService) openAIRawRelayOutboundBody(ctx context.Context, c
 	if decoded == nil {
 		decoded = forwardBody
 	}
-	base, err := httputil.NormalizeLenientJSONRequestBody(decoded, 0)
+	var limit int64
+	if s.cfg != nil {
+		limit = s.cfg.Gateway.MaxBodySize
+	}
+	base, err := httputil.NormalizeLenientJSONRequestBody(decoded, limit)
 	if err != nil {
 		return nil, nil, "", err
 	}

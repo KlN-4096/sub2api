@@ -7,6 +7,8 @@ import "time"
 type gatewayPoolVerifiedMark struct {
 	version string
 	at      time.Time
+	// Immutable after publication; pointer keeps the sync.Map CAS value comparable.
+	models *map[string]time.Time
 }
 
 // The caller persists this duration in gateway/contact history after marking

@@ -48,6 +48,7 @@ var errOpenAIRawRelayWSDone = errors.New("openai raw relay: relay already finish
 type openAIRawRelayWSSide struct {
 	conn     *coderws.Conn
 	read     func(ctx context.Context) (coderws.MessageType, []byte, error)
+	write    func(ctx context.Context, msgType coderws.MessageType, payload []byte) error
 	filter   func(payload []byte) ([]byte, error)
 	received atomic.Pointer[coderws.CloseError]
 	peer     *openAIRawRelayWSSide
@@ -70,6 +71,9 @@ func (s *openAIRawRelayWSSide) ReadFrame(ctx context.Context) (coderws.MessageTy
 }
 
 func (s *openAIRawRelayWSSide) WriteFrame(ctx context.Context, msgType coderws.MessageType, payload []byte) error {
+	if s.write != nil {
+		return s.write(ctx, msgType, payload)
+	}
 	return s.conn.Write(ctx, msgType, payload)
 }
 
@@ -130,7 +134,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketRawRelay(
 		proxyURL = account.Proxy.URL()
 	}
 	dialCtx, cancelDial := context.WithTimeout(ctx, s.openAIWSDialTimeout())
-	upstream, status, handshakeHeaders, err := s.getOpenAIWSPassthroughDialer().Dial(dialCtx, wsURL, headers, proxyURL)
+	upstream, status, handshakeHeaders, err := s.dialRecordedOpenAIWS(dialCtx, account, wsURL, headers, proxyURL, s.getOpenAIWSPassthroughDialer())
 	cancelDial()
 	if err != nil {
 		return s.openAIRawRelayWSDialError(ctx, c, clientConn, account, status, handshakeHeaders, err)
@@ -140,6 +144,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketRawRelay(
 		_ = upstream.Close()
 		return errors.New("openai raw relay: upstream websocket does not expose its connection")
 	}
+	defer func() { upstreamConn.recording.Load().finish("ws_relay_finished") }()
 
 	// 已发的一轮（含首帧）与已结算的一轮；有保护保证同一时刻只有一轮在途。
 	var accepted, settled atomic.Int32
@@ -165,9 +170,12 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketRawRelay(
 		// 读不挂 relay 的 ctx：ctx 一取消 coder/websocket 会直接掐断连接，关闭帧就发不出去了。
 		// relay 退出时总会先调 Close，读随之结束。
 		read: func(context.Context) (coderws.MessageType, []byte, error) {
-			return upstreamConn.conn.Read(context.Background())
+			kind, payload, err := upstreamConn.conn.Read(context.Background())
+			upstreamConn.recording.Load().read(kind, payload, err)
+			return kind, payload, err
 		},
-		peer: client,
+		write: upstreamConn.WriteFrame,
+		peer:  client,
 	}
 	client.peer = upstreamSide
 	// filterMu 让客户端读协程里的准入与 relay 收尾互斥：收尾先等在跑的准入做完再兜底，之后迟到的

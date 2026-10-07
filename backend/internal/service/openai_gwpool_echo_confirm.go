@@ -130,6 +130,7 @@ func (s *OpenAIGatewayService) gatewayPoolConfirmResponse(request *http.Request,
 				return 0, "", err
 			}
 			probe.Header.Set("Cookie", cookie)
+			probe = probe.WithContext(withOpenAIRecordingKind(probe.Context(), "echo_confirmation"))
 			shotAt := time.Now()
 			resp, sentAt, err := s.gatewayPoolObservedRoundTrip(probe, proxyURL, account, true)
 			if !sentAt.IsZero() {

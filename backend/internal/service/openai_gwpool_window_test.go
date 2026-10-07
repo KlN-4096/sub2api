@@ -29,6 +29,7 @@ func TestVerifiedMarkKeepsTheWindowStartForTheSameTicket(t *testing.T) {
 	after, ok := store.gatewayPoolVerifiedMarkOf(gwpoolTestIdentity)
 	require.True(t, ok)
 	require.Equal(t, before, after)
+	store.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{cookie: "offline", version: "next", until: time.Now().Add(time.Minute)})
 	store.gatewayPoolMarkVerifiedFull(gwpoolTestIdentity, "next")
 	after, _ = store.gatewayPoolVerifiedMarkOf(gwpoolTestIdentity)
 	require.True(t, after.at.After(before.at))
