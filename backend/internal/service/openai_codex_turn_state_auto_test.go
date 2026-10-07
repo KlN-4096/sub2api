@@ -449,7 +449,7 @@ func TestOpenAITurnStateExpiredCandidatesStayInPool(t *testing.T) {
 	}
 
 	fresh := turnStateBlob(openAIHealthyTurnStateLen)
-	svc.pushOpenAITurnStateCandidate(turnStateAutoCtx("s"), account, fresh)
+	svc.pushOpenAITurnStateCandidate(turnStateAutoCtx("s"), account, fresh, nil)
 
 	pool := readOpenAITurnStatePool(account)
 	require.Len(t, pool, 2, "过期候选不得在入池时被删掉")
@@ -464,7 +464,7 @@ func TestOpenAITurnStateExpiredCandidatesStayInPool(t *testing.T) {
 	// 超出本模型配额时过期条目才出局，数量有界。
 	for i := 1; i <= 3; i++ {
 		svc.pushOpenAITurnStateCandidate(turnStateAutoCtx("s"), account,
-			turnStateBlob(openAIHealthyTurnStateLen-i)+strings.Repeat("y", i))
+			turnStateBlob(openAIHealthyTurnStateLen-i)+strings.Repeat("y", i), nil)
 	}
 	require.Len(t, readOpenAITurnStatePool(account), 3, "限深仍按模型生效")
 }
@@ -560,10 +560,10 @@ func TestOpenAITurnStatePoolDepthIsPerModel(t *testing.T) {
 	account.Extra[openAITurnStatePoolSizeExtraKey] = 1
 
 	astraBlob := turnStateBlob(openAIHealthyTurnStateLen)
-	svc.pushOpenAITurnStateCandidate(turnStateAutoCtxModel("s", astra), account, astraBlob)
+	svc.pushOpenAITurnStateCandidate(turnStateAutoCtxModel("s", astra), account, astraBlob, nil)
 	for i := 1; i <= 3; i++ {
 		svc.pushOpenAITurnStateCandidate(turnStateAutoCtxModel("s", luna), account,
-			turnStateBlob(openAIHealthyTurnStateLen-i)+strings.Repeat("z", i))
+			turnStateBlob(openAIHealthyTurnStateLen-i)+strings.Repeat("z", i), nil)
 	}
 
 	pool := readOpenAITurnStatePool(account)
