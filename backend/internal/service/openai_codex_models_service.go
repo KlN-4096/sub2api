@@ -21,6 +21,7 @@ import (
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/upstreamrecord"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"golang.org/x/net/http2"
 	"golang.org/x/sync/singleflight"
@@ -1628,6 +1629,7 @@ type openAIModelsRequest struct {
 	accountID           int64
 	credentialAccountID int64
 	credentialAccount   *Account
+	recordingAccount    *Account // Selected row, never the inherited credential source.
 	accountConcurrency  int
 	useAPIKeyUpstream   bool
 	// deviceWireProfile（双开）：/models 与该账号的 /responses 转发走同一协议（h2）——
@@ -1907,6 +1909,7 @@ func (s *OpenAIGatewayService) buildCodexModelsManifestRequest(ctx context.Conte
 		accountID:           account.ID,
 		credentialAccountID: credAccount.ID,
 		credentialAccount:   credAccount,
+		recordingAccount:    account,
 		accountConcurrency:  account.Concurrency,
 		useAPIKeyUpstream:   useAPIKeyUpstream,
 		// 双开只可能是 OAuth 类凭据（codexFingerprintConvergenceEnabled），API-key 上游走 s.httpUpstream。
@@ -2034,8 +2037,10 @@ func (s *OpenAIGatewayService) fetchOpenAIModelsUpstream(ctx context.Context, re
 	}
 
 	var resp *http.Response
+	req, observeResponse := upstreamrecord.PrepareHTTP(s.beginOpenAIRecording(reqCtx, request.recordingAccount, "models"), req)
 	if request.useAPIKeyUpstream {
 		if s.httpUpstream == nil {
+			_, _ = observeResponse(nil, errors.New("upstream_not_configured"))
 			return nil, infraerrors.New(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_UPSTREAM_NOT_CONFIGURED", "Codex models upstream HTTP client is not configured")
 		}
 		req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
@@ -2053,11 +2058,13 @@ func (s *OpenAIGatewayService) fetchOpenAIModelsUpstream(ctx context.Context, re
 				ForceHTTP2:            request.deviceWireProfile,
 			})
 			if clientErr != nil {
+				_, _ = observeResponse(nil, clientErr)
 				return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_PROXY_INVALID", "invalid proxy configuration: %v", clientErr)
 			}
 			resp, err = client.Do(req)
 		}
 	}
+	resp, err = observeResponse(resp, err)
 	if err != nil {
 		return nil, &codexModelsManifestUpstreamError{
 			err:       infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_UPSTREAM_FAILED", "codex models manifest request failed: %v", err),

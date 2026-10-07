@@ -85,7 +85,8 @@ const (
 // Seen 用 map 而不是数组：同一个网关会被反复碰到，按名字原地覆盖时间戳，条目数恒等于
 // 碰过的网关数。顺序在读的时候按时间排（readOpenAIGatewayHistoryRows）。
 type openAIGatewayHistory struct {
-	LedgerTag string `json:"ledger_tag,omitempty"`
+	LedgerTag string                `json:"ledger_tag,omitempty"`
+	Previous  *openAIGatewayHistory `json:"previous,omitempty"`
 	// Current 是最近一发请求实际落在的网关。空 = 这个号还没拿到过能读出落点的路由。
 	Current string `json:"current"`
 	// CurrentRegion 是 Current 那个网关所属的大区（池子报的）。空 = 不知道。
@@ -187,6 +188,7 @@ func readOpenAIGatewayHistory(a *Account) (openAIGatewayHistory, bool) {
 func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 	ctx context.Context, account *Account, gateway, region, verdict string, advanceCurrent bool,
 	poolLive, poolFree int, fullHeldMs int64,
+	expectedTags ...string,
 ) {
 	if s == nil || s.accountRepo == nil || account == nil {
 		return
@@ -199,6 +201,15 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 	}
 	region = strings.TrimSpace(region)
 	now := time.Now().UTC()
+	expectedTag := ""
+	if len(expectedTags) > 0 {
+		expectedTag = expectedTags[0]
+	}
+	if expectedTag == "" {
+		if identity, err := s.codexCookies.gatewayPoolIdentity(ctx, account); err == nil {
+			expectedTag = gatewayPoolLedgerTag(identity)
+		}
+	}
 
 	unlock := s.codexCookies.gatewayPoolHistoryLock(account.ID)
 	defer unlock()
@@ -212,16 +223,20 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 	var cooldown *gatewayPoolCooldown
 	if identity, identityErr := s.codexCookies.gatewayPoolIdentity(ctx, account); identityErr == nil {
 		tag := gatewayPoolLedgerTag(identity)
-		if rec.LedgerTag != "" && rec.LedgerTag != tag {
-			rec = openAIGatewayHistory{}
+		if expectedTag != "" && tag != expectedTag {
+			return // a late result cannot be reassigned to a newly selected ledger
 		}
+		rec = gatewayPoolHistoryForTag(rec, tag)
 		rec.LedgerTag = tag
 		if c, exists := s.codexCookies.cooldownEntry(identity, gateway); exists {
 			cooldown = &c
 		}
+	} else {
+		slog.Warn("gwpool_gateway_history_identity_unavailable", "account_id", account.ID)
+		return
 	}
 	prev := rec.Seen[gateway]
-	cooldownChanged := cooldown != nil && (prev.Cooldown == nil || cooldown.UpdatedAt.After(prev.Cooldown.UpdatedAt))
+	cooldownChanged := cooldown != nil && (prev.Cooldown == nil || cooldown.changedAt().After(prev.Cooldown.changedAt()))
 	newTiming := fullHeldMs > 0 && fullHeldMs != prev.FullHeldMs
 	// 没换网关、这个网关刚写过、大区没新消息、**判定也没变** ⇒ 不写。换了就立刻写。
 	// 判定变了必须穿过节流：「这个落点刚被判降智」正是这张卡要看的事，压住它等于不记。
@@ -291,10 +306,15 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 	}
 	account.Extra[openAIGatewayHistoryExtraKey] = generic
 	account.Extra[openAIGatewayLedgerTagExtraKey] = rec.LedgerTag
+	previousTag := ""
+	if rec.Previous != nil {
+		previousTag = rec.Previous.LedgerTag
+	}
 	// 不随请求取消：用量是在响应收尾之后记的，跟着请求 ctx 一起死就等于这条读数永远写不进去。
 	if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
-		openAIGatewayHistoryExtraKey:   generic,
-		openAIGatewayLedgerTagExtraKey: rec.LedgerTag,
+		openAIGatewayHistoryExtraKey:           generic,
+		openAIGatewayLedgerTagExtraKey:         rec.LedgerTag,
+		openAIGatewayPreviousLedgerTagExtraKey: previousTag,
 	}); err != nil {
 		slog.Debug("gwpool_gateway_history_persist_failed", "account_id", account.ID, "error", err)
 	}
@@ -305,6 +325,22 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 // Current 不许被裁掉：它是这张卡最要紧的那一格，而「当前网关」恰好可能是刚加进来的那条
 // （加进来时它是最新的，裁的是最旧的，所以这里实际裁不到它——留着这个判断是为了让
 // 以后改排序规则的人撞上它）。
+// Keep one previous identity view so toggling the experimental partition does
+// not erase cooldowns. Previous views are never merged into another identity.
+func gatewayPoolHistoryForTag(rec openAIGatewayHistory, tag string) openAIGatewayHistory {
+	if rec.LedgerTag == "" || rec.LedgerTag == tag {
+		return rec
+	}
+	previous := rec
+	previous.Previous = nil
+	next := openAIGatewayHistory{LedgerTag: tag}
+	if rec.Previous != nil && rec.Previous.LedgerTag == tag {
+		next = *rec.Previous
+	}
+	next.Previous = &previous
+	return next
+}
+
 func pruneOpenAIGatewayHistory(rec *openAIGatewayHistory) {
 	if rec == nil || len(rec.Seen) <= openAIGatewayHistoryMax {
 		return
