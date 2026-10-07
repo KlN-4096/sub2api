@@ -29,16 +29,34 @@ const render = (acc: Account) => mount(AccountGatewayCell, { props: { account: a
 const cell = (w: ReturnType<typeof render>, region: string) =>
   w.get(`[data-testid="account-gateway-region-${region}"]`)
 
-/** 格子里是「大区名 + 网关号」，断言只看网关号那一截（大区名是 i18n key 桩）。 */
+/**
+ * 格子里是「大区名 + 判定字符 + 网关号」，断言只看网关号那一截（大区名是 i18n key 桩）。
+ * 判定字符单独由 markOf 看 —— 两件事分开断言，改一个不会连带改另一个的期望值。
+ */
 const gatewayOf = (w: ReturnType<typeof render>, region: string) =>
+  markedOf(w, region)?.replace(/^[✓!] /, '')
+
+const markedOf = (w: ReturnType<typeof render>, region: string) =>
   cell(w, region)
     .findAll('span')
     .map((s) => s.text())
     .at(-1)
 
-/** 琥珀色 = 窗口内打过、还在冷却。 */
-const isHot = (w: ReturnType<typeof render>, region: string) =>
-  cell(w, region).html().includes('amber')
+/** 判定字符：'✓ ' = 验过满血，'! ' = 窗口内碰过（现在打就是降智），'' = 已过窗口。 */
+const markOf = (w: ReturnType<typeof render>, region: string) =>
+  (markedOf(w, region) ?? '').match(/^[✓!] /)?.[0] ?? ''
+
+/** 「还烧着」= 本地账本窗口内碰过 = 格子不是淡显的那一档。 */
+const isHot = (w: ReturnType<typeof render>, region: string) => tone(w, region) !== 'idle'
+
+/** 格子的状态色：full / degraded / idle（见 AccountGatewayCell 的 TONE_CLASS）。 */
+const tone = (w: ReturnType<typeof render>, region: string) => cell(w, region).attributes('data-tone')
+
+/** 预测那行里的分钟数。t() 是桩，渲染出来是 `key:{"minutes":N}`。 */
+const minutesOf = (w: ReturnType<typeof render>) => {
+  const text = w.get('[data-testid="account-gateway-forecast"]').text()
+  return JSON.parse(text.slice(text.indexOf('{'), text.indexOf('}') + 1)).minutes as number
+}
 
 describe('AccountGatewayCell', () => {
   it('第一行是当前大区 · 当前网关', () => {
@@ -160,6 +178,201 @@ describe('AccountGatewayCell', () => {
       const w = render(account(bad))
       expect(w.find('[data-testid="account-gateway-empty"]').exists()).toBe(true)
     }
+  })
+
+  // 状态色只有三种（2026-10-02 从四种并成三种）：绿 = 此刻真的在 183 秒满血窗口里；
+  // 红 = 窗口内碰过、现在打过去就是降智；灰 = 已过本地账本窗口，可以再用。
+  //
+  // 原来那档琥珀（「碰过没判据」/「曾判满血但 183 秒窗口已过」）并进红色：它们在
+  // 「现在能不能用」这个问题上和降智完全等价，分两色只会让人以为琥珀比红安全。
+  it('窗口内只分满血与降智，窗口外一律淡显', () => {
+    const w = render(
+      account({
+        current: 'unified-73',
+        current_region: 'east-asia',
+        seen: {
+          'unified-73': { at: isoAgo(60), region: 'east-asia', verdict: 'full', full_at: isoAgo(60) },
+          'unified-84': { at: isoAgo(120), region: 'us-west', verdict: 'degraded' },
+          'unified-95': { at: isoAgo(180), region: 'us-east' },
+          // 窗口外（默认 4 小时）：判定过期了，不该再按它渲染当前状态。
+          'unified-200': { at: isoAgo(5 * 3600), region: 'oceania', verdict: 'full' }
+        },
+        updated_at: isoAgo(60)
+      })
+    )
+    expect(tone(w, 'east-asia')).toBe('full')
+    expect(tone(w, 'us-west')).toBe('degraded')
+    expect(tone(w, 'us-east')).toBe('degraded') // 碰过没判据 = 窗口已经烧了
+    expect(tone(w, 'oceania')).toBe('idle')
+    expect(tone(w, 'europe')).toBe('idle') // 空格子
+
+    // 色退化成装饰（9px 字号 + 红绿色盲 + title 在触屏上摸不到）时信息仍然读得出来。
+    expect(markOf(w, 'east-asia')).toBe('✓ ')
+    expect(markOf(w, 'us-west')).toBe('! ')
+    expect(markOf(w, 'us-east')).toBe('! ')
+    expect(markOf(w, 'oceania')).toBe('')
+
+    // 判定不管窗口内外都进 tooltip：它是「验出过满血没有」唯一的记录。
+    expect(cell(w, 'east-asia').attributes('title')).toContain('gatewayHistory.verdicts.full')
+    expect(cell(w, 'us-west').attributes('title')).toContain('gatewayHistory.verdicts.degraded')
+    expect(cell(w, 'oceania').attributes('title')).toContain('gatewayHistory.verdicts.full')
+    expect(cell(w, 'us-east').attributes('title')).toContain('gatewayHistory.verdicts.none')
+  })
+
+  // 判过满血、但 183 秒窗口已经过去 ⇒ 红，不是绿也不是琥珀：窗口是 (账号 × 网关) 首次接触
+  // 那一下给的，过了就没了。
+  it('满血判定过了 183 秒窗口就变红', () => {
+    const w = render(
+      account({
+        current: 'unified-73',
+        seen: {
+          'unified-73': { at: isoAgo(60), region: 'east-asia', verdict: 'full', full_at: isoAgo(400) }
+        },
+        updated_at: isoAgo(60)
+      })
+    )
+    expect(tone(w, 'east-asia')).toBe('degraded')
+    expect(cell(w, 'east-asia').attributes('title')).toContain('gatewayHistory.verdicts.full')
+  })
+
+  it('认不出的判定值按「没判过」处理', () => {
+    const w = render(
+      account({
+        current: 'unified-73',
+        seen: { 'unified-73': { at: isoAgo(60), region: 'east-asia', verdict: 'FULL' } },
+        updated_at: isoAgo(60)
+      })
+    )
+    expect(tone(w, 'east-asia')).toBe('degraded')
+    expect(cell(w, 'east-asia').attributes('title')).toContain('gatewayHistory.verdicts.none')
+  })
+
+  // tooltip 固定五段：区域 · 网关名 · 满血时刻 · 状态 · 上次判定。
+  // 段位固定（没有就写「从未 / 没判过」）是刻意的 —— 运营方竖着扫一列格子看，段数会变的话
+  // 每一行都得重新找「满血时刻」在哪儿。
+  it('tooltip 恒为五段：区域·网关·满血时刻·状态·判定', () => {
+    const w = render(
+      account({
+        current: 'unified-73',
+        seen: {
+          'unified-73': { at: isoAgo(60), region: 'east-asia', verdict: 'full', full_at: isoAgo(60) },
+          'unified-95': { at: isoAgo(180), region: 'us-east' }
+        },
+        updated_at: isoAgo(60)
+      })
+    )
+    const judged = (cell(w, 'east-asia').attributes('title') ?? '').split(' · ')
+    expect(judged).toHaveLength(5)
+    expect(judged[0]).toContain('gatewayHistory.regions.east-asia')
+    expect(judged[1]).toBe('unified-73')
+    expect(judged[2]).toContain('gatewayHistory.fullAt')
+    expect(judged[3]).toContain('gatewayHistory.regionHot')
+    expect(judged[4]).toContain('gatewayHistory.verdicts.full')
+
+    // 从没判过满血的那一格段数一样，第三段写「从未」而不是整段消失。
+    const never = (cell(w, 'us-east').attributes('title') ?? '').split(' · ')
+    expect(never).toHaveLength(5)
+    expect(never[2]).toContain('gatewayHistory.fullNever')
+    expect(never[4]).toContain('gatewayHistory.verdicts.none')
+  })
+
+  // 满血分钟预测：单位是 (账号 × 大区)，同一大区下的多个网关名算一个，而且算**下界**。
+  it('满血分钟预测按大区数单位，不按网关名数', () => {
+    // 九个大区全部刚烧过 ⇒ 一小时内一个都出不来 ⇒ 0 分钟。
+    const allBurned = Object.fromEntries(
+      ['us-east', 'us-west', 'south-america', 'west-europe', 'europe', 'east-asia', 'oceania', 'south-asia', 'middle-east'].map(
+        (region, i) => [`unified-${i}`, { at: isoAgo(60), region }]
+      )
+    )
+    expect(minutesOf(render(account({ current: 'unified-0', seen: allBurned })))).toBe(0)
+
+    // 九个大区都已出冷却 ⇒ 九个单位 × 183 秒，封顶一小时之前是 27 分钟。
+    const allCooled = Object.fromEntries(
+      Object.entries(allBurned).map(([name, row]) => [
+        name,
+        { ...(row as object), at: isoAgo(5 * 3600) }
+      ])
+    )
+    expect(minutesOf(render(account({ current: 'unified-0', seen: allCooled })))).toBe(
+      Math.round((9 * 183) / 60)
+    )
+
+    // 同一个大区三个网关名 = **一个**单位。都已出冷却 ⇒ 1 个单位，不是 3 个。
+    const oneRegion = render(
+      account({
+        current: 'unified-1',
+        seen: {
+          'unified-1': { at: isoAgo(5 * 3600), region: 'us-west' },
+          'unified-2': { at: isoAgo(6 * 3600), region: 'us-west' },
+          'unified-3': { at: isoAgo(7 * 3600), region: 'us-west' }
+        }
+      })
+    )
+    expect(minutesOf(oneRegion)).toBe(Math.round(183 / 60))
+
+    // 同一个大区里取**最近**那次当冷却起点：旧的那条不该让这个单位看起来已恢复。
+    const staleAndFresh = render(
+      account({
+        current: 'unified-2',
+        seen: {
+          'unified-1': { at: isoAgo(5 * 3600), region: 'us-west' },
+          'unified-2': { at: isoAgo(60), region: 'us-west' }
+        }
+      })
+    )
+    expect(minutesOf(staleAndFresh)).toBe(0)
+
+    // 冷却剩余 ≤ 1 小时就算可用：4 小时窗口下，3.5 小时前烧的那个算回来。
+    const recovering = render(
+      account({
+        current: 'unified-1',
+        seen: { 'unified-1': { at: isoAgo(3.5 * 3600), region: 'us-west' } }
+      })
+    )
+    expect(minutesOf(recovering)).toBe(Math.round(183 / 60))
+  })
+
+  // 下界的两条悲观规则，都是为了别让这个数偏到不能用。
+  it('没摸过的大区不进数字，只当上行空间提示', () => {
+    const w = render(
+      account({
+        current: 'unified-1',
+        seen: { 'unified-1': { at: isoAgo(5 * 3600), region: 'us-west' } }
+      })
+    )
+    // 只有 us-west 有正面证据 ⇒ 1 个单位。另外八个大区本行没碰过，**不算**。
+    expect(minutesOf(w)).toBe(Math.round(183 / 60))
+    const text = w.get('[data-testid="account-gateway-forecast"]').text()
+    expect(text).toContain('gatewayHistory.forecastUntouched')
+    expect(text).toContain('"count":8')
+
+    // 九个大区都有记录了就没有上行空间可说。
+    const full = Object.fromEntries(
+      ['us-east', 'us-west', 'south-america', 'west-europe', 'europe', 'east-asia', 'oceania', 'south-asia', 'middle-east'].map(
+        (region, i) => [`unified-${i}`, { at: isoAgo(5 * 3600), region }]
+      )
+    )
+    expect(
+      render(account({ current: 'unified-0', seen: full }))
+        .get('[data-testid="account-gateway-forecast"]')
+        .text()
+    ).not.toContain('gatewayHistory.forecastUntouched')
+  })
+
+  it('未归类且还在窗口里的落点要从可用数里扣掉，不是白送', () => {
+    const seen = {
+      'unified-1': { at: isoAgo(5 * 3600), region: 'us-west' },
+      'unified-2': { at: isoAgo(5 * 3600), region: 'europe' },
+      'unified-9': { at: isoAgo(60) } // 还在窗口里，但读不出大区
+    }
+    // 两个大区出了冷却，扣掉一个未归类的烧灼 ⇒ 1 个单位。
+    expect(minutesOf(render(account({ current: 'unified-1', seen })))).toBe(Math.round(183 / 60))
+
+    // 那个未归类落点出了窗口就不再扣 ⇒ 回到 2 个单位。
+    const cooled = { ...seen, 'unified-9': { at: isoAgo(5 * 3600) } }
+    expect(minutesOf(render(account({ current: 'unified-1', seen: cooled })))).toBe(
+      Math.round((2 * 183) / 60)
+    )
   })
 
   it('非 Codex 上游的账号整块不展示', () => {

@@ -200,11 +200,18 @@ func usageCodexRoutePairOverriddenPtr(account *Account, fromPool bool) *bool {
 // （见 routePairInUse），池子那个大区讲的是另一个网关的事，记上去会把落点归到错的大区，
 // 于是账号卡片上「这个号在哪个大区还有没烧过的落点」直接答错。宁可留空（显示未归类）。
 func usageCodexRouteRegion(poolGateway, inUseGateway, region string) string {
-	poolGateway = strings.TrimSpace(poolGateway)
-	if poolGateway == "" || poolGateway != strings.TrimSpace(inUseGateway) {
+	if !usageCodexRouteLandedOnPoolGateway(poolGateway, inUseGateway) {
 		return ""
 	}
 	return strings.TrimSpace(region)
+}
+
+// usageCodexRouteLandedOnPoolGateway 是上面那道判断本身。抽出来是因为 state-echo 的判定读数
+// （openAIGatewaySeen.Verdict）要用**同一个**谓词：判据问的也是池子那个网关，改派时同样不能
+// 把结论挂到实际落点上。两处各写一份的话只在「名字两边没有空白」时同义。
+func usageCodexRouteLandedOnPoolGateway(poolGateway, inUseGateway string) bool {
+	poolGateway = strings.TrimSpace(poolGateway)
+	return poolGateway != "" && poolGateway == strings.TrimSpace(inUseGateway)
 }
 
 // usageCodexRoutePairPoolGatewayPtr 记池子交付时说的那个网关：与 route_gateway 比对就知道注入

@@ -103,15 +103,40 @@ func gwpoolEchoRun(t *testing.T, svc *OpenAIGatewayService, acct *Account, sent 
 	}
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ctx, _ := withOpenAIGatewayPoolSink(req.Context(), ginCtx)
+	gwpoolEchoSeedVerified(t, svc, acct)
 	resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", acct)
 	return ginCtx, resp, err
 }
 
-// gwpoolEchoAccount 造一个配好假池子、显式写上重试档位的账号。
-func gwpoolEchoAccount(fake *gwpoolFakePool, retries int) *Account {
-	acct := fake.account(1)
-	acct.Extra[openAIGatewayPoolDegradedRetriesExtraKey] = retries
-	return acct
+// gwpoolEchoAccount 造一个配好假池子的账号。
+func gwpoolEchoAccount(fake *gwpoolFakePool) *Account {
+	return fake.account(1)
+}
+
+// gwpoolEchoSeedVerified 先按正常路径取一张票，再把它标成「已验满血」。
+//
+// 降智防护的档位 2026-10-03 删了 ⇒ doOpenAIUpstream 一律先跑预热。而这个文件验的是**业务响应**
+// 上的判据，不是预热：不先塞这一张的话，每个用例都要把两发垫话的回应也排进 replies 里，
+// sentBodies 的下标全要跟着挪，而那些断言本来就是在数业务请求。
+//
+// 「已验满血 + 还 Live」正是预热的快路条件（gatewayPoolWarmUp 的早返回），一发垫话都不打。
+// 刻意走真实取票而不是手搓一个 pair：网关名、票号、cookie 都得和假池子发的那张对得上。
+func gwpoolEchoSeedVerified(t *testing.T, svc *OpenAIGatewayService, acct *Account) {
+	t.Helper()
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx, _ := withOpenAIGatewayPoolSink(context.Background(), ginCtx)
+	identity, err := svc.codexCookies.gatewayPoolIdentity(ctx, acct)
+	if err != nil {
+		return // 解不出身份 ⇒ 预热那条路自己也会在这里返回，没什么要塞的
+	}
+	if _, state := svc.codexCookies.cachedPoolPair(identity); state != openAIGatewayPoolPairLive {
+		// release 刻意丢掉：这张票要留在缓存里给紧接着那一发业务请求用，还回去就白取了。
+		if _, err := svc.codexCookies.AttachRoute(ctx, acct, gwpoolTestURL, http.Header{}); err != nil {
+			return // 本来就不接管（没配池子）⇒ 预热也不会跑
+		}
+	}
+	pair, _ := svc.codexCookies.cachedPoolPair(identity)
+	svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, pair.version)
 }
 
 // ---------------------------------------------------------------------------
@@ -122,11 +147,22 @@ func gwpoolEchoAccount(fake *gwpoolFakePool, retries int) *Account {
 // retries=0 = 只截断那一档。
 func TestStateEchoDegradedTruncatesAndMarksPairStale(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	// 票龄不到 90 秒要连着三发被刷新才判死（gatewayPoolEchoStrikes），所以这里要
+	// 攒满三发才看得到截断。前两发是放行的，它们的响应体照常交给调用方。
 	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
+		{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
+		{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
 		{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
 	}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
-	acct := gwpoolEchoAccount(fake, 0)
+	acct := gwpoolEchoAccount(fake)
+
+	for i := 1; i <= 2; i++ {
+		_, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
+		require.NoError(t, err, "第 %d 发还没攒满，该照常放行", i)
+		require.NotNil(t, resp)
+		_ = resp.Body.Close()
+	}
 
 	ginCtx, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
 	require.Nil(t, resp, "截断不许把降智的响应交给调用方")
@@ -135,9 +171,10 @@ func TestStateEchoDegradedTruncatesAndMarksPairStale(t *testing.T) {
 		"必须包着 ErrPool：classifyUpstreamTransportError 据此豁免「按代理持久故障停调度 10 分钟」")
 	require.ErrorIs(t, err, errOpenAIGatewayPoolRouteDegraded)
 
-	require.Len(t, upstream.sentBodies, 1, "retries=0 ⇒ 一发都不许重发")
-	require.True(t, upstream.bodies[0].closed, "丢弃的响应体必须当场关掉")
-	require.Zero(t, upstream.bodies[0].reads, "判据只读响应头，一个字节的响应体都不许读")
+	require.Len(t, upstream.sentBodies, 3, "三发判据 + 一发都不许重发")
+	last := len(upstream.bodies) - 1
+	require.True(t, upstream.bodies[last].closed, "丢弃的响应体必须当场关掉")
+	require.Zero(t, upstream.bodies[last].reads, "判据只读响应头，一个字节的响应体都不许读")
 
 	_, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
 	require.Equal(t, openAIGatewayPoolPairStale, state,
@@ -152,7 +189,6 @@ func TestStateEchoDegradedTruncatesAndMarksPairStale(t *testing.T) {
 	discarded := takeDiscardedOpenAIGatewayPoolAttempts(ginCtx)
 	require.Len(t, discarded, 1)
 	require.Equal(t, "unified-142", discarded[0].Applied.Gateway)
-	require.False(t, discarded[0].Retried, "retries=0 ⇒ 没有重发")
 	require.Empty(t, takeDiscardedOpenAIGatewayPoolAttempts(ginCtx), "读数取走即清，不许落重复行")
 }
 
@@ -161,7 +197,7 @@ func TestStateEchoFullStrengthPassesThrough(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 	upstream := &gwpoolEchoUpstream{}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
-	acct := gwpoolEchoAccount(fake, 1)
+	acct := gwpoolEchoAccount(fake)
 
 	ginCtx, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
 	require.NoError(t, err)
@@ -184,7 +220,7 @@ func TestStateEchoEchoedSameTicketIsFullStrength(t *testing.T) {
 	}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 
-	_, resp, err := gwpoolEchoRun(t, svc, gwpoolEchoAccount(fake, 1), gwpoolEchoLiveTicket)
+	_, resp, err := gwpoolEchoRun(t, svc, gwpoolEchoAccount(fake), gwpoolEchoLiveTicket)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	_ = resp.Body.Close()
@@ -199,7 +235,7 @@ func TestStateEchoWithoutSentTicketIsNotAVerdict(t *testing.T) {
 	}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 
-	ginCtx, resp, err := gwpoolEchoRun(t, svc, gwpoolEchoAccount(fake, 1), "")
+	ginCtx, resp, err := gwpoolEchoRun(t, svc, gwpoolEchoAccount(fake), "")
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	_ = resp.Body.Close()
@@ -220,7 +256,7 @@ func TestStateEchoIgnoresNon200EvenWithFreshTicket(t *testing.T) {
 			}}
 			svc := &OpenAIGatewayService{httpUpstream: upstream}
 
-			ginCtx, resp, err := gwpoolEchoRun(t, svc, gwpoolEchoAccount(fake, 1), gwpoolEchoLiveTicket)
+			ginCtx, resp, err := gwpoolEchoRun(t, svc, gwpoolEchoAccount(fake), gwpoolEchoLiveTicket)
 			require.NoError(t, err, "非 200 要原样交回去，由既有错误路径处理")
 			require.NotNil(t, resp)
 			require.Equal(t, status, resp.StatusCode)
@@ -235,149 +271,40 @@ func TestStateEchoIgnoresNon200EvenWithFreshTicket(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 换票重试（degraded_retries=1，默认档）
+// 没有档位了
 // ---------------------------------------------------------------------------
 
-// 判到降智 ⇒ 换一张票（换一个网关）把**同一个请求体**重发一遍；第二发满血 ⇒ 客户端拿到正常响应。
-func TestStateEchoRetriesOnceWithAFreshTicket(t *testing.T) {
+// 降智防护**没有开关**：三个老键一起配成最松的那组值，判据照样跑、照样截断。
+//
+// 这一条钉的是 2026-10-03 那次删档不会被悄悄复活：三个键里任何一个被重新接回读路径，
+// 这个用例就红。它们在存量库里是真实存在的值（页面写得出 guard，更早的页面写得出另两个），
+// 所以「读到了就关掉防护」是一个**能在现网发生**的回归，不是假想。
+func TestGatewayPoolGuardHasNoModesLeft(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-	fake.forceCookie = gwpoolTestPairCookie(t, "unified-84") // force=1 取到的那张落在另一个网关
-	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
-		{status: http.StatusOK, minted: gwpoolEchoFreshTicket, requestID: "req-burned"},
-		{status: http.StatusOK}, // 第二发不回新票 = 满血
-	}}
-	svc := &OpenAIGatewayService{httpUpstream: upstream}
-	acct := fake.account(1) // 不写 extra：默认就是 1
-
-	require.Equal(t, 1, acct.gatewayPoolDegradedRetries(), "默认档必须是换票重试一次")
-
-	ginCtx, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
-	require.NoError(t, err, "重试成功 ⇒ 客户端无感")
-	require.NotNil(t, resp)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Same(t, upstream.bodies[1], resp.Body, "交回去的必须是第二发那个响应")
-	_ = resp.Body.Close()
-
-	require.Len(t, upstream.sentBodies, 2)
-	require.Equal(t, upstream.sentBodies[0], upstream.sentBodies[1], "重发的请求体必须一字不差")
-	require.Equal(t, gwpoolEchoBody1, upstream.sentBodies[1])
-	require.Equal(t, gwpoolEchoLiveTicket, upstream.sentState[1], "同一个客户端回合 ⇒ 还是那张票")
-	require.True(t, upstream.bodies[0].closed, "被丢掉那一发的响应体要关掉")
-
-	// 落点在 __oailb 的 JWT 载荷里，按解码后比（网关名不是 Cookie 头里的明文子串）。
-	require.Equal(t, "unified-142", openAICodexRouteGateway(upstream.sentCookies[0]))
-	require.Equal(t, "unified-84", openAICodexRouteGateway(upstream.sentCookies[1]),
-		"第二发必须落在另一个网关上")
-	require.NotContains(t, fake.nextQuery(t), "force=1", "第一次取票是常规取票")
-	forced := fake.nextQuery(t)
-	require.Contains(t, forced, "force=1", "换票必须带 force=1，池子据它保证换网关")
-	require.Contains(t, forced, "exclude_versions=tkt-1", "顺带点名排除被判死那一张")
-
-	// 丢弃的那一发留一条审计读数（真实发生过的上游请求），重试成功那一发走正常计费。
-	discarded := takeDiscardedOpenAIGatewayPoolAttempts(ginCtx)
-	require.Len(t, discarded, 1, "只有被丢掉的那一发留读数")
-	require.Equal(t, "unified-142", discarded[0].Applied.Gateway)
-	require.Equal(t, "tkt-1", discarded[0].Applied.Version)
-	require.True(t, discarded[0].Retried)
-}
-
-// 换票那一发**又**判降智 ⇒ 绝不再试，直接走错误路径。放大系数封顶的硬断言。
-func TestStateEchoNeverRetriesTwice(t *testing.T) {
-	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-	fake.forceCookie = gwpoolTestPairCookie(t, "unified-84")
+	// 票龄不到 90 秒要连着三发被刷新才判死（gatewayPoolEchoStrikes）。
 	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
 		{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
-		{status: http.StatusOK, minted: gwpoolEchoFreshTicket + "-2"},
-	}}
-	svc := &OpenAIGatewayService{httpUpstream: upstream}
-
-	ginCtx, resp, err := gwpoolEchoRun(t, svc, fake.account(1), gwpoolEchoLiveTicket)
-	require.Nil(t, resp)
-	require.ErrorIs(t, err, errOpenAIGatewayPoolRouteDegraded)
-	require.Len(t, upstream.sentBodies, 2, "最多两发：原始一发 + 换票一发")
-	require.True(t, upstream.bodies[1].closed)
-
-	_, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
-	require.Equal(t, openAIGatewayPoolPairStale, state, "第二张也要标 Stale")
-
-	discarded := takeDiscardedOpenAIGatewayPoolAttempts(ginCtx)
-	require.Len(t, discarded, 2, "两发都真的到了上游 ⇒ 两条审计读数")
-	require.Equal(t, "unified-142", discarded[0].Applied.Gateway)
-	require.True(t, discarded[0].Retried)
-	require.Equal(t, "unified-84", discarded[1].Applied.Gateway)
-	require.False(t, discarded[1].Retried, "最后那一发没有重发")
-}
-
-// 请求体重放不了（GetBody 为 nil）⇒ 退回「只截断」，绝不发一个半截的请求体。
-func TestStateEchoDoesNotRetryUnreplayableBody(t *testing.T) {
-	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
 		{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
-	}}
-	svc := &OpenAIGatewayService{httpUpstream: upstream}
-
-	// io.NopCloser 包出来的 reader 不是 net/http 认得的可重放类型 ⇒ GetBody 为 nil。
-	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL,
-		io.NopCloser(strings.NewReader(gwpoolEchoBody1)))
-	require.NoError(t, err)
-	require.Nil(t, req.GetBody)
-	req.Header.Set(openAICodexTurnStateHeader, gwpoolEchoLiveTicket)
-	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
-	ctx, _ := withOpenAIGatewayPoolSink(req.Context(), ginCtx)
-
-	resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", fake.account(1))
-	require.Nil(t, resp)
-	require.ErrorIs(t, err, errOpenAIGatewayPoolRouteDegraded)
-	require.Len(t, upstream.sentBodies, 1)
-	discarded := takeDiscardedOpenAIGatewayPoolAttempts(ginCtx)
-	require.Len(t, discarded, 1)
-	require.False(t, discarded[0].Retried)
-}
-
-// ---------------------------------------------------------------------------
-// 开关与取值钳位
-// ---------------------------------------------------------------------------
-
-// 开关缺省即开，显式 false 才关；关掉之后降智响应原样透传（行为与接入前逐字节一致）。
-func TestStateEchoSwitchDefaultsOnAndCanBeTurnedOff(t *testing.T) {
-	require.True(t, (*Account)(nil).gatewayPoolStateEcho(), "缺省即开")
-	require.True(t, (&Account{}).gatewayPoolStateEcho())
-	require.True(t, (&Account{Extra: map[string]any{openAIGatewayPoolStateEchoExtraKey: "false"}}).
-		gatewayPoolStateEcho(), "只认 bool，字符串不算关")
-
-	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
 		{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
 	}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	acct := fake.account(1)
-	acct.Extra[openAIGatewayPoolStateEchoExtraKey] = false
-	require.False(t, acct.gatewayPoolStateEcho())
+	// 删掉的那三个键，全配成「别判、别截断」。
+	acct.Extra["openai_gwpool_guard"] = "off"
+	acct.Extra["openai_gwpool_state_echo"] = false
+	acct.Extra["openai_gwpool_degraded_retries"] = 0
 
-	ginCtx, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
-	require.NoError(t, err)
-	require.NotNil(t, resp)
-	_ = resp.Body.Close()
-	require.Len(t, upstream.sentBodies, 1)
+	for i := 1; i <= 2; i++ {
+		_, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
+		require.NoError(t, err, "第 %d 发还没攒满，该照常放行", i)
+		require.NotNil(t, resp)
+		_ = resp.Body.Close()
+	}
+	_, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
+	require.Nil(t, resp, "死键不许把降智的响应放出去")
+	require.ErrorIs(t, err, errOpenAIGatewayPoolRouteDegraded)
 	_, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
-	require.Equal(t, openAIGatewayPoolPairLive, state, "关了就一个字都不碰")
-	require.Empty(t, takeDiscardedOpenAIGatewayPoolAttempts(ginCtx))
-}
-
-// 重试档位只有 0 和 1：别的值一律回默认 1，绝不能让账号配出一个把请求放大 N 倍的状态。
-func TestStateEchoDegradedRetriesClampsToZeroOrOne(t *testing.T) {
-	require.Equal(t, 1, (*Account)(nil).gatewayPoolDegradedRetries(), "缺省 = 换票重试一次")
-	require.Equal(t, 1, (&Account{}).gatewayPoolDegradedRetries())
-	for _, raw := range []any{5, 99, -3, 2.7, "1", nil, true} {
-		require.Equal(t, 1,
-			(&Account{Extra: map[string]any{openAIGatewayPoolDegradedRetriesExtraKey: raw}}).
-				gatewayPoolDegradedRetries(), "越界/畸形值回默认档，不许放大")
-	}
-	for _, raw := range []any{0, 0.0, float64(0)} {
-		require.Equal(t, 0,
-			(&Account{Extra: map[string]any{openAIGatewayPoolDegradedRetriesExtraKey: raw}}).
-				gatewayPoolDegradedRetries(), "0 是有意义的取值：只截断")
-	}
+	require.Equal(t, openAIGatewayPoolPairStale, state, "判死之后照样标 Stale")
 }
 
 // 这一发没注入池子那张 pair（非推理面端点）⇒ 判据根本不跑：
@@ -473,6 +400,63 @@ func TestGatewayPoolMarkStaleFallsBackToGatewayWhenTicketChanged(t *testing.T) {
 	require.Equal(t, "tkt-2", cached.version, "要排掉的是缓存里现持的那张票号")
 }
 
+// 半程 state-echo 的票龄梯子：越老越信一次刷新。
+func TestEchoStrikeLadderByTicketAge(t *testing.T) {
+	for _, tc := range []struct {
+		age  time.Duration
+		want int
+	}{
+		{0, 3},
+		{89 * time.Second, 3},
+		{90 * time.Second, 2},
+		{139 * time.Second, 2},
+		{140 * time.Second, 1},
+		{3 * time.Minute, 1},
+		{time.Hour, 1},
+	} {
+		require.Equal(t, tc.want, gatewayPoolEchoStrikes(tc.age), "票龄 %s", tc.age)
+	}
+	// 上界开口：满血窗口实测是「约 183 秒」，写死 140–180s 的话活得更久的票在 180 秒
+	// 之后会掉进一个没定义的格子。开口之后它继续落在最严那一档。
+	require.Equal(t, 1, gatewayPoolEchoStrikes(10*time.Minute))
+	// 缓存里万一有一张没带 since 的票（零值 ⇒ 票龄巨大）⇒ 落最严那档 = 老行为。
+	require.Equal(t, 1, gatewayPoolEchoStrikes(time.Since(time.Time{})))
+}
+
+// 连续计数：被刷新累加，中间读到一发满血就归零。
+//
+// 归零是承重的：窗口真烧完之后每一发都会被刷新，所以夹着一发没被刷新的就说明这条
+// 路由还好着。不归零的话 刷新/满血/刷新 会被数成「连着两发」，而 90 秒内本该要三发。
+func TestNoteEchoCountsConsecutiveRefreshesAndResets(t *testing.T) {
+	store := &openAICodexCookieStore{}
+	store.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
+		cookie: "__cflb=a", gateway: "unified-142", version: "tkt-1",
+		until: time.Now().Add(time.Minute), since: time.Now(),
+	})
+
+	misses, age := store.gatewayPoolNoteEcho(gwpoolTestIdentity, "tkt-1", "unified-142", true)
+	require.Equal(t, 1, misses)
+	require.Less(t, age, gatewayPoolEchoYoungAge, "刚进缓存的票该算「年轻」")
+
+	misses, _ = store.gatewayPoolNoteEcho(gwpoolTestIdentity, "tkt-1", "unified-142", true)
+	require.Equal(t, 2, misses)
+
+	misses, _ = store.gatewayPoolNoteEcho(gwpoolTestIdentity, "tkt-1", "unified-142", false)
+	require.Equal(t, 0, misses, "读到一发满血要归零")
+
+	misses, _ = store.gatewayPoolNoteEcho(gwpoolTestIdentity, "tkt-1", "unified-142", true)
+	require.Equal(t, 1, misses, "归零之后要从 1 重新数")
+
+	// 票号和落点都对不上 ⇒ 缓存里已经是另一张票，这一发的读数无处可归，回 0。
+	// 调用方按最严办（判死），所以这里绝不能回一个「还没攒满」的数。
+	misses, _ = store.gatewayPoolNoteEcho(gwpoolTestIdentity, "tkt-9", "unified-999", true)
+	require.Equal(t, 0, misses)
+
+	require.NotPanics(t, func() {
+		(*openAICodexCookieStore)(nil).gatewayPoolNoteEcho("x", "y", "z", true)
+	})
+}
+
 // 丢弃读数的入口在没有 gin 上下文时静默退化（裸结构体单测、WS 之类没挂 sink 的路径）。
 func TestDiscardedAttemptsWithoutSinkAreEmpty(t *testing.T) {
 	require.Empty(t, takeDiscardedOpenAIGatewayPoolAttempts(nil))
@@ -482,4 +466,96 @@ func TestDiscardedAttemptsWithoutSinkAreEmpty(t *testing.T) {
 	require.NotNil(t, sink)
 	sink.noteDiscarded(OpenAIGatewayPoolDiscardedAttempt{})
 	require.Len(t, sink.discarded, 1)
+}
+
+// 判据的**两个方向**都要留下读数（2026-10-02 加的 Applied.Verdict ⇒ 账号卡片的状态色）。
+//
+// 账号卡片上「验过是满血」和「没验过」是两回事，而满血那条读数只有这里产出 —— 判据判满血时
+// 什么动作都不做，不记的话卡片永远只有「降智」和「空白」两种颜色。
+func TestStateEchoRecordsBothVerdictsOnTheAppliedSnapshot(t *testing.T) {
+	t.Run("满血", func(t *testing.T) {
+		fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+		upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{{status: http.StatusOK}}}
+		svc := &OpenAIGatewayService{httpUpstream: upstream}
+
+		req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
+		require.NoError(t, err)
+		req.Header.Set(openAICodexTurnStateHeader, gwpoolEchoLiveTicket)
+		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx, sink := withOpenAIGatewayPoolSink(req.Context(), ginCtx)
+		resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", fake.account(1))
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		_ = resp.Body.Close()
+
+		applied := sink.snapshot()
+		require.Equal(t, "unified-142", applied.Gateway)
+		require.Equal(t, openAIGatewayVerdictFull, applied.Verdict)
+	})
+
+	t.Run("降智那一发自己带着降智读数", func(t *testing.T) {
+		fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+		// 半程 state-echo：票龄不到 90 秒要**连着三发**被刷新才判死，所以前两发
+		// 照常交付、第三发才丢弃（gatewayPoolEchoStrikes）。
+		upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
+			{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
+			{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
+			{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
+		}}
+		svc := &OpenAIGatewayService{httpUpstream: upstream}
+		acct := gwpoolEchoAccount(fake)
+
+		for i := 1; i <= 2; i++ {
+			_, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
+			require.NoError(t, err, "第 %d 发还没攒满，该照常放行", i)
+			require.NotNil(t, resp)
+			_ = resp.Body.Close()
+		}
+
+		ginCtx, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
+		require.ErrorIs(t, err, errOpenAIGatewayPoolRouteDegraded, "连着三发被刷新就该判死")
+		require.Nil(t, resp)
+
+		// 丢弃行按它自己那一刻的快照落库：读数和落点绑在同一份 Applied 上，而一次客户端
+		// 请求里可能先后落在好几个落点上（预热一张张试、换号重试），各读各的。
+		discarded := takeDiscardedOpenAIGatewayPoolAttempts(ginCtx)
+		require.Len(t, discarded, 1)
+		require.Equal(t, "unified-142", discarded[0].Applied.Gateway)
+		require.Equal(t, openAIGatewayVerdictDegraded, discarded[0].Applied.Verdict)
+	})
+
+	t.Run("没下结论就不许留读数", func(t *testing.T) {
+		fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+		// 没送票 ⇒ 没有回声 ⇒ 判不出来（纪律：上游对不带票的请求本来就会铸一张新的）。
+		upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
+			{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
+		}}
+		svc := &OpenAIGatewayService{httpUpstream: upstream}
+
+		req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
+		require.NoError(t, err)
+		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx, sink := withOpenAIGatewayPoolSink(req.Context(), ginCtx)
+		resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", fake.account(1))
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		_ = resp.Body.Close()
+		require.Empty(t, sink.snapshot().Verdict, "判不出来不许写成满血")
+	})
+}
+
+// noteVerdict 落在别的落点上时不许改读数：换票重试那一圈里 mark 已经指向下一张票了。
+func TestSinkVerdictOnlyApplToTheMarkedGateway(t *testing.T) {
+	_, sink := withOpenAIGatewayPoolSink(context.Background(), nil)
+	sink.mark(OpenAIGatewayPoolApplied{AccountID: 1, Gateway: "unified-84", Cookie: "c", Version: "tkt-2"})
+
+	sink.noteVerdict("unified-142", openAIGatewayVerdictDegraded) // 上一张票的结论，晚到了
+	require.Empty(t, sink.snapshot().Verdict, "落点对不上就不许写")
+
+	sink.noteVerdict("", openAIGatewayVerdictFull)
+	require.Empty(t, sink.snapshot().Verdict)
+
+	sink.noteVerdict("unified-84", openAIGatewayVerdictFull)
+	require.Equal(t, openAIGatewayVerdictFull, sink.snapshot().Verdict)
+	require.NotPanics(t, func() { (*openAIGatewayPoolSink)(nil).noteVerdict("x", "full") })
 }

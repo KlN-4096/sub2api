@@ -215,6 +215,10 @@ func newGwpoolFakePool(t *testing.T, cookie string, validForS int) *gwpoolFakePo
 }
 
 // configure 把这个假池子的地址与 consumer key 写进账号 extra。
+//
+// **不再钉档位**：降智防护的档位 2026-10-03 删了，预热现在是无条件的。这个文件里的用例测的是
+// 取票/还票/注入协议，它们直接调 AttachRoute / gatewayPoolPair，走不到预热那条路（预热的入口
+// 只有 doOpenAIUpstream）。少数走转发入口的用例自己负责把预热那条路也配出来。
 func (f *gwpoolFakePool) configure(accounts ...*Account) {
 	for _, acct := range accounts {
 		acct.Extra[openAIGatewayPoolBaseURLExtraKey] = f.baseURL
@@ -463,7 +467,7 @@ func TestDoOpenAIUpstreamGatewayPoolReplacesOnlyRouteCookies(t *testing.T) {
 	for range 3 {
 		req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 		require.NoError(t, err)
-		resp, err := svc.doOpenAIUpstream(req, "", acct)
+		resp, err := gwpoolRunOnce(svc, req, acct)
 		require.NoError(t, err)
 		_ = resp.Body.Close()
 	}
@@ -494,7 +498,7 @@ func TestGatewayPoolNeverReportsTouch(t *testing.T) {
 	for range 2 {
 		req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 		require.NoError(t, err)
-		resp, err := svc.doOpenAIUpstream(req, "", acct)
+		resp, err := gwpoolRunOnce(svc, req, acct)
 		require.NoError(t, err)
 		_ = resp.Body.Close()
 	}
@@ -584,6 +588,10 @@ func TestOpenAIWSIngressBridgesGatewayPoolAccountToHTTP(t *testing.T) {
 	poolCookie := gwpoolTestPairCookie(t, "unified-142")
 	fake := newGwpoolFakePool(t, poolCookie, 150)
 	fake.configure(account)
+	// 预热 2026-10-03 起无条件跑在 doOpenAIUpstream 里，而这个假上游只有**一个**响应体
+	// （一个 strings.Reader）：让垫话先把它读空，桥那一发就只剩 EOF。测的是 WS→HTTP 的桥，
+	// 不是预热，所以先塞一张已验满血的票把预热那条快路点亮。
+	gwpoolEchoSeedVerified(t, svc, account)
 	dialer := &codexWSStagedDialer{conns: []openAIWSClientConn{&openAIWSCaptureConn{}}}
 	svc.openaiWSPassthroughDialer = dialer
 
@@ -1013,15 +1021,40 @@ func TestGatewayPoolFallsBackToBareTakeWhenListUnavailable(t *testing.T) {
 	}
 }
 
-// 一个候选都挑不出来（池子侧全烧过 / 没活 pair，加上本地账本排掉的那个）⇒ 同样裸取。
-func TestGatewayPoolFallsBackToBareTakeWhenEveryCandidateIsBurnt(t *testing.T) {
+// 有活 pair 的候选**全在本地账本窗口里** ⇒ 不再裸取，而是轮到「我们自己碰得最早」的那个，
+// 并且**把它从 exclude 里摘掉**（池子对「点名的又在排除名单里」是按排除办，不摘等于没点名）。
+//
+// 为什么不裸取：裸取是把选择权交回池子，而本地那 4 小时窗口是个保守估计
+// （docs/conventions/codex-full-strength-tickets.md 明说没测准）—— 「全都在窗口内」不等于
+// 「全都还降智」，碰得最早的那个是最可能已经恢复的。真没恢复也不会发出降智的票：池子自己那条
+// (消费账号 × 网关) 冷却过滤还在，它认得的烧灼它会拒。
+func TestGatewayPoolRotatesToTheOldestBurntCandidateInsteadOfBareTake(t *testing.T) {
+	poolCookie := gwpoolTestPairCookie(t, "unified-142")
+	fake := newGwpoolFakePool(t, poolCookie, 150)
+	fake.listGateways = []gwpoolFakeGateway{
+		{Name: "unified-126", PairReady: true, UsedByYou: true}, // 池子说这张是你自己正拿着的
+		{Name: "unified-195"},                  // 没活 pair
+		{Name: "unified-167", PairReady: true}, // 本地 1 分钟前碰过
+		{Name: "unified-84", PairReady: true},  // 本地 3 小时前碰过 ⇒ 轮到它
+	}
+	store := &openAICodexCookieStore{}
+	store.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, "unified-167"), time.Now().Add(-time.Minute))
+	store.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, "unified-84"), time.Now().Add(-3*time.Hour))
+
+	headers := http.Header{}
+	require.NoError(t, attachRoute(context.Background(), store, fake.account(1), gwpoolTestURL, headers))
+	require.Equal(t, poolCookie, headers.Get("Cookie"))
+	require.Equal(t, gwpoolTestAccountQuery+"&exclude=unified-167&gateway=unified-84", fake.nextQuery(t),
+		"点名碰得最早那个，并把它自己从 exclude 里摘掉；别的烧过的照旧带着")
+}
+
+// 一个有活 pair 的候选都没有（池子侧全烧过 / 没活 pair）⇒ 仍然裸取，账本带成 exclude。
+func TestGatewayPoolFallsBackToBareTakeWhenNothingIsSteerable(t *testing.T) {
 	poolCookie := gwpoolTestPairCookie(t, "unified-142")
 	fake := newGwpoolFakePool(t, poolCookie, 150)
 	fake.listGateways = []gwpoolFakeGateway{
 		{Name: "unified-126", PairReady: true, UsedByYou: true},
 		{Name: "unified-195"},
-		// 池子还认为这个可用，但本地账本里 4 小时内碰过（下面种进去）。
-		{Name: "unified-167", PairReady: true},
 	}
 	store := &openAICodexCookieStore{}
 	store.gatewayPoolMarkUsed(gwpoolTestIdentity, "unified-167")
@@ -1156,7 +1189,10 @@ func TestDoOpenAIUpstreamGatewayPoolNoSlotFailsClosed(t *testing.T) {
 	// 罐里有一张能回放的 pair：也不许用。
 	svc.codexCookies.Store(acct, gwpoolTestURL, codexCookieUpstreamResponse())
 
-	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
+	// 体里必须带 model：预热现在无条件跑（档位 2026-10-03 删了），读不出 model 会先死在
+	// errOpenAIGatewayPoolWarmNoModel 上，根本走不到池子 —— 那就测不到这条用例要测的东西。
+	// 带上之后预热自己去取票、撞上 503，错误原样抛出来，和它要钉的失败形态是同一个。
+	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
 	require.NoError(t, err)
 	resp, err := svc.doOpenAIUpstream(req, "", acct)
 	require.ErrorIs(t, err, gwpool.ErrNoSlot)
@@ -1513,6 +1549,52 @@ func TestGatewayPoolSteeringOffSkipsGatewayListing(t *testing.T) {
 	require.Equal(t, int64(1), fake.hits.Load())
 	require.Zero(t, fake.listHits.Load(), "关掉自己挑落点就不该列网关")
 	require.NotContains(t, fake.nextQuery(t), "gateway=", "不许点名")
+}
+
+// 2026-10-02 现场：池子回 consumer_rejected（"需要本账号的 key"，owner 一拆 key 就换了），
+// 客户端收到的却是「网关池当前没有满血槽位……稍后重试即可」。此刻池子有 51 个空闲网关、
+// 51 张活票，一个槽位都不缺——文案把「要人去改配置」说成了「供给不够，等等再来」，
+// 而后面 300 秒退避期里每一发都是同一句，运维对着它查不出是 key 的问题。
+//
+// 根因：pkg/gwpool 把 11 个错误码**全部** Unwrap 到 ErrNoSlot，于是 gatewayPoolClientMessage
+// 的判序里 ErrNoSlot 先命中，gatewayPoolUnavailableClientMsg（原文就带「检查账号的池子地址与
+// consumer key」）永远够不着。分流线按**「重试会不会好」**划，不按谁的责任。
+func TestGatewayPoolClientMessageSplitsHopelessCodes(t *testing.T) {
+	msg := func(code string) string {
+		return gatewayPoolClientMessage(gatewayPoolClientError(
+			fmt.Errorf("take: %w", &gwpool.PoolError{Code: code, Status: http.StatusServiceUnavailable})))
+	}
+	// 重试不会好：要人去改 key / 改参数。
+	for _, code := range []string{gwpool.CodeConsumerRejected, gwpool.CodeBadRequest} {
+		require.Contains(t, msg(code), "网关池不可用或配置有误", code)
+	}
+	// 会自愈：「稍后重试即可」对它们是**对的**，不要改。
+	for _, code := range []string{
+		gwpool.CodeAllCooling, gwpool.CodeNoLivePair, gwpool.CodeNoGateway, gwpool.CodeMintFailed,
+		gwpool.CodeRateLimited, gwpool.CodeNoExit, gwpool.CodePublicClosed, gwpool.CodeUpstreamRejected,
+	} {
+		require.Contains(t, msg(code), "网关池当前没有满血槽位", code)
+	}
+	// 没报码（池子回了集合外的值）⇒ 仍按供给不足，别凭空升级成「你配错了」。
+	require.Contains(t, msg(""), "网关池当前没有满血槽位")
+}
+
+// 退避期间的那一发也要说得出原因：原来退避错误是裸的 fmt.Errorf(ErrNoSlot)，
+// 码在 gwpool_backoff_started 那一行之后就丢了，于是 300 秒里全报「没有满血槽位」。
+func TestGatewayPoolBackoffErrorCarriesCode(t *testing.T) {
+	store := &openAICodexCookieStore{}
+	const identity = "acct-1"
+	store.poolBackoff.Store(gatewayPoolLedgerIdentity(identity),
+		gatewayPoolBackoffEntry{Until: time.Now().Add(5 * time.Minute), Code: gwpool.CodeConsumerRejected})
+
+	remaining, code := store.gatewayPoolBackoffFor(identity)
+	require.Greater(t, remaining, 4*time.Minute)
+	require.Equal(t, gwpool.CodeConsumerRejected, code)
+
+	_, _, err := store.gatewayPoolPair(context.Background(), &Account{ID: 1}, identity)
+	require.ErrorIs(t, err, gwpool.ErrNoSlot, "退避仍然是「这一发没拿到票」")
+	require.Contains(t, gatewayPoolClientMessage(gatewayPoolClientError(err)), "网关池不可用或配置有误",
+		"退避期里也要指向 consumer key，不能继续说槽位不够")
 }
 
 // 池子侧失败的报错要能看懂（双语单串，转发面没有 i18n 协商通道），同时必须保住两件事：

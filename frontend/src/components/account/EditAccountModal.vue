@@ -2633,33 +2633,15 @@
                 class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
               />
             </div>
-            <div class="flex items-center justify-between gap-4">
-              <div class="min-w-0">
-                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolStateEcho') }}</label>
-                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  {{ t('admin.accounts.openai.gwpoolStateEchoDesc') }}
-                </p>
-              </div>
-              <input
-                v-model="openAIGwpoolStateEcho"
-                data-testid="edit-openai-gwpool-state-echo"
-                type="checkbox"
-                class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-              />
-            </div>
-            <div v-if="openAIGwpoolStateEcho" class="flex items-center justify-between gap-4">
-              <div class="min-w-0">
-                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolDegradedRetry') }}</label>
-                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  {{ t('admin.accounts.openai.gwpoolDegradedRetryDesc') }}
-                </p>
-              </div>
-              <input
-                v-model="openAIGwpoolDegradedRetry"
-                data-testid="edit-openai-gwpool-degraded-retry"
-                type="checkbox"
-                class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-              />
+            <!-- 降智防护**没有开关了**（2026-10-03）：接了池子就一律「业务请求只落在验过满血
+                 的槽上」。原来那条三档梯子（off/cut/queue）删了，说明留着 —— 这一档会花票，
+                 运营方得知道钱花在哪。 -->
+            <div>
+              <p class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolGuard') }}</p>
+              <p class="input-hint" data-testid="edit-openai-gwpool-guard-hint">
+                {{ t('admin.accounts.openai.gwpoolGuardDescs.queue') }}
+              </p>
+              <p class="input-hint">{{ t('admin.accounts.openai.gwpoolGuardDesc') }}</p>
             </div>
             <div>
               <p class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolAdvanced') }}</p>
@@ -2686,7 +2668,7 @@
                     min="1"
                     max="86400"
                     step="1"
-                    placeholder="8"
+                    placeholder="25"
                     class="input text-xs"
                     data-testid="edit-openai-gwpool-fetch-timeout"
                     :title="t('admin.accounts.openai.gwpoolFetchTimeoutDesc')"
@@ -2704,6 +2686,20 @@
                     class="input text-xs"
                     data-testid="edit-openai-gwpool-list-timeout"
                     :title="t('admin.accounts.openai.gwpoolListTimeoutDesc')"
+                  />
+                </div>
+                <div>
+                  <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolWarmTickets') }}</label>
+                  <input
+                    v-model.number="openAIGwpoolWarmTickets"
+                    type="number"
+                    min="1"
+                    max="8"
+                    step="1"
+                    placeholder="5"
+                    class="input text-xs"
+                    data-testid="edit-openai-gwpool-warm-tickets"
+                    :title="t('admin.accounts.openai.gwpoolWarmTicketsDesc')"
                   />
                 </div>
               </div>
@@ -4069,15 +4065,18 @@ const openAIGwpoolConsumerKey = ref('')
 const openAIGwpoolConsumerKeySaved = ref(false)
 // 缺省即开，与后端 gatewayPoolSteering 同口径（只有显式 false 才关）。
 const openAIGwpoolSteering = ref(true)
-// 两个开关都是「缺省即开」：后端只认显式 false / 显式数字 0，所以存的时候只写关掉那一侧。
-// 重试档位在后端是整数（合法值只有 0 和 1），这里刻意做成勾选框 —— UI 上造不出别的数。
-const openAIGwpoolStateEcho = ref(true)
-const openAIGwpoolDegradedRetry = ref(true)
+// 降智防护**没有档位了**（2026-10-03）：三个老键 openai_gwpool_guard /
+// openai_gwpool_state_echo / openai_gwpool_degraded_retries 都不再读也不再写，页面上那个
+// select 一起删了。存量行里留着它们是无害的死键 —— 但别再接回来，后端也不读了。
 // 续期缺省即关：那一发要摘掉 __oailb 出站，是对真实 Codex 报文形状的偏离，而且从没单独实测过。
-// 三个「秒」旋钮：null = 留空 = 用后端默认值（4h / 8s / 2s），不往 extra 里写键。
+// 三个「秒」旋钮：null = 留空 = 用后端默认值（4h / 25s / 2s），不往 extra 里写键。
+// 占位符要和后端那三个常量一致 —— 它展示的就是「留空会用什么」。
 const openAIGwpoolGatewayWindow = ref<number | null>(null)
 const openAIGwpoolFetchTimeout = ref<number | null>(null)
 const openAIGwpoolListTimeout = ref<number | null>(null)
+// 一轮预热最多试几张票。null = 留空 = 用后端默认值 5，不往 extra 里写键。
+// 后端封顶 8（gatewayPoolWarmMaxTicketsCeiling），越界回默认值。
+const openAIGwpoolWarmTickets = ref<number | null>(null)
 const readGwpoolSeconds = (value: unknown): number | null =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
 
@@ -4632,12 +4631,11 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	openAIGwpoolConsumerKey.value = ''
 	// 自己挑落点缺省即开：只有显式 false 才算关（与后端同口径）。
 	openAIGwpoolSteering.value = extra?.openai_gwpool_steering !== false
-	openAIGwpoolStateEcho.value = extra?.openai_gwpool_state_echo !== false
-	openAIGwpoolDegradedRetry.value = extra?.openai_gwpool_degraded_retries !== 0
 	// 续期缺省即关：只有显式 true 才算开（与后端 gatewayPoolRenew 同口径）。
 	openAIGwpoolGatewayWindow.value = readGwpoolSeconds(extra?.openai_gwpool_gateway_window_s)
 	openAIGwpoolFetchTimeout.value = readGwpoolSeconds(extra?.openai_gwpool_fetch_timeout_s)
 	openAIGwpoolListTimeout.value = readGwpoolSeconds(extra?.openai_gwpool_list_timeout_s)
+	openAIGwpoolWarmTickets.value = readGwpoolSeconds(extra?.openai_gwpool_warm_tickets)
 	openAIImagesUrlToB64JsonEnabled.value = extra?.images_url_to_b64_json === true
 	autoPause5hThreshold.value = typeof extra?.auto_pause_5h_threshold === 'number' ? extra.auto_pause_5h_threshold * 100 : null
 	autoPause7dThreshold.value = typeof extra?.auto_pause_7d_threshold === 'number' ? extra.auto_pause_7d_threshold * 100 : null
@@ -6254,21 +6252,20 @@ const handleSubmit = async () => {
         } else {
           newExtra.openai_gwpool_steering = false
         }
-        if (openAIGwpoolStateEcho.value) {
-          delete newExtra.openai_gwpool_state_echo
-        } else {
-          newExtra.openai_gwpool_state_echo = false
-        }
-        if (openAIGwpoolDegradedRetry.value) {
-          delete newExtra.openai_gwpool_degraded_retries
-        } else {
-          newExtra.openai_gwpool_degraded_retries = 0
-        }
-        // 三个「秒」旋钮：留空 / 非正数 = 用后端默认值，所以不落键。
+        // 降智防护的三个档位键 2026-10-03 全删了（接了池子就一律验满血才放行），保存时顺手
+        // 把残留清掉。**刻意不再「同步写一份老键」**：那是为回滚到只认老键的后端留的后路，
+        // 而现在没有哪一档可退 —— 留着反而会让回滚后的后端把一个本该验满血的号读成 off。
+        delete newExtra.openai_gwpool_guard
+        delete newExtra.openai_gwpool_state_echo
+        delete newExtra.openai_gwpool_degraded_retries
+        // 三个「秒」旋钮 + 试票张数：留空 / 非正数 = 用后端默认值，所以不落键。
+        // 试票张数后端还封了个 8 的上限，越界同样回默认值 —— 这里不另做钳位，让后端那一处
+        // 当唯一真源（前端 input 的 max 只是提示，管理 API 和批量导入绕得过去）。
         for (const [key, value] of [
           ['openai_gwpool_gateway_window_s', openAIGwpoolGatewayWindow.value],
           ['openai_gwpool_fetch_timeout_s', openAIGwpoolFetchTimeout.value],
-          ['openai_gwpool_list_timeout_s', openAIGwpoolListTimeout.value]
+          ['openai_gwpool_list_timeout_s', openAIGwpoolListTimeout.value],
+          ['openai_gwpool_warm_tickets', openAIGwpoolWarmTickets.value]
         ] as const) {
           if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
             newExtra[key] = Math.floor(value)

@@ -18,26 +18,22 @@ func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
 // 满足两个条件：响应头已经到手，而调用方还一个字节都没往下游写（调用方要等这个函数返回才开始
 // 解析响应）。所以「截断」在这里是干净的，不会留一个半截的 SSE 流。
 func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
-	// 判据有假阳性（见 openai_gwpool_state_echo.go 的纪律 2）⇒ 换票重发的放大系数硬封顶在 1：
-	// 重试那一发若又判降智，直接走错误路径，绝不再试。
-	for remaining := account.gatewayPoolDegradedRetries(); ; remaining-- {
-		resp, degraded, err := s.doOpenAIUpstreamOnce(request, proxyURL, account)
-		if !degraded {
-			return resp, err
-		}
-		// 换票重发要把同一个请求体再发一遍；重放不了（GetBody 为 nil）就退回「只截断」，
-		// 绝不发一个半截的请求体。
-		var replay *http.Request
-		if remaining > 0 {
-			replay = gatewayPoolReplayRequest(request)
-		}
-		s.dropDegradedGatewayPoolRoute(request, resp, account, replay != nil)
-		if replay == nil {
-			return nil, errOpenAIGatewayPoolRouteDegraded
-		}
-		// 当前 pair 已标 Stale ⇒ 下一圈的 AttachRoute 自然带 force=1 取一张别的网关的票。
-		request = replay
+	// 业务请求只落在**验过满血**的槽上。判据跑在这一发之前、用便宜的垫话，所以用户的请求不会是
+	// 那个去试网关的人（openai_gwpool_warm.go）。验不出来就把错误往上抛，**绝不降级放行**。
+	// 没有档位可关：2026-10-03 删了（见 openai_gwpool_state_echo.go 文件头）。
+	if err := s.gatewayPoolWarmUp(request, proxyURL, account); err != nil {
+		return nil, err
 	}
+	resp, degraded, err := s.doOpenAIUpstreamOnce(request, proxyURL, account)
+	if !degraded {
+		return resp, err
+	}
+	// 判到降智就**只截断**，不在这里换票重发：重发走 AttachRoute 换一张没验过的票就把用户的
+	// prompt 打出去，而判据对首轮请求结构性失效（没送 turn-state ⇒ 没有回声），所以「客户端
+	// 无感」实际是「降智静默交付」。
+	// 当前 pair 已标 Stale ⇒ 下一发客户端请求的 AttachRoute 自然带 force=1 换网关。
+	s.dropDegradedGatewayPoolRoute(request, resp, account)
+	return nil, errOpenAIGatewayPoolRouteDegraded
 }
 
 // doOpenAIUpstreamOnce 发一发上游，并把 state-echo 判据跑在 Store **之前**。

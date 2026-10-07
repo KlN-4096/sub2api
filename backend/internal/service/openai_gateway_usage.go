@@ -504,9 +504,17 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	// 顺手把落点记进账号 extra：用量行是按请求的，答不了「这个号碰过哪些网关、现在在哪个」。
 	// 用 RouteGateway（实际落点）而不是池子说的那个：注入被改派时，这张卡该显示真正打到的。
 	if usageLog.RouteGateway != nil {
-		s.noteOpenAIGatewayUse(ctx, account, *usageLog.RouteGateway,
-			usageCodexRouteRegion(routePairPoolGateway, *usageLog.RouteGateway,
-				result.GatewayPoolApplied.Region))
+		// 大区和判定共用**同一个**谓词「池子交付的落点 == 实际落点」：改派的那些发，池子说的
+		// 大区与判据问的都是另一个网关，记到实际落点上就是把读数挂到错的单位上（而降智的单位
+		// 恰好就是 (账号 × 网关)）。
+		landed := usageCodexRouteLandedOnPoolGateway(routePairPoolGateway, *usageLog.RouteGateway)
+		region, verdict := "", ""
+		if landed {
+			region = strings.TrimSpace(result.GatewayPoolApplied.Region)
+			verdict = result.GatewayPoolApplied.Verdict
+		}
+		// 业务请求真的落在这里了 ⇒ 推进「当前网关」。
+		s.noteOpenAIGatewayUse(ctx, account, *usageLog.RouteGateway, region, verdict, true)
 	}
 	isVideoUsage := isGrokVideoUsageResult(result, billingModels)
 	if isVideoUsage {

@@ -18,6 +18,12 @@ import (
 // 2026-10-02 池子新协议的消费侧：exclude（本地账本）/ 按错误码退避 / min_remaining / wait /
 // cookie_version + exclude_versions / POST /release。一律打 httptest 假池子，**绝不打真实上游**。
 
+// gwpoolBackoffLeft 只要剩余时长那一半，给 require.Zero / require.LessOrEqual 当表达式用。
+func gwpoolBackoffLeft(store *openAICodexCookieStore) time.Duration {
+	left, _ := store.gatewayPoolBackoffFor(gwpoolTestIdentity)
+	return left
+}
+
 // ---------------------------------------------------------------------------
 // 1. 本地账本当 exclude 带上去
 // ---------------------------------------------------------------------------
@@ -104,7 +110,7 @@ func TestGatewayPoolBacksOffByErrorCode(t *testing.T) {
 			require.ErrorIs(t, err, gwpool.ErrNoSlot)
 			require.EqualValues(t, 1, fake.hits.Load(), "退避期内一个池子请求都不许发")
 
-			remaining := store.gatewayPoolBackoffFor(gwpoolTestIdentity)
+			remaining, _ := store.gatewayPoolBackoffFor(gwpoolTestIdentity)
 			require.Positive(t, remaining)
 			require.LessOrEqual(t, remaining, tc.wantBackoff)
 			require.Greater(t, remaining, tc.wantBackoff-10*time.Second)
@@ -130,7 +136,7 @@ func TestGatewayPoolRateLimitedNeverBlocksBusinessRequests(t *testing.T) {
 	require.ErrorIs(t, err, gwpool.ErrNoSlot)
 	require.EqualValues(t, 1, fake.hits.Load())
 
-	require.Zero(t, store.gatewayPoolBackoffFor(gwpoolTestIdentity),
+	require.Zero(t, gwpoolBackoffLeft(store),
 		"rate_limited 不许记退避：它说的是池子铸不动，不是池子没票")
 
 	// 池子补上票之后，**下一发业务请求立刻就能拿到**——退避会把这一段整个吃掉。
@@ -160,7 +166,7 @@ func TestGatewayPoolCapsAllCoolingBackoff(t *testing.T) {
 		gwpool.ErrNoSlot)
 
 	// 期望值写成独立字面量，不引用生产常量：引用它的话把常量改成 4h 这条用例照样绿。
-	require.LessOrEqual(t, store.gatewayPoolBackoffFor(gwpoolTestIdentity), time.Minute,
+	require.LessOrEqual(t, gwpoolBackoffLeft(store), time.Minute,
 		"all_cooling 的 retry_after 只对当时那批网关成立，不能拿来静默数小时")
 }
 
@@ -176,7 +182,7 @@ func TestGatewayPoolHonorsShortAllCoolingRetryAfter(t *testing.T) {
 	require.ErrorIs(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, http.Header{}),
 		gwpool.ErrNoSlot)
 
-	remaining := store.gatewayPoolBackoffFor(gwpoolTestIdentity)
+	remaining, _ := store.gatewayPoolBackoffFor(gwpoolTestIdentity)
 	require.Positive(t, remaining)
 	require.LessOrEqual(t, remaining, 12*time.Second)
 	require.Greater(t, remaining, 2*time.Second)
@@ -201,7 +207,7 @@ func TestGatewayPoolDoesNotBackOffOnWaitableCodes(t *testing.T) {
 					gwpool.ErrNoSlot)
 			}
 			require.EqualValues(t, 2, fake.hits.Load(), "不退避 ⇒ 下一发照常取票")
-			require.Zero(t, store.gatewayPoolBackoffFor(gwpoolTestIdentity))
+			require.Zero(t, gwpoolBackoffLeft(store))
 		})
 	}
 }
@@ -312,6 +318,19 @@ func TestGatewayPoolExcludesStaleTicketVersion(t *testing.T) {
 // 6. 取了票但一个字节都没发出去 ⇒ 还票
 // ---------------------------------------------------------------------------
 
+// gwpoolRunOnce 跑**预热下面那一层**。
+//
+// 预热 2026-10-03 起无条件跑在 doOpenAIUpstream 里（档位删了），而这一组用例验的是取票/注入/
+// 还票协议：走上层的话每个用例都要先把判据那两发也配出来，而且它们的请求体里没有 model ⇒
+// 预热会先 fail closed（errOpenAIGatewayPoolWarmNoModel），一张票都取不到，测不到任何东西。
+//
+// 靶子选这一层是对的，不是绕过：还票判据本身就住在 doOpenAIUpstreamOnce 里
+// （gatewayPoolReleasesUnsent 的调用点）。预热与转发的组合由 openai_gwpool_warm_test.go 盯。
+func gwpoolRunOnce(svc *OpenAIGatewayService, req *http.Request, acct *Account) (*http.Response, error) {
+	resp, _, err := svc.doOpenAIUpstreamOnce(req, "", acct)
+	return resp, err
+}
+
 // gwpoolErrorUpstream 让 doOpenAIUpstream 在「已经取到票」之后失败，失败形态由 err 给定。
 //
 // 为什么要能给任意形态：doOpenAIUpstreamRoundTrip 有**两条出口**（先插件
@@ -359,7 +378,7 @@ func TestGatewayPoolReleasesTicketWhenNothingWasSent(t *testing.T) {
 
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 	require.NoError(t, err)
-	_, err = svc.doOpenAIUpstream(req, "", acct)
+	_, err = gwpoolRunOnce(svc, req, acct)
 	require.Error(t, err)
 
 	require.Equal(t, `{"cookie_version":"tkt-1"}`, fake.nextRelease(t))
@@ -379,7 +398,7 @@ func TestGatewayPoolReleasesNearExpiryTicketFromCacheToo(t *testing.T) {
 
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 	require.NoError(t, err)
-	_, err = svc.doOpenAIUpstream(req, "", acct)
+	_, err = gwpoolRunOnce(svc, req, acct)
 	require.Error(t, err)
 
 	require.Equal(t, `{"cookie_version":"tkt-1"}`, fake.nextRelease(t))
@@ -401,7 +420,7 @@ func TestGatewayPoolReleasesTicketWhenClientVanishedBeforeSend(t *testing.T) {
 	fake.onCookie = cancel
 	defer cancel()
 
-	_, err = svc.doOpenAIUpstream(req, "", acct)
+	_, err = gwpoolRunOnce(svc, req, acct)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Zero(t, upstream.calls, "客户端已经走了就不该再打上游")
 	require.Equal(t, `{"cookie_version":"tkt-1"}`, fake.nextRelease(t))
@@ -416,7 +435,7 @@ func TestGatewayPoolKeepsTicketWhenRequestMayHaveLanded(t *testing.T) {
 		svc := &OpenAIGatewayService{httpUpstream: &cookieRecordingUpstream{}}
 		req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 		require.NoError(t, err)
-		resp, err := svc.doOpenAIUpstream(req, "", fake.account(1))
+		resp, err := gwpoolRunOnce(svc, req, fake.account(1))
 		require.NoError(t, err)
 		_ = resp.Body.Close()
 		require.Zero(t, fake.releaseHits.Load())
@@ -426,7 +445,7 @@ func TestGatewayPoolKeepsTicketWhenRequestMayHaveLanded(t *testing.T) {
 		svc := &OpenAIGatewayService{httpUpstream: &gwpoolErrorUpstream{}}
 		req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 		require.NoError(t, err)
-		_, err = svc.doOpenAIUpstream(req, "", fake.account(1))
+		_, err = gwpoolRunOnce(svc, req, fake.account(1))
 		require.Error(t, err)
 		require.Zero(t, fake.releaseHits.Load(), "可能已经碰到网关了，不许谎报没用过")
 	})
@@ -444,7 +463,7 @@ func TestGatewayPoolDoesNotReleaseReusedTicket(t *testing.T) {
 		version: "tkt-reused", until: time.Now().Add(time.Minute)})
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 	require.NoError(t, err)
-	_, err = svc.doOpenAIUpstream(req, "", acct)
+	_, err = gwpoolRunOnce(svc, req, acct)
 	require.Error(t, err)
 
 	require.Zero(t, fake.releaseHits.Load(), "复用的票不是我取的，不许我还")
@@ -461,7 +480,7 @@ func TestGatewayPoolReleaseFailureIsSwallowed(t *testing.T) {
 
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 	require.NoError(t, err)
-	_, err = svc.doOpenAIUpstream(req, "", fake.account(1))
+	_, err = gwpoolRunOnce(svc, req, fake.account(1))
 	require.EqualError(t, err, gwpoolBareError().Error(), "还票的失败不许冒泡")
 	require.EqualValues(t, 1, fake.releaseHits.Load())
 }
@@ -474,7 +493,7 @@ func TestGatewayPoolSkipsReleaseWithoutTicketVersion(t *testing.T) {
 
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 	require.NoError(t, err)
-	_, err = svc.doOpenAIUpstream(req, "", fake.account(1))
+	_, err = gwpoolRunOnce(svc, req, fake.account(1))
 	require.Error(t, err)
 	require.Zero(t, fake.releaseHits.Load())
 	require.Zero(t, fake.strays.Load())
@@ -561,7 +580,7 @@ func TestGatewayPoolReleaseJudgementCoversBothRoundTripExits(t *testing.T) {
 			// ctx 是活的：发送前那道显式检查不许抢掉这里要测的判据。
 			req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 			require.NoError(t, err)
-			_, err = svc.doOpenAIUpstream(req, "", fake.account(1))
+			_, err = gwpoolRunOnce(svc, req, fake.account(1))
 			require.Error(t, err)
 
 			if tc.wantRelease {
@@ -675,7 +694,7 @@ func gwpoolDoUpstream(t *testing.T, svc *OpenAIGatewayService, acct *Account) Op
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 	require.NoError(t, err)
 	ctx, sink := withOpenAIGatewayPoolSink(req.Context(), nil)
-	resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", acct)
+	resp, err := gwpoolRunOnce(svc, req.WithContext(ctx), acct)
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 	result := &OpenAIForwardResult{}
@@ -710,4 +729,48 @@ func (u *gwpoolCancelingUpstream) DoWithTLS(
 	req *http.Request, proxyURL string, id int64, c int, _ *tlsfingerprint.Profile,
 ) (*http.Response, error) {
 	return u.Do(req, proxyURL, id, c)
+}
+
+// 重启后内存账本是空的，但落库的落点记录还在 ⇒ exclude 必须从它补回来。
+//
+// 现场（2026-10-02）：池子对同一个号说「45 个候选网关都还在 4h 冷却里」，而我们这一发的
+// gwpool_pair_taken 打的是 excluded=6 —— 那 6 是重启之后重新数起来的，于是烧过的落点被
+// 原样发回来，而业务请求落上去就是降智。
+func TestGatewayPoolSeedsExcludeFromThePersistedLandingRecord(t *testing.T) {
+	poolCookie := gwpoolTestPairCookie(t, "unified-142")
+	fake := newGwpoolFakePool(t, poolCookie, 150)
+	store := &openAICodexCookieStore{} // 全新进程：poolUsed 是空的
+	acct := fake.account(1)
+	acct.Extra[openAIGatewayHistoryExtraKey] = map[string]any{
+		"seen": map[string]any{
+			"unified-167": map[string]any{"at": time.Now().Add(-time.Hour).Format(time.RFC3339Nano)},
+			// 出了本地账本窗口（默认 4 小时）⇒ 不该补进来，它又能用了。
+			"unified-84": map[string]any{"at": time.Now().Add(-5 * time.Hour).Format(time.RFC3339Nano)},
+		},
+	}
+
+	headers := http.Header{}
+	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, headers))
+	require.Equal(t, gwpoolTestAccountQuery+"&exclude=unified-167", fake.nextQuery(t),
+		"窗口内那条要补回 exclude；出了窗口的那条不许补")
+	require.True(t, store.gatewayPoolUsedRecently(gwpoolTestIdentity, "unified-167", time.Hour+time.Minute))
+}
+
+// 补回来的时间**只许往后对齐**：这个进程自己刚取的票比落库那条新，不许被旧读数盖回去
+// （盖回去会让「刚烧过」看起来像「一小时前烧的」，而挑落点正是按这个时间排序轮转的）。
+func TestGatewayPoolHydrateNeverRewindsAFresherLocalEntry(t *testing.T) {
+	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	store := &openAICodexCookieStore{}
+	store.gatewayPoolMarkUsed(gwpoolTestIdentity, "unified-167") // 刚刚
+	acct := fake.account(1)
+	acct.Extra[openAIGatewayHistoryExtraKey] = map[string]any{
+		"seen": map[string]any{
+			"unified-167": map[string]any{"at": time.Now().Add(-3 * time.Hour).Format(time.RFC3339Nano)},
+		},
+	}
+
+	store.gatewayPoolHydrateUsed(acct, gwpoolTestIdentity)
+	at, used := store.gatewayPoolUsedAt(gwpoolTestIdentity, "unified-167", openAIGatewayPoolGatewayWindow)
+	require.True(t, used)
+	require.WithinDuration(t, time.Now(), at, time.Minute, "内存里那条更新，不许被落库的旧读数盖掉")
 }

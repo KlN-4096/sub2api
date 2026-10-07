@@ -43,18 +43,68 @@ describe('gateway pool locale keys', () => {
       'gwpoolFetchTimeoutDesc',
       'gwpoolListTimeout',
       'gwpoolListTimeoutDesc',
+      'gwpoolWarmTickets',
+      'gwpoolWarmTicketsDesc',
       'gwpoolSteering',
       'gwpoolSteeringDesc',
-      'gwpoolStateEcho',
-      'gwpoolStateEchoDesc',
-      'gwpoolDegradedRetry',
-      'gwpoolDegradedRetryDesc'
+      'gwpoolGuard'
     ]) {
       expect(typeof openai[key], key).toBe('string')
     }
+    // 降智防护 2026-10-03 删成零档：页面上只剩一段常驻说明，下拉和三个档的标签全删了。
+    // 这三条钉住「别把档位接回来」—— 留着任何一个标签，页面就会重新长出一个选不中的选项。
+    expect(openai.gwpoolGuardModes, '档位已删').toBeUndefined()
+    for (const mode of ['off', 'cut', 'retry']) {
+      expect(openai.gwpoolGuardDescs[mode], `${mode} 档已删`).toBeUndefined()
+    }
+    expect(typeof openai.gwpoolGuardDescs.queue).toBe('string')
+    expect(openai.gwpoolGuardDescs.queue.length).toBeGreaterThan(40)
+    // 验满血要花掉上游配额（平均约 6 发垫话换一个窗口），说明里必须写清成本 —— 现在它是
+    // 无条件生效的，运营方更不该靠读源码才知道这笔钱花在哪。
+    expect(openai.gwpoolGuardDescs.queue).toContain('gwpool_warm_probe')
+    // 判不出来那条路的**行为**必须点名，而且必须点对：代码在那条路上放行业务请求
+    // （openai_gwpool_warm.go 的 `case !conclusive`），第一版文案写的是「这一发直接失败、
+    // 上游限流期间这一档会挡掉每个请求」—— 正好相反。运营方选这一档就是为了「上游不正常时
+    // 宁可失败也别放降智出去」，而这里恰好是它做不到的那一格，说反了比不说更坏。
+    // 长度/关键词断言抓不到语义反转，所以钉死这两个判别词。
+    expect(openai.gwpoolGuardDescs.queue).toContain('gwpool_warm_inconclusive')
+    // 和首输出超时共享墙上时间这件事也要点名：配到 30 秒以下整档静默失效。
+    expect(openai.gwpoolGuardDescs.queue).toContain('gwpool_warm_no_budget')
     // 地址提示必须点出「根地址」这个坑（用户填过 /a/xxxx 个人页面）。
     expect(openai.gwpoolBaseUrlDesc).toContain('pool.0102400.xyz')
     expect(openai.gwpoolBaseUrlDesc).toContain('/a/xxxx')
+    // 九宫格的四种色只靠颜色传达不行（9px 字号、emerald/rose 同明度、title 触屏摸不到），
+    // 图例必须在页面上，而且要带那两个字符前缀。
+    for (const mark of ['✓', '!']) {
+      expect(openai.gatewayHistory.legend, mark).toContain(mark)
+    }
+    // 满血分钟预测是**下界**。主文案必须出现「至少」那个限定词 —— 写成「最多」会被
+    // 运营方当配额用，而这个数的全部意义是「可以指望这么多」。
+    expect(openai.gatewayHistory.forecast).toMatch(/至少|at least/)
+    expect(openai.gatewayHistory.forecast).not.toMatch(/最多|at most/)
+    expect(openai.gatewayHistory.forecastHint).toMatch(/下界|lower bound/)
+    // tooltip 必须同时交代两个偏移方向：往大偏（没摸过的大区不计入）和仍然乐观的那一处
+    // （冷却时长没测准）。只说一个方向的话读者会以为另一个方向不存在。
+    expect(openai.gatewayHistory.forecastHint).toMatch(/没碰过|never touched/)
+    expect(openai.gatewayHistory.forecastHint).toMatch(/没测准|not pinned down/)
+    expect(openai.gatewayHistory.forecastUntouchedHint).toMatch(/别的行|another row/)
+    // 预测用的插值名必须是 minutes / units / window / count —— 组件按这些名字传参，
+    // 改了名字 vue-i18n 会静默渲染成字面量。
+    expect(openai.gatewayHistory.forecast).toContain('{minutes}')
+    expect(openai.gatewayHistory.forecastHint).toContain('{units}')
+    expect(openai.gatewayHistory.forecastHint).toContain('{window}')
+    expect(openai.gatewayHistory.forecastUntouched).toContain('{count}')
+    expect(openai.gatewayHistory.forecastUntouchedHint).toContain('{count}')
+    expect(openai.gatewayHistory.forecastBlindHint).toContain('{count}')
+  })
+
+  // 判不出来那条路的文案在中英两边都必须说「放行」，不能说「失败」。
+  // 分开一条用例是因为判别词按语言不同，塞进上面那个 it.each 会变成一堆 if。
+  it('describes the inconclusive filler shot as letting the request through', () => {
+    expect(zh.admin.accounts.openai.gwpoolGuardDescs.queue).toContain('不拦这一发')
+    expect(zh.admin.accounts.openai.gwpoolGuardDescs.queue).not.toContain('这一发直接失败')
+    expect(en.admin.accounts.openai.gwpoolGuardDescs.queue).toContain('is not blocked')
+    expect(en.admin.accounts.openai.gwpoolGuardDescs.queue).not.toContain('the request simply fails')
   })
 
   it.each([

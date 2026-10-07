@@ -754,15 +754,22 @@ export default {
         gwpoolListTimeout: 'Gateway list timeout (s)',
         gwpoolListTimeoutDesc:
           'Caps the /gateways call used to pick a landing spot. Default 2 — it is an optimisation and must never eat into the fetch budget; on timeout the pool picks for you.',
+        gwpoolWarmTickets: 'Pairs tried per warm-up',
+        gwpoolWarmTicketsDesc:
+          'How many pairs one business request may take and check before giving up. Default 5 (hit rate is roughly one in three, so 5 pairs is about 82% cumulative), capped at 8, blank uses the default. ' +
+          'This is a supply knob, not a performance knob: every pair burns one (upstream account x gateway) unit, and that unit regenerates at somewhere between a handful and a few dozen per hour (the number is not settled - counting by gateway name it is known-gateways / a 4-hour cooldown, but several gateway names in one region may be a single unit as far as one consumer is concerned). Overspending does not make things slow - the pool starts answering all_cooling for this account and every request during the back-off returns 503 instantly.',
         gwpoolSteering: 'Pick the landing gateway myself',
         gwpoolSteeringDesc:
           'On (default): list the gateways first and name one this account has not burnt in the ledger window. Off: let the pool schedule it.',
-        gwpoolStateEcho: 'Degradation check',
-        gwpoolStateEchoDesc:
-          'On (default): when a request carried a live turn-state and the upstream answered with a different fresh one, the route is judged degraded and the current gateway is marked for rotation. Response headers only, and only on HTTP 200 - a fresh ticket on a 429/5xx is rate limiting or a fault, not evidence of degradation. This test has false negatives but no false positives: a full-strength verdict is trustworthy, a degraded verdict is occasionally wrong, so it will sometimes rotate a gateway and burn a slot for nothing - and supply is single digits of pairs per hour. Turn it off if the rotation rate becomes too expensive; with it off the behaviour is byte-for-byte what it was before this feature.',
-        gwpoolDegradedRetry: 'Degradation retry',
-        gwpoolDegradedRetryDesc:
-          'On (default): take a fresh pair (a different gateway) and replay the same request once, so the client never notices; if the replay is judged degraded too it is not retried again and the request fails. Off: truncate only and return a clean error for the client to retry itself. The cap is hard-wired at one and cannot be raised - the test misjudges sometimes, and every retry is a real upstream request that burns one (account x gateway) unit. Both attempts get a usage row: the dropped one is tagged as degraded-dropped and its tokens and cost are always zero (nothing of the response body is read at the truncation point, so usage simply cannot be observed, and it is deliberately not estimated).',
+        gwpoolGuard: 'Degradation guard (no switch - always on once the pool is enabled)',
+        // The check discipline and the cost paragraph are both unconditional now, so both stay on screen.
+        gwpoolGuardDesc:
+          'The check (state-echo): send a live turn-state and read the verdict off the response headers - no fresh ticket (or the same one) means full strength, a different fresh one means degraded. Response headers only, and a verdict only on HTTP 200 (a fresh ticket on a 429/5xx is rate limiting or a fault, not evidence of degradation). It has false negatives but no false positives: a full-strength verdict is trustworthy, a degraded verdict is occasionally wrong, and that error is absorbed by ticket-age tiering (the younger the ticket, the more consecutive refreshes it takes to call it dead). The old three modes (off / truncate only / check first) were removed on 2026-10-03: the whole point of the pool is full strength, and truncate-only could act solely on requests that already carried a turn-state - the first request of a session has no ticket to echo, so the check structurally cannot run and degradation on that request got through.',
+        gwpoolGuardDescs: {
+          queue:
+            'After taking a fresh pair, two cheap filler shots run the check first and the business request is only let through once a full-strength verdict comes back; a degraded verdict rotates to the next pair, up to the "pairs tried per warm-up" limit (default 5), after which the request fails. This is the only way to catch degradation on the first request of a session - the check needs a live turn-state to echo and that request has none, so it mints its own baseline. No filler is spent while the current pair is both verified full strength and still inside its delivery window. ' +
+            'Five costs to know up front: (1) about 6 filler shots per window on average (hit rate is roughly one in three); concurrent requests share one pair and one check, so this does not scale with concurrency. (2) The client receives no bytes at all while this runs (not even response headers); the budget is 90 seconds, but taking a pair does not spend that budget, so the worst case is about 2 minutes - make sure your client timeout exceeds that. Each account gets its own budget and failover adds them up (accounts have burned different pairs, so one must not eat into the chance of the next); the real brakes are the pairs-per-warm-up limit above and the Retry-After returned on failure. (3) Filler shots are not billed and get no usage row (a known gap), so reconcile them against the gwpool_warm_probe / gwpool_warm_degraded / gwpool_warm_exhausted log lines; gateways judged degraded do turn red on the gateway cell. (4) When a filler shot comes back inconclusive (non-200, rate limiting, a fault) there is no verdict, no further rotation, and the request is not blocked: it is let through, and the check still runs on the business response. So requests are not blocked during upstream rate limiting - the guard is temporarily less strict than usual; count gwpool_warm_inconclusive in the log. (5) It shares wall-clock with the server-side first-output timeout (gateway.openai_first_output_timeout_seconds): warming takes at most half of whatever that deadline has left, and when the remainder is too short to verify a single pair warming is silently skipped (only a gwpool_warm_no_budget line). So leave that value at 0 (the default) or set it above 60 seconds.'
+        },
         gwpoolErrors: {
           GWPOOL_BASE_URL_INVALID:
             'The gateway pool URL must be an absolute http(s) address, e.g. https://pool.0102400.xyz. Fill in the pool root, not the /a/xxxx page.',
@@ -788,10 +795,33 @@ export default {
           empty: 'Gateway -',
           current: 'Current',
           seen: '{n} used',
-          lastUsed: 'last used',
           regionHot: 'used within the window, still cooling',
           regionCooled: 'window elapsed, usable again',
           regionIdle: 'never used',
+          // Tooltip segment 3: when the full-strength verdict happened. The window is only
+          // 183s, so this is an absolute time rather than a timeless "verified full".
+          fullAt: 'full strength at {when}',
+          fullNever: 'never verified full',
+          legend:
+            '✓ verified full (inside the 183s window) · ! used inside the window, degraded right now · grey window elapsed, usable again',
+          // Full-strength minutes forecast for the next hour, deliberately a LOWER bound.
+          // "at least" is required: "at most" would get read as a quota.
+          forecast: 'at least {minutes} min full-strength in the next hour',
+          forecastUntouched: '(this row has {count} regions it never touched, so possibly more)',
+          forecastHint:
+            'Counted per (account × region): {units} regions are in the ledger and come out of cooldown within the hour, each worth about {window}s of full strength.\n' +
+            'This is a **lower bound**: only units with positive evidence are counted. Regions this row never touched are left out (another row on the same credential may have burned them, or the record may have been pruned), and landings still inside the window with no region are subtracted.\n' +
+            'One thing still optimistic: the 4h cooldown itself is not pinned down (resting 30 minutes vs 4 hours gave a constant full-strength rate, zero correlation), so if real recovery takes longer this number is still too high.',
+          forecastUntouchedHint:
+            '{count} regions have no record in this row\'s ledger. They are **not counted** above: this ledger only sees what this row sent, so "this row never touched it" may well mean "another row burned it" or "the record was pruned".',
+          forecastBlindHint:
+            '{count} landings are still inside the window but have no region (the pool\'s older renewal mints did not report one — fixed since, but old records do not backfill) ⇒ they did burn some region\'s unit, so they have been subtracted from the available count.',
+          // state-echo verdict (backend openai_gwpool_state_echo.go).
+          verdicts: {
+            full: 'last verdict: full strength',
+            degraded: 'last verdict: degraded',
+            none: 'never judged'
+          },
           regions: {
             'us-east': 'US-E',
             'us-west': 'US-W',
