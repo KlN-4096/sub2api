@@ -23,11 +23,18 @@ const (
 	// RequestTypeTurnStateProbe 是 292 猎手的探测（openai_turn_state_hunter.go）：挂在配置的
 	// API Key 下按标准路径计费，输入 token 为本地估算、输出恒 0。
 	RequestTypeTurnStateProbe RequestType = 6
+	// RequestTypeGatewayPoolDegraded 是被 state-echo 判成降智后整发丢掉的那次上游尝试
+	// （openai_gwpool_state_echo.go）。它真的到了上游、上游真的跑了，所以要落行；但判定点在
+	// 「响应头到手、响应体一个字节都没读」的时刻，**输入与输出 token 都观测不到**
+	// （两者都来自上游 response.completed 事件里的 usage）⇒ 这种行恒为 0 token / 0 金额。
+	// 刻意不估算：编出来的数字进了计费表，事后没人分得清哪条是真的。
+	RequestTypeGatewayPoolDegraded RequestType = 7
 )
 
 func (t RequestType) IsValid() bool {
 	switch t {
-	case RequestTypeUnknown, RequestTypeSync, RequestTypeStream, RequestTypeWSV2, RequestTypeCyberBlocked, RequestTypeLive, RequestTypeTurnStateProbe:
+	case RequestTypeUnknown, RequestTypeSync, RequestTypeStream, RequestTypeWSV2, RequestTypeCyberBlocked, RequestTypeLive,
+		RequestTypeTurnStateProbe, RequestTypeGatewayPoolDegraded:
 		return true
 	default:
 		return false
@@ -55,6 +62,8 @@ func (t RequestType) String() string {
 		return "live"
 	case RequestTypeTurnStateProbe:
 		return "probe"
+	case RequestTypeGatewayPoolDegraded:
+		return "gwpool_degraded"
 	default:
 		return "unknown"
 	}
@@ -80,8 +89,11 @@ func ParseUsageRequestType(value string) (RequestType, error) {
 		return RequestTypeLive, nil
 	case "probe":
 		return RequestTypeTurnStateProbe, nil
+	case "gwpool_degraded":
+		return RequestTypeGatewayPoolDegraded, nil
 	default:
-		return RequestTypeUnknown, fmt.Errorf("invalid request_type, allowed values: unknown, sync, stream, ws_v2, cyber, live, probe")
+		return RequestTypeUnknown, fmt.Errorf(
+			"invalid request_type, allowed values: unknown, sync, stream, ws_v2, cyber, live, probe, gwpool_degraded")
 	}
 }
 
@@ -213,10 +225,29 @@ type UsageLog struct {
 	// 的读数（openai_codex_safety_buffering.go）。上游没带、非 Codex 上游、OAuth WS 轮次（暂不取事件里的头）为 nil。
 	SafetyBufferingEnabled     *bool
 	SafetyBufferingFasterModel *string
-	// RouteGateway / RoutePair 是这一发生效的路由对读数（openai_codex_route_cookies.go）：
+	// RouteGateway / RoutePair 是这一发**生效的**路由对读数（openai_codex_route_cookies.go）：
 	// 网关段从 __oailb 的 JWT 载荷解出，整串留着以便原样复现。两者都只作观测，不作判据。
+	//
+	// **「生效的」不等于「观测到的落点」。** 上游下发了新 __oailb 时这一列是观测值；上游什么都
+	// 不回时它读的是**我们自己发出去那张** ⇒ 只是「我们要求它去哪」。而上游恰恰只在改派时才
+	// 下发新 cookie（带着活 pair 的健康请求一个都不回），所以
+	// `RouteGateway` 与 `RoutePairPoolGateway` 相同的那些行**基本都是没观测到**，
+	// 不是「确认落在承诺的网关上」——「不回新 oailb 就是没换网关」恒为真、无法证伪
+	// （2026-10-02 作废的两条判据之一）。
+	//
+	// 后果要知道：消费者回放池子的票之后到底落在哪，现网数据答不了。想测只能靠别的手段
+	// （只送 cflb、摘掉 oailb，读回来的那张），不能靠这两列。
 	RouteGateway *string
 	RoutePair    *string
+	// RoutePairOverridden 表示这一发出站的路由对由网关池下发（openai_gwpool.go），
+	// 而不是账号罐里回放的那一组。nil 表示账号类型不适用（非 Codex 上游）。
+	RoutePairOverridden *bool
+	// RoutePairPoolGateway 是池子交付 pair 时说的那个网关。与 RouteGateway 不一致 = 上游下发了
+	// 新的 __oailb 把这一发改派走了（注入被拒）。没走池子时为 nil。
+	RoutePairPoolGateway *string
+	// RoutePairPoolVersion 是池子给这张票的身份（cookie_version），用来和池子侧的交付/验证
+	// 日志对上账。不是 cookie 本体。没走池子 / 池子没报时为 nil。
+	RoutePairPoolVersion *string
 
 	// Cache TTL Override 标记（管理员强制替换了缓存 TTL 计费）
 	CacheTTLOverridden bool

@@ -98,9 +98,41 @@ func TestRoutePairInUsePrefersUpstream(t *testing.T) {
 	upstream := http.Header{}
 	upstream.Add("Set-Cookie", "__cflb=new; Path=/")
 	upstream.Add("Set-Cookie", "__oailb="+fresh+"; Path=/")
-	require.Equal(t, "unified-165", openAICodexRouteGateway(s.routePairInUse(account, upstream)))
+	pair, fromPool, poolGateway, poolVersion := s.routePairInUse(account, upstream, OpenAIGatewayPoolApplied{})
+	require.Equal(t, "unified-165", openAICodexRouteGateway(pair))
+	require.False(t, fromPool, "没接管网关池就不是覆写")
+	require.Empty(t, poolGateway)
+	require.Empty(t, poolVersion)
 
 	// 上游没下发时回读罐；罐是空的就给空串，不能崩。
-	require.Empty(t, s.routePairInUse(account, http.Header{}))
-	require.Empty(t, s.routePairInUse(nil, http.Header{}))
+	jarPair, fromPool, _, _ := s.routePairInUse(account, http.Header{}, OpenAIGatewayPoolApplied{})
+	require.Empty(t, jarPair)
+	require.False(t, fromPool)
+	nilPair, fromPool, _, _ := s.routePairInUse(nil, http.Header{}, OpenAIGatewayPoolApplied{})
+	require.Empty(t, nilPair)
+	require.False(t, fromPool)
+
+	// 账号类型不适用时「已覆写」读数保持 NULL，与 FALSE 区分开。
+	require.Nil(t, usageCodexRoutePairOverriddenPtr(&Account{ID: 2, Platform: PlatformAnthropic}, true))
+	overridden := usageCodexRoutePairOverriddenPtr(account, true)
+	require.NotNil(t, overridden)
+	require.True(t, *overridden)
+}
+
+// 池子说的大区只在它说的网关就是这一发实际在用的那个时才作数。改派走了还认，
+// 等于把落点归到错的大区 ⇒ 账号卡片上「哪个大区还能用」会反过来。
+func TestUsageCodexRouteRegion(t *testing.T) {
+	t.Run("网关对得上就采用", func(t *testing.T) {
+		require.Equal(t, "east-asia",
+			usageCodexRouteRegion("unified-167", "unified-167", "east-asia"))
+	})
+	t.Run("被改派走了就不记", func(t *testing.T) {
+		require.Empty(t, usageCodexRouteRegion("unified-167", "unified-73", "east-asia"))
+	})
+	t.Run("没走池子就不记", func(t *testing.T) {
+		require.Empty(t, usageCodexRouteRegion("", "unified-167", "east-asia"))
+	})
+	t.Run("两头都空不算对得上", func(t *testing.T) {
+		require.Empty(t, usageCodexRouteRegion("", "", "east-asia"))
+	})
 }

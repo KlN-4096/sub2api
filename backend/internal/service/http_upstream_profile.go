@@ -7,10 +7,13 @@ import "context"
 type HTTPUpstreamProfile string
 
 const (
-	HTTPUpstreamProfileDefault    HTTPUpstreamProfile = ""
-	HTTPUpstreamProfileOpenAI     HTTPUpstreamProfile = "openai"
-	HTTPUpstreamProfileGrok       HTTPUpstreamProfile = "grok"
-	HTTPUpstreamProfileLongStream HTTPUpstreamProfile = "long_stream"
+	HTTPUpstreamProfileDefault HTTPUpstreamProfile = ""
+	HTTPUpstreamProfileOpenAI  HTTPUpstreamProfile = "openai"
+	// Confirmations run while the original streaming response is still open.
+	// They need a distinct bounded connection pool, but identical wire policy.
+	HTTPUpstreamProfileOpenAIConfirmation HTTPUpstreamProfile = "openai_confirmation"
+	HTTPUpstreamProfileGrok               HTTPUpstreamProfile = "grok"
+	HTTPUpstreamProfileLongStream         HTTPUpstreamProfile = "long_stream"
 )
 
 type httpUpstreamProfileContextKey struct{}
@@ -38,7 +41,7 @@ func HTTPUpstreamProfileFromContext(ctx context.Context) HTTPUpstreamProfile {
 		return HTTPUpstreamProfileDefault
 	}
 	switch profile {
-	case HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileGrok, HTTPUpstreamProfileLongStream:
+	case HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileOpenAIConfirmation, HTTPUpstreamProfileGrok, HTTPUpstreamProfileLongStream:
 		return profile
 	default:
 		return HTTPUpstreamProfileDefault

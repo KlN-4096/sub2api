@@ -526,6 +526,12 @@ export default {
       turnStateSent: 'Turn-State 出站',
       routeGateway: '路由网关',
       routePairCopy: '复制整组 __cflb/__oailb',
+      routePairOverriddenShort: '已覆写',
+      routePairOverridden:
+        '这一发出站的 __cflb/__oailb 由网关池下发，顶掉了账号罐回放。上游没有下发新的 __oailb ⇒ 实际落点**没有观测到**，只能按池子承诺的那个网关记账：「不回新 oailb 就是没换网关」这条恒为真、无法证伪，不算落点的确认。真正观测到落点的只有被改派那一格',
+      routePairPoolVersion: '池子票号',
+      routePairReroutedShort: '被改派',
+      routePairRerouted: '池子给的是 {promised}，但上游下发的新 __oailb 把这一发改派到了 {landed}，注入被拒。落点相同的新 __oailb 不算改派（续期那一发会换一组新的，路由没变）',
       turnStateHint: '{chars} 字符（密文 {blocks} 块）；PKCS#7 下明文落在 {min}–{max} 字节。基线 292 字符（team 号 332）= 不降智。块数只能把明文框进 16 字节的窗口，所以这是疑似判据，不是确证。铸于 {minted}',
       turnStateUndecodable: '不是可解析的 Fernet 信封，退回字符长度 {n} 判断',
       turnStateUnknownShape: '黄色：不在已知形态表里（正常 292/332、降智 312/356），判断不了是否降智。',

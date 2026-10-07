@@ -575,7 +575,14 @@ func (s *OpenAIGatewayService) resolveAccountByPreviousResponseIDForCapability(
 	// survive an HTTP fallback. Official API-key Responses HTTP requests are
 	// different: previous_response_id is supported by the provider and scoped to
 	// the selected key/project, so the response-id binding must retain that key.
-	if !account.IsOpenAIApiKey() && s.getOpenAIWSProtocolResolver().Resolve(account).Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
+	// 网关池接管的账号实际走 HTTP/SSE（选路层降级，openai_gwpool.go）。Resolve 不带这一道过滤，
+	// 不补的话这种账号会被判成 WSv2 ⇒ 绑定留着 ⇒ 下一发被钉回这个账号再走 HTTP，而按这条判据
+	// 自己的理由（HTTP 上游没有 WSv2 的延续态），绑定就该丢掉。
+	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
+	if gatewayPoolTakesOverWSUpstream(wsDecision, account) {
+		wsDecision = openAIWSHTTPDecision("gwpool_takeover")
+	}
+	if !account.IsOpenAIApiKey() && wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
 		return 0, nil, "", nil
 	}
 	if shouldClearStickySession(account, requestedModel) || !account.IsOpenAI() || !account.IsSchedulable() {
