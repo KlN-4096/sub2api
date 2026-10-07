@@ -123,6 +123,14 @@ func (s *OpenAIGatewayService) holdOpenAITurnStateIfUnfilled(c *gin.Context, acc
 	if s == nil || c == nil || account == nil || openAITurnStateProbeContext(c) || !s.openAITurnStateHoldEnabled(account, model) {
 		return
 	}
+	// pair 模式下不停模型。停的时长是一个空闲窗口（idle_minutes，门槛关掉时 1 小时），而 pair
+	// 票只活 ticket_ttl_seconds（默认 4 分钟）、命中率个位数百分比——池空是常态，于是池空后的
+	// 第一条真实请求就能把这个模型停一小时并回 503。下面那道逃生门（客户端回带一张新鲜的健康票）
+	// 在 780 时代恒不成立，等于没有。与 pair 候选耗尽不停号同一个口径：实验性功能不许升级成线上
+	// 事故（用户 2026-09-26 定）。两个开关在编辑弹窗里上下相邻，很容易一起勾上。
+	if account.IsOpenAITurnStatePairModeEnabled() {
+		return
+	}
 	now := time.Now()
 	if c.Request != nil {
 		inbound := strings.TrimSpace(c.Request.Header.Get(openAICodexTurnStateHeader))

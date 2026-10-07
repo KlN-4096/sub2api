@@ -1190,13 +1190,13 @@ func TestOpenAITurnStateInjectsEverySessionWhenHunterEnabled(t *testing.T) {
 	repo.latest = account
 	gw := &OpenAIGatewayService{accountRepo: repo}
 	blob := turnStateFernetBlob(time.Now(), openAIHealthyTurnStateBlocks)
-	gw.pushOpenAITurnStateCandidate(turnStateAutoCtxModel("seed", hunterTestModel), account, blob)
+	gw.pushOpenAITurnStateCandidate(turnStateAutoCtxModel("seed", hunterTestModel), account, blob, nil)
 
 	got, source := gw.resolveOpenAITurnStateOverride(turnStateAutoCtxModel("fresh-session", hunterTestModel), account)
 	require.Equal(t, blob, got, "开了猎手：新会话第一回合就注")
 	require.Equal(t, turnStateSourceAuto, source)
 
-	gw.pushOpenAITurnStateCandidate(turnStateAutoCtxModel("seed-other", "gpt-6"), account, turnStateFernetBlob(time.Now().Add(time.Second), openAIHealthyTurnStateBlocks))
+	gw.pushOpenAITurnStateCandidate(turnStateAutoCtxModel("seed-other", "gpt-6"), account, turnStateFernetBlob(time.Now().Add(time.Second), openAIHealthyTurnStateBlocks), nil)
 	got, _ = gw.resolveOpenAITurnStateOverride(turnStateAutoCtxModel("fresh-session-other", "gpt-6"), account)
 	require.Empty(t, got, "猎手不管的模型：仍要先判定降智才注")
 

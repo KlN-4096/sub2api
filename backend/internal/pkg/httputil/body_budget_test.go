@@ -180,7 +180,7 @@ func requestBodyBudgetUsed(budget *BodyMemoryBudget) int64 {
 	return budget.used
 }
 
-func TestRequestBodyMemoryBudgetRetainsOnlyFinalAllocation(t *testing.T) {
+func TestRequestBodyMemoryBudgetRetainsOnlyLiveAllocations(t *testing.T) {
 	for _, encoding := range []string{"identity", "gzip", "zstd"} {
 		for _, normalize := range []bool{false, true} {
 			name := encoding
@@ -229,8 +229,23 @@ func TestRequestBodyMemoryBudgetRetainsOnlyFinalAllocation(t *testing.T) {
 				if !bytes.Equal(got, want) {
 					t.Fatal("body contents changed")
 				}
-				if used := requestBodyBudgetUsed(budget); used != int64(cap(got)) {
-					t.Fatalf("retained %d bytes, final allocation is %d", used, cap(got))
+				preread, ok := req.Body.(*PrereadBody)
+				if !ok {
+					t.Fatal("request body was not refilled")
+				}
+				wire, _, ok := preread.Wire()
+				if !ok || !bytes.Equal(wire, raw) {
+					t.Fatal("original wire bytes were not retained")
+				}
+				retained := cap(preread.Bytes())
+				if encoding != "identity" {
+					retained += cap(wire)
+				}
+				if normalize {
+					retained += cap(got)
+				}
+				if used := requestBodyBudgetUsed(budget); used != int64(retained) {
+					t.Fatalf("charged %d bytes, live allocations total %d", used, retained)
 				}
 				release()
 				if used := requestBodyBudgetUsed(budget); used != 0 {

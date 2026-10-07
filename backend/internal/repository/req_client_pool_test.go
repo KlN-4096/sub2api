@@ -4,7 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -148,6 +150,64 @@ func TestGetSharedReqClient_ImpersonateUsesFirefoxFingerprint(t *testing.T) {
 	// chatgpt.com 的 Cloudflare 会质询 req 内置的 Chrome/120 伪装，必须保持 Firefox 指纹。
 	require.Contains(t, client.Headers.Get("User-Agent"), "Firefox/")
 	require.NotContains(t, client.Headers.Get("User-Agent"), "Chrome/")
+}
+
+// OpenAI 换/刷 token 的客户端（auth.openai.com）不留 cookie：客户端按代理共享，带 jar 就会把
+// 一个账号换 token 时收到的 cookie 随同代理下另一个账号的请求发出去。真实 Codex 的
+// Cloudflare cookie 仓只认 ChatGPT 主机，auth.openai.com 上从来不带 cookie。
+func TestCreateOpenAIReqClientHasNoCookieJar(t *testing.T) {
+	sharedReqClients = sync.Map{}
+	client, err := createOpenAIReqClient("")
+	require.NoError(t, err)
+	require.Nil(t, client.GetClient().Jar)
+}
+
+// Codex 客户端面照真实 Codex（http-client/src/chatgpt_cloudflare_cookies.rs）：只在 https 的
+// ChatGPT 主机上存取 Cloudflare 类 cookie；oai-did、会话 cookie 之类一律不存，免得跨账号串味。
+func TestCodexBackendReqClientKeepsOnlyChatGPTCloudflareCookies(t *testing.T) {
+	sharedReqClients = sync.Map{}
+	client, err := CreateCodexBackendReqClient("")
+	require.NoError(t, err)
+	jar := client.GetClient().Jar
+	require.NotNil(t, jar)
+
+	set := func(raw string) {
+		u, err := url.Parse(raw)
+		require.NoError(t, err)
+		jar.SetCookies(u, []*http.Cookie{
+			{Name: "__cf_bm", Value: "a"}, {Name: "_cfuvid", Value: "b"}, {Name: "cf_chl_rc_m", Value: "c"},
+			{Name: "oai-did", Value: "device"}, {Name: "__Secure-next-auth.session-token", Value: "s"},
+		})
+	}
+	names := func(raw string) []string {
+		u, err := url.Parse(raw)
+		require.NoError(t, err)
+		var out []string
+		for _, c := range jar.Cookies(u) {
+			out = append(out, c.Name)
+		}
+		sort.Strings(out)
+		return out
+	}
+	set("https://chatgpt.com/backend-api/wham/usage")
+	require.Equal(t, []string{"__cf_bm", "_cfuvid", "cf_chl_rc_m"}, names("https://chatgpt.com/backend-api/wham/usage"))
+	set("https://auth.openai.com/oauth/token")
+	require.Empty(t, names("https://auth.openai.com/oauth/token"))
+	require.Empty(t, names("http://chatgpt.com/backend-api/wham/usage"), "只认 https")
+	require.Empty(t, names("https://evilchatgpt.com/"))
+}
+
+// Gemini CLI 客户端与 Codex 客户端面选项相同（30s、不伪装）：cookie 策略必须进缓存键，
+// 否则两者共用一个实例；其余客户端维持 req 默认 jar。
+func TestCodexBackendReqClientDoesNotShareInstanceWithSameOptionClients(t *testing.T) {
+	sharedReqClients = sync.Map{}
+	codex, err := CreateCodexBackendReqClient("")
+	require.NoError(t, err)
+	gemini, err := createGeminiCliReqClient("")
+	require.NoError(t, err)
+	require.NotSame(t, codex, gemini)
+	require.NotNil(t, gemini.GetClient().Jar)
+	require.NotSame(t, codex.GetClient().Jar, gemini.GetClient().Jar)
 }
 
 // Codex 客户端面（额度查询）不得带浏览器指纹：浏览器伪装会连带一整套公共头与

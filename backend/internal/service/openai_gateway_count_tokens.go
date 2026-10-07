@@ -162,6 +162,11 @@ func shouldEstimateOpenAIInputTokensLocally(account *Account) bool {
 	if account.Type == AccountTypeCPR {
 		return true
 	}
+	// ChatGPT OAuth / setup-token：access token 没有平台 scope（api.responses.write），官方
+	// input_tokens 必然 401/403；真实 Codex 也从不调这个端点。本地估算，不把 ChatGPT token 发给 api.openai.com。
+	if account.UsesOpenAICodexProtocol() {
+		return true
+	}
 	if account.Type != AccountTypeAPIKey {
 		return false
 	}
@@ -300,6 +305,10 @@ func (s *OpenAIGatewayService) ForwardCountTokensAsAnthropic(
 	if err != nil {
 		writeAnthropicCountTokensError(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
 		return err
+	}
+	if account.UsesOpenAICodexProtocol() {
+		writeOpenAIOAuthInputTokensFallback(c, account, prepared, 0) // 理由见 shouldEstimateOpenAIInputTokensLocally
+		return nil
 	}
 
 	upstreamBody, err := marshalOpenAIUpstreamJSON(prepared.Request)
@@ -454,7 +463,6 @@ func (s *OpenAIGatewayService) buildInputTokensUpstreamRequest(
 		}
 	case AccountTypeCPR:
 		// CPR 中继绝不能回落到官方端点：client key 只对 CPR 网关有效，发给 OpenAI 就是凭据外泄。
-		// 注意不能加无差别 default——oauth / setup-token 合法使用官方 input_tokens 端点。
 		baseURL := account.GetCPRGatewayBaseURL()
 		if baseURL == "" {
 			return nil, errors.New("cpr account requires credentials.base_url")

@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
 	"io"
 )
 
@@ -1224,11 +1223,10 @@ func TestCPRFastPolicyHasOwnScope(t *testing.T) {
 		"beta policy 侧 apikey scope 仍命中普通 api key 账号")
 }
 
-// TestCPRForwardAppliesCodexBodyNormalizations 从 Forward 入口驱动，钉住转发主线上
-// 按「上游是谁」放行给 cpr 的几处 body 归一化：reasoning.mode、推理内容回放、
-// input item ID 清洗、namespace 清理（工具调用项保留）。之前这几处只有谓词层
-// 断言，把门控改回旧谓词整个包仍全绿。
-func TestCPRForwardAppliesCodexBodyNormalizations(t *testing.T) {
+// TestCPRForwardSendsCodexBodyUntouched 从 Forward 入口驱动：cpr 走原样中继，
+// reasoning.mode、推理内容回放、input item ID、namespace 一律不改写——这些都是
+// CPR 的职责，选 cpr 渠道必须和直连 CPR 发出同样的字节。
+func TestCPRForwardSendsCodexBodyUntouched(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	upstreamSSE := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_cpr\",\"model\":\"gpt-5.6-sol\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\ndata: [DONE]\n\n"
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
@@ -1263,26 +1261,7 @@ func TestCPRForwardAppliesCodexBodyNormalizations(t *testing.T) {
 	require.NotNil(t, result)
 	require.NotNil(t, upstream.lastReq)
 	require.Equal(t, "127.0.0.1:18081", upstream.lastReq.URL.Host, "只能发往自己的 CPR 网关")
-	sent := upstream.lastBody
-
-	// reasoning.mode：pro → effort=max，mode 删除
-	require.False(t, gjson.GetBytes(sent, "reasoning.mode").Exists())
-	require.Equal(t, "max", gjson.GetBytes(sent, "reasoning.effort").String())
-
-	items := gjson.GetBytes(sent, "input").Array()
-	require.Len(t, items, 4)
-	byType := map[string]gjson.Result{}
-	for _, item := range items {
-		byType[item.Get("type").String()] = item
-	}
-	// 推理内容回放：非空 content 数组必须删掉，其它字段保留
-	require.False(t, byType["reasoning"].Get("content").Exists())
-	require.Equal(t, "enc", byType["reasoning"].Get("encrypted_content").String())
-	// item ID 清洗：custom_tool_call 带 fc_ 前缀的假 id 删除
-	require.False(t, byType["custom_tool_call"].Get("id").Exists())
-	// namespace：普通 input 项清理，工具调用项保留
-	require.False(t, byType["message"].Get("namespace").Exists())
-	require.Equal(t, "n0", byType["function_call"].Get("namespace").String())
+	require.Equal(t, string(body), string(upstream.lastBody), "cpr 请求体逐字节原样")
 }
 
 // TestCPRHandle429DefersToSameAccountRetry：ChatGPT Codex 后端的瞬时 429 在有界
@@ -1468,11 +1447,10 @@ func TestOpenAITurnStateOverrideAppliesToCodexUpstreams(t *testing.T) {
 		}
 	}
 
-	// 适用：三种都会落到 ChatGPT Codex 后端
+	// 适用：本地持有 token 的两种 Codex 账号
 	for _, tc := range []struct{ platform, accType string }{
 		{PlatformOpenAI, AccountTypeOAuth},
 		{PlatformOpenAI, AccountTypeSetupToken},
-		{PlatformOpenAI, AccountTypeCPR},
 	} {
 		acc := withOverride(tc.platform, tc.accType)
 		require.Equal(t, blob, acc.OpenAICodexTurnStateOverride(turnStateTestModel), "%s/%s 应支持覆写", tc.platform, tc.accType)
@@ -1491,8 +1469,10 @@ func TestOpenAITurnStateOverrideAppliesToCodexUpstreams(t *testing.T) {
 			svc.applyOpenAICodexTurnStateOverrideWSManualOnly(newTurnStateTestCtx(), acc, ""), "值形态（WS 路径）同样生效")
 	}
 
-	// 不适用：上游不是 Codex 后端的账号，一个字节都不能碰
+	// 不适用：上游不是 Codex 后端的账号，一个字节都不能碰；cpr 走原样中继，turn-state
+	// 由客户端与 CPR 自己往返（2026-09-23 起不再替换）
 	for _, tc := range []struct{ platform, accType string }{
+		{PlatformOpenAI, AccountTypeCPR},
 		{PlatformOpenAI, AccountTypeAPIKey},
 		{PlatformAnthropic, AccountTypeOAuth},
 		{PlatformAnthropic, AccountTypeBedrock},
@@ -1507,7 +1487,7 @@ func TestOpenAITurnStateOverrideAppliesToCodexUpstreams(t *testing.T) {
 	}
 
 	// 未配置 = 功能不存在，出站行为与改动前逐字节一致
-	plain := &Account{Platform: PlatformOpenAI, Type: AccountTypeCPR}
+	plain := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	h := http.Header{}
 	h.Set(openAICodexTurnStateHeader, "客户端自己回带的值")
 	svc.applyOpenAICodexTurnStateOverrideHeader(newTurnStateTestCtx(), plain, h)

@@ -112,6 +112,11 @@ func TestOpenAITurnStateHoldSkips(t *testing.T) {
 			a.Extra[openAITurnStateAutoExtraKey] = false
 			return a
 		}, realCtx},
+		// pair 模式下票只活几分钟、命中率个位数百分比，池空是常态：那时每次池空后的第一条真实
+		// 请求都会把这个模型停一个空闲窗口（默认 1 小时）并回 503，把实验性功能变成线上事故。
+		{"pair 模式", func() *Account {
+			return hunterTestAccount(holdHunterConfig(map[string]any{"pair_mode": true, "lead_minutes": 1}))
+		}, realCtx},
 		{"探测上下文", func() *Account { return hunterTestAccount(holdHunterConfig(nil)) }, func() *gin.Context {
 			c := realCtx()
 			c.Set(ctxKeyTurnStateProbe, true)
