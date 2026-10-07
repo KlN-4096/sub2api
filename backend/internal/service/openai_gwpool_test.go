@@ -1069,6 +1069,34 @@ func TestGatewayPoolPicksUnburntGateway(t *testing.T) {
 	require.Zero(t, fake.strays.Load())
 }
 
+// 「池子剩余」只问**本地账本**，不看池子的 used_by_you。
+//
+// 池子那本账记的是 LastTouch，而它的铸票和扫描也写 LastTouch —— 一个在池子里也当铸票者
+// 的号，几乎每个它铸过的网关都会被标成 used_by_you。跟着它数的话这个数恒为 0，卡片上就是
+// 「池子剩余 0」而池子正有几十个落点可交付（2026-10-03 现网实况）。
+//
+// 挑落点仍然避开 used_by_you（上面那条用例钉着），两件事刻意不同口径：报数要准，挑要保守。
+func TestGatewayPoolFreeCountIgnoresPoolSideUsedByYou(t *testing.T) {
+	poolCookie := gwpoolTestPairCookie(t, "unified-167")
+	fake := newGwpoolFakePool(t, poolCookie, 150)
+	fake.listGateways = []gwpoolFakeGateway{
+		{Name: "unified-126", PairReady: true, UsedByYou: true}, // 池子说烧过，本地账本没记
+		{Name: "unified-188", PairReady: true, UsedByYou: true}, // 同上
+		{Name: "unified-195"},                                  // 没有活 pair ⇒ 不算
+		{Name: "unified-167", PairReady: true},
+	}
+	store := &openAICodexCookieStore{}
+	ctx, sink := withOpenAIGatewayPoolSink(context.Background(), nil)
+
+	headers := http.Header{}
+	require.NoError(t, attachRoute(ctx, store, fake.account(1), gwpoolTestURL, headers))
+
+	snap := sink.snapshot()
+	require.Equal(t, 4, snap.PoolLive, "可交付总数报的是清单长度")
+	require.Equal(t, 3, snap.PoolFree,
+		"本地账本一个都没记 ⇒ 三个有活 pair 的全算剩余，不该被 used_by_you 扣掉")
+}
+
 // 多个候选时挑**最久没碰**的；池子缺省 last_used_at（从没碰过）最优。
 func TestGatewayPoolPicksLeastRecentlyUsedCandidate(t *testing.T) {
 	for name, tc := range map[string]struct {

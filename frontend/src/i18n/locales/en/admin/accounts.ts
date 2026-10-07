@@ -800,26 +800,50 @@ export default {
           empty: 'Gateway -',
           current: 'Current',
           seen: '{n} used',
-          regionHot: 'used within the window, still cooling',
-          regionCooled: 'window elapsed, usable again',
+          // The tooltip's five segments are region-gateway-fullTime-state-verdict, each
+          // carrying only the VALUE and no label: operators scan a column vertically, and
+          // repeating "used within the window, still cooling" on every row pushes the values
+          // that actually need comparing off to the right where they no longer line up.
+          // The long wording stays in gatewayColumnHint and legend, which appear once.
+          // "cooling" carries no information — a whole column of it. Report how many minutes
+          // are left instead (against the local ledger window, 4h by default) so a vertical
+          // scan picks out the one that comes back first.
+          regionHot: 'CD left: {minutes}min',
+          regionCooled: 'usable',
           regionIdle: 'never used',
-          // Tooltip segment 3: when the full-strength verdict happened. The window is only
-          // 183s, so this is an absolute time rather than a timeless "verified full".
-          fullAt: 'full strength at {when}',
-          fullNever: 'never verified full',
+          // Segment 3 is how LONG full strength held (full verdict → degraded verdict),
+          // rendered straight as `180s` with no i18n key. This one is the placeholder when
+          // there is no duration to show: window still running, never verified full, or both
+          // readings landed in one write so the length cannot be measured — same thing to the
+          // reader, so one label.
+          fullUntimed: 'not timed',
           legend:
             '✓ verified full (inside the 183s window) · ! used inside the window, degraded right now · grey window elapsed, usable again',
+          // Two independent numbers, NO subtraction: "landings" comes from this row's ledger
+          // (gateway names touched over the past window), "left in pool" is the current
+          // deliverable listing reconciled against that ledger. The two sets do not nest.
+          windowUsage: '{used} landing(s) in the last {hours}h; {free} left in the pool',
+          // Without the pool listing, report only the landings: inventing a number is worse.
+          windowUsageUsedOnly: '{used} landing(s) in the last {hours}h',
+          windowUsageHint:
+            '"Landings" counts gateways this row\'s ledger touched inside the window; "left in the pool" is how many of the gateways the pool can deliver RIGHT NOW this account has not burned according to the local ledger — recomputed against the ledger every time a ticket fetch pulls the listing, never cached. With "let the pool pick the landing" off there is no listing, so only the first number is shown.\n' +
+            'The two must NOT be subtracted: landings span the local window (expired tickets included) while the listing is a snapshot of now. More landings than deliverable gateways is normal and does not mean the pool is exhausted.',
           // Full-strength minutes forecast for the next hour, deliberately a LOWER bound.
           // "at least" is required: "at most" would get read as a quota.
           forecast: 'at least {minutes} min full-strength in the next hour',
+          // At 0 this must not read "at least 0 minutes": that sounds like a verdict on the
+          // account, when it actually states a fact about TIME — every landing in the ledger
+          // comes out of cooldown more than an hour from now. And the number is a lower bound
+          // anyway: gateways never touched are not counted at all.
+          forecastNone: 'no landing comes out of cooldown within the hour',
           forecastHint:
             'Counted per (account × gateway): {units} gateways are in the ledger and come out of cooldown within the hour, each worth about {window}s of full strength. One gateway name is one unit — different gateways in the same region have separate full-strength windows, so do not collapse by region (region is only the grouping for the grid above).\n' +
             'This is a **lower bound**: only units with positive evidence are counted. Gateways this row never touched are left out, so possibly more — no number is given because this row cannot work it out: it does not know how many gateways the pool has, and "this row never touched it" may well mean another row on the same credential burned it, or the record was pruned.\n' +
             'One thing still optimistic: the 4h cooldown itself is not pinned down (resting 30 minutes vs 4 hours gave a constant full-strength rate, zero correlation), so if real recovery takes longer this number is still too high.',
           // state-echo verdict (backend openai_gwpool_state_echo.go).
           verdicts: {
-            full: 'last verdict: full strength',
-            degraded: 'last verdict: degraded',
+            full: 'full',
+            degraded: 'degraded',
             none: 'never judged'
           },
           regions: {

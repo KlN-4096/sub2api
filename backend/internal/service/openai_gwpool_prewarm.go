@@ -124,15 +124,21 @@ func (w *gatewayPoolFullWindow) p95() (time.Duration, bool) {
 //
 // 只有**验过满血**的那张票才产样本：没验过的票不知道窗口什么时候开的，把它的「取票到判死」
 // 当成满血时长会把 p95 拉低，于是预热越来越早、越来越费票。
-func (s *openAICodexCookieStore) gatewayPoolNoteFullWindow(identity, version string) {
+// 返回值是测到的时长，0 = 这张票没验过满血（没有窗口起点）。调用方拿它往账号账本里记一笔
+// 「这个 (账号 × 网关) 的满血持续了多久」—— 卡片上那一段只能用这个数，**不能**拿账本里的
+// 「判满血的时刻」和「判降智的时刻」相减：后者要等下一次真的打到这个网关才会写，中间的空闲
+// 全算进去，实测能得出 22655 秒（2026-10-03 现网）。这里两头都在同一张票的生命里，有界。
+func (s *openAICodexCookieStore) gatewayPoolNoteFullWindow(identity, version string) time.Duration {
 	if s == nil || identity == "" || version == "" {
-		return
+		return 0
 	}
 	mark, ok := s.gatewayPoolVerifiedMarkOf(identity)
 	if !ok || mark.version != version || mark.at.IsZero() {
-		return
+		return 0
 	}
-	s.poolFullWindow.observe(time.Since(mark.at))
+	held := time.Since(mark.at)
+	s.poolFullWindow.observe(held)
+	return held
 }
 
 // gatewayPoolPrewarmDue 报告「手里这张票该开始预热换下一张了吗」。
@@ -316,5 +322,6 @@ func (s *OpenAIGatewayService) notePrewarmVerdict(
 ) {
 	noteCtx, cancel := context.WithTimeout(ctx, gatewayPoolWarmNoteTimeout)
 	defer cancel()
-	s.noteOpenAIGatewayUse(noteCtx, account, applied.Gateway, applied.Region, verdict, advanceCurrent)
+	s.noteOpenAIGatewayUse(noteCtx, account, applied.Gateway, applied.Region, verdict, advanceCurrent,
+		applied.PoolLive, applied.PoolFree, applied.FullHeldMs)
 }

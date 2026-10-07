@@ -910,14 +910,37 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 		slog.Debug("gwpool_gateways_unavailable", "account_id", account.ID, "error", err)
 		return "", false
 	}
+	// /gateways 只列此刻有活 pair 的网关 ⇒ 列表长度就是池子的可交付网关数。账号卡片拿它当
+	// 「还剩几个落点没用」的分母（见 OpenAIGatewayPoolApplied.PoolLive）。
 	var fresh, oldest string
 	var freshAt, oldestAt time.Time
+	// free =「池子此刻可交付、而且**本地账本**说这个号还没烧过」的落点数，也就是
+	// 「池子剩余」。每次拉到清单都拿它和本地账本现对一遍，不缓存、不事后推算。
+	//
+	// 两条纪律：
+	//
+	//  1. **不能拿「可交付总数 − 账本里用过的个数」去减。** 那两个集合不是包含关系：账本是
+	//     过去一个窗口里碰过的网关名（票早过期的也在里面），清单是此刻还有活票的，相减能出
+	//     负数，夹到 0 就成了「池子用完了」（2026-10-03 现网：账本 67、可交付 62，报成 0）。
+	//  2. **只问本地账本，不看 candidate.UsedByYou。** 池子那本账记的是 LastTouch，而铸票和
+	//     扫描也写它（见池子 gateways.go 的注释）—— 一个在池子里也当铸票者的号，几乎每个它
+	//     铸过的网关都会被标成 used_by_you，于是这个数恒为 0。而「这个 (账号 × 网关) 的满血
+	//     窗口烧没烧」只有本地账本答得准：它记的是**这个号真的打过业务请求**的那些落点。
+	//     挑落点时仍然避开池子说烧过的（下面那个 continue），那是另一回事：报数要准，
+	//     挑落点要保守。
+	free := 0
 	window := account.gatewayPoolGatewayWindow()
 	for _, candidate := range gateways {
-		if !candidate.PairReady || candidate.UsedByYou {
+		if !candidate.PairReady {
 			continue
 		}
 		at, burned := s.gatewayPoolUsedAt(identity, candidate.Name, window)
+		if !burned {
+			free++
+		}
+		if candidate.UsedByYou {
+			continue
+		}
 		if !burned {
 			// 没碰过：挑池子说**最久没人用**的。零值（池子说没碰过）早于任何时刻，天然最优。
 			if fresh == "" || candidate.LastUsedAt.Before(freshAt) {
@@ -930,6 +953,9 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 			oldest, oldestAt = candidate.Name, at
 		}
 	}
+	// 两个数一起记：live 是「池子此刻能交付几个」，free 是「其中这个号还没烧过几个」。
+	// 成对下发，卡片才能把 free=0（全烧过了）和「没问到清单」分开。
+	openAIGatewayPoolSinkFrom(ctx).notePoolCounts(len(gateways), free)
 	if fresh != "" {
 		return fresh, false
 	}
@@ -1425,6 +1451,27 @@ type OpenAIGatewayPoolApplied struct {
 	// （queue 档的预热一张张试、故障转移换号重试），而丢弃行各自快照走自己那一份 Applied
 	// ⇒ 每条用量行读到的是它自己那一发的结论。
 	Verdict string
+	// PoolLive 是**池子此刻报的可交付网关数**（/gateways 只列有活 pair 的，所以列表长度
+	// 就是它）。0 = 这一发没问过池子要清单（关了 steering、或者列表打不开）。
+	//
+	// 它是整个池子的读数、不是这一发的，挂在这个快照上纯粹是搭车：这条已经是「池子对这一发
+	// 说了什么」通向用量侧的现成管道。由 snapshot() 从 sink 合进来，不走 mark() —— 取清单
+	// 发生在注入之前，让 mark 覆盖它就等于永远是 0。
+	PoolLive int
+	// PoolFree 是上面那些里**本地账本说这个号还没烧过**的个数 ——「池子剩余」。
+	//
+	// 必须由池子那一遍循环当场数出来，**不能用「PoolLive − 本地账本条目数」去减**：账本
+	// 装的是过去一个窗口里碰过的网关名（票早过期的也在），和「此刻还有活票的」不是包含
+	// 关系，相减会出负数，夹到 0 就成了「池子用完了」——而池子可能正有几十个落点可交付。
+	// 只在 PoolLive > 0 时有意义；那时 0 是**真的 0**（全烧过了），不是「没测到」。
+	PoolFree int
+	// FullHeldMs 是这一发判降智时量到的满血时长（毫秒）：从「这张票验出满血」那一刻到
+	// 「判成降智」那一刻。0 = 没量到（这张票没验过满血，没有窗口起点）。
+	//
+	// 两头都在**同一张票的生命里**，所以有界。卡片上那一段只能用这个数 —— 拿账本里的
+	// 「判满血的时刻」和「判降智的时刻」相减是错的：后者要等下一次真的打到这个网关才会写，
+	// 中间空闲全算进去，现网实测能得出 22655 秒。
+	FullHeldMs int64
 }
 
 // openAIGatewayPoolSink 是 ctx 里承载的那个指针。
@@ -1447,6 +1494,13 @@ type openAIGatewayPoolSink struct {
 	// *http.Request —— 而且双开账号的出站体是 zstd，裸解 JSON 必然失败
 	// （compressCodexRequestBody）。所以在还看得见明文的那一层记下来。
 	model string
+	// poolLive / poolFree 是池子最近一次清单的两个读数（见 OpenAIGatewayPoolApplied）。
+	// 存在 sink 上而不是 applied 上：取清单发生在注入之前，放进 applied 会被 mark() 覆盖。
+	poolLive int
+	poolFree int
+	// fullHeldMs 见 OpenAIGatewayPoolApplied.FullHeldMs。和上面两个一样存在 sink 上：
+	// 它在 mark() 之后才量到，写进 applied 会被同一发里后续的 mark 覆盖。
+	fullHeldMs int64
 }
 
 type openAIGatewayPoolSinkCtxKey struct{}
@@ -1573,13 +1627,42 @@ func (s *openAIGatewayPoolSink) noteVerdict(gateway, verdict string) {
 }
 
 // snapshot 读回这一发的标记（出站挂钩点之后、同一个 ctx 上的调用方用，见 gatewayPoolRenew）。
+// notePoolCounts 记下池子这一发清单的两个读数。live<=0 整对丢掉：列表打不开时该保留上一次
+// 问到的那一对，报 0 会让卡片说「池子一个落点都没有」。
+//
+// **成对写**：free 的含义依附于 live（「这 live 个里有 free 个没烧过」），拆开写会出现
+// 新 free 配旧 live 的组合，而那个组合从来没有同时成立过。
+func (s *openAIGatewayPoolSink) notePoolCounts(live, free int) {
+	if s == nil || live <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.poolLive, s.poolFree = live, free
+}
+
+// noteFullHeld 记下这一发量到的满血时长。0 不覆盖：一次请求里可能先后判死几个落点，
+// 而没量到的那些（票没验过满血）不该把量到的那个抹掉。
+func (s *openAIGatewayPoolSink) noteFullHeld(d time.Duration) {
+	if s == nil || d <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fullHeldMs = d.Milliseconds()
+}
+
 func (s *openAIGatewayPoolSink) snapshot() OpenAIGatewayPoolApplied {
 	if s == nil {
 		return OpenAIGatewayPoolApplied{}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.applied
+	// 在读的时候合进来，不在 mark 里写：取清单在注入之前，让 mark 覆盖它就恒为 0。
+	applied := s.applied
+	applied.PoolLive, applied.PoolFree = s.poolLive, s.poolFree
+	applied.FullHeldMs = s.fullHeldMs
+	return applied
 }
 
 // publish 把标记落到转发结果上（result 为 nil = 这一发失败了，没有用量行要写）。

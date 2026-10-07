@@ -16,12 +16,14 @@ vi.mock('vue-i18n', async (importOriginal) => ({
 const nowSec = Math.floor(Date.now() / 1000)
 const isoAgo = (sec: number) => new Date((nowSec - sec) * 1000).toISOString()
 
+// openai_gwpool 默认开：整块烧灼读数（颜色、九宫格、预测）只对走网关池的号成立，关着的号
+// 另有一条用例。放在 spread 前面，用例可以传 false 覆盖。
 const account = (gateways: unknown, extra: Record<string, unknown> = {}): Account =>
   ({
     id: 1,
     platform: 'openai',
     type: 'oauth',
-    extra: { openai_gwpool_gateways: gateways, ...extra }
+    extra: { openai_gwpool: true, openai_gwpool_gateways: gateways, ...extra }
   }) as unknown as Account
 
 const render = (acc: Account) => mount(AccountGatewayCell, { props: { account: acc } })
@@ -55,6 +57,9 @@ const tone = (w: ReturnType<typeof render>, region: string) => cell(w, region).a
 /** 预测那行里的分钟数。t() 是桩，渲染出来是 `key:{"minutes":N}`。 */
 const minutesOf = (w: ReturnType<typeof render>) => {
   const text = w.get('[data-testid="account-gateway-forecast"]').text()
+  // 0 分钟那一档换成了另一句话（forecastNone，不带插值）—— 没有 `{` 就是那一档。
+  // 措辞由专门那条用例钉，这里只把它折回 0，免得每个算单位数的断言都要分两种写法。
+  if (!text.includes('{')) return 0
   return JSON.parse(text.slice(text.indexOf('{'), text.indexOf('}') + 1)).minutes as number
 }
 
@@ -153,7 +158,10 @@ describe('AccountGatewayCell', () => {
       })
     )
     expect(gatewayOf(w, 'east-asia')).toBe('73+1')
-    expect(cell(w, 'east-asia').attributes('title') ?? '').toContain('unified-99')
+    // 被折进 +1 的那个必须在 tooltip 里单独占一行。名字和格子里一样去掉 `unified-` 前缀，
+    // 所以这里认的是行首那个 `-99-`：`toContain('99')` 会被 `unified-199` 之类蒙混过去。
+    expect((cell(w, 'east-asia').attributes('title') ?? '').split('\n')).toHaveLength(2)
+    expect(cell(w, 'east-asia').attributes('title') ?? '').toContain('-99-')
   })
 
   it('没有读数时给占位，不是整块消失', () => {
@@ -247,33 +255,213 @@ describe('AccountGatewayCell', () => {
     expect(cell(w, 'east-asia').attributes('title')).toContain('gatewayHistory.verdicts.none')
   })
 
-  // tooltip 固定五段：区域 · 网关名 · 满血时刻 · 状态 · 上次判定。
-  // 段位固定（没有就写「从未 / 没判过」）是刻意的 —— 运营方竖着扫一列格子看，段数会变的话
-  // 每一行都得重新找「满血时刻」在哪儿。
-  it('tooltip 恒为五段：区域·网关·满血时刻·状态·判定', () => {
+  // tooltip 固定五段：区域-网关名-满血时长-状态-判定，例 `美东-149-180s-冷却中-降智`。
+  //
+  // 段位固定（没有就写「未计时 / 没判过」）是刻意的 —— 运营方竖着扫一列格子看，段数会变
+  // 的话每一行都得重新找「满血时长」在哪儿。每段只放**值**、不带标签，同一个理由。
+  //
+  // 这里断言整串 toBe 而不是切开数段数：分隔符是 `-`，而 i18n 桩回的是带 `-` 的 key
+  // （`regions.east-asia`），切出来的段数没有意义。整串比对连「段里混进标签」也一起钉住。
+  it('tooltip 恒为五段：区域-网关-满血时长-状态-判定', () => {
+    const base = 'admin.accounts.openai.gatewayHistory'
     const w = render(
       account({
         current: 'unified-73',
         seen: {
-          'unified-73': { at: isoAgo(60), region: 'east-asia', verdict: 'full', full_at: isoAgo(60) },
+          // 后端量到的满血时长照原样显示，不在前端拿时刻相减。
+          'unified-73': {
+            at: isoAgo(60),
+            region: 'east-asia',
+            verdict: 'degraded',
+            full_at: isoAgo(240),
+            full_held_ms: 180_000
+          },
           'unified-95': { at: isoAgo(180), region: 'us-east' }
         },
         updated_at: isoAgo(60)
       })
     )
-    const judged = (cell(w, 'east-asia').attributes('title') ?? '').split(' · ')
-    expect(judged).toHaveLength(5)
-    expect(judged[0]).toContain('gatewayHistory.regions.east-asia')
-    expect(judged[1]).toBe('unified-73')
-    expect(judged[2]).toContain('gatewayHistory.fullAt')
-    expect(judged[3]).toContain('gatewayHistory.regionHot')
-    expect(judged[4]).toContain('gatewayHistory.verdicts.full')
+    expect(cell(w, 'east-asia').attributes('title')).toBe(
+      [
+        `${base}.regions.east-asia`,
+        '73', // `unified-` 前缀在这一列里是恒定的，省掉才塞得下
+        '180s', // 满血持续了多久，不是它发生在什么时候
+        // 4 小时窗口减掉「1 分钟前用过」再向上取整 ⇒ 239。钉死这个数同时钉住两件事：
+        // 报 240 是忘了减，报 238 是向下取整（那会让「还剩 0 分钟」读成「已经好了」）。
+        `${base}.regionHot:{"minutes":239}`,
+        `${base}.verdicts.degraded`
+      ].join('-')
+    )
 
-    // 从没判过满血的那一格段数一样，第三段写「从未」而不是整段消失。
-    const never = (cell(w, 'us-east').attributes('title') ?? '').split(' · ')
-    expect(never).toHaveLength(5)
-    expect(never[2]).toContain('gatewayHistory.fullNever')
-    expect(never[4]).toContain('gatewayHistory.verdicts.none')
+    // 从没验出过满血的那一格段数一样，第三段写「未计时」而不是整段消失。
+    expect(cell(w, 'us-east').attributes('title')).toBe(
+      [
+        `${base}.regions.us-east`,
+        '95',
+        `${base}.fullUntimed`,
+        `${base}.regionHot:{"minutes":237}`,
+        `${base}.verdicts.none`
+      ].join('-')
+    )
+  })
+
+  // 没开「Codex 路由 cookie 由网关池下发」的号：只显示落点本身，整块烧灼读数都不出现。
+  //
+  // 这条是用户 2026-10-03 当场指出来的误导：那种号的 state-echo 判据压根不跑 ⇒ verdict 恒为空
+  // ⇒ toneOf 的兜底把**每一个**最近用过的落点都染成红的（「现在打就是降智」），而它根本不选
+  // 落点、也没有冷却这回事。红色读起来像「这个号废了」。
+  it('没开网关池的号不套烧灼读数：不染色、没有九宫格/预测/图例', () => {
+    const w = render(
+      account(
+        {
+          current: 'unified-121',
+          current_region: 'east-asia',
+          seen: { 'unified-121': { at: isoAgo(60), region: 'east-asia' } },
+          updated_at: isoAgo(60)
+        },
+        { openai_gwpool: false }
+      )
+    )
+    // 落点本身仍然要显示 —— 它是真的，只是不该按烧灼去读。
+    const current = w.get('[data-testid="account-gateway-current"]')
+    expect(current.text()).toContain('unified-121')
+    // 判定字符和红色都不许出现。
+    expect(current.text()).not.toContain('!')
+    expect(current.text()).not.toContain('✓')
+    for (const id of ['regions', 'forecast', 'legend', 'window-usage']) {
+      expect(w.find(`[data-testid="account-gateway-${id}"]`).exists(), id).toBe(false)
+    }
+  })
+
+  // 窗口用量三个数**各报各的，不做减法**。
+  //
+  // 第一版写的是 `pool_live - used` 再夹到 0：账本装的是过去一个窗口碰过的网关名（票早
+  // 过期的也在），pool_live 是此刻还有活票的，两个集合不是包含关系。现网当场撞上 ——
+  // 账本 67、可交付 62 ⇒ 渲染成「池子里还剩 0 个没用」，而池子好好的有 62 个。
+  it('窗口用量三个数各报各的，不在前端做减法', () => {
+    const w = render(
+      account({
+        current: 'unified-1',
+        seen: {
+          'unified-1': { at: isoAgo(60), region: 'us-east' }, // 窗口内 ⇒ 已用
+          'unified-2': { at: isoAgo(120), region: 'us-west' }, // 窗口内 ⇒ 已用
+          'unified-3': { at: isoAgo(5 * 3600), region: 'europe' } // 4h 窗口外 ⇒ 不算已用
+        },
+        pool_live: 62,
+        pool_free: 5,
+        updated_at: isoAgo(60)
+      })
+    )
+    const text = w.get('[data-testid="account-gateway-window-usage"]').text()
+    expect(text).toContain('gatewayHistory.windowUsage:')
+    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 2, free: 5 })
+  })
+
+  // 已用多于可交付是**正常的**（账本跨一个窗口、清单是此刻的快照），不许因此把「没烧过」
+  // 算成 0 —— 那正是现网报错的那一幕。free 来自后端，照原样显示。
+  it('已用多于可交付时照样报后端给的「没烧过」个数', () => {
+    const seen = Object.fromEntries(
+      Array.from({ length: 67 }, (_, i) => [`unified-${i}`, { at: isoAgo(60), region: 'us-east' }])
+    )
+    const w = render(
+      account({ current: 'unified-0', seen, pool_live: 62, pool_free: 7, updated_at: isoAgo(60) })
+    )
+    const text = w.get('[data-testid="account-gateway-window-usage"]').text()
+    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 67, free: 7 })
+  })
+
+  // 问不到池子清单（没开 steering / 列表打不开 ⇒ pool_live 缺省）时只报已用那一半。
+  it('拿不到池子清单时只报已用，不编一个分母', () => {
+    const w = render(
+      account({
+        current: 'unified-1',
+        seen: { 'unified-1': { at: isoAgo(60), region: 'us-east' } },
+        updated_at: isoAgo(60)
+      })
+    )
+    const text = w.get('[data-testid="account-gateway-window-usage"]').text()
+    expect(text).toContain('gatewayHistory.windowUsageUsedOnly:')
+    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual({ hours: 4, used: 1 })
+  })
+
+  // 旧版本（klno.3 及更早）写下的记录有 pool_live、没有 pool_free。两个字段都在才算测到 ——
+  // 只看 live 的话缺席会被当成 0，渲染出「可交付 61 个，其中 0 个没烧过」，正是这次要修的
+  // 那句假话换了个来源。后端那边 pool_free 刻意不带 omitempty，真的 0 一定在 JSON 里。
+  it('旧记录只有 pool_live 没有 pool_free 时退回「只报已用」', () => {
+    const w = render(
+      account({
+        current: 'unified-1',
+        seen: { 'unified-1': { at: isoAgo(60), region: 'us-east' } },
+        pool_live: 61,
+        updated_at: isoAgo(60)
+      })
+    )
+    const text = w.get('[data-testid="account-gateway-window-usage"]').text()
+    expect(text).toContain('gatewayHistory.windowUsageUsedOnly:')
+    expect(text).not.toContain('gatewayHistory.windowUsage:')
+  })
+
+  // pool_live>0 时 free=0 是**真的 0**（可交付的全烧过了），要和「没问到清单」分开。
+  it('可交付的全烧过时报 0，不退回「只报已用」', () => {
+    const w = render(
+      account({
+        current: 'unified-1',
+        seen: { 'unified-1': { at: isoAgo(60), region: 'us-east' } },
+        pool_live: 62,
+        pool_free: 0,
+        updated_at: isoAgo(60)
+      })
+    )
+    const text = w.get('[data-testid="account-gateway-window-usage"]').text()
+    expect(text).toContain('gatewayHistory.windowUsage:')
+    expect(JSON.parse(text.slice(text.indexOf('{'))).free).toBe(0)
+  })
+
+  // 0 的时候不能渲染成「至少 0 分钟满血」：那读起来像对这个号的判决，而它说的是
+  // 「账本里每个落点的冷却都要一小时之后才结束」——一个关于时间的事实。
+  it('一小时内没有落点出冷却时换一句话，不写「至少 0 分钟」', () => {
+    const w = render(
+      account({
+        current: 'unified-1',
+        // 刚碰过 ⇒ 冷却还剩约 4 小时 ⇒ 一小时内出不了冷却 ⇒ 预测为 0。
+        seen: { 'unified-1': { at: isoAgo(30), region: 'us-east' } },
+        updated_at: isoAgo(30)
+      })
+    )
+    const text = w.get('[data-testid="account-gateway-forecast"]').text()
+    expect(text).toContain('gatewayHistory.forecastNone')
+    expect(text).not.toContain('gatewayHistory.forecast:')
+  })
+
+  // 没有 full_held_ms 就写「未计时」，**绝不拿 at − full_at 顶上**。
+  //
+  // 第一版就是那个减法：full_at 是粘滞的，而 degraded 判定要等下一次真的打到这个网关才会
+  // 写，中间空几个小时就白算几个小时 —— 现网渲染出了 22655s / 21738s（满血窗口才 183 秒）。
+  // 这条用例铺的正是那个形状：满血判定在 6 小时前、降智判定在 30 秒前，减出来是 21570s，
+  // 而正确答案是「未计时」。
+  it('没有后端量到的时长就写「未计时」，不拿两个时刻相减', () => {
+    const base = 'admin.accounts.openai.gatewayHistory'
+    const w = render(
+      account({
+        current: 'unified-73',
+        seen: {
+          // 仍判满血 = 窗口正在跑，没有收尾读数。
+          'unified-73': { at: isoAgo(10), region: 'east-asia', verdict: 'full', full_at: isoAgo(70) },
+          // 判了降智、也有满血时刻，但两者隔了 6 小时 —— 相减是 21570s，必须是「未计时」。
+          'unified-95': {
+            at: isoAgo(30),
+            region: 'us-east',
+            verdict: 'degraded',
+            full_at: isoAgo(6 * 3600)
+          }
+        },
+        updated_at: isoAgo(10)
+      })
+    )
+    expect(cell(w, 'east-asia').attributes('title')).toContain(`-${base}.fullUntimed-`)
+    const stale = cell(w, 'us-east').attributes('title') ?? ''
+    expect(stale).toContain(`-${base}.fullUntimed-`)
+    expect(stale).not.toMatch(/-\d{4,}s-/)
   })
 
   // 满血分钟预测：单位是 (账号 × 网关)，**一个网关名就是一个单位**，而且算**下界**。

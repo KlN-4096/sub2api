@@ -97,6 +97,24 @@ type openAIGatewayHistory struct {
 	// 账本（判「这个网关还能不能用」走 gatewayPoolUsedRecently），丢了只是卡片空一会儿，
 	// 所以不写迁移代码。
 	Seen map[string]openAIGatewaySeen `json:"seen"`
+	// PoolLive / PoolFree 是最近一次问到的池子清单读数：此刻能交付几个网关，其中这个号
+	// 还没烧过几个。两个数由 gatewayPoolPick 当场数出来（见 OpenAIGatewayPoolApplied）。
+	//
+	// **PoolFree 不是算出来的**：拿「PoolLive − Seen 里窗口内的条目数」去减是错的，账本
+	// 装的是过去一个窗口里碰过的网关名、清单是此刻还有活票的，两者不是包含关系，相减会出
+	// 负数，夹到 0 就成了「池子用完了」（2026-10-03 现网：账本 67、可交付 62，卡片报成 0）。
+	//
+	// PoolLive=0 = 还没问到过：关了 steering 的号不取清单（gatewayPoolPick 直接返回），
+	// 列表打不开时也不覆盖旧值。卡片在那时只报已用，不编分母。PoolLive>0 时 PoolFree=0
+	// 是**真的 0**（可交付的全烧过了）。
+	//
+	// 存在账号行上是搭车：池子全局的读数每一行各存一份。新鲜度跟着这一行自己的流量走，
+	// 而那正是要看它的时候。
+	PoolLive int `json:"pool_live,omitempty"`
+	// PoolFree **不能带 omitempty**：带了的话真实的 0（可交付的全烧过了）会被整条省掉，
+	// 和「这条记录是旧版本写的、压根没这个字段」在消费端长得一模一样 —— 而那正是这个字段
+	// 存在的意义。消费端按「两个字段都在」判「这一对测到了」。
+	PoolFree int `json:"pool_free"`
 	// UpdatedAt 是写下这条记录的时刻，只用于展示「这份读数有多新」。
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -119,6 +137,13 @@ type openAIGatewaySeen struct {
 	// omitzero 而不是 omitempty：omitempty 对 struct 不生效，零值会落库成
 	// "0001-01-01T00:00:00Z"（同 openai_turn_state_recovery.go 的两个时间字段）。
 	FullAt time.Time `json:"full_at,omitzero"`
+	// FullHeldMs 是这个 (账号 × 网关) 上量到的**满血持续了多久**（毫秒），由判降智那一刻
+	// 从「这张票验出满血」算到「判成降智」—— 两头都在同一张票的生命里，有界。
+	// 0 = 没量到（没验过满血、或者这一格的降智不是从本进程这条路判出来的）。
+	//
+	// **不能用 At − FullAt 代替**：FullAt 是粘滞的，而降智判定要等下一次真的打到这个网关
+	// 才会写，中间的空闲全算进去。2026-10-03 现网照这个减法渲染出 22655 秒。
+	FullHeldMs int64 `json:"full_held_ms,omitempty"`
 }
 
 // readOpenAIGatewayHistory 读这条记录。解析失败按「没有」处理。
@@ -154,8 +179,12 @@ func readOpenAIGatewayHistory(a *Account) (openAIGatewayHistory, bool) {
 // advanceCurrent=false 只更新 Seen，不动 `Current`/`CurrentRegion`：queue 档的预热在业务请求
 // **之前**判死一批落点，那些落点上永远不会有业务请求，推进「当前网关」会把卡片第一行写成最后
 // 一个被判死的落点（见 openai_gwpool_warm.go 的 noteWarmVerdict）。
+// poolLive/poolFree 是池子这一发清单的两个读数，poolLive=0 = 没问到（关了 steering /
+// 列表打不开）⇒ 整对留旧值。它蹭的是这条已有的写路径：另起一条写 extra 的路就是两个写者
+// 抢同一个键。
 func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 	ctx context.Context, account *Account, gateway, region, verdict string, advanceCurrent bool,
+	poolLive, poolFree int, fullHeldMs int64,
 ) {
 	if s == nil || s.accountRepo == nil || account == nil {
 		return
@@ -196,7 +225,13 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 		rec.Current = gateway
 		rec.CurrentRegion = region
 	}
-	next := openAIGatewaySeen{At: now, Region: region, Verdict: prev.Verdict, FullAt: prev.FullAt}
+	next := openAIGatewaySeen{At: now, Region: region, Verdict: prev.Verdict, FullAt: prev.FullAt,
+		FullHeldMs: prev.FullHeldMs}
+	// 这一发量到了就刷新，没量到留着上一次的：满血时长是「上一个窗口有多长」，没新读数时
+	// 旧读数仍然是关于这一格最新的事实。
+	if fullHeldMs > 0 {
+		next.FullHeldMs = fullHeldMs
+	}
 	// 这一发没判据时**留着上一次的判定**，和大区同一个道理：没判 ≠ 判不出来。
 	if verdict != "" {
 		next.Verdict = verdict
@@ -205,6 +240,13 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 		}
 	}
 	rec.Seen[gateway] = next
+	// 成对写、0 不覆盖：没问到清单的那些发（关了 steering、列表超时）该留着上一次问到的
+	// 那一对，写 0 会让卡片说「池子一个落点都没有」。拆开写会出现新 free 配旧 live 的组合，
+	// 而那个组合从来没有同时成立过。跟着这条写路径走、不单独穿过节流 —— 它只是展示用的
+	// 读数，下一次正常写就会刷新。
+	if poolLive > 0 {
+		rec.PoolLive, rec.PoolFree = poolLive, poolFree
+	}
 	rec.UpdatedAt = now
 	pruneOpenAIGatewayHistory(&rec)
 
