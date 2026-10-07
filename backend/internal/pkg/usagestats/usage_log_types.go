@@ -267,6 +267,19 @@ type PlatformDashboardStats struct {
 	TodayActualCost float64 `json:"today_actual_cost"`
 }
 
+// TurnState 筛选取值。判据用字符长度而不是解密：individual 292 字符 ↔ 密文 10 块、team 332 ↔ 12 块
+// 一一对应（与 service 的 openAITurnStateShapes 同源），SQL 里 char_length 能走，解 base64 不能。
+const (
+	TurnStateFilterMinted    = "minted"     // 上游本次铸出了新 blob
+	TurnStateFilterHealthy   = "healthy"    // 铸出的是正常形态（292 / 332）
+	TurnStateFilterSuspect   = "suspect"    // 铸出的不是正常形态 —— 疑似降智
+	TurnStateFilterSent      = "sent"       // 本次出站带了 turn-state
+	TurnStateFilterInjected  = "injected"   // 本次注入了覆写值（手填或自动接管）
+	TurnStateFilterAuto      = "auto"       // 自动接管注入
+	TurnStateFilterAutoStale = "auto_stale" // 自动接管注入，且候选已过保鲜期
+	TurnStateFilterManual    = "manual"     // 手填覆写注入
+)
+
 // UsageLogFilters represents filters for usage log queries
 type UsageLogFilters struct {
 	UserID    int64
@@ -283,8 +296,10 @@ type UsageLogFilters struct {
 	BillingType           *int8
 	BillingMode           string
 	UpstreamModelMismatch *bool
-	StartTime             *time.Time
-	EndTime               *time.Time
+	// TurnState 按 Codex 回合状态筛选，取值见 TurnStateFilter* 常量；空串不筛。
+	TurnState string
+	StartTime *time.Time
+	EndTime   *time.Time
 	// ExactTotal requests exact COUNT(*) for pagination. Default false for fast large-table paging.
 	ExactTotal bool
 }
