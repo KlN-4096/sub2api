@@ -410,6 +410,8 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		}
 		sessionID := service.ExtractClientSessionID(c)
 		channelUsageFields := clientRequestedUsageFields(c, channelMapping, requestModel, upstreamModel)
+		turnStateSource := service.OpenAITurnStateUsageSource(c)
+		turnStateSent := service.OpenAITurnStateUsageSent(c)
 		h.submitMandatoryUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 				Result:             result,
@@ -425,6 +427,8 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 				APIKeyService:      h.apiKeyService,
 				QuotaPlatform:      quotaPlatform,
 				SessionID:          sessionID,
+				TurnStateSource:    turnStateSource,
+				TurnStateSent:      turnStateSent,
 				ChannelUsageFields: channelUsageFields,
 			}); err != nil {
 				logger.L().With(
