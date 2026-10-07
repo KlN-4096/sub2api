@@ -21,18 +21,39 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
 
 func f64p(v float64) *float64 { return &v }
 
+// codexTestDecodeUpstreamBody：上游替身收到 Content-Encoding: zstd 的体时解压成明文，既有断言看明文。
+// 解压失败原样返回，让断言自己红。
+func codexTestDecodeUpstreamBody(h http.Header, raw []byte) []byte {
+	if h == nil || !strings.EqualFold(h.Get("Content-Encoding"), "zstd") {
+		return raw
+	}
+	dec, err := zstd.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		return raw
+	}
+	defer dec.Close()
+	plain, err := io.ReadAll(dec)
+	if err != nil {
+		return raw
+	}
+	return plain
+}
+
 type httpUpstreamRecorder struct {
 	lastReq      *http.Request
-	lastBody     []byte
+	lastBody     []byte // 明文 JSON：Content-Encoding: zstd 的体已解压（codexTestDecodeUpstreamBody）
+	lastRawBody  []byte // 线上字节（压缩体原样）
 	lastProxyURL string
 	requests     []*http.Request
 	bodies       [][]byte
+	rawBodies    [][]byte
 
 	resp      *http.Response
 	responses []*http.Response
@@ -68,11 +89,14 @@ func (u *httpUpstreamRecorder) Do(req *http.Request, proxyURL string, accountID 
 	u.lastReq = req
 	u.lastProxyURL = proxyURL
 	if req != nil && req.Body != nil {
-		b, _ := io.ReadAll(req.Body)
+		raw, _ := io.ReadAll(req.Body)
+		b := codexTestDecodeUpstreamBody(req.Header, raw)
+		u.lastRawBody = raw
 		u.lastBody = b
+		u.rawBodies = append(u.rawBodies, append([]byte(nil), raw...))
 		u.bodies = append(u.bodies, append([]byte(nil), b...))
 		_ = req.Body.Close()
-		req.Body = io.NopCloser(bytes.NewReader(b))
+		req.Body = io.NopCloser(bytes.NewReader(raw))
 	}
 	u.requests = append(u.requests, req)
 	if u.err != nil {
@@ -2284,10 +2308,18 @@ func TestOpenAIGatewayService_CodexFingerprintCompactDoesNotRewriteBodyCacheKeyO
 	seed, ok := codexFingerprintSeed(account.Extra)
 	require.True(t, ok)
 	require.NotEqual(t, resolveConvergedSessionID(seed), gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
-	require.Equal(t, "body-session", gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
+	// 线协议投影未开（本例是 session 模式、未开实验收敛）：compact 的 prompt_cache_key
+	// 维持既有出站形态被删除——handler 以前就是这么做的，现在改由 service 按账号收口。
+	require.False(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").Exists())
 	require.Equal(t, "body-session", gjson.GetBytes(upstream.lastBody, "client_metadata.session_id").String())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "client_metadata.x-codex-installation-id").Exists())
-	require.Empty(t, upstream.lastReq.Header.Get("x-codex-window-id"))
+	// 头侧与体侧相反：真实 compact 照发 x-codex-window-id（codex-rs
+	// core/src/client.rs:653 的 build_responses_compatibility_headers →
+	// responses_metadata.rs:348），所以头必须收敛。要保证的是它来自本轮解析的
+	// IDs，而不是上一轮暂存的 staleIDs 被顺手复用。
+	windowID := upstream.lastReq.Header.Get("x-codex-window-id")
+	require.NotEmpty(t, windowID)
+	require.NotEqual(t, staleIDs.windowID, windowID)
 }
 
 func TestOpenAIGatewayService_CodexFingerprintMessagesBridgeDoesNotInjectBodyPromptCacheKey(t *testing.T) {
