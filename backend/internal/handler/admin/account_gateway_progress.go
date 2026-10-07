@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -44,4 +45,28 @@ func (h *AccountHandler) GatewayPoolProgress(c *gin.Context) {
 		progress = reader.GatewayPoolProgress(ids)
 	}
 	response.Success(c, progress)
+}
+
+func (h *AccountHandler) RetryGatewayPool(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.Error(c, http.StatusBadRequest, "invalid account ID")
+		return
+	}
+	writer, ok := h.adminService.(interface {
+		RetryGatewayPool(context.Context, int64) (service.GatewayPoolRetryResult, error)
+	})
+	if !ok {
+		response.Error(c, http.StatusServiceUnavailable, "gateway retry unavailable")
+		return
+	}
+	const actionTimeout = 10 * time.Second
+	ctx, cancel := context.WithTimeout(c.Request.Context(), actionTimeout)
+	defer cancel()
+	result, err := writer.RetryGatewayPool(ctx, id)
+	if err != nil {
+		response.Error(c, http.StatusServiceUnavailable, "gateway cooldown clear or retry failed")
+		return
+	}
+	response.Success(c, result)
 }

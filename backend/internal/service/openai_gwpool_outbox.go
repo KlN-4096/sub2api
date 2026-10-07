@@ -70,10 +70,12 @@ type gatewayPoolOutbox struct {
 }
 
 type gatewayPoolReporter struct {
-	cancel context.CancelFunc
-	wake   chan struct{}
-	done   chan struct{}
-	once   sync.Once
+	cancel   context.CancelFunc
+	wake     chan struct{}
+	done     chan struct{}
+	restWake chan struct{}
+	restDone chan struct{}
+	once     sync.Once
 }
 
 func gatewayPoolReportBinding(account *Account, tag string) string {
@@ -209,8 +211,10 @@ func (s *OpenAIGatewayService) StartGatewayPoolReporter() {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	worker := &gatewayPoolReporter{cancel: cancel, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	worker := &gatewayPoolReporter{cancel: cancel, wake: make(chan struct{}, 1), done: make(chan struct{}),
+		restWake: make(chan struct{}, 1), restDone: make(chan struct{})}
 	s.gatewayReporter = worker
+	go s.runGatewayPoolRestTimer(ctx, worker)
 	go func() {
 		defer close(worker.done)
 		ticker := time.NewTicker(gatewayPoolOutboxPoll)
@@ -239,6 +243,7 @@ func (s *OpenAIGatewayService) StopGatewayPoolReporter() {
 	}
 	worker.once.Do(worker.cancel)
 	<-worker.done
+	<-worker.restDone
 }
 
 func (s *OpenAIGatewayService) flushGatewayPoolReports(ctx context.Context) {
@@ -257,6 +262,7 @@ func (s *OpenAIGatewayService) flushGatewayPoolReports(ctx context.Context) {
 			return
 		}
 		account := &accounts[i]
+		s.maintainGatewayPoolUsage(ctx, account, time.Now().UTC())
 		if account.Extra[openAIGatewayPoolOutboxExtraKey] == nil {
 			continue
 		}

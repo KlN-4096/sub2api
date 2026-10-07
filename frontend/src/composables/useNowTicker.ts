@@ -1,4 +1,4 @@
-import { onUnmounted, ref } from 'vue'
+import { onUnmounted, ref, type Ref } from 'vue'
 
 /**
  * 会走的「现在」。倒计时必须真的走，否则页面一挂就是一张冻结的快照：过期的票不消失、
@@ -19,9 +19,36 @@ import { onUnmounted, ref } from 'vue'
  */
 export const NOW_TICKER_INTERVAL_MS = 30_000
 
-export function useNowTicker() {
+export function useNowTicker(intervalMs = NOW_TICKER_INTERVAL_MS) {
   const now = ref(Date.now())
-  const timer = setInterval(() => (now.value = Date.now()), NOW_TICKER_INTERVAL_MS)
+  const timer = setInterval(() => (now.value = Date.now()), intervalMs)
   onUnmounted(() => clearInterval(timer))
   return now
+}
+
+interface SharedTicker {
+  now: Ref<number>
+  users: number
+  timer: ReturnType<typeof setInterval>
+}
+const sharedTickers = new Map<number, SharedTicker>()
+
+// Opt-in for the gateway cells. Start lazily and dispose on the last unmount:
+// no module-load timer or time value can leak across pages / fake-timer tests.
+export function useSharedNowTicker(intervalMs = NOW_TICKER_INTERVAL_MS) {
+  let ticker = sharedTickers.get(intervalMs)
+  if (!ticker) {
+    const now = ref(Date.now())
+    ticker = { now, users: 0, timer: setInterval(() => { now.value = Date.now() }, intervalMs) }
+    sharedTickers.set(intervalMs, ticker)
+  }
+  ticker.users++
+  const current = ticker
+  onUnmounted(() => {
+    if (--current.users === 0) {
+      clearInterval(current.timer)
+      sharedTickers.delete(intervalMs)
+    }
+  })
+  return current.now
 }

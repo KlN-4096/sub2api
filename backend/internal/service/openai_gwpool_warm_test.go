@@ -232,6 +232,7 @@ func TestWarmUpFailsClosedWhenNoTicketVerifiesFull(t *testing.T) {
 	shooter := &gwpoolWarmShooter{}
 	// 每一发 B 都回一张不同的新票 ⇒ 恒判降智。
 	for i := 0; i < gatewayPoolWarmMaxTickets; i++ {
+		fake.listGateways = append(fake.listGateways, gwpoolFakeGateway{Name: fmt.Sprintf("unified-%d", 141+i), PairReady: true})
 		shooter.replies = append(shooter.replies,
 			gwpoolWarmReply{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
 			gwpoolWarmReply{status: http.StatusOK, minted: "fake-reminted-ticket"})
@@ -256,10 +257,9 @@ func TestWarmUpBlocksInconclusiveShotsWithoutCallingThemDegraded(t *testing.T) {
 		replies []gwpoolWarmReply
 		sent    bool // 这张票有没有确证送达上游（拿到过状态码）
 	}{
-		"A 被限流":      {[]gwpoolWarmReply{{status: http.StatusTooManyRequests}}, true},
-		"A 没回 state": {[]gwpoolWarmReply{{status: http.StatusOK}}, true},
-		"B 被拒":       {[]gwpoolWarmReply{{status: http.StatusOK, minted: gwpoolEchoFreshTicket}, {status: http.StatusForbidden}}, true},
-		"传输失败":       {[]gwpoolWarmReply{{err: errors.New("dial tcp: i/o timeout")}}, false},
+		"A 被限流": {[]gwpoolWarmReply{{status: http.StatusTooManyRequests}}, true},
+		"B 被拒":  {[]gwpoolWarmReply{{status: http.StatusOK, minted: gwpoolEchoFreshTicket}, {status: http.StatusForbidden}}, true},
+		"传输失败":  {[]gwpoolWarmReply{{err: errors.New("dial tcp: i/o timeout")}}, false},
 	} {
 		replies, sent := tc.replies, tc.sent
 		t.Run(name, func(t *testing.T) {
@@ -267,7 +267,9 @@ func TestWarmUpBlocksInconclusiveShotsWithoutCallingThemDegraded(t *testing.T) {
 			svc := &OpenAIGatewayService{}
 			shooter := &gwpoolWarmShooter{replies: replies}
 
-			err := gwpoolWarmRun(t, svc, gwpoolWarmAccount(fake), shooter)
+			account := gwpoolWarmAccount(fake)
+			account.Extra[openAIGatewayPoolRecoveryExtraKey] = 0
+			err := gwpoolWarmRun(t, svc, account, shooter)
 			require.Error(t, err, "严格模式下无法判断必须停止业务出站")
 			require.NotErrorIs(t, err, errOpenAIGatewayPoolRouteDegraded, "无法判断不能冒充明确降级")
 			require.LessOrEqual(t, len(shooter.shots), 2, "本轮就停，不许换票再试")
@@ -317,9 +319,7 @@ func TestWarmUpFailsClosedWhenTheBudgetDiesMidAttempt(t *testing.T) {
 
 	err = svc.gatewayPoolWarmUpWith(req.WithContext(budget), acct,
 		gwpoolTestIdentity, gwpoolWarmModel, shoot)
-	require.ErrorIs(t, err, errOpenAIGatewayPoolWarmExhausted,
-		"预算死了就按失败处理，不许当成「上游没下结论」放行")
-	require.ErrorIs(t, err, gwpool.ErrPool, "必须包着 ErrPool，否则这条会被当成账号故障停调度")
+	require.ErrorIs(t, err, context.Canceled, "a cancelled business waiter exits without releasing unverified business")
 	require.False(t, svc.codexCookies.gatewayPoolVerifiedFull(gwpoolTestIdentity),
 		"一发判据都没跑完，不许标成验过")
 	require.Equal(t, int64(1), fake.hits.Load(), "过线之后不许再取票")
@@ -631,41 +631,40 @@ func TestWarmUpIgnoresNonInferenceRequests(t *testing.T) {
 	require.Zero(t, fake.hits.Load())
 }
 
-// 预热预算**按账号各发一份**，故障转移换号时不累计（2026-10-02 用户拍板）。
-//
-// 理由是供给不是时间：每个账号碰过的票不一样，A 号烧光自己的额度不代表 B 号没有满血落点
-// 可试，共享一份会让排在后面的号拿不到公平的机会。同一个 sink（= 同一条客户端请求）上调
-// 两次必须都拿满额。
-func TestWarmUpBudgetIsPerAccountNotPerClientRequest(t *testing.T) {
-	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
-	ctx, _ := withOpenAIGatewayPoolSink(context.Background(), ginCtx)
-
-	for round := 1; round <= 3; round++ {
-		budget, ok := gatewayPoolWarmBudgetFor(ctx)
-		require.Truef(t, ok, "第 %d 个账号也该有预算", round)
-		require.Equalf(t, gatewayPoolWarmBudget, budget, "第 %d 个账号领的必须是满额", round)
-	}
+func TestWarmUpBudgetsAreIndependentBetweenBusinessRequests(t *testing.T) {
+	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	account := fake.account(1)
+	svc := &OpenAIGatewayService{}
+	first := svc.gatewayPoolWaitContext(context.Background(), account)
+	second := svc.gatewayPoolWaitContext(context.Background(), account)
+	state := gatewayPoolWaitFrom(first)
+	state.mu.Lock()
+	state.deadline = time.Now().Add(-time.Second)
+	state.mu.Unlock()
+	require.ErrorIs(t, gatewayPoolPreparationDeadlineError(first), errOpenAIGatewayPoolWarmExhausted)
+	require.NoError(t, gatewayPoolPreparationDeadlineError(second))
 }
 
-// 没有截止时间（首输出守卫没开，缺省就是没开）给满额；额度不够验一张票时报 false，
-// 调用方据此**放行**而不是失败 —— 把守卫那点额度吃光会让业务请求带着过期 ctx 出门。
-func TestWarmUpBudgetYieldsToTheFirstOutputGuard(t *testing.T) {
-	budget, ok := gatewayPoolWarmBudgetFor(context.Background())
-	require.True(t, ok)
-	require.Equal(t, gatewayPoolWarmBudget, budget)
-
-	// 守卫还剩 40 秒 ⇒ 预热最多拿一半。
-	half, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+func TestWarmUpShorterCallerDeadlineDoesNotStartBusiness(t *testing.T) {
+	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	svc := &OpenAIGatewayService{}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
-	budget, ok = gatewayPoolWarmBudgetFor(half)
-	require.True(t, ok)
-	require.InDelta(t, 20.0, budget.Seconds(), 1)
-
-	// 只剩 10 秒 ⇒ 一半是 5 秒，连一张票都验不完 ⇒ 不预热。
-	tight, cancelTight := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancelTight()
-	_, ok = gatewayPoolWarmBudgetFor(tight)
-	require.False(t, ok)
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
+	stopped := make(chan struct{})
+	err := svc.gatewayPoolWarmUpWith(request, fake.account(1), gwpoolTestIdentity, gwpoolWarmModel,
+		func(ctx context.Context, _, _ string) (int, string, error) {
+			<-ctx.Done()
+			close(stopped)
+			return 0, "", ctx.Err()
+		})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("the last waiter did not cancel its probe")
+	}
+	require.False(t, svc.codexCookies.gatewayPoolVerifiedFull(gwpoolTestIdentity))
 }
 
 // 试票上限是账号旋钮：缺省 5，越界回缺省，封顶 8。
@@ -687,10 +686,12 @@ func TestWarmTicketsIsAnAccountKnobWithACeiling(t *testing.T) {
 	}
 }
 
-// 旋钮真的管着循环次数，不是只读出来不用。
-func TestWarmUpStopsAtTheConfiguredTicketCount(t *testing.T) {
+// Legacy saved limits cannot truncate the shared candidate queue.
+func TestWarmUpIgnoresTheLegacyTicketCount(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-	fake.forceCookie = gwpoolTestPairCookie(t, "unified-84")
+	fake.cookieForHit = func(hit int64) string {
+		return gwpoolTestPairCookie(t, fmt.Sprintf("unified-%d", 140+hit))
+	}
 	svc := &OpenAIGatewayService{}
 	acct := gwpoolWarmAccount(fake)
 	acct.Extra[openAIGatewayPoolWarmTicketsExtraKey] = 2
@@ -703,6 +704,6 @@ func TestWarmUpStopsAtTheConfiguredTicketCount(t *testing.T) {
 	}
 	shooter := &gwpoolWarmShooter{replies: replies}
 
-	require.ErrorIs(t, gwpoolWarmRun(t, svc, acct, shooter), errOpenAIGatewayPoolWarmExhausted)
-	require.Len(t, shooter.shots, 4, "配 2 张就只许打 2×2 发，不许按默认的 5 张跑")
+	require.NoError(t, gwpoolWarmRun(t, svc, acct, shooter))
+	require.Len(t, shooter.shots, 10, "continue after four rejected candidates to the fifth full one")
 }

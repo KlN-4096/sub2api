@@ -55,7 +55,11 @@ type codexWireUpstream struct {
 	mu       sync.Mutex
 	captures []codexWireCapture
 	// status 按账号强制返回的状态码，用于换号测试。
-	status map[int64]int
+	status     map[int64]int
+	sequence   []int // optional POST-only statuses; zero uses the normal success fixture
+	errorBody  string
+	streamBody string
+	afterPost  func()
 }
 
 func (u *codexWireUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
@@ -82,21 +86,41 @@ func (u *codexWireUpstream) Do(req *http.Request, _ string, accountID int64, _ i
 		body:      body,
 	})
 	forced := u.status[accountID]
+	if req.Method == http.MethodPost && len(u.sequence) > 0 {
+		forced = u.sequence[0]
+		u.sequence = u.sequence[1:]
+	}
+	errorBody := u.errorBody
+	afterPost := u.afterPost
+	if req.Method == http.MethodPost {
+		u.afterPost = nil
+	} else {
+		afterPost = nil
+	}
 	u.mu.Unlock()
+	if afterPost != nil {
+		afterPost()
+	}
 
 	if forced > 0 {
+		if errorBody == "" {
+			errorBody = `{"error":{"message":"upstream unavailable"}}`
+		}
 		return &http.Response{
 			StatusCode: forced,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"upstream unavailable"}}`)),
+			Body:       io.NopCloser(strings.NewReader(errorBody)),
 		}, nil
 	}
 	if bytes.Contains(body, []byte(`"stream":true`)) {
+		streamBody := u.streamBody
+		if streamBody == "" {
+			streamBody = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"model\":\"gpt-5.4\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-			Body: io.NopCloser(strings.NewReader(
-				"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"model\":\"gpt-5.4\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")),
+			Body:       io.NopCloser(strings.NewReader(streamBody)),
 		}, nil
 	}
 	return &http.Response{
@@ -148,11 +172,14 @@ func codexWireAccount(id int64, name string, extra map[string]any) service.Accou
 	}
 }
 
-func newCodexWireEntry(t *testing.T, accounts []service.Account) (*codexWireUpstream, *gin.Engine, func()) {
+func newCodexWireEntry(t *testing.T, accounts []service.Account, repos ...service.AccountRepository) (*codexWireUpstream, *gin.Engine, func()) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	groupID := int64(9001)
-	repo := &grokCredentialHandlerRepo{accounts: accounts, missingOnGet: map[int64]bool{}}
+	var repo service.AccountRepository = &grokCredentialHandlerRepo{accounts: accounts, missingOnGet: map[int64]bool{}}
+	if len(repos) > 0 {
+		repo = repos[0]
+	}
 	upstream := &codexWireUpstream{status: map[int64]int{}}
 
 	cfg := &config.Config{RunMode: config.RunModeSimple}
@@ -184,6 +211,8 @@ func newCodexWireEntry(t *testing.T, accounts []service.Account) (*codexWireUpst
 		c.Next()
 	})
 	router.POST("/v1/responses", h.Responses)
+	router.POST("/responses", h.Responses)
+	router.POST("/v1/chat/completions", h.ChatCompletions)
 	router.POST("/v1/messages", h.Messages)
 	router.POST("/v1/responses/*subpath", h.Responses)
 	return upstream, router, func() { billingCache.Stop() }

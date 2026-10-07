@@ -19,7 +19,7 @@ func TestGatewayPoolLateVerificationCannotReplaceCurrentProof(t *testing.T) {
 	require.Equal(t, "new", mark.version)
 }
 
-func TestGatewayPoolVerifiedModelsDoNotCrossAndKeepFirstTime(t *testing.T) {
+func TestGatewayPoolVerifiedTicketIsSharedAcrossModelsAndKeepsFirstTime(t *testing.T) {
 	store := &openAICodexCookieStore{}
 	store.poolPairs.Store("identity", openAIGatewayPoolPair{
 		cookie: "cookie", version: "v", until: time.Now().Add(time.Minute),
@@ -27,7 +27,8 @@ func TestGatewayPoolVerifiedModelsDoNotCrossAndKeepFirstTime(t *testing.T) {
 	store.gatewayPoolMarkVerifiedFull("identity", "v", "gpt-6-luna")
 	before, _ := store.gatewayPoolVerifiedMarkOf("identity")
 	require.True(t, store.gatewayPoolVerifiedFullFor("identity", "gpt-6-luna"))
-	require.False(t, store.gatewayPoolVerifiedFullFor("identity", "gpt-6-astra"))
+	require.True(t, store.gatewayPoolVerifiedFullFor("identity", "gpt-6-astra"))
+	require.NotContains(t, *before.models, "gpt-6-astra", "shared eligibility does not invent an actual probe")
 	store.gatewayPoolMarkVerifiedFull("identity", "v", "gpt-6-astra")
 	after, _ := store.gatewayPoolVerifiedMarkOf("identity")
 	require.True(t, store.gatewayPoolVerifiedFullFor("identity", "gpt-6-astra"))

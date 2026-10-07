@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGatewayPoolUsageCountsModelTicketOnceAndStartsAtActualSend(t *testing.T) {
+func TestGatewayPoolUsageCountsTicketOnceAcrossModels(t *testing.T) {
 	state := gatewayPoolUsageLedger{Tag: "ledger"}
 	at := time.Now().UTC()
 	require.False(t, state.note("luna", "v", time.Time{}, false))
@@ -23,18 +23,34 @@ func TestGatewayPoolUsageCountsModelTicketOnceAndStartsAtActualSend(t *testing.T
 	require.False(t, state.note("luna", "v", at.Add(time.Second), false))
 	require.True(t, state.note("luna", "v", at.Add(time.Second), true))
 	require.False(t, state.note("luna", "v", at.Add(2*time.Second), true))
-	require.True(t, state.note("astra", "v", at.Add(time.Second), false))
-	require.Len(t, state.Rounds, 2)
+	require.False(t, state.note("astra", "v", at.Add(time.Second), false))
+	require.Len(t, state.Rounds, 1)
 	require.Equal(t, 1, state.Rounds[0].Attempted)
 	require.Equal(t, 1, state.Rounds[0].Full)
 	require.Equal(t, at, state.Rounds[0].StartedAt)
-	require.Zero(t, state.Rounds[1].Full, "Luna is not Astra")
 	require.True(t, state.end(at.Add(time.Minute)))
 	require.False(t, state.note("luna", "late-old", at.Add(time.Second), false))
 	require.True(t, state.note("luna", "fresh", at.Add(2*time.Minute), false))
-	require.Len(t, state.Rounds, 3)
-	require.Equal(t, 1, state.Rounds[2].Attempted)
-	require.True(t, state.Rounds[2].EndedAt.IsZero())
+	require.Len(t, state.Rounds, 2)
+	require.Equal(t, 1, state.Rounds[1].Attempted)
+	require.True(t, state.Rounds[1].EndedAt.IsZero())
+}
+
+func TestGatewayPoolUsageClosedCycleFreezesAndSameTicketCanStartNewCycle(t *testing.T) {
+	state := gatewayPoolUsageLedger{Tag: "ledger"}
+	at := time.Now().UTC()
+	state.note("luna", "v", at, true)
+	state.startFullUse("v", at, time.Time{}, "session")
+	state.end(at.Add(time.Minute))
+	live := map[string]openAIGatewayPoolPair{"v": {version: "v"}}
+	view := state.Rounds[0].fullUsageView(live, "session", at.Add(time.Hour))
+	require.EqualValues(t, 60000, view.FullDurationMS)
+	require.Empty(t, view.FullActiveUntil)
+	require.True(t, state.note("luna", "v", at.Add(2*time.Minute), true))
+	require.True(t, state.startFullUse("v", at.Add(2*time.Minute), time.Time{}, "session"))
+	require.Len(t, state.Rounds, 2)
+	require.EqualValues(t, 60000, state.Rounds[0].fullUseDuration(at.Add(time.Hour)))
+	require.EqualValues(t, 1000, state.Rounds[1].fullUseDuration(at.Add(2*time.Minute+time.Second)))
 }
 
 func TestGatewayPoolUsageArchivesWithoutLosingTotals(t *testing.T) {
@@ -43,14 +59,16 @@ func TestGatewayPoolUsageArchivesWithoutLosingTotals(t *testing.T) {
 	for i := 0; i < gatewayPoolUsageHistoryLimit+3; i++ {
 		start := at.Add(time.Duration(i) * 2 * time.Minute)
 		state.note("luna", fmt.Sprint(i), start, true)
+		state.startFullUse(fmt.Sprint(i), start, time.Time{}, "offline")
+		state.endFullUse(fmt.Sprint(i), start.Add(time.Minute))
 		state.end(start.Add(time.Minute))
 		state.prune()
 	}
 	require.Len(t, state.Rounds, gatewayPoolUsageHistoryLimit)
-	require.EqualValues(t, 3, state.Archived["luna"].Rounds)
-	require.EqualValues(t, 3, state.Archived["luna"].Attempted)
-	require.EqualValues(t, 3, state.Archived["luna"].Full)
-	require.EqualValues(t, 180000, state.Archived["luna"].DurationMS)
+	require.EqualValues(t, 3, state.Archived[gatewayPoolUsageSharedModel].Rounds)
+	require.EqualValues(t, 3, state.Archived[gatewayPoolUsageSharedModel].Attempted)
+	require.EqualValues(t, 3, state.Archived[gatewayPoolUsageSharedModel].Full)
+	require.EqualValues(t, 180000, state.Archived[gatewayPoolUsageSharedModel].DurationMS)
 }
 
 func TestGatewayPoolUsageConcurrentDedupPersistsAcrossRestart(t *testing.T) {
@@ -166,7 +184,7 @@ func TestGatewayPoolRuntimeViewOnlyShowsLiveExactModelProofWithoutPoolIO(t *test
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), "secret-cookie")
 	require.Nil(t, snapshot[1].Runtime.Rounds[0].Tickets)
-	pair.until = time.Now().Add(-time.Second)
+	pair.routeExpiresAt = time.Now().Add(-time.Second)
 	svc.codexCookies.poolPairs.Store(identity, pair)
 	snapshot, err = svc.GatewayPoolRuntimeProgress(context.Background(), []int64{1})
 	require.NoError(t, err)
@@ -208,6 +226,26 @@ func TestGatewayPoolUsageEndsOnlyOnStableFreshZeroInventory(t *testing.T) {
 	require.True(t, ended())
 }
 
+func TestGatewayPoolUsageUnreservedEarlyOpportunityDoesNotHoldCycleOpen(t *testing.T) {
+	fake := newGwpoolFakePool(t, "", 150)
+	fake.listGateways = []gwpoolFakeGateway{{Name: "unified-80", PairReady: true, UsedByYou: true}}
+	account := fake.account(1)
+	account.Status, account.Schedulable = StatusActive, true
+	account.Extra[openAIGatewayPoolEarlyEnabledKey] = true
+	svc, repo := gatewayRuntimeService(account)
+	identity := openAIGatewayPoolAccountKey(account)
+	svc.codexCookies.gatewayPoolMarkUsed(identity, "unified-80")
+	require.True(t, svc.codexCookies.gatewayPoolEarlyDue(context.Background(), account, identity))
+	svc.noteGatewayPoolUsage(context.Background(), account, identity, "luna",
+		OpenAIGatewayPoolApplied{AccountID: 1, Gateway: "old", Version: "old"}, time.Now().Add(-time.Minute), false)
+	svc.finishGatewayPoolUsageIfExhausted(context.Background(), account)
+	fresh, _ := repo.GetByID(context.Background(), 1)
+	state := readGatewayPoolUsage(fresh, gatewayPoolLedgerTag(identity))
+	require.False(t, state.Rounds[0].EndedAt.IsZero())
+	require.True(t, readGatewayPoolEarlyState(fresh, identity).IsZero(), "settlement never spends an early probe budget")
+	require.Zero(t, fake.hits.Load())
+}
+
 func TestGatewayPoolUsageLockWaitIsWithinContextBudget(t *testing.T) {
 	var lock sync.Mutex
 	lock.Lock()
@@ -217,4 +255,36 @@ func TestGatewayPoolUsageLockWaitIsWithinContextBudget(t *testing.T) {
 	started := time.Now()
 	require.False(t, gatewayPoolLockWithin(ctx, &lock))
 	require.Less(t, time.Since(started), 200*time.Millisecond)
+}
+
+func TestGatewayPoolUsageAbandonedFetchSettlesAfterStrictZero(t *testing.T) {
+	fake := newGwpoolFakePool(t, "", 150)
+	fake.refuseStatus, fake.refuseCode = http.StatusConflict, "all_cooling"
+	account := fake.account(1)
+	svc, repo := gatewayRuntimeService(account)
+	svc.codexCookies.poolUsageFinished = svc.finishGatewayPoolUsageIfExhausted
+	identity := openAIGatewayPoolAccountKey(account)
+	svc.noteGatewayPoolUsage(context.Background(), account, identity, gatewayPoolProbeModelLuna,
+		OpenAIGatewayPoolApplied{AccountID: 1, Gateway: "old", Version: "old"}, time.Now().Add(-time.Minute), false)
+	started, release := make(chan struct{}), make(chan struct{})
+	var firstList, releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	fake.onList = func() { firstList.Do(func() { close(started); <-release }) }
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := svc.codexCookies.gatewayPoolPair(ctx, account, identity)
+		done <- err
+	}()
+	<-started
+	require.ErrorIs(t, <-done, context.DeadlineExceeded)
+	_, pending := svc.codexCookies.gatewayPoolInventorySnapshot(identity, account)
+	require.True(t, pending)
+	releaseOnce.Do(func() { close(release) })
+	require.Eventually(t, func() bool {
+		fresh, _ := repo.GetByID(context.Background(), 1)
+		state := readGatewayPoolUsage(fresh, gatewayPoolLedgerTag(identity))
+		return len(state.Rounds) == 1 && !state.Rounds[0].EndedAt.IsZero()
+	}, time.Second, time.Millisecond, "the abandoned fetch's final zero must close the round without another business request")
 }

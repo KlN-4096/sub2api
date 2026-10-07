@@ -23,7 +23,7 @@
         >
           {{ statusText }}
         </button>
-        <span class="max-w-[180px] text-center text-[11px] leading-4 text-gray-500 dark:text-gray-400">
+        <span class="max-w-[180px] whitespace-normal break-words text-center text-[11px] leading-4 text-gray-500 dark:text-gray-400">
           {{ tempUnschedRecoveryText }}
         </span>
       </div>
@@ -176,11 +176,14 @@ import type { Account } from '@/types'
 import { formatCountdown, formatDateTime, formatDateTimeToMinute, formatCountdownWithSuffix, formatTime } from '@/utils/format'
 import { TURN_STATE_HOLD_REASON } from '@/utils/turnState'
 import { useNowTicker } from '@/composables/useNowTicker'
+import { isGatewayPoolRestReason } from '@/utils/gatewayPoolRest'
 
 const { t } = useI18n()
 
 const props = defineProps<{
   account: Account
+  gatewayPoolRest?: { active: boolean }
+  gatewayPoolRestPending?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -298,6 +301,8 @@ const isOverloaded = computed(() => {
 
 // Computed: is temp unschedulable
 const isTempUnschedulable = computed(() => {
+  if (props.gatewayPoolRest?.active) return true
+  if (props.gatewayPoolRest && isGatewayPoolRestReason(props.account.temp_unschedulable_reason)) return false
   if (!props.account.temp_unschedulable_until) return false
   return new Date(props.account.temp_unschedulable_until).getTime() > sharedNow.value
 })
@@ -333,7 +338,11 @@ const overloadCountdown = computed(() => {
 })
 
 const tempUnschedRecoveryText = computed(() => {
+  if (props.gatewayPoolRest?.active) return t('admin.accounts.tempUnschedulable.poolRestPending')
   if (!isTempUnschedulable.value || !props.account.temp_unschedulable_until) return ''
+  if (isGatewayPoolRestReason(props.account.temp_unschedulable_reason)) {
+    return t('admin.accounts.tempUnschedulable.poolRestPending')
+  }
   return t('admin.accounts.status.tempUnschedulableUntil', {
     time: formatDateTime(props.account.temp_unschedulable_until)
   })
@@ -356,6 +365,7 @@ const statusClass = computed(() => {
   if (!props.account.schedulable) {
     return 'badge-gray'
   }
+  if (props.gatewayPoolRestPending) return 'badge-gray'
   return 'badge-success'
 })
 
@@ -376,6 +386,7 @@ const statusText = computed(() => {
   if (!props.account.schedulable) {
     return t('admin.accounts.status.paused')
   }
+  if (props.gatewayPoolRestPending) return t('common.unknown')
   return t(`admin.accounts.status.${props.account.status}`)
 })
 

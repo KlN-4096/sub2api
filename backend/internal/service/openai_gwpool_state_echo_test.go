@@ -257,22 +257,32 @@ func TestStateEchoEchoedSameTicketIsFullStrength(t *testing.T) {
 	require.Len(t, upstream.sentBodies, 1)
 }
 
-// 没送票 + 上游回了一张新票 ⇒ **不管**。不带票的请求 87% 都会拿到新铸的一张，那不是回声。
-func TestStateEchoWithoutSentTicketIsNotAVerdict(t *testing.T) {
-	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
-		{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
-	}}
-	svc := &OpenAIGatewayService{httpUpstream: upstream}
-
-	ginCtx, resp, err := gwpoolEchoRun(t, svc, gwpoolEchoAccount(fake), "")
-	require.NoError(t, err)
-	require.NotNil(t, resp)
-	_ = resp.Body.Close()
-	require.Len(t, upstream.sentBodies, 1, "判不出东西就不该换票重发")
-	_, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
-	require.Equal(t, openAIGatewayPoolPairLive, state)
-	require.Empty(t, takeDiscardedOpenAIGatewayPoolAttempts(ginCtx))
+// No state on either side passes without a quality verdict. A response state
+// needs the same live pair and a valid confirmation template, never a blind pass.
+func TestStateEchoMissingOutboundStateNeedsEvidenceForConfirmation(t *testing.T) {
+	for _, sent := range []string{"", " \t "} {
+		for _, minted := range []string{"", gwpoolEchoFreshTicket} {
+			t.Run(sent+"/"+minted, func(t *testing.T) {
+				svc := &OpenAIGatewayService{}
+				ctx, sink := withOpenAIGatewayPoolSink(context.Background(), nil)
+				sink.mark(OpenAIGatewayPoolApplied{AccountID: 1, Cookie: "offline"})
+				req, err := http.NewRequestWithContext(ctx, http.MethodPost, gwpoolTestURL, nil)
+				require.NoError(t, err)
+				req.Header.Set(openAICodexTurnStateHeader, sent)
+				resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}}
+				resp.Header.Set(openAICodexTurnStateHeader, minted)
+				degraded, err := svc.gatewayPoolRouteDegraded(req, resp, gwpoolTestAccount(1), "", "", time.Now())
+				if minted == "" {
+					require.NoError(t, err)
+				} else {
+					require.ErrorIs(t, err, errOpenAIGatewayPoolWarmUnverified)
+				}
+				require.False(t, degraded)
+				require.Empty(t, sink.discarded)
+				require.Empty(t, sink.snapshot().Verdict)
+			})
+		}
+	}
 }
 
 // 纪律 1：**非 200 带回新票一律不下结论**。作者原版把 429/403 判成满血（响应头里本来就没票），
@@ -433,8 +443,8 @@ func TestEchoStrikeLadderByTicketAge(t *testing.T) {
 	}{
 		{0, 3},
 		{89 * time.Second, 3},
-		{90 * time.Second, 2},
-		{139 * time.Second, 2},
+		{90 * time.Second, 1},
+		{139 * time.Second, 1},
 		{140 * time.Second, 1},
 		{3 * time.Minute, 1},
 		{time.Hour, 1},
@@ -539,14 +549,15 @@ func TestStateEchoRecordsBothVerdictsOnTheAppliedSnapshot(t *testing.T) {
 
 	t.Run("没下结论就不许留读数", func(t *testing.T) {
 		fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-		// 没送票 ⇒ 没有回声 ⇒ 判不出来（纪律：上游对不带票的请求本来就会铸一张新的）。
+		// 非200仍由原错误路径处理，不将其记成质量降级。
 		upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
-			{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
+			{status: http.StatusBadGateway, minted: gwpoolEchoFreshTicket},
 		}}
 		svc := &OpenAIGatewayService{httpUpstream: upstream}
 
 		req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
 		require.NoError(t, err)
+		req.Header.Set(openAICodexTurnStateHeader, "business-state")
 		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 		ctx, sink := withOpenAIGatewayPoolSink(req.Context(), ginCtx)
 		gwpoolEchoSeedVerified(t, svc, fake.account(1))
