@@ -419,6 +419,23 @@ func TestForwardAsChatCompletions_OAuthPromotesSystemMessageWithoutDuplication(t
 	require.Equal(t, 1, strings.Count(string(upstreamBody), systemPrompt))
 }
 
+// 真实 Codex 不发 prompt cache 提示：oauth 经 chat 桥出站时删掉，只剩断点的空文本段也不再生成。
+func TestForwardAsChatCompletions_OAuthDropsPromptCacheHints(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","prompt_cache_options":{"ttl":"30m"},"messages":[{"role":"user","content":[` +
+		`{"type":"text","text":"hello","prompt_cache_breakpoint":{}},` +
+		`{"type":"text","text":"","prompt_cache_breakpoint":{}},` +
+		`{"type":"text","text":"world"}]},{"role":"user","content":"plain"}],"stream":false}`)
+
+	upstreamBody := forwardOAuthChatCompletionsForUpstreamBody(t, body)
+
+	require.NotContains(t, string(upstreamBody), "prompt_cache_options")
+	require.NotContains(t, string(upstreamBody), "prompt_cache_breakpoint")
+	require.Equal(t, int64(2), gjson.GetBytes(upstreamBody, "input.0.content.#").Int())
+	require.Equal(t, "hello", gjson.GetBytes(upstreamBody, "input.0.content.0.text").String())
+	require.Equal(t, "world", gjson.GetBytes(upstreamBody, "input.0.content.1.text").String())
+	require.Contains(t, string(upstreamBody), "plain")
+}
+
 func TestForwardAsChatCompletions_OAuthJsonObjectKeepsSystemMessageInInput(t *testing.T) {
 	const systemPrompt = "Return JSON only."
 	body := []byte(`{"model":"gpt-5.4","messages":[{"role":"system","content":"` + systemPrompt + `"},{"role":"user","content":"symbol data"}],"response_format":{"type":" JSON_OBJECT "},"stream":false}`)
@@ -1156,7 +1173,7 @@ func TestGPT6ReasoningModeAndSamplingCompatibility(t *testing.T) {
 		out, changed, err := normalizeOpenAIResponsesReasoningMode(body, "")
 		require.NoError(t, err)
 		require.True(t, changed)
-		require.Equal(t, "pro", gjson.GetBytes(out, "reasoning.mode").String())
+		require.False(t, gjson.GetBytes(out, "reasoning.mode").Exists())
 		require.Equal(t, "max", gjson.GetBytes(out, "reasoning.effort").String())
 		require.False(t, gjson.GetBytes(out, "temperature").Exists())
 		require.False(t, gjson.GetBytes(out, "top_p").Exists())
@@ -1207,7 +1224,7 @@ func TestGPT6ReasoningModeUsesMappedUpstream(t *testing.T) {
 	out, _, err := normalizeOpenAIResponsesReasoningMode(body, "gpt-6-sol")
 	require.NoError(t, err)
 	require.Equal(t, "public-model", gjson.GetBytes(out, "model").String())
-	require.Equal(t, "pro", gjson.GetBytes(out, "reasoning.mode").String())
+	require.False(t, gjson.GetBytes(out, "reasoning.mode").Exists())
 	require.Equal(t, "max", gjson.GetBytes(out, "reasoning.effort").String())
 	require.False(t, gjson.GetBytes(out, "temperature").Exists())
 }
