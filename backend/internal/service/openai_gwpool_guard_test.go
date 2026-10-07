@@ -24,10 +24,12 @@ func TestGatewayPoolGuardOffSkipsVerificationAndResponseJudgment(t *testing.T) {
 		{status: http.StatusOK, minted: "changed-state"},
 	}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
-	for range 4 {
+	for i := range 4 {
 		request, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 		require.NoError(t, err)
-		request.Header.Set(openAICodexTurnStateHeader, "client-state")
+		if i%2 == 0 {
+			request.Header.Set(openAICodexTurnStateHeader, "client-state")
+		}
 		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 		ctx, _ := withOpenAIGatewayPoolSink(request.Context(), ginCtx)
 		response, err := svc.doOpenAIUpstream(request.WithContext(ctx), "", account)
@@ -41,12 +43,12 @@ func TestGatewayPoolGuardOffSkipsVerificationAndResponseJudgment(t *testing.T) {
 	require.False(t, svc.codexCookies.gatewayPoolVerifiedFull(gwpoolTestIdentity), "关防护不等于验证成功")
 }
 
-func TestGatewayPoolStrictGuardBlocksInsufficientBudgetBeforeFetching(t *testing.T) {
+func TestGatewayPoolStrictGuardBlocksExpiredBudgetBeforeFetching(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 	svc := &OpenAIGatewayService{}
 	request, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
 	require.NoError(t, err)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
 	shooter := &gwpoolWarmShooter{}
 	err = svc.gatewayPoolWarmUpWith(request.WithContext(ctx), fake.account(1), gwpoolTestIdentity, gwpoolWarmModel, shooter.shoot)

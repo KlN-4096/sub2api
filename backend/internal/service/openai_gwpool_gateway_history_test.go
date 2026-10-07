@@ -266,7 +266,7 @@ func TestGatewayPoolCooldownFreshPersistenceAndCrossRowRestart(t *testing.T) {
 	svc.codexCookies.accountByID = repo.GetByID
 	identity := openAIGatewayPoolAccountKey(account)
 	require.True(t, svc.codexCookies.beginGatewayPoolAttempt(identity, "unified-142", 30*time.Minute))
-	svc.codexCookies.observeGatewayPoolCooldown(identity, "unified-142", openAIGatewayVerdictDegraded, 30*time.Minute)
+	svc.codexCookies.observeGatewayPoolCooldown(identity, "unified-142", openAIGatewayVerdictDegraded, 30*time.Minute, time.Time{})
 	stale := *account
 	stale.Extra = map[string]any{} // 模拟五分钟前的请求快照。
 	svc.noteOpenAIGatewayUse(context.Background(), &stale, "unified-142", "europe", openAIGatewayVerdictDegraded, true, 0, 0, 75000)

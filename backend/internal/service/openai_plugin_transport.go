@@ -24,18 +24,30 @@ func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
 // 这里还夹着 state-echo 降智判据（openai_gwpool_state_echo.go）。判定点落在这一层是因为它同时
 // 满足两个条件：响应头已经到手，而调用方还一个字节都没往下游写（调用方要等这个函数返回才开始
 // 解析响应）。所以「截断」在这里是干净的，不会留一个半截的 SSE 流。
-func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
+func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL string, account *Account) (response *http.Response, responseErr error) {
+	if request != nil {
+		if failure := GatewayPoolRetryFailure(request.Context()); failure != nil {
+			return nil, failure
+		}
+	}
 	if request != nil && request.URL != nil && chatgptcookies.IsChatGPTURL(request.URL) && request.URL.Path == openAIGatewayPoolInferencePath {
-		defer s.finishGatewayPoolUsageIfExhausted(request.Context(), account)
+		if allowed, err := s.gatewayPoolResumeAllowed(request.Context(), account, true); err != nil || !allowed {
+			return nil, gatewayPoolRestError()
+		}
+		ctx, finish := s.beginGatewayPoolUsageRequest(request.Context(), account)
+		request = request.WithContext(ctx)
+		if finish != nil {
+			defer func() {
+				if response != nil && response.Body != nil && responseErr == nil {
+					response.Body = &gatewayPoolUsageBody{ReadCloser: response.Body, finish: finish}
+				} else {
+					finish()
+				}
+			}()
+		}
 	}
 	if request != nil {
 		ctx := s.gatewayPoolWaitContext(request.Context(), account)
-		budget, _ := gatewayPoolWarmBudgetFor(ctx)
-		work := &gatewayPoolWarmWork{started: time.Now(), budget: budget, limit: account.gatewayPoolWarmTickets()}
-		if wait := gatewayPoolWaitFrom(ctx); wait != nil {
-			_, _, work.waitedAtStart = wait.snapshot()
-		}
-		ctx = context.WithValue(ctx, gatewayPoolWarmWorkKey{}, work)
 		request = request.WithContext(ctx)
 	}
 	// 业务请求只落在**验过满血**的槽上。判据跑在这一发之前、用便宜的垫话，所以用户的请求不会是
@@ -52,10 +64,6 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 		if !errors.Is(err, errGatewayPoolPreflightChanged) || gatewayPoolWaitFrom(request.Context()) == nil {
 			break
 		}
-		work := gatewayPoolWarmWorkFrom(request.Context())
-		if work.attempts >= work.limit || work.remaining(gatewayPoolWaitFrom(request.Context())) <= 0 {
-			break
-		}
 		retry, waitErr := s.waitGatewayPoolRetry(request.Context(), account, gatewayPoolVerificationRetryGap)
 		if waitErr != nil {
 			return nil, waitErr
@@ -68,8 +76,7 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 		return resp, err
 	}
 	// 判到降智就**只截断**，不在这里换票重发：重发走 AttachRoute 换一张没验过的票就把用户的
-	// prompt 打出去，而判据对首轮请求结构性失效（没送 turn-state ⇒ 没有回声），所以「客户端
-	// 无感」实际是「降智静默交付」。
+	// prompt 打出去，还会重复已经送出的业务。缺state只使用响应值做最小复验，不重放业务。
 	// 当前 pair 已标 Stale ⇒ 下一发客户端请求的 AttachRoute 自然带 force=1 换网关。
 	if !s.dropDegradedGatewayPoolRoute(request, resp, account) {
 		return nil, errOpenAIGatewayPoolWarmUnverified
@@ -87,6 +94,9 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 	account *Account,
 ) (*http.Response, bool, error) {
 	if err := requireOpenAIProxyBinding(account, proxyURL); err != nil {
+		return nil, false, err
+	}
+	if err := gatewayPoolPreparationDeadlineError(request.Context()); err != nil {
 		return nil, false, err
 	}
 	// ChatGPT cookie 回放（openai_codex_cookies.go）：出站前带上该账号罐里的 cookie，拿到响应
@@ -122,11 +132,10 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 		mark, verified := s.codexCookies.gatewayPoolVerifiedMarkOf(identity)
 		probeModel := account.gatewayPoolProbeModel(gatewayPoolWarmModel(request))
 		if applied.early != nil {
-			probeModel = gatewayPoolWarmModel(request)
+			probeModel = applied.early.model
 		}
 		if identityErr != nil || applied.AccountID != account.ID || applied.Version == "" ||
-			!verified || mark.version != applied.Version || s.codexCookies.gatewayPoolVerifiedVersionFor(identity, probeModel) != applied.Version ||
-			(applied.early != nil && applied.early.model != gatewayPoolWarmModel(request)) {
+			!verified || mark.version != applied.Version || s.codexCookies.gatewayPoolVerifiedVersionFor(identity, probeModel) != applied.Version {
 			gatewayPoolReleaseUnsent(release)
 			return nil, false, errGatewayPoolPreflightChanged
 		}
@@ -138,14 +147,27 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 		finish := s.codexCookies.gatewayPoolInventoryOperation(identity)
 		defer finish() // includes response classification and durable accounting
 	}
+	if failure := GatewayPoolRetryFailure(request.Context()); failure != nil {
+		gatewayPoolReleaseUnsent(release)
+		return nil, false, failure
+	}
+	if poolRequest {
+		gatewayPoolUsageMarkSending(request.Context(), identity)
+	}
 	resp, sentAt, err := s.gatewayPoolObservedRoundTrip(request, proxyURL, account, poolRequest, func(at time.Time) {
-		s.noteGatewayPoolUsage(request.Context(), account, identity, gatewayPoolWarmModel(request), applied, at, false)
+		if !s.noteGatewayPoolFullUse(request.Context(), account, identity, applied, at) {
+			s.noteGatewayPoolUsage(request.Context(), account, identity, gatewayPoolWarmModel(request), applied, at, false)
+		}
 	})
 	if !sentAt.IsZero() {
 		s.codexCookies.gatewayPoolMarkSent(identity, applied.Version, sentAt)
 	}
 	if err == nil && resp != nil {
-		degraded, verifyErr := s.gatewayPoolRouteDegraded(request, resp, account, proxyURL, identity, sentAt)
+		var degraded bool
+		var verifyErr error
+		if poolRequest {
+			degraded, verifyErr = s.gatewayPoolRouteDegraded(request, resp, account, proxyURL, identity, sentAt)
+		}
 		s.noteGatewayPoolBusinessContact(request, account, identity, applied, sentAt, resp)
 		if verifyErr != nil {
 			if resp.Body != nil {
@@ -158,7 +180,7 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 		}
 		if poolRequest && (account.gatewayPoolGuardEnabled() || applied.early != nil) {
 			current, state := s.codexCookies.cachedPoolPair(identity)
-			if state != openAIGatewayPoolPairLive || current.version != applied.Version {
+			if state == openAIGatewayPoolPairNone || current.invalidated || current.version != applied.Version {
 				openAIGatewayPoolSinkFrom(request.Context()).noteVerdict(applied.Gateway, "")
 				if resp.Body != nil {
 					_ = resp.Body.Close()
@@ -190,6 +212,20 @@ func (s *OpenAIGatewayService) gatewayPoolObservedRoundTrip(request *http.Reques
 	if !observe {
 		resp, err := s.doOpenAIUpstreamRoundTrip(request, proxyURL, account)
 		return resp, time.Time{}, err
+	}
+	if allowed, err := s.gatewayPoolResumeAllowed(request.Context(), account, false); err != nil || !allowed {
+		return nil, time.Time{}, gatewayPoolRestError()
+	}
+	// Final business dispatch admission after fresh rest checks. A probe trace
+	// denotes quality verification, including confirmation of an already-sent
+	// successful response; the retry deadline must not truncate that response.
+	if request.Context().Value(gatewayPoolProbeTraceKey{}) == nil {
+		if failure := GatewayPoolRetryFailure(request.Context()); failure != nil {
+			return nil, time.Time{}, failure
+		}
+		if err := gatewayPoolPreparationDeadlineError(request.Context()); err != nil {
+			return nil, time.Time{}, err
+		}
 	}
 	started := time.Now()
 	var wroteAt atomic.Int64
@@ -270,6 +306,11 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamRoundTrip(request *http.Request, 
 }
 
 func (s *OpenAIGatewayService) doOpenAIUpstreamRoundTripUnrecorded(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
+	if request.Context().Value(gatewayPoolProbeTraceKey{}) == nil {
+		// Fresh rest/deadline checks and the optional recording-policy read are
+		// preparation, not upstream first-output time. A/B probes never arm it.
+		startGatewayPoolFirstOutputGuard(request.Context())
+	}
 	if s.pluginManager != nil {
 		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(request.Context(), request, proxyURL, account)
 		if handled {

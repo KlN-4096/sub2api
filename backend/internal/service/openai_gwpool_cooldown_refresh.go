@@ -14,6 +14,7 @@ func (c gatewayPoolCooldown) changedAt() time.Time {
 }
 
 func (c *gatewayPoolCooldown) initSources(previous gatewayPoolCooldown, base int, now time.Time) {
+	c.Cleared = false
 	c.SourcesKnown, c.BaseSeconds, c.CycleAt = true, base, now
 	if !previous.SourcesKnown && previous.WindowSeconds > base && previous.Outcome != openAIGatewayVerdictFull {
 		// The old combined record cannot tell failure backoff from a recommendation.
@@ -30,7 +31,9 @@ func (c *gatewayPoolCooldown) initSources(previous gatewayPoolCooldown, base int
 func (s *openAICodexCookieStore) refreshGatewayPoolCooldown(c *gatewayPoolCooldown,
 	identity, gateway string, window time.Duration, touched, now time.Time, enabled ...bool,
 ) {
-	if !c.SourcesKnown {
+	c.clearCooldown(s.gatewayPoolCooldownClearAt(identity), gatewayPoolCooldownBase(window))
+	c.resetBackoff(s.gatewayPoolCooldownResetAt(identity), touched, gatewayPoolCooldownBase(window))
+	if c.Cleared || !c.SourcesKnown {
 		return // conservative migration of old, irreversibly mixed records
 	}
 	beforeWindow, beforeUntil, beforeBase := c.WindowSeconds, c.Until, c.BaseSeconds
@@ -42,7 +45,7 @@ func (s *openAICodexCookieStore) refreshGatewayPoolCooldown(c *gatewayPoolCooldo
 	if !use {
 		c.RecommendedSeconds, c.RecommendationSource, c.RecommendationUntil = 0, "", time.Time{}
 	} else if rec, ok := raw.(gatewayPoolRecommendation); loaded && ok {
-		if !rec.Valid() || now.Sub(rec.at) > gatewayPoolRecommendationTTL {
+		if !rec.Valid() || now.Sub(rec.at) > gatewayPoolRecommendationTTL || !rec.at.After(c.ResetAt) {
 			c.RecommendedSeconds, c.RecommendationSource, c.RecommendationUntil = 0, "", time.Time{}
 		} else {
 			c.RecommendedSeconds, c.RecommendationSource = rec.Seconds, rec.Source
@@ -88,10 +91,11 @@ func (s *OpenAIGatewayService) persistGatewayPoolCooldownRefresh(ctx context.Con
 	if !ok || rec.LedgerTag != gatewayPoolLedgerTag(identity) {
 		return
 	}
-	changed := false
+	changed := s.codexCookies.syncGatewayPoolCooldownResetHistory(&rec, identity,
+		gatewayPoolCooldownBase(account.gatewayPoolGatewayWindow()))
 	for gateway, seen := range rec.Seen {
 		cooldown, exists := s.codexCookies.cooldownEntry(identity, gateway)
-		if exists && cooldown.SourcesKnown && (seen.Cooldown == nil || cooldown.changedAt().After(seen.Cooldown.changedAt())) {
+		if exists && cooldown.SourcesKnown && newerGatewayPoolCooldown(&cooldown, seen.Cooldown) {
 			copy := cooldown.clone()
 			seen.Cooldown = &copy
 			rec.Seen[gateway], changed = seen, true

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"sort"
 	"strings"
 	"testing"
@@ -99,7 +100,29 @@ func TestReorderCodexTopLevelFields(t *testing.T) {
 
 	t.Run("已是目标序时是恒等变换", func(t *testing.T) {
 		in := []byte(`{"model":"m","instructions":"i","input":[],"stream":true}`)
-		require.Equal(t, string(in), string(reorderCodexTopLevelFields(in, codexResponsesFieldOrder)))
+		out := reorderCodexTopLevelFields(in, codexResponsesFieldOrder)
+		require.Equal(t, string(in), string(out))
+		require.Same(t, &in[0], &out[0], "canonical wire must not be copied")
+	})
+
+	t.Run("快路保留旧的空白规范化与未知字段语义", func(t *testing.T) {
+		for _, in := range []string{
+			` {"model":"m","input": []} `,
+			`{"model":"m", "input":[]}`,
+			`{"model":"m","input":[],"unknown":{"x": 1}}`,
+			`{"unknown":1,"model":"m","input":[]}`,
+			`{"model":"m","input":[],"unknown":1,"stream":true}`,
+		} {
+			body := []byte(in)
+			first := reorderCodexTopLevelFields(body, codexResponsesFieldOrder)
+			require.Equal(t, in, string(body), "input ownership is unchanged")
+			require.True(t, gjson.ValidBytes(first))
+			second := reorderCodexTopLevelFields(first, codexResponsesFieldOrder)
+			require.Equal(t, first, second)
+			require.Same(t, &first[0], &second[0])
+		}
+		require.Equal(t, `{"model":"m","input":[]}`, string(reorderCodexTopLevelFields(
+			[]byte(` {"model":"m", "input": []} `), codexResponsesFieldOrder)))
 	})
 
 	t.Run("异常输入原样返回", func(t *testing.T) {
@@ -118,6 +141,30 @@ func TestReorderCodexTopLevelFields(t *testing.T) {
 		require.Contains(t, string(out), `"model"`, "键的原始拼写保留")
 		require.Contains(t, string(out), `"项目 <&>"`, "值的原始转义保留")
 	})
+}
+
+func TestReorderCodexTopLevelFieldsMatchesLegacyBytes(t *testing.T) {
+	fields := []string{
+		`"model":"gpt-6-astra"`, `"input":[{"content":"保留 <&> \\n"}]`,
+		`"instructions":"i"`, `"stream":true`, `"client_metadata":{"x": 1}`,
+		`"unknown_z":1e+03`, `"unknown_a":"\u4e2d"`,
+	}
+	random := rand.New(rand.NewSource(42))
+	for i := 0; i < 200; i++ {
+		parts := append([]string(nil), fields...)
+		random.Shuffle(len(parts), func(i, j int) { parts[i], parts[j] = parts[j], parts[i] })
+		separator := []string{",", ", ", ",\n"}[i%3]
+		body := []byte(" \n{" + strings.Join(parts, separator) + "} ")
+		for _, order := range [][]string{codexResponsesFieldOrder, codexCompactFieldOrder, codexWSCreateFieldOrder} {
+			want := forkPerformanceLegacyReorder(body, order)
+			require.Equal(t, want, reorderCodexTopLevelFields(body, order))
+			require.Equal(t, want, reorderCodexTopLevelFields(want, order))
+		}
+	}
+	for _, body := range []string{`{"model":"a","model":"b"}`, `{"model":"a","mo\u0064el":"b"}`, `{broken`, `{"x":1`, `{} junk`} {
+		require.Equal(t, forkPerformanceLegacyReorder([]byte(body), codexResponsesFieldOrder),
+			reorderCodexTopLevelFields([]byte(body), codexResponsesFieldOrder))
+	}
 }
 
 // 端到端：非透传是现网形态（自动透传关闭），透传也走同一条规则。
