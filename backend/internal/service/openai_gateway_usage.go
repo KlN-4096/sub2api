@@ -421,6 +421,15 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		ImageSizeBreakdown:       imageSizeBreakdown,
 		NativeCompactionV2:       input.NativeCompactionV2,
 	}
+	// x-codex-safety-buffering-* 读数（openai_codex_safety_buffering.go）。OAuth WS 轮次的
+	// UpstreamHeaders 为空（response.metadata 事件里的 headers 暂不取），保持 NULL；cpr 原样中继的 WS 轮次会落值。
+	usageLog.SafetyBufferingEnabled = usageCodexSafetyBufferingEnabledPtr(result.UpstreamHeaders)
+	usageLog.SafetyBufferingFasterModel = usageCodexSafetyBufferingFasterModelPtr(result.UpstreamHeaders)
+	// 路由对读数（openai_codex_route_cookies.go）：上游新下发就记新的，否则回读罐里当前那一组。
+	// 纯观测，不参与任何判定。
+	routePair := s.routePairInUse(account, result.UpstreamHeaders)
+	usageLog.RoutePair = usageCodexRoutePairPtr(routePair)
+	usageLog.RouteGateway = usageCodexRouteGatewayPtr(routePair)
 	isVideoUsage := isGrokVideoUsageResult(result, billingModels)
 	if isVideoUsage {
 		usageLog.VideoCount = result.VideoCount

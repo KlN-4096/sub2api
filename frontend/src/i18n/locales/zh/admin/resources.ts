@@ -524,6 +524,8 @@ export default {
       turnStateOverridden: '本次出站带的是账号级覆写值',
       turnStateOverriddenShort: '覆写',
       turnStateSent: 'Turn-State 出站',
+      routeGateway: '路由网关',
+      routePairCopy: '复制整组 __cflb/__oailb',
       turnStateHint: '{chars} 字符（密文 {blocks} 块）；PKCS#7 下明文落在 {min}–{max} 字节。基线 292 字符（team 号 332）= 不降智。块数只能把明文框进 16 字节的窗口，所以这是疑似判据，不是确证。铸于 {minted}',
       turnStateUndecodable: '不是可解析的 Fernet 信封，退回字符长度 {n} 判断',
       turnStateUnknownShape: '黄色：不在已知形态表里（正常 292/332、降智 312/356），判断不了是否降智。',
