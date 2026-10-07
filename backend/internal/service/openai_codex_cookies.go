@@ -78,6 +78,7 @@ type openAICodexCookieStore struct {
 	// 并作为 /cookie 的 exclude 带给池子（裸取时也能避开烧过的落点）。
 	// 池子按它发的 consumer key 记账，认不出同一份凭据挂在多个账号行上（见 gatewayPoolLedgerKey）。
 	poolUsed               sync.Map // 凭证域身份 + "\x00" + 网关名 → time.Time
+	poolKnown              sync.Map // ledger key -> struct{}; retain known gateways across cooldown clears
 	poolCooldownMu         sync.Mutex
 	poolCooldown           map[string]gatewayPoolCooldown
 	poolCooldownReset      sync.Map // ledger identity -> last committed reset barrier; writes hold poolCooldownMu

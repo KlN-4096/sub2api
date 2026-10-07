@@ -1,6 +1,9 @@
 package service
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type gatewayPoolDisplayReadKey struct {
 	account *Account
@@ -80,6 +83,33 @@ func (s *OpenAIGatewayService) gatewayPoolDisplaySnapshot(
 			merge(&peers[i])
 		}
 	}
+	prefix := gatewayPoolLedgerIdentity(identity) + "\x00"
+	clearAt := s.codexCookies.gatewayPoolCooldownClearAt(identity)
+	if !clearAt.IsZero() {
+		s.codexCookies.poolKnown.Range(func(key, _ any) bool {
+			name, valid := key.(string)
+			gateway, matches := strings.CutPrefix(name, prefix)
+			if _, exists := history.Seen[gateway]; valid && matches && gateway != "" && !exists {
+				var cleared gatewayPoolCooldown
+				cleared.clearCooldown(clearAt, gatewayPoolCooldownBase(account.gatewayPoolGatewayWindow()))
+				history.Seen[gateway] = openAIGatewaySeen{Cooldown: &cleared}
+			}
+			return true
+		})
+	}
+	s.codexCookies.poolUsed.Range(func(key, value any) bool {
+		name, keyOK := key.(string)
+		at, timeOK := value.(time.Time)
+		gateway, matches := strings.CutPrefix(name, prefix)
+		if keyOK && timeOK && matches && gateway != "" && !at.IsZero() {
+			seen := history.Seen[gateway]
+			if at.After(seen.At) {
+				seen.At = at
+				history.Seen[gateway] = seen
+			}
+		}
+		return true
+	})
 	for gateway, seen := range history.Seen {
 		if current, ok := s.codexCookies.cooldownEntry(identity, gateway); ok &&
 			newerGatewayPoolCooldown(&current, seen.Cooldown) {
