@@ -129,6 +129,10 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 	if isClientCanceledTransportError(ctx, err) {
 		return err
 	}
+	var rejectedRetry *UpstreamFailoverError
+	if errors.As(err, &rejectedRetry) {
+		return rejectedRetry // pre-dispatch retry expiry is not a transport/account fault
+	}
 	safeErr := sanitizeUpstreamErrorMessage(err.Error())
 	setOpsUpstreamError(c, 0, safeErr, "")
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{

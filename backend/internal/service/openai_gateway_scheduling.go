@@ -1081,6 +1081,7 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 		compactTiers[fresh.ID] = compactTier
 	}
 
+	eligible = gatewayPoolDedupeCandidates(ctx, eligible)
 	if len(eligible) == 0 {
 		return nil, compactBlocked, filterStats
 	}
@@ -1313,6 +1314,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		candidates = append(candidates, acc)
 	}
 
+	candidates = gatewayPoolDedupeCandidates(ctx, candidates)
 	if len(candidates) == 0 {
 		return nil, noAvailableOpenAISelectionError(requestedModel, false, filterStats.summary(""))
 	}
@@ -1336,7 +1338,12 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			if loadInfo == nil {
 				loadInfo = &AccountLoadInfo{AccountID: acc.ID}
 			}
-			if loadInfo.LoadRate < 100 {
+			pref, poolMember := gatewayPoolPreferences(ctx)[acc.ID]
+			availableByLoad := loadInfo.LoadRate < 100
+			if poolMember && pref.activeRank > 0 {
+				availableByLoad = acc.Concurrency <= 0 || loadInfo.CurrentConcurrency < acc.Concurrency
+			}
+			if availableByLoad {
 				available = append(available, accountWithLoad{
 					account:  acc,
 					loadInfo: loadInfo,

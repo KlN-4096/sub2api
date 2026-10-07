@@ -30,12 +30,12 @@ func TestOpenAIOAuth429SharedLaneSpacesConcurrentClonesAndBoundsQueue(t *testing
 		}(int64(i + 1))
 	}
 	done.Wait()
-	require.NotEmpty(t, delays)
-	require.LessOrEqual(t, len(delays), int(openAIOAuth429MaxRetryDelay/openAIOAuth429RetryDelay))
+	require.Len(t, delays, 32, "a burst must use the existing retry budget, not fail after only 16 reservations")
 	sort.Slice(delays, func(i, j int) bool { return delays[i] < delays[j] })
 	for i := 1; i < len(delays); i++ {
 		require.GreaterOrEqual(t, delays[i]-delays[i-1], openAIOAuth429RetryDelay)
 	}
+	require.Less(t, delays[len(delays)-1], deadline.Sub(now))
 	_, ok := svc.reserveOpenAIOAuth429RetryAt(gwpoolTestAccount(1), nil, now.Add(time.Millisecond), now)
 	require.False(t, ok, "do not reserve beyond the original deadline")
 }
