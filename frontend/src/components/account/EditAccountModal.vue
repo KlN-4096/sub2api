@@ -1934,6 +1934,37 @@
         </div>
       </div>
 
+      <!-- 原样中继（klno，仅 OpenAI API Key）：下一跳是另一个 sub2api 时用 -->
+      <div
+        v-if="account?.platform === 'openai' && account?.type === 'apikey'"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <div class="flex items-center justify-between">
+          <div>
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.rawRelay') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.openai.rawRelayDesc') }}
+            </p>
+          </div>
+          <button
+            type="button"
+            data-testid="edit-openai-raw-relay-toggle"
+            @click="openaiRawRelayEnabled = !openaiRawRelayEnabled"
+            :class="[
+              'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+              openaiRawRelayEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+            ]"
+          >
+            <span
+              :class="[
+                'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+                openaiRawRelayEnabled ? 'translate-x-5' : 'translate-x-0'
+              ]"
+            />
+          </button>
+        </div>
+      </div>
+
       <!-- OpenAI Codex namespace 工具摊平（兼容开关，仅 OAuth） -->
       <div
         v-if="account?.platform === 'openai' && account?.type === 'oauth'"
@@ -2765,6 +2796,32 @@
               </div>
               <div class="flex items-center justify-between gap-4 sm:col-span-2">
                 <div class="min-w-0">
+                  <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.turnStateHunterPair') }}</label>
+                  <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    {{ t('admin.accounts.openai.turnStateHunterPairDesc') }}
+                  </p>
+                </div>
+                <input
+                  v-model="openAITurnStateHunter.pair_mode"
+                  data-testid="edit-openai-turn-state-hunter-pair"
+                  type="checkbox"
+                  class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
+              </div>
+              <div v-if="openAITurnStateHunter.pair_mode">
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterTicketTtl') }}</label>
+                <input
+                  v-model.number="openAITurnStateHunter.ticket_ttl_seconds"
+                  type="number"
+                  min="30"
+                  max="3600"
+                  placeholder="240"
+                  class="input text-xs"
+                  data-testid="edit-openai-turn-state-hunter-ticket-ttl"
+                />
+              </div>
+              <div class="flex items-center justify-between gap-4 sm:col-span-2">
+                <div class="min-w-0">
                   <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.turnStateHunterHold') }}</label>
                   <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                     {{ t('admin.accounts.openai.turnStateHunterHoldDesc') }}
@@ -2811,6 +2868,18 @@
                 <input v-model.number="openAITurnStateRecovery.streak_target" type="number" min="1" max="50" placeholder="5" class="input text-xs" />
               </div>
               <div>
+                <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateRecoverySuccess') }}</label>
+                <input
+                  v-model.number="openAITurnStateRecovery.success_target"
+                  type="number"
+                  min="1"
+                  max="50"
+                  placeholder="4"
+                  class="input text-xs"
+                  data-testid="edit-openai-turn-state-recovery-success"
+                />
+              </div>
+              <div>
                 <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateRecoveryCooldown') }}</label>
                 <input v-model.number="openAITurnStateRecovery.cooldown_hours" type="number" min="1" max="168" placeholder="16" class="input text-xs" />
               </div>
@@ -2837,7 +2906,7 @@
               <div>
                 <label class="input-label text-xs">{{ t('admin.accounts.openai.turnStateHunterEffort') }}</label>
                 <select v-model="openAITurnStateRecovery.reasoning_effort" class="input text-xs" data-testid="edit-openai-turn-state-recovery-effort">
-                  <option value="">{{ t('admin.accounts.openai.turnStateHunterEffortDefault') }}</option>
+                  <option value="">{{ t('admin.accounts.openai.turnStateRecoveryEffortDefault') }}</option>
                   <option v-for="e in turnStateHunterEfforts" :key="e" :value="e">{{ e }}</option>
                 </select>
               </div>
@@ -3735,9 +3804,10 @@ const accountHasOpenAIExtraSettings = computed(() => hasOpenAIExtraSettings(prop
 // 与后端 Account.TargetsChatGPTCodexUpstream() 严格对齐：只有最终落到 ChatGPT Codex
 // 后端的账号才认 turn-state 覆写。apikey 走的是别的上游，后端会忽略，露出输入框
 // 等于让管理员配一个静默失效的值。
+// cpr 走原样中继，turn-state 由客户端与 CPR 自己往返，不提供替换设置（2026-09-23）
 const accountSupportsTurnStateOverride = computed(() =>
   props.account?.platform === 'openai' &&
-  ['oauth', 'setup-token', 'cpr'].includes(props.account?.type || '')
+  ['oauth', 'setup-token'].includes(props.account?.type || '')
 )
 
 const isSparkShadow = computed(() => props.account?.parent_account_id != null)
@@ -4308,14 +4378,22 @@ interface TurnStateHunterConfig {
   auto_models: boolean
   /** 探测记账用的 API Key ID：每次 200 探测按标准用量路径落一行；空 = 不记。 */
   usage_api_key_id: number | null
+  /** pair 模式（实验性）：探测直接做糖果题，答对才入池，票与 __cflb/__oailb 一起回放。 */
+  pair_mode: boolean
+  /** pair 票自己的有效期（秒，30–3600，默认 240）；必须比「到期前开窗」长。 */
+  ticket_ttl_seconds: number | null
 }
-// 降智恢复探测（extra.openai_turn_state_recovery）：走账号**自己的出口**、间隔随机，连续
-// streak_target 次 292 判定恢复并打标记；连续同样多次失败进 cooldown_hours 冷却。只标记，不改配置。
+// 降智恢复探测（extra.openai_turn_state_recovery）：走账号**自己的出口**、间隔随机，每次出一道
+// 糖果题，最近 streak_target 次里答对 success_target 次判定恢复并打标记；连续 streak_target 次
+// 失败进 cooldown_hours 冷却。只标记，不改配置。
 interface TurnStateRecoveryConfig {
   enabled: boolean
-  /** 探哪个模型；留空 = 最近有真实流量的那个。 */
+  /** 探哪个模型；留空 = gpt-5.6-sol。 */
   model: string
+  /** 判定窗口（总次数）。 */
   streak_target: number | null
+  /** 窗口内需要答对的次数。 */
+  success_target: number | null
   min_minutes: number | null
   max_minutes: number | null
   cooldown_hours: number | null
@@ -4327,6 +4405,7 @@ const emptyTurnStateRecovery = (): TurnStateRecoveryConfig => ({
   enabled: false,
   model: '',
   streak_target: null,
+  success_target: null,
   min_minutes: null,
   max_minutes: null,
   cooldown_hours: null,
@@ -4342,6 +4421,7 @@ const readOpenAITurnStateRecovery = (extra: unknown): TurnStateRecoveryConfig =>
   cfg.model = typeof table.model === 'string' ? table.model : ''
   const int = (key: string) => (typeof table[key] === 'number' ? (table[key] as number) : null)
   cfg.streak_target = int('streak_target')
+  cfg.success_target = int('success_target')
   cfg.min_minutes = int('min_minutes')
   cfg.max_minutes = int('max_minutes')
   cfg.cooldown_hours = int('cooldown_hours')
@@ -4356,6 +4436,7 @@ const normalizeTurnStateRecovery = (cfg: TurnStateRecoveryConfig): Record<string
   if (model) out.model = model
   const numeric: Array<[string, number | null]> = [
     ['streak_target', cfg.streak_target],
+    ['success_target', cfg.success_target],
     ['min_minutes', cfg.min_minutes],
     ['max_minutes', cfg.max_minutes],
     ['cooldown_hours', cfg.cooldown_hours],
@@ -4384,7 +4465,9 @@ const emptyTurnStateHunter = (): TurnStateHunterConfig => ({
   reasoning_effort: '',
   hold_when_degraded: false,
   auto_models: false,
-  usage_api_key_id: null
+  usage_api_key_id: null,
+  pair_mode: false,
+  ticket_ttl_seconds: null
 })
 const readOpenAITurnStateHunter = (extra: unknown): TurnStateHunterConfig => {
   const cfg = emptyTurnStateHunter()
@@ -4411,6 +4494,8 @@ const readOpenAITurnStateHunter = (extra: unknown): TurnStateHunterConfig => {
   cfg.reasoning_effort = typeof table.reasoning_effort === 'string' ? table.reasoning_effort : ''
   cfg.hold_when_degraded = table.hold_when_degraded === true
   cfg.auto_models = table.auto_models === true
+  cfg.pair_mode = table.pair_mode === true
+  cfg.ticket_ttl_seconds = int('ticket_ttl_seconds')
   return cfg
 }
 // 归一成要写进 extra 的对象；全空（关着、没选、没填）返回 null = 删键。
@@ -4427,13 +4512,15 @@ const normalizeTurnStateHunter = (cfg: TurnStateHunterConfig): Record<string, un
     ['lead_minutes', cfg.lead_minutes],
     ['idle_minutes', cfg.idle_minutes],
     ['retry_minutes', cfg.retry_minutes],
-    ['usage_api_key_id', cfg.usage_api_key_id]
+    ['usage_api_key_id', cfg.usage_api_key_id],
+    ['ticket_ttl_seconds', cfg.ticket_ttl_seconds]
   ]
   for (const [key, value] of numeric) {
     if (typeof value === 'number' && Number.isFinite(value) && value !== 0) out[key] = value
   }
   if (cfg.reasoning_effort) out.reasoning_effort = cfg.reasoning_effort
   if (cfg.hold_when_degraded) out.hold_when_degraded = true
+  if (cfg.pair_mode) out.pair_mode = true
   if (cfg.auto_models) out.auto_models = true
   const blank = !cfg.enabled && !models.length && !proxyIds.length && Object.keys(out).length === 3
   return blank ? null : out
@@ -4540,6 +4627,8 @@ const customBaseUrl = ref('')
 
 // OpenAI 自动透传开关（OAuth/API Key）
 const openaiPassthroughEnabled = ref(false)
+// 原样中继（klno，仅 OpenAI API Key）
+const openaiRawRelayEnabled = ref(false)
 // OpenAI Codex namespace 工具摊平兼容开关（仅 OAuth），缺省关闭即原样保留
 const openaiFlattenNamespacesEnabled = ref(false)
 const openAILongContextBillingEnabled = ref(false)
@@ -5055,6 +5144,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 
   // Load OpenAI passthrough toggle (OpenAI OAuth/SetupToken/API Key)
   openaiPassthroughEnabled.value = false
+  openaiRawRelayEnabled.value = false
   openaiFlattenNamespacesEnabled.value = false
   openAILongContextBillingEnabled.value = false
   editPlanType.value = ''
@@ -5075,6 +5165,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   webSearchEmulationMode.value = 'default'
   if (hasOpenAIExtraSettings(newAccount)) {
     openaiPassthroughEnabled.value = extra?.openai_passthrough === true || extra?.openai_oauth_passthrough === true
+    openaiRawRelayEnabled.value = newAccount.type === 'apikey' && extra?.openai_raw_relay === true
     openaiFlattenNamespacesEnabled.value =
       newAccount.type === 'oauth' && extra?.openai_responses_flatten_namespaces === true
     const longContextBillingValue = extra?.openai_long_context_billing_enabled
@@ -6675,6 +6766,13 @@ const handleSubmit = async () => {
       } else {
         delete newExtra.openai_passthrough
         delete newExtra.openai_oauth_passthrough
+      }
+      if (props.account.type === 'apikey') {
+        if (openaiRawRelayEnabled.value) {
+          newExtra.openai_raw_relay = true
+        } else {
+          delete newExtra.openai_raw_relay
+        }
       }
       // 缺省即保留 namespace，不写空值，避免 extra 里堆积默认项。
       // cpr 不在此处落键也不清键：这个开关没有对应 UI（表单 ref 恒为默认值），

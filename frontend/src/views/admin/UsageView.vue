@@ -631,7 +631,7 @@ const exportToExcel = async () => {
 
 // Column visibility
 const ALWAYS_VISIBLE = ['user', 'created_at']
-const DEFAULT_HIDDEN_COLUMNS = ['reasoning_effort', 'request_id', 'upstream_request_id', 'turn_state_sent', 'user_agent']
+const DEFAULT_HIDDEN_COLUMNS = ['reasoning_effort', 'request_id', 'upstream_request_id', 'turn_state_sent', 'route_gateway', 'user_agent']
 const HIDDEN_COLUMNS_KEY = 'usage-hidden-columns'
 const HIDDEN_COLUMNS_VERSION_KEY = 'usage-hidden-columns-version'
 // 隐藏列版本链：每级只把当级新增列加入隐藏集，不重置用户已显式打开的列。
@@ -639,12 +639,14 @@ const HIDDEN_COLUMNS_VERSION_KEY = 'usage-hidden-columns-version'
 const HIDDEN_COLUMNS_VERSIONS = [
   'request-id-hidden-by-default',
   'upstream-request-id-hidden-by-default',
-  'turn-state-sent-hidden-by-default'
+  'turn-state-sent-hidden-by-default',
+  'route-gateway-hidden-by-default'
 ] as const
 const HIDDEN_COLUMNS_ADDED_BY_VERSION: Record<string, string[]> = {
   'request-id-hidden-by-default': ['request_id'],
   'upstream-request-id-hidden-by-default': ['upstream_request_id'],
-  'turn-state-sent-hidden-by-default': ['turn_state_sent']
+  'turn-state-sent-hidden-by-default': ['turn_state_sent'],
+  'route-gateway-hidden-by-default': ['route_gateway']
 }
 const HIDDEN_COLUMNS_CURRENT_VERSION =
   HIDDEN_COLUMNS_VERSIONS[HIDDEN_COLUMNS_VERSIONS.length - 1]
@@ -667,6 +669,7 @@ const allColumns = computed(() => [
   { key: 'upstream_request_id', label: t('admin.usage.upstreamRequestId'), sortable: false },
   { key: 'turn_state', label: t('admin.usage.turnState'), sortable: false },
   { key: 'turn_state_sent', label: t('admin.usage.turnStateSent'), sortable: false },
+  { key: 'route_gateway', label: t('admin.usage.routeGateway'), sortable: false },
   { key: 'user_agent', label: t('usage.userAgent'), sortable: false },
   { key: 'ip_address', label: t('admin.usage.ipAddress'), sortable: false }
 ])

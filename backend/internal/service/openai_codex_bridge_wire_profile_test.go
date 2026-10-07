@@ -124,8 +124,10 @@ func requireCodexBridgeIdentityCoherent(t *testing.T, header http.Header, body [
 
 	cm := gjson.GetBytes(body, "client_metadata")
 	require.True(t, cm.IsObject())
-	require.ElementsMatch(t, []string{"session_id", "thread_id", "turn_id", "x-codex-installation-id", "x-codex-turn-metadata", "x-codex-window-id"},
-		codexBridgeJSONKeys(cm), "client_metadata 键集合 = 真客户端无子代理时的集合（responses_metadata.rs:307-340）")
+	require.ElementsMatch(t, []string{"session_id", "thread_id", "turn_id", "x-codex-installation-id", "x-codex-turn-metadata", "x-codex-window-id",
+		codexGuardianCreditsRequestedKey},
+		codexBridgeJSONKeys(cm), "client_metadata 键集合 = 真客户端无子代理时的集合（responses_metadata.rs:307-340，0.156 起加 guardian 计费标记 client.rs:1153）")
+	require.Equal(t, "true", cm.Get(codexGuardianCreditsRequestedKey).String())
 	require.Equal(t, sid, cm.Get("session_id").String())
 	require.Equal(t, sid, cm.Get("thread_id").String())
 	windowID := sid + ":0"
@@ -141,7 +143,14 @@ func requireCodexBridgeIdentityCoherent(t *testing.T, header http.Header, body [
 	require.Equal(t, headerTM, cm.Get(openAIWSTurnMetadataHeader).String(), "桥没有 tool_namespaces_info，头与体内的 turn-metadata 逐字节相同")
 	tm := gjson.Parse(headerTM)
 	require.True(t, tm.IsObject())
-	require.Equal(t, codexBridgeTurnMetadataKeyOrder, codexBridgeJSONKeys(tm), "turn-metadata 键序 = serde 声明序")
+	// 0.156 起 extra 里的 model / reasoning_effort 排在声明字段之后（BTreeMap 按键名），值与出站体同源。
+	wantKeys := append(append([]string{}, codexBridgeTurnMetadataKeyOrder...), "model")
+	require.Equal(t, gjson.GetBytes(body, "model").String(), tm.Get("model").String())
+	if effort := gjson.GetBytes(body, "reasoning.effort").String(); effort != "" {
+		wantKeys = append(wantKeys, "reasoning_effort")
+		require.Equal(t, effort, tm.Get("reasoning_effort").String())
+	}
+	require.Equal(t, wantKeys, codexBridgeJSONKeys(tm), "turn-metadata 键序 = serde 声明序")
 	require.Equal(t, installationID, tm.Get("installation_id").String())
 	require.Equal(t, sid, tm.Get("session_id").String())
 	require.Equal(t, sid, tm.Get("thread_id").String())

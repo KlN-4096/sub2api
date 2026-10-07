@@ -446,7 +446,7 @@ func TestCodexDeviceWireProfileModelsRequestForcesHTTP2(t *testing.T) {
 			svc := &OpenAIGatewayService{cfg: &config.Config{}}
 			request, _, err := svc.buildCodexModelsManifestRequest(context.Background(), account, "")
 			require.NoError(t, err)
-			require.Equal(t, tc.want, request.forceHTTP2)
+			require.Equal(t, tc.want, request.deviceWireProfile)
 		})
 	}
 }
@@ -474,6 +474,30 @@ func TestCodexDeviceWireProfileModelsManifestAccept(t *testing.T) {
 			require.Len(t, models.requests, 1)
 			require.Equal(t, tc.want, models.requests[0].Header.Get("Accept"))
 			require.Equal(t, resolveCodexOutboundIdentity("").version, models.requests[0].Header.Get("version"))
+		})
+	}
+}
+
+// 真实 Codex 拉 /models 不带 If-None-Match（model-provider/src/models_endpoint.rs 传空 HeaderMap，
+// 只读响应 ETag）。双开账号的缓存刷新不发条件请求；其余账号维持既有的 304 复验。
+func TestCodexDeviceWireProfileModelsRefreshOmitsIfNoneMatch(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+		want    string
+	}{
+		{"device/enabled", true, ""},
+		{"device/disabled", false, `"probe-etag"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			models := newCodexModelsProbeServer(t)
+			svc := &OpenAIGatewayService{cfg: &config.Config{}}
+			request, _, err := svc.buildCodexModelsManifestRequest(context.Background(), wireProfileTestAccount(tc.enabled), "")
+			require.NoError(t, err)
+			_, err = svc.fetchOpenAIModelsUpstream(context.Background(), request, `"probe-etag"`)
+			require.NoError(t, err)
+			require.Len(t, models.requests, 1)
+			require.Equal(t, tc.want, models.requests[0].Header.Get("If-None-Match"))
 		})
 	}
 }
