@@ -2201,7 +2201,22 @@ func TestOpenAIWSHTTPBridgeKeepsContinuationFramesOnHTTPWithoutPreviousResponseI
 		req.Header.Set("User-Agent", "codex_cli_rs/0.135.0")
 		ginCtx.Request = req
 
-		errCh <- svc.ProxyResponsesWebSocketFromClient(r.Context(), ginCtx, conn, account, "sk-test", firstMessage, hooks)
+		firstBudget := &gatewayPoolWaitHolder{state: &gatewayPoolWaitState{
+			max: time.Minute, waited: time.Minute, deadline: time.Now().Add(-time.Minute),
+		}}
+		ginCtx.Set(gatewayPoolWaitGinKey, firstBudget)
+		turnHooks := *hooks
+		turnHooks.BeforeTurn = func(turn int) error {
+			holder, _ := ginCtx.Get(gatewayPoolWaitGinKey)
+			if turn == 1 && holder != firstBudget {
+				return errors.New("same-turn reentry must keep its wait budget")
+			}
+			if turn > 1 && holder == firstBudget {
+				return errors.New("new websocket turn inherited the previous wait budget")
+			}
+			return nil
+		}
+		errCh <- svc.ProxyResponsesWebSocketFromClient(r.Context(), ginCtx, conn, account, "sk-test", firstMessage, &turnHooks)
 	}))
 	defer wsServer.Close()
 

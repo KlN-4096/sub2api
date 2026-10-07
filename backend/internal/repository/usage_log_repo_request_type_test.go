@@ -112,6 +112,9 @@ func TestUsageLogRepositoryCreateSyncRequestTypeAndLegacyFields(t *testing.T) {
 			sqlmock.AnyArg(), // safety_buffering_faster_model
 			sqlmock.AnyArg(), // route_gateway
 			sqlmock.AnyArg(), // route_pair
+			sqlmock.AnyArg(), // route_pair_overridden
+			sqlmock.AnyArg(), // route_pair_pool_gateway
+			sqlmock.AnyArg(), // route_pair_pool_version
 			createdAt,
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}).AddRow(int64(99), createdAt))
@@ -217,6 +220,9 @@ func TestUsageLogRepositoryCreate_PersistsServiceTier(t *testing.T) {
 			sqlmock.AnyArg(), // safety_buffering_faster_model
 			sqlmock.AnyArg(), // route_gateway
 			sqlmock.AnyArg(), // route_pair
+			sqlmock.AnyArg(), // route_pair_overridden
+			sqlmock.AnyArg(), // route_pair_pool_gateway
+			sqlmock.AnyArg(), // route_pair_pool_version
 			createdAt,
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}).AddRow(int64(100), createdAt))
@@ -298,9 +304,9 @@ func TestPrepareUsageLogInsert_PersistsNativeCompactionV2WithoutChangingRequestT
 	prepared := prepareUsageLogInsert(log)
 
 	require.Len(t, prepared.args, len(usageLogInsertArgTypes))
-	// 尾部：native_compaction_v2 在 turn_state ×4 与 safety_buffering ×2 之前，倒数第 8
-	require.Equal(t, "boolean", usageLogInsertArgTypes[len(usageLogInsertArgTypes)-12])
-	require.Equal(t, true, prepared.args[len(prepared.args)-12])
+	// 尾部：native_compaction_v2 在 turn_state ×4、safety_buffering ×2 与 route_* ×5 之前，倒数第 13
+	require.Equal(t, "boolean", usageLogInsertArgTypes[len(usageLogInsertArgTypes)-15])
+	require.Equal(t, true, prepared.args[len(prepared.args)-15])
 	require.Equal(t, int16(service.RequestTypeStream), prepared.args[30])
 	require.Equal(t, service.RequestTypeStream, log.RequestType)
 	require.True(t, log.Stream)
@@ -991,6 +997,9 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullString{}, // safety_buffering_faster_model
 			sql.NullString{}, // route_gateway
 			sql.NullString{}, // route_pair
+			sql.NullBool{},   // route_pair_overridden
+			sql.NullString{}, // route_pair_pool_gateway
+			sql.NullString{}, // route_pair_pool_version
 			now,
 		}})
 		require.NoError(t, err)
@@ -1081,6 +1090,9 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullString{},  // safety_buffering_faster_model
 			sql.NullString{},  // route_gateway
 			sql.NullString{},  // route_pair
+			sql.NullBool{},    // route_pair_overridden
+			sql.NullString{},  // route_pair_pool_gateway
+			sql.NullString{},  // route_pair_pool_version
 			now,
 		}})
 		require.NoError(t, err)
@@ -1154,6 +1166,9 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullString{},  // safety_buffering_faster_model
 			sql.NullString{},  // route_gateway
 			sql.NullString{},  // route_pair
+			sql.NullBool{},    // route_pair_overridden
+			sql.NullString{},  // route_pair_pool_gateway
+			sql.NullString{},  // route_pair_pool_version
 			now,
 		}})
 		require.NoError(t, err)
@@ -1228,6 +1243,9 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullString{},  // safety_buffering_faster_model
 			sql.NullString{},  // route_gateway
 			sql.NullString{},  // route_pair
+			sql.NullBool{},    // route_pair_overridden
+			sql.NullString{},  // route_pair_pool_gateway
+			sql.NullString{},  // route_pair_pool_version
 			now,
 		}})
 		require.NoError(t, err)
