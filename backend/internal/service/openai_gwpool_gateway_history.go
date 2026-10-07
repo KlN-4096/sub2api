@@ -85,6 +85,7 @@ const (
 // Seen 用 map 而不是数组：同一个网关会被反复碰到，按名字原地覆盖时间戳，条目数恒等于
 // 碰过的网关数。顺序在读的时候按时间排（readOpenAIGatewayHistoryRows）。
 type openAIGatewayHistory struct {
+	LedgerTag string `json:"ledger_tag,omitempty"`
 	// Current 是最近一发请求实际落在的网关。空 = 这个号还没拿到过能读出落点的路由。
 	Current string `json:"current"`
 	// CurrentRegion 是 Current 那个网关所属的大区（池子报的）。空 = 不知道。
@@ -143,7 +144,8 @@ type openAIGatewaySeen struct {
 	//
 	// **不能用 At − FullAt 代替**：FullAt 是粘滞的，而降智判定要等下一次真的打到这个网关
 	// 才会写，中间的空闲全算进去。2026-10-03 现网照这个减法渲染出 22655 秒。
-	FullHeldMs int64 `json:"full_held_ms,omitempty"`
+	FullHeldMs int64                `json:"full_held_ms,omitempty"`
+	Cooldown   *gatewayPoolCooldown `json:"cooldown,omitempty"`
 }
 
 // readOpenAIGatewayHistory 读这条记录。解析失败按「没有」处理。
@@ -189,6 +191,8 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 	if s == nil || s.accountRepo == nil || account == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gatewayPoolWarmNoteTimeout)
+	defer cancel()
 	gateway = strings.TrimSpace(gateway)
 	if gateway == "" {
 		return
@@ -196,8 +200,29 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 	region = strings.TrimSpace(region)
 	now := time.Now().UTC()
 
+	unlock := s.codexCookies.gatewayPoolHistoryLock(account.ID)
+	defer unlock()
+	fresh, err := s.codexCookies.freshGatewayPoolAccount(ctx, account)
+	if err != nil || fresh == nil {
+		slog.Warn("gwpool_gateway_history_read_failed", "account_id", account.ID)
+		return
+	}
+	account = fresh
 	rec, _ := readOpenAIGatewayHistory(account)
+	var cooldown *gatewayPoolCooldown
+	if identity, identityErr := s.codexCookies.gatewayPoolIdentity(ctx, account); identityErr == nil {
+		tag := gatewayPoolLedgerTag(identity)
+		if rec.LedgerTag != "" && rec.LedgerTag != tag {
+			rec = openAIGatewayHistory{}
+		}
+		rec.LedgerTag = tag
+		if c, exists := s.codexCookies.cooldownEntry(identity, gateway); exists {
+			cooldown = &c
+		}
+	}
 	prev := rec.Seen[gateway]
+	cooldownChanged := cooldown != nil && (prev.Cooldown == nil || cooldown.UpdatedAt.After(prev.Cooldown.UpdatedAt))
+	newTiming := fullHeldMs > 0 && fullHeldMs != prev.FullHeldMs
 	// 没换网关、这个网关刚写过、大区没新消息、**判定也没变** ⇒ 不写。换了就立刻写。
 	// 判定变了必须穿过节流：「这个落点刚被判降智」正是这张卡要看的事，压住它等于不记。
 	//
@@ -208,7 +233,7 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 	staleFull := verdict == openAIGatewayVerdictFull &&
 		now.After(prev.FullAt.Add(openAIGatewayFullWindow))
 	if (!advanceCurrent || rec.Current == gateway) && (region == "" || region == prev.Region) &&
-		(verdict == "" || verdict == prev.Verdict) && !staleFull {
+		(verdict == "" || verdict == prev.Verdict) && !staleFull && !cooldownChanged && !newTiming {
 		if !prev.At.IsZero() && now.Before(prev.At.Add(openAIGatewayHistoryWriteInterval)) {
 			return
 		}
@@ -226,7 +251,10 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 		rec.CurrentRegion = region
 	}
 	next := openAIGatewaySeen{At: now, Region: region, Verdict: prev.Verdict, FullAt: prev.FullAt,
-		FullHeldMs: prev.FullHeldMs}
+		FullHeldMs: prev.FullHeldMs, Cooldown: prev.Cooldown}
+	if cooldown != nil {
+		next.Cooldown = cooldown
+	}
 	// 这一发量到了就刷新，没量到留着上一次的：满血时长是「上一个窗口有多长」，没新读数时
 	// 旧读数仍然是关于这一格最新的事实。
 	if fullHeldMs > 0 {
@@ -262,9 +290,11 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 		account.Extra = map[string]any{}
 	}
 	account.Extra[openAIGatewayHistoryExtraKey] = generic
+	account.Extra[openAIGatewayLedgerTagExtraKey] = rec.LedgerTag
 	// 不随请求取消：用量是在响应收尾之后记的，跟着请求 ctx 一起死就等于这条读数永远写不进去。
-	if err := s.accountRepo.UpdateExtra(context.WithoutCancel(ctx), account.ID, map[string]any{
-		openAIGatewayHistoryExtraKey: generic,
+	if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
+		openAIGatewayHistoryExtraKey:   generic,
+		openAIGatewayLedgerTagExtraKey: rec.LedgerTag,
 	}); err != nil {
 		slog.Debug("gwpool_gateway_history_persist_failed", "account_id", account.ID, "error", err)
 	}

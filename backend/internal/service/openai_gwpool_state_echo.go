@@ -145,6 +145,9 @@ func (s *OpenAIGatewayService) gatewayPoolRouteDegraded(
 		verdict = openAIGatewayVerdictDegraded
 	}
 	openAIGatewayPoolSinkFrom(request.Context()).noteVerdict(applied.Gateway, verdict)
+	if !refreshed {
+		s.noteGatewayPoolCooldownVerdict(request.Context(), account, applied, openAIGatewayVerdictFull)
+	}
 	return s.gatewayPoolEchoStrike(request, account, applied, refreshed)
 }
 
@@ -343,11 +346,13 @@ func (s *OpenAIGatewayService) dropDegradedGatewayPoolRoute(
 	detached := context.WithoutCancel(request.Context())
 	if identity, err := s.codexCookies.gatewayPoolIdentity(detached, account); err == nil {
 		// 标 Stale 顺手量到这张票的满血时长 ⇒ 记进 sink，由用量侧落到这个网关的账本上。
-		openAIGatewayPoolSinkFrom(detached).noteFullHeld(
-			s.codexCookies.gatewayPoolMarkStale(identity, applied.Version, applied.Gateway))
+		held := s.codexCookies.gatewayPoolMarkStale(identity, applied.Version, applied.Gateway)
+		applied.FullHeldMs = held.Milliseconds()
+		openAIGatewayPoolSinkFrom(detached).noteFullHeld(applied, held)
 		// 账本记的是**实际交付的那个网关**：标 Stale 只让下一发换票，账本才是「这个上游账号
 		// 4 小时内别再点这个落点」的依据。
 		s.codexCookies.gatewayPoolMarkUsed(identity, applied.Gateway)
+		s.noteGatewayPoolCooldownVerdict(detached, account, applied, openAIGatewayVerdictDegraded)
 	}
 	sent := strings.TrimSpace(request.Header.Get(openAICodexTurnStateHeader))
 	// **不打 account_key**：它是 chatgpt:<上游 account_id>[:user:<user_id>]，含上游账号/用户

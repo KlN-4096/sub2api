@@ -80,15 +80,12 @@ describe('gateway pool locale keys', () => {
     for (const mark of ['✓', '!']) {
       expect(openai.gatewayHistory.legend, mark).toContain(mark)
     }
-    // 满血分钟预测是**下界**。主文案必须出现「至少」那个限定词 —— 写成「最多」会被
-    // 运营方当配额用，而这个数的全部意义是「可以指望这么多」。
-    expect(openai.gatewayHistory.forecast).toMatch(/至少|at least/)
-    expect(openai.gatewayHistory.forecast).not.toMatch(/最多|at most/)
-    expect(openai.gatewayHistory.forecastHint).toMatch(/下界|lower bound/)
-    // tooltip 必须同时交代两个偏移方向：往大偏（没碰过的网关不计入）和仍然乐观的那一处
-    // （冷却时长没测准）。只说一个方向的话读者会以为另一个方向不存在。
-    expect(openai.gatewayHistory.forecastHint).toMatch(/没碰过|never touched/)
-    expect(openai.gatewayHistory.forecastHint).toMatch(/没测准|not pinned down/)
+    // 自适应冷却到期只是允许重试，不能把预测写成满血保底或配额。
+    expect(openai.gatewayHistory.forecast).toMatch(/可重试|retry-eligible/)
+    expect(openai.gatewayHistory.forecast).not.toMatch(/至少|at least|最多|at most/)
+    expect(openai.gatewayHistory.forecastHint).toMatch(/不是满血保底|not guaranteed/)
+    expect(openai.gatewayHistory.forecastHint).toMatch(/其他行|Other rows/)
+    expect(openai.gatewayHistory.forecastHint).toMatch(/确认恢复|confirm recovery/)
     // **单位是 (账号 × 网关)，不是大区。** 2026-10-03 用户纠正：「时间还是按网关来的，
     // 相同区域不同网关同一个号还是有不同的满血期的」。第一版按大区数，把 us-west 那 20 个
     // 网关名算成 1 个单位 ⇒ 预测值低一个数量级。这条断言钉住口径，别再被「九宫格是按大区

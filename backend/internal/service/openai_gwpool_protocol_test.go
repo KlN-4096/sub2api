@@ -278,7 +278,7 @@ func TestGatewayPoolAsksForUsableLifetimeAndWait(t *testing.T) {
 
 	// 取票超时配小 ⇒ wait 跟着变小甚至不带（钳位是代码而不是注释）。
 	acct.Extra[openAIGatewayPoolFetchTimeoutExtraKey] = 1
-	store.poolPairs.Delete(gwpoolTestIdentity)
+	store = &openAICodexCookieStore{} // 独立观察等待参数，不绕过上一发刚开始的本地冷却。
 	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, http.Header{}))
 	tight, err := url.ParseQuery(fake.nextRawQuery(t))
 	require.NoError(t, err)
@@ -695,8 +695,8 @@ func TestGatewayPoolSeedsExcludeFromThePersistedLandingRecord(t *testing.T) {
 	acct := fake.account(1)
 	acct.Extra[openAIGatewayHistoryExtraKey] = map[string]any{
 		"seen": map[string]any{
-			"unified-167": map[string]any{"at": time.Now().Add(-time.Hour).Format(time.RFC3339Nano)},
-			// 出了本地账本窗口（默认 4 小时）⇒ 不该补进来，它又能用了。
+			"unified-167": map[string]any{"at": time.Now().Add(-10 * time.Minute).Format(time.RFC3339Nano)},
+			// 出了本地初始窗口（默认 1 小时）⇒ 不该补进来。
 			"unified-84": map[string]any{"at": time.Now().Add(-5 * time.Hour).Format(time.RFC3339Nano)},
 		},
 	}
