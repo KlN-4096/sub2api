@@ -266,10 +266,21 @@ func applyCodexWSFrameWireProfile(c *gin.Context, account *Account, payload []by
 	if eventType := gjson.GetBytes(payload, "type").String(); eventType != "" && eventType != "response.create" {
 		return payload
 	}
+	// 覆写是管理员的显式动作，要盖过真客户端自带的 blob。判据必须是「本次真的覆写了」
+	// 而不是「extra 里有手填值」：开了自动接管时手填值刻意保留在 extra 里但不生效
+	//（applyOpenAICodexTurnStateOverrideWSManualOnly），按配置判会把握手时那一个陈旧
+	// blob 强按进整条连接的每一帧。上游解析覆写时会把实际注入值写进上下文。
+	forcedTurnStateOverride := turnState != "" && turnState == openAITurnStateInjectedFromContext(c)
 	if meta := gjson.GetBytes(payload, "client_metadata"); !meta.Exists() || meta.IsObject() {
 		if turnState = strings.TrimSpace(turnState); turnState != "" {
 			existing := gjson.GetBytes(payload, "client_metadata."+openAICodexTurnStateHeader)
-			if existing.Type != gjson.String || strings.TrimSpace(existing.Str) == "" {
+			// 默认「缺失才补」：真客户端自带的 blob 不覆盖。
+			// 但账号级覆写是管理员的显式动作，必须盖过自带值——双开 WS 路径上握手头
+			// 已被 enforceCodexIdentityHeaders 删掉（turn-state 只走帧内），这里再让步
+			// 就等于「配了但静默失效」，而使用记录仍按配置记 overridden=true，
+			// 污染这个功能唯一要产出的诊断数据。
+			if forcedTurnStateOverride ||
+				existing.Type != gjson.String || strings.TrimSpace(existing.Str) == "" {
 				payload = setCodexWSClientMetadataString(payload, openAICodexTurnStateHeader, turnState)
 			}
 		}

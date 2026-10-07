@@ -25,4 +25,14 @@ func TestUsageStatsCacheKey_StableAndDistinct(t *testing.T) {
 	withUser := base
 	withUser.UserID = 7
 	require.NotEqual(t, k1, usageStatsCacheKey(withUser), "different user must change key")
+
+	// 漏掉任何一个进 WHERE 的筛选维度，30s 内切换该筛选就会拿到上一次的统计。
+	withTurnState := base
+	withTurnState.TurnState = usagestats.TurnStateFilterHealthy
+	require.NotEqual(t, k1, usageStatsCacheKey(withTurnState), "different turn_state must change key")
+
+	otherTurnState := base
+	otherTurnState.TurnState = usagestats.TurnStateFilterSuspect
+	require.NotEqual(t, usageStatsCacheKey(withTurnState), usageStatsCacheKey(otherTurnState),
+		"两个不同的 turn-state 取值不得共用缓存")
 }
