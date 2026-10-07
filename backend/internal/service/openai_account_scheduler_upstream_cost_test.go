@@ -770,13 +770,13 @@ func TestBuildOpenAISelectionOrderIncludesOverflowOnlyForCostScheduling(t *testi
 		{account: &Account{ID: 3}, loadInfo: &AccountLoadInfo{}, score: 1},
 	}
 
-	legacy := scheduler.buildOpenAISelectionOrder(OpenAIAccountScheduleRequest{}, openAIAccountLoadPlan{
+	legacy := scheduler.buildOpenAISelectionOrder(context.Background(), OpenAIAccountScheduleRequest{}, openAIAccountLoadPlan{
 		candidates: candidates,
 		topK:       1,
 	})
 	require.Len(t, legacy, 1)
 
-	costAware := scheduler.buildOpenAISelectionOrder(OpenAIAccountScheduleRequest{}, openAIAccountLoadPlan{
+	costAware := scheduler.buildOpenAISelectionOrder(context.Background(), OpenAIAccountScheduleRequest{}, openAIAccountLoadPlan{
 		candidates:              candidates,
 		topK:                    1,
 		includeOverflowFallback: true,

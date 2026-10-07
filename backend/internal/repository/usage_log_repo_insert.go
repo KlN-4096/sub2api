@@ -95,6 +95,9 @@ var usageLogInsertArgTypes = [...]string{
 	"text",        // safety_buffering_faster_model
 	"text",        // route_gateway
 	"text",        // route_pair
+	"boolean",     // route_pair_overridden
+	"text",        // route_pair_pool_gateway
+	"text",        // route_pair_pool_version
 	"timestamptz", // created_at
 }
 
@@ -306,6 +309,9 @@ func (r *usageLogRepository) createSingle(ctx context.Context, sqlq sqlExecutor,
 			safety_buffering_faster_model,
 			route_gateway,
 			route_pair,
+			route_pair_overridden,
+			route_pair_pool_gateway,
+			route_pair_pool_version,
 			created_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9,
@@ -313,7 +319,7 @@ func (r *usageLogRepository) createSingle(ctx context.Context, sqlq sqlExecutor,
 			$12, $13, $14, $15,
 			$16, $17, $18, $19,
 			$20, $21, $22, $23, $24, $25,
-			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72
+			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75
 		)
 		ON CONFLICT (request_id, api_key_id) DO NOTHING
 		RETURNING id, created_at
@@ -776,6 +782,9 @@ func buildUsageLogBatchInsertQuery(keys []string, preparedByKey map[string]usage
 			safety_buffering_faster_model,
 			route_gateway,
 			route_pair,
+			route_pair_overridden,
+			route_pair_pool_gateway,
+			route_pair_pool_version,
 			created_at
 		) AS (VALUES `)
 
@@ -881,6 +890,9 @@ func buildUsageLogBatchInsertQuery(keys []string, preparedByKey map[string]usage
 				safety_buffering_faster_model,
 				route_gateway,
 				route_pair,
+				route_pair_overridden,
+				route_pair_pool_gateway,
+				route_pair_pool_version,
 				created_at
 			)
 			SELECT
@@ -955,6 +967,9 @@ func buildUsageLogBatchInsertQuery(keys []string, preparedByKey map[string]usage
 				safety_buffering_faster_model,
 				route_gateway,
 				route_pair,
+				route_pair_overridden,
+				route_pair_pool_gateway,
+				route_pair_pool_version,
 				created_at
 			FROM input
 			ON CONFLICT (request_id, api_key_id) DO NOTHING
@@ -1069,6 +1084,9 @@ func buildUsageLogBestEffortInsertQuery(preparedList []usageLogInsertPrepared) (
 			safety_buffering_faster_model,
 			route_gateway,
 			route_pair,
+			route_pair_overridden,
+			route_pair_pool_gateway,
+			route_pair_pool_version,
 			created_at
 		) AS (VALUES `)
 
@@ -1169,6 +1187,9 @@ func buildUsageLogBestEffortInsertQuery(preparedList []usageLogInsertPrepared) (
 			safety_buffering_faster_model,
 			route_gateway,
 			route_pair,
+			route_pair_overridden,
+			route_pair_pool_gateway,
+			route_pair_pool_version,
 			created_at
 		)
 		SELECT
@@ -1243,6 +1264,9 @@ func buildUsageLogBestEffortInsertQuery(preparedList []usageLogInsertPrepared) (
 			safety_buffering_faster_model,
 			route_gateway,
 			route_pair,
+			route_pair_overridden,
+			route_pair_pool_gateway,
+			route_pair_pool_version,
 			created_at
 		FROM input
 		ON CONFLICT (request_id, api_key_id) DO NOTHING
@@ -1325,6 +1349,9 @@ func execUsageLogInsertNoResult(ctx context.Context, sqlq sqlExecutor, prepared 
 			safety_buffering_faster_model,
 			route_gateway,
 			route_pair,
+			route_pair_overridden,
+			route_pair_pool_gateway,
+			route_pair_pool_version,
 			created_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9,
@@ -1332,7 +1359,7 @@ func execUsageLogInsertNoResult(ctx context.Context, sqlq sqlExecutor, prepared 
 			$12, $13, $14, $15,
 			$16, $17, $18, $19,
 			$20, $21, $22, $23, $24, $25,
-			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72
+			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75
 		)
 		ON CONFLICT (request_id, api_key_id) DO NOTHING
 	`, prepared.args...)
@@ -1384,6 +1411,9 @@ func prepareUsageLogInsert(log *service.UsageLog) usageLogInsertPrepared {
 	safetyBufferingFasterModel := nullString(log.SafetyBufferingFasterModel)
 	routeGateway := nullString(log.RouteGateway)
 	routePair := nullString(log.RoutePair)
+	routePairOverridden := nullBool(log.RoutePairOverridden)
+	routePairPoolGateway := nullString(log.RoutePairPoolGateway)
+	routePairPoolVersion := nullString(log.RoutePairPoolVersion)
 	requestedModel := strings.TrimSpace(log.RequestedModel)
 	if requestedModel == "" {
 		requestedModel = strings.TrimSpace(log.Model)
@@ -1474,6 +1504,9 @@ func prepareUsageLogInsert(log *service.UsageLog) usageLogInsertPrepared {
 			safetyBufferingFasterModel, // safety_buffering_faster_model
 			routeGateway,               // route_gateway
 			routePair,                  // route_pair
+			routePairOverridden,        // route_pair_overridden
+			routePairPoolGateway,       // route_pair_pool_gateway
+			routePairPoolVersion,       // route_pair_pool_version
 			createdAt,
 		},
 	}
