@@ -616,6 +616,8 @@ func NewOpenAIGatewayService(
 	}
 	svc.logOpenAIWSModeBootstrap()
 	svc.codexSideCalls = newCodexSideCallState()
+	// 网关池接管推理面的路由 cookie（openai_gwpool.go）。配置全在账号 extra 上，客户端按需建。
+	svc.codexCookies.identity = svc.codexCredentialIdentity
 	return svc
 }
 

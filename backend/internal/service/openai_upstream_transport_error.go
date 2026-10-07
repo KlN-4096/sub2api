@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -67,6 +68,14 @@ var persistentUpstreamTransportErrorMarkers = []string{
 //     net even though the typed checks should cover them on modern Go+Linux.
 func classifyUpstreamTransportError(err error) upstreamTransportErrorClass {
 	if err == nil {
+		return upstreamTransportErrorClass{}
+	}
+
+	// 网关池这一侧的失败不是这个账号的代理/网络故障：重启池子、改端口、容器没起都是日常操作，
+	// 而它们的报错字面（connection refused / no such host）和真实代理死掉一模一样，照字符串判就会
+	// 把一批真账号按「代理持久故障」停调度 10 分钟并发告警。失败仍然 failover、仍然记 Ops 错误，
+	// 只是不摘账号（openai_gwpool.go / pkg/gwpool）。
+	if errors.Is(err, gwpool.ErrPool) || errors.Is(err, ErrGatewayPoolWSIncompatible) {
 		return upstreamTransportErrorClass{}
 	}
 

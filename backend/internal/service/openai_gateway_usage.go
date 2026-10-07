@@ -427,7 +427,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	usageLog.SafetyBufferingFasterModel = usageCodexSafetyBufferingFasterModelPtr(result.UpstreamHeaders)
 	// 路由对读数（openai_codex_route_cookies.go）：上游新下发就记新的，否则回读罐里当前那一组。
 	// 纯观测，不参与任何判定。
-	routePair := s.routePairInUse(account, result.UpstreamHeaders)
+	routePair := s.routePairInUse(ctx, account, result.UpstreamHeaders)
 	usageLog.RoutePair = usageCodexRoutePairPtr(routePair)
 	usageLog.RouteGateway = usageCodexRouteGatewayPtr(routePair)
 	isVideoUsage := isGrokVideoUsageResult(result, billingModels)
