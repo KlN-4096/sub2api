@@ -1832,6 +1832,37 @@
         </div>
       </div>
 
+      <!-- 原样中继（klno，仅 OpenAI API Key）：下一跳是另一个 sub2api 时用 -->
+      <div
+        v-if="account?.platform === 'openai' && account?.type === 'apikey'"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <div class="flex items-center justify-between">
+          <div>
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.rawRelay') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.openai.rawRelayDesc') }}
+            </p>
+          </div>
+          <button
+            type="button"
+            data-testid="edit-openai-raw-relay-toggle"
+            @click="openaiRawRelayEnabled = !openaiRawRelayEnabled"
+            :class="[
+              'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+              openaiRawRelayEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+            ]"
+          >
+            <span
+              :class="[
+                'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+                openaiRawRelayEnabled ? 'translate-x-5' : 'translate-x-0'
+              ]"
+            />
+          </button>
+        </div>
+      </div>
+
       <!-- OpenAI Codex namespace 工具摊平（兼容开关，仅 OAuth） -->
       <div
         v-if="account?.platform === 'openai' && account?.type === 'oauth'"
@@ -3626,9 +3657,10 @@ const accountHasOpenAIExtraSettings = computed(() => hasOpenAIExtraSettings(prop
 // 与后端 Account.TargetsChatGPTCodexUpstream() 严格对齐：只有最终落到 ChatGPT Codex
 // 后端的账号才认 turn-state 覆写。apikey 走的是别的上游，后端会忽略，露出输入框
 // 等于让管理员配一个静默失效的值。
+// cpr 走原样中继，turn-state 由客户端与 CPR 自己往返，不提供替换设置（2026-09-23）
 const accountSupportsTurnStateOverride = computed(() =>
   props.account?.platform === 'openai' &&
-  ['oauth', 'setup-token', 'cpr'].includes(props.account?.type || '')
+  ['oauth', 'setup-token'].includes(props.account?.type || '')
 )
 
 const isSparkShadow = computed(() => props.account?.parent_account_id != null)
@@ -4421,6 +4453,8 @@ const customBaseUrl = ref('')
 
 // OpenAI 自动透传开关（OAuth/API Key）
 const openaiPassthroughEnabled = ref(false)
+// 原样中继（klno，仅 OpenAI API Key）
+const openaiRawRelayEnabled = ref(false)
 // OpenAI Codex namespace 工具摊平兼容开关（仅 OAuth），缺省关闭即原样保留
 const openaiFlattenNamespacesEnabled = ref(false)
 const openAILongContextBillingEnabled = ref(false)
@@ -4919,6 +4953,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 
   // Load OpenAI passthrough toggle (OpenAI OAuth/SetupToken/API Key)
   openaiPassthroughEnabled.value = false
+  openaiRawRelayEnabled.value = false
   openaiFlattenNamespacesEnabled.value = false
   openAILongContextBillingEnabled.value = false
   editPlanType.value = ''
@@ -4939,6 +4974,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   webSearchEmulationMode.value = 'default'
   if (hasOpenAIExtraSettings(newAccount)) {
     openaiPassthroughEnabled.value = extra?.openai_passthrough === true || extra?.openai_oauth_passthrough === true
+    openaiRawRelayEnabled.value = newAccount.type === 'apikey' && extra?.openai_raw_relay === true
     openaiFlattenNamespacesEnabled.value =
       newAccount.type === 'oauth' && extra?.openai_responses_flatten_namespaces === true
     const longContextBillingValue = extra?.openai_long_context_billing_enabled
@@ -6483,6 +6519,13 @@ const handleSubmit = async () => {
       } else {
         delete newExtra.openai_passthrough
         delete newExtra.openai_oauth_passthrough
+      }
+      if (props.account.type === 'apikey') {
+        if (openaiRawRelayEnabled.value) {
+          newExtra.openai_raw_relay = true
+        } else {
+          delete newExtra.openai_raw_relay
+        }
       }
       // 缺省即保留 namespace，不写空值，避免 extra 里堆积默认项。
       // cpr 不在此处落键也不清键：这个开关没有对应 UI（表单 ref 恒为默认值），

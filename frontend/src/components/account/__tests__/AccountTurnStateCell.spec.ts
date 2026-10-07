@@ -50,7 +50,7 @@ const account = (pool: unknown, extra: Record<string, unknown> = {}): Account =>
   ({
     id: 1,
     platform: 'openai',
-    type: 'cpr',
+    type: 'oauth',
     extra: { openai_turn_state_auto: true, openai_turn_state_pool: pool, ...extra }
   }) as unknown as Account
 
@@ -575,6 +575,33 @@ describe('AccountTurnStateCell', () => {
         render(account([], { openai_turn_state_recovery: { enabled: false } }))
           .find('[data-testid="account-turn-state-recovery"]').exists()
       ).toBe(false)
+    })
+  })
+  // cpr 走原样中继（2026-09-23）：只观测不替换。extra 里残留的手填、候选池、猎手、恢复探测
+  // 配置一律不展示，也不报「裸奔」。
+  describe('cpr 只显示形态观测', () => {
+    const cpr = (extra: Record<string, unknown>): Account =>
+      ({ id: 2, platform: 'openai', type: 'cpr', extra }) as unknown as Account
+
+    it('残留的候选池、手填与猎手/恢复探测都不展示，只剩观测行', () => {
+      const w = render(
+        cpr({
+          openai_turn_state_auto: true,
+          openai_turn_state_pool: [cand('gpt-5.6-luna', 60)],
+          openai_turn_state_override: { 'gpt-5.6-luna': turnStateFixture(nowSec - 60, 10) },
+          openai_turn_state_observed: obs('gpt-5.6-luna', 30),
+          openai_turn_state_hunter: { enabled: true, max_per_hour: 30 },
+          openai_turn_state_recovery: { enabled: true }
+        })
+      )
+      expect(rows(w)).toEqual(['admin.accounts.openai.turnStatePool.observedTag|gpt-5.6-luna'])
+      expect(w.find('[data-testid="account-turn-state-hunter"]').exists()).toBe(false)
+      expect(w.find('[data-testid="account-turn-state-recovery"]').exists()).toBe(false)
+    })
+
+    it('池子空、最近还在铸票也不报裸奔', () => {
+      const w = render(cpr({ openai_turn_state_auto: true, openai_turn_state_observed: obs('gpt-5.6-luna', 30, 11) }))
+      expect(w.get('[data-testid="account-turn-state-empty"]').attributes('data-starved')).toBe('false')
     })
   })
 })

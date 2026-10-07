@@ -2,8 +2,9 @@
 
 package service
 
-// Integration-level tests for GPT-6 Astra reasoning.mode preservation through
-// OpenAIGatewayService.Forward.
+// Integration-level tests for GPT-6 Astra reasoning.mode handling through
+// OpenAIGatewayService.Forward: the request aligns with the real Codex client,
+// which never sends reasoning.mode; the response side keeps it verbatim.
 //
 // These exercise the real forward pipeline through the httpUpstreamRecorder mock
 // (no real network / credentials / config), covering the OpenAI OAuth account
@@ -117,23 +118,23 @@ func TestForward_AstraOAuth_NonAstraLegacyStillStrips(t *testing.T) {
 		"non-Astra legacy mode=pro without effort injects max")
 }
 
-// TestForward_AstraOAuth_ModeMatrix_Preserved runs the pro/standard/missing-mode
-// x effort=max matrix across both forward branches and both client stream modes.
+// TestForward_AstraOAuth_ModeMatrix_AlignedWithCodex runs the pro/standard/missing-mode
+// x effort matrix across both forward branches and both client stream modes.
 // Every attempt receives an upstream SSE fixture; assertions check the final
-// upstream request keeps mode/effort and the URL is the Codex responses endpoint.
-func TestForward_AstraOAuth_ModeMatrix_Preserved(t *testing.T) {
+// upstream request drops mode (mode=pro without effort becomes effort=max), keeps
+// effort, and the URL is the Codex responses endpoint.
+func TestForward_AstraOAuth_ModeMatrix_AlignedWithCodex(t *testing.T) {
 	cases := []struct {
 		name    string
 		mode    string
 		effort  string
-		wantMod string // gjson string value; "" == absent
 		wantEff string
 	}{
-		{name: "pro+max", mode: "pro", effort: "max", wantMod: "pro", wantEff: "max"},
-		{name: "standard+max", mode: "standard", effort: "max", wantMod: "standard", wantEff: "max"},
-		{name: "missing mode + max", mode: "", effort: "max", wantMod: "", wantEff: "max"},
-		{name: "pro+high", mode: "pro", effort: "high", wantMod: "pro", wantEff: "high"},
-		{name: "pro no effort", mode: "pro", effort: "", wantMod: "pro", wantEff: ""},
+		{name: "pro+max", mode: "pro", effort: "max", wantEff: "max"},
+		{name: "standard+max", mode: "standard", effort: "max", wantEff: "max"},
+		{name: "missing mode + max", mode: "", effort: "max", wantEff: "max"},
+		{name: "pro+high", mode: "pro", effort: "high", wantEff: "high"},
+		{name: "pro no effort", mode: "pro", effort: "", wantEff: "max"},
 	}
 	for _, passthrough := range []bool{false, true} {
 		branch := "native-codex"
@@ -162,19 +163,8 @@ func TestForward_AstraOAuth_ModeMatrix_Preserved(t *testing.T) {
 					forwarded := s.upstream.lastBody
 					require.Equal(t, "gpt-6-astra", gjson.GetBytes(forwarded, "model").String())
 
-					mode := gjson.GetBytes(forwarded, "reasoning.mode")
-					if tt.wantMod == "" {
-						require.False(t, mode.Exists(), "mode should be absent for %q", tt.name)
-					} else {
-						require.True(t, mode.Exists(), "Astra mode must be preserved for %q", tt.name)
-						require.Equal(t, tt.wantMod, mode.String())
-					}
-					eff := gjson.GetBytes(forwarded, "reasoning.effort")
-					if tt.wantEff == "" {
-						require.False(t, eff.Exists(), "no effort injected when omitted for %q", tt.name)
-					} else {
-						require.Equal(t, tt.wantEff, eff.String(), "Astra effort preserved for %q", tt.name)
-					}
+					require.False(t, gjson.GetBytes(forwarded, "reasoning.mode").Exists(), "mode must be dropped for %q", tt.name)
+					require.Equal(t, tt.wantEff, gjson.GetBytes(forwarded, "reasoning.effort").String(), "effort for %q", tt.name)
 				})
 			}
 		}
