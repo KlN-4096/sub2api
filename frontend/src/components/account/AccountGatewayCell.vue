@@ -94,7 +94,7 @@
       </button>
     </div>
     <p v-if="usesPool && runtime" class="truncate border-t border-gray-100 pt-2 text-[10px] text-gray-500 dark:border-gray-700 dark:text-gray-400" data-testid="account-gateway-usage-history">
-      {{ t('admin.accounts.openai.gatewayRuntime.archived', { count: runtime.archived?.all?.rounds || 0, duration: formatUseTime(runtime.archived?.all?.duration_ms || 0) }) }}
+      {{ t('admin.accounts.openai.gatewayRuntime.archived', { count: historyUsage.rounds, duration: formatUseTime(historyUsage.durationMS) }) }}
     </p>
   </div>
 </template>
@@ -162,6 +162,21 @@ const liveTickets = computed(() => {
   return snapshot.tickets.filter((ticket) => !validTimestamp(ticket.expires_at) || Date.parse(ticket.expires_at!) > now.value)
 })
 const activeRounds = computed(() => runtime.value?.rounds.filter((round) => round.model === 'all' && !round.ended_at) || [])
+const historyUsage = computed(() => {
+  const snapshot = runtime.value
+  const total = {
+    rounds: snapshot?.archived?.all?.rounds || 0,
+    durationMS: Math.max(0, snapshot?.archived?.all?.duration_ms || 0)
+  }
+  // Retained closed rounds and compressed archives are disjoint. Use measured
+  // full-use duration, never wall time; ongoing and legacy model rounds stay out.
+  for (const round of snapshot?.rounds || []) {
+    if (round.model !== 'all' || !validTimestamp(round.ended_at)) continue
+    total.rounds++
+    total.durationMS += Math.max(0, round.full_duration_ms || 0)
+  }
+  return total
+})
 function validTimestamp(value?: string): boolean {
   return !!value && Number.isFinite(Date.parse(value)) && Date.parse(value) > 0
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,9 +20,12 @@ const (
 )
 
 type gatewayPoolRestState struct {
-	Tag       string                `json:"tag"`
-	Active    bool                  `json:"active"`
-	ChangedAt time.Time             `json:"changed_at"`
+	Tag       string    `json:"tag"`
+	Active    bool      `json:"active"`
+	ChangedAt time.Time `json:"changed_at"`
+	StartedAt time.Time `json:"started_at,omitzero"`
+	ResumeAt  time.Time `json:"resume_at,omitzero"`
+	// Decode old records, but never use a legacy recheck as a local deadline.
 	NextCheck time.Time             `json:"next_check,omitzero"`
 	Previous  *gatewayPoolRestState `json:"previous,omitempty"`
 }
@@ -143,7 +147,7 @@ func (s *OpenAIGatewayService) writeGatewayPoolRest(ctx context.Context, account
 		return errors.New("gateway rest write identity changed")
 	}
 	// Lock order matches usage maintenance: history, then inventory. Hold the
-	// final generation check through durable publication, not just the listing.
+	// final generation check through durable publication, not just the deadline calculation.
 	unlockInventory, err := lockInventory()
 	if err != nil {
 		return err
@@ -157,11 +161,15 @@ func (s *OpenAIGatewayService) writeGatewayPoolRest(ctx context.Context, account
 		gatewayPoolRestStateKey: state, gatewayPoolRestTagKey: state.Tag, gatewayPoolRestPreviousTagKey: previousTag,
 	}
 	if atomicRepo, ok := s.accountRepo.(gatewayPoolRestRepository); ok && state.Active {
-		err = atomicRepo.SetGatewayPoolRest(ctx, account.ID, state.NextCheck, gatewayPoolRestReason(fresh), patch)
+		err = atomicRepo.SetGatewayPoolRest(ctx, account.ID, state.ResumeAt, gatewayPoolRestReason(fresh), patch)
+	} else if clearRepo, ok := s.accountRepo.(gatewayPoolClearRestRepository); ok && !state.Active {
+		err = clearRepo.ClearGatewayPoolRest(ctx, account.ID, patch)
 	} else {
 		err = s.accountRepo.UpdateExtra(ctx, account.ID, patch)
 		if err == nil && state.Active {
-			err = s.accountRepo.SetTempUnschedulable(ctx, account.ID, state.NextCheck, gatewayPoolRestReason(fresh))
+			err = s.accountRepo.SetTempUnschedulable(ctx, account.ID, state.ResumeAt, gatewayPoolRestReason(fresh))
+		} else if err == nil && gatewayPoolOwnsTempBlock(fresh) {
+			err = s.accountRepo.ClearTempUnschedulable(ctx, account.ID)
 		}
 	}
 	if err != nil {
@@ -172,9 +180,14 @@ func (s *OpenAIGatewayService) writeGatewayPoolRest(ctx context.Context, account
 }
 
 func gatewayPoolRestReason(account *Account) string {
-	return fmt.Sprintf("网关候选低于%d，休息后达到%d才恢复 / Gateway candidates below %d; resume at %d",
+	return fmt.Sprintf("网关候选低于%d，按%d个本地冷却截止恢复 / Gateway candidates below %d; resume after %d local cooldowns",
 		account.gatewayPoolRotationMinGateways(), account.gatewayPoolResumeGateways(),
 		account.gatewayPoolRotationMinGateways(), account.gatewayPoolResumeGateways())
+}
+
+func gatewayPoolOwnsTempBlock(account *Account) bool {
+	return account != nil && strings.HasPrefix(account.TempUnschedulableReason, "网关候选低于") &&
+		strings.Contains(account.TempUnschedulableReason, " / Gateway candidates below ")
 }
 
 func (s *gatewayPoolRestState) advance(now time.Time) {
@@ -196,17 +209,21 @@ func (s *OpenAIGatewayService) enterGatewayPoolRest(ctx context.Context, account
 	state, fresh, err := s.loadGatewayPoolRest(ctx, account, identity)
 	if err != nil {
 		// A known shortage stays blocked locally even when persistence fails.
-		state = gatewayPoolRestState{Tag: tag, Active: true, ChangedAt: at, NextCheck: until}
+		state = gatewayPoolRestState{Tag: tag, Active: true, ChangedAt: at, StartedAt: at, ResumeAt: until}
 		s.codexCookies.poolRestState.Store(tag, state)
+		s.wakeGatewayPoolRestTimer()
 		return err
 	}
 	if at.Before(state.ChangedAt) {
 		return nil // late shortage result cannot undo a newer recovery
 	}
-	state.Active = true
-	state.NextCheck = until
+	if !state.Active {
+		state.StartedAt = at
+	}
+	state.Active, state.ResumeAt, state.NextCheck = true, until, time.Time{}
 	state.advance(at)
 	s.codexCookies.poolRestState.Store(tag, state) // fail closed even on a write failure
+	s.wakeGatewayPoolRestTimer()
 	return s.writeGatewayPoolRest(ctx, fresh, identity, state)
 }
 
@@ -231,7 +248,7 @@ func (s *OpenAIGatewayService) gatewayPoolResumeAllowed(ctx context.Context, acc
 	if err != nil {
 		return false, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, gatewayPoolWarmNoteTimeout+account.gatewayPoolListTimeout())
+	ctx, cancel := context.WithTimeout(ctx, gatewayPoolWarmNoteTimeout)
 	defer cancel()
 	unlock, err := s.lockGatewayPoolRest(ctx, gatewayPoolLedgerTag(identity))
 	if err != nil {
@@ -239,63 +256,54 @@ func (s *OpenAIGatewayService) gatewayPoolResumeAllowed(ctx context.Context, acc
 	}
 	defer unlock()
 	state, fresh, err := s.loadGatewayPoolRest(ctx, account, identity)
-	if err != nil || !state.Active {
-		return err == nil, err
-	}
-	now := time.Now().UTC()
-	if !allowResume || now.Before(state.NextCheck) || !fresh.IsSchedulable() {
-		return false, nil
-	}
-	generation, enough := s.gatewayPoolHasRecoveryCandidates(ctx, fresh, identity)
-	if enough {
-		state.Active, state.NextCheck = false, time.Time{}
-	} else {
-		state.NextCheck = now.Add(s.codexCookies.gatewayPoolRestDuration(identity, fresh, now))
-	}
-	state.advance(now)
-	var expected []uint64
-	if enough {
-		expected = []uint64{generation}
-	}
-	if err := s.writeGatewayPoolRest(ctx, fresh, identity, state, expected...); err != nil {
-		return false, err // recovery is published only after the tombstone is durable
-	}
-	if !enough {
-		return false, nil
-	}
-	s.codexCookies.poolRounds.recovered(identity)
-	return true, nil
-}
-
-func (s *OpenAIGatewayService) gatewayPoolHasRecoveryCandidates(ctx context.Context, account *Account, identity string) (uint64, bool) {
-	if err := s.codexCookies.hydrateGatewayPoolSharedHistory(ctx, account, identity); err != nil {
-		return 0, false
-	}
-	generation, active, _ := s.codexCookies.gatewayPoolInventoryCandidates(identity, account)
-	if active {
-		return generation, false
-	}
-	pool, err := s.codexCookies.poolClient(account)
 	if err != nil {
-		return generation, false
+		return false, err
 	}
-	listCtx, cancel := context.WithTimeout(ctx, account.gatewayPoolListTimeout())
-	defer cancel()
-	gateways, err := pool.Gateways(listCtx, gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(account, identity))
-	if err != nil {
-		return generation, false
-	}
-	available := make(map[string]struct{})
-	for _, gateway := range gateways {
-		if gateway.Name != "" && gateway.PairReady {
-			if _, cooling := s.codexCookies.gatewayPoolUsedAt(identity, gateway.Name,
-				account.gatewayPoolGatewayWindow(), account.gatewayPoolUseRecommendation()); !cooling {
-				available[gateway.Name] = struct{}{}
+	if !state.Active {
+		// A clone can still carry a pool-owned block after another row published
+		// the shared inactive tombstone. Retry its cleanup independently.
+		if !state.ChangedAt.IsZero() && gatewayPoolOwnsTempBlock(fresh) {
+			if err := s.writeGatewayPoolRest(ctx, fresh, identity, state); err != nil {
+				return false, err
 			}
 		}
+		return true, nil
 	}
-	after, pending, _ := s.codexCookies.gatewayPoolInventoryCandidates(identity, account)
-	return generation, !pending && after == generation && len(available) >= account.gatewayPoolResumeGateways()
+	if !allowResume {
+		return false, nil
+	}
+	if err := s.codexCookies.hydrateGatewayPoolSharedHistory(ctx, fresh, identity); err != nil {
+		return false, err
+	}
+	generation, active, _ := s.codexCookies.gatewayPoolInventoryCandidates(identity, fresh)
+	if active {
+		return false, errors.New("gateway local recovery work still in flight")
+	}
+	now := time.Now().UTC()
+	until := s.codexCookies.gatewayPoolLocalResumeAt(identity, fresh)
+	if until.After(now) {
+		if state.ResumeAt.Equal(until) && state.NextCheck.IsZero() {
+			return false, nil
+		}
+		state.ResumeAt, state.NextCheck = until, time.Time{}
+		state.advance(now)
+		err = s.writeGatewayPoolRest(ctx, fresh, identity, state, generation)
+		if err == nil {
+			s.wakeGatewayPoolRestTimer()
+		}
+		return false, err
+	}
+	state.Active, state.ResumeAt, state.NextCheck = false, time.Time{}, time.Time{}
+	state.advance(now)
+	if err := s.writeGatewayPoolRest(ctx, fresh, identity, state, generation); err != nil {
+		return false, err // recovery is published only after the tombstone is durable
+	}
+	s.codexCookies.poolRounds.recovered(identity)
+	health := *fresh
+	if gatewayPoolOwnsTempBlock(fresh) {
+		health.TempUnschedulableUntil = nil
+	}
+	return health.IsSchedulable(), nil
 }
 
 func gatewayPoolRestError() error {

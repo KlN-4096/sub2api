@@ -332,7 +332,7 @@ func TestGatewayPoolCooldownResetRunsWithoutOutboxOrModelRequests(t *testing.T) 
 	for id := range repo.rows {
 		require.NoError(t, repo.UpdateExtra(ctx, id, map[string]any{openAIGatewayPoolBaseURLExtraKey: server.URL}))
 	}
-	svc.flushGatewayPoolReports(ctx)
+	svc.maintainGatewayPoolRests(ctx)
 	require.False(t, svc.codexCookies.gatewayPoolCooldownResetAt(identity).IsZero())
 	require.Zero(t, calls.Load())
 }

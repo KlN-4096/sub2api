@@ -9,57 +9,73 @@ import (
 )
 
 const (
-	gatewayPoolRestMin     = 30 * time.Second
-	gatewayPoolRestMax     = 10 * time.Minute
-	gatewayPoolRestDefault = time.Minute
+	gatewayPoolRestMin = 30 * time.Second // client retry hint, not a recovery deadline
 )
 
-// Estimate when X distinct locally known gateways could be retried. Inventory
-// can improve independently, so even a distant cooldown is re-evaluated within
-// ten minutes. This never declares those future candidates verified.
-func (s *openAICodexCookieStore) gatewayPoolRestDuration(identity string, account *Account, now time.Time) time.Duration {
+// No pool I/O. With fewer than N known gateways, wait for all known cooldowns.
+// No history means no local cooldown rest, not an invented retry interval.
+func (s *openAICodexCookieStore) gatewayPoolLocalResumeAt(identity string, account *Account) time.Time {
 	prefix := gatewayPoolLedgerIdentity(identity) + "\x00"
 	var eligibleAt []time.Time
+	known := map[string]time.Time{}
+	s.poolKnown.Range(func(key, _ any) bool {
+		if name, ok := key.(string); ok && strings.HasPrefix(name, prefix) {
+			known[name] = time.Time{}
+		}
+		return true
+	})
 	s.poolUsed.Range(func(key, value any) bool {
 		name, ok := key.(string)
 		at, timeOK := value.(time.Time)
+		if ok && timeOK && strings.HasPrefix(name, prefix) && !at.IsZero() {
+			known[name] = at
+		}
+		return true
+	})
+	for name, at := range known {
 		gateway, matches := strings.CutPrefix(name, prefix)
-		if !ok || !timeOK || !matches || gateway == "" {
-			return true
+		if !matches || gateway == "" {
+			continue
+		}
+		clearAt := s.gatewayPoolCooldownClearAt(identity)
+		if !at.After(clearAt) && !clearAt.IsZero() {
+			eligibleAt = append(eligibleAt, clearAt)
+			continue
+		}
+		if at.IsZero() {
+			continue
 		}
 		_, _ = s.gatewayPoolUsedAt(identity, gateway, account.gatewayPoolGatewayWindow(), account.gatewayPoolUseRecommendation())
 		base, _ := s.gatewayPoolInitialCooldown(identity, gateway, account.gatewayPoolGatewayWindow(), account.gatewayPoolUseRecommendation())
 		until := at.Add(time.Duration(base) * time.Second)
 		if cooldown, found := s.cooldownEntry(identity, gateway); found {
 			until = cooldown.Until
-			if touched := at.Add(time.Duration(cooldown.WindowSeconds) * time.Second); touched.After(until) {
+			if touched := at.Add(time.Duration(cooldown.WindowSeconds) * time.Second); !cooldown.Cleared && touched.After(until) {
 				until = touched
 			}
 		}
 		eligibleAt = append(eligibleAt, until)
-		return true
-	})
+	}
 	sort.Slice(eligibleAt, func(i, j int) bool { return eligibleAt[i].Before(eligibleAt[j]) })
-	delay := gatewayPoolRestDefault
-	threshold := account.gatewayPoolResumeGateways()
-	if len(eligibleAt) >= threshold {
-		estimated := eligibleAt[threshold-1].Sub(now)
-		if estimated > 0 {
-			delay = estimated
-		}
+	if len(eligibleAt) == 0 {
+		return time.Time{}
 	}
-	if delay < gatewayPoolRestMin {
-		delay = gatewayPoolRestMin
+	return eligibleAt[min(account.gatewayPoolResumeGateways(), len(eligibleAt))-1]
+}
+
+func (s *openAICodexCookieStore) gatewayPoolRestDuration(identity string, account *Account, now time.Time) time.Duration {
+	if until := s.gatewayPoolLocalResumeAt(identity, account); until.After(now) {
+		return until.Sub(now)
 	}
-	if delay > gatewayPoolRestMax {
-		delay = gatewayPoolRestMax
-	}
-	return delay
+	return 0
 }
 
 func (s *OpenAIGatewayService) restGatewayPoolAccount(ctx context.Context, account *Account, identity string, group int64) {
 	now := time.Now()
-	until := now.Add(s.codexCookies.gatewayPoolRestDuration(identity, account, now))
+	until := s.codexCookies.gatewayPoolLocalResumeAt(identity, account)
+	if !until.After(now) {
+		return // supply-only shortages remain ordinary ticket-acquisition failures
+	}
 	s.codexCookies.poolRounds.rest(group, identity, until)
 	if err := s.enterGatewayPoolRest(ctx, account, identity, now, until); err != nil {
 		slog.Warn("gwpool_rest_state_persist_failed", "account_id", account.ID)

@@ -26,20 +26,20 @@ func TestGatewayPoolRotationThresholdCountsSpareAndKeepsVerifiedWindow(t *testin
 	require.False(t, svc.gatewayPoolNoRemainingRoutes(context.Background(), account), "verified window is never preempted")
 }
 
-func TestGatewayPoolRestEstimateUsesNthCooldownWithBounds(t *testing.T) {
+func TestGatewayPoolRestEstimateUsesExactNthCooldown(t *testing.T) {
 	store := &openAICodexCookieStore{}
 	account := gwpoolTestAccount(1)
 	now := time.Now()
-	require.Equal(t, time.Minute, store.gatewayPoolRestDuration(gwpoolTestIdentity, account, now))
+	require.Zero(t, store.gatewayPoolRestDuration(gwpoolTestIdentity, account, now))
 	account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 1
 	store.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, "soon"), now.Add(-time.Hour+10*time.Second))
 	store.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, "later"), now.Add(-time.Hour+5*time.Minute))
-	require.Equal(t, 30*time.Second, store.gatewayPoolRestDuration(gwpoolTestIdentity, account, now))
+	require.Equal(t, 10*time.Second, store.gatewayPoolRestDuration(gwpoolTestIdentity, account, now))
 	account.Extra[openAIGatewayPoolRotationMinGatewaysExtraKey] = 2
 	account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 2
 	require.Equal(t, 5*time.Minute, store.gatewayPoolRestDuration(gwpoolTestIdentity, account, now))
 	store.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, "later"), now)
-	require.Equal(t, 10*time.Minute, store.gatewayPoolRestDuration(gwpoolTestIdentity, account, now))
+	require.Equal(t, time.Hour, store.gatewayPoolRestDuration(gwpoolTestIdentity, account, now))
 }
 
 func TestGatewayPoolRestDoesNotShortenOtherBlockOrDisableAccount(t *testing.T) {

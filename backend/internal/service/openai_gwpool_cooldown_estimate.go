@@ -55,10 +55,10 @@ func (s *openAICodexCookieStore) gatewayPoolCooldownEstimate(identity string, ac
 			deadlines = append(deadlines, until)
 		}
 	}
-	if len(deadlines) < result.ResumeGateways {
-		return result // unknown; never substitute the next recheck time
+	if len(deadlines) == 0 {
+		return result // no local cooldown to wait for
 	}
 	sort.Slice(deadlines, func(i, j int) bool { return deadlines[i].Before(deadlines[j]) })
-	result.EligibleAt = deadlines[result.ResumeGateways-1]
+	result.EligibleAt = deadlines[min(result.ResumeGateways, len(deadlines))-1]
 	return result
 }

@@ -50,6 +50,15 @@ func (r gatewayRotationRepo) SetTempUnschedulable(_ context.Context, id int64, u
 	return nil
 }
 
+func (r gatewayRotationRepo) ClearTempUnschedulable(_ context.Context, id int64) error {
+	for i := range r.accounts {
+		if r.accounts[i].ID == id {
+			r.accounts[i].TempUnschedulableUntil = nil
+			r.accounts[i].TempUnschedulableReason = ""
+		}
+	}
+	return nil
+}
 func rotationAccount(id, group int64) *Account {
 	account := gwpoolTestAccount(id)
 	account.GroupIDs = []int64{group}
