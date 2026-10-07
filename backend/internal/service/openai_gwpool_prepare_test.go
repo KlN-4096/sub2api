@@ -152,7 +152,7 @@ func TestGatewayPoolPreparationSettingsDefaultsAndRecoveryBounds(t *testing.T) {
 	require.Equal(t, 120*time.Second, account.gatewayPoolMaxWait())
 	account.Extra[openAIGatewayPoolWaitEnabledExtraKey] = false
 	require.Equal(t, 120*time.Second, account.gatewayPoolMaxWait(), "obsolete auto-wait switch does not disable queue waiting")
-	require.Equal(t, 1, account.gatewayPoolPreparationRecoveries())
+	require.Zero(t, account.gatewayPoolPreparationRecoveries())
 	for _, value := range []any{0, float64(0), int64(0)} {
 		account.Extra[openAIGatewayPoolRecoveryExtraKey] = value
 		require.Zero(t, account.gatewayPoolPreparationRecoveries())

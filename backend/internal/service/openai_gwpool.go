@@ -317,6 +317,7 @@ var openAIGatewayPoolConfigExtraKeys = []string{
 	openAIGatewayPoolRecoveryExtraKey,
 	openAIGatewayPoolFetchTimeoutExtraKey,
 	openAIGatewayPoolListTimeoutExtraKey,
+	openAIGatewayPoolProbeTimeoutExtraKey,
 	openAIGatewayPoolBaseURLExtraKey,
 	OpenAIGatewayPoolConsumerKeyExtraKey,
 	openAIGatewayPoolProbeModelExtraKey,
@@ -364,6 +365,7 @@ func validateOpenAIGatewayPoolAccountExtra(account *Account, extra map[string]an
 		openAIGatewayPoolWarmTicketsExtraKey:         gatewayPoolWarmMaxTicketsCeiling,
 		openAIGatewayPoolFetchTimeoutExtraKey:        openAIGatewayPoolMaxSeconds,
 		openAIGatewayPoolListTimeoutExtraKey:         openAIGatewayPoolMaxSeconds,
+		openAIGatewayPoolProbeTimeoutExtraKey:        gatewayPoolProbeTimeoutMaxSeconds,
 		openAIGatewayPoolGatewayWindowExtraKey:       openAIGatewayPoolMaxSeconds,
 	} {
 		if raw := extra[key]; raw != nil {

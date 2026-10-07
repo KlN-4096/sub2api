@@ -257,10 +257,9 @@ func TestWarmUpBlocksInconclusiveShotsWithoutCallingThemDegraded(t *testing.T) {
 		replies []gwpoolWarmReply
 		sent    bool // 这张票有没有确证送达上游（拿到过状态码）
 	}{
-		"A 被限流":      {[]gwpoolWarmReply{{status: http.StatusTooManyRequests}}, true},
-		"A 没回 state": {[]gwpoolWarmReply{{status: http.StatusOK}}, true},
-		"B 被拒":       {[]gwpoolWarmReply{{status: http.StatusOK, minted: gwpoolEchoFreshTicket}, {status: http.StatusForbidden}}, true},
-		"传输失败":       {[]gwpoolWarmReply{{err: errors.New("dial tcp: i/o timeout")}}, false},
+		"A 被限流": {[]gwpoolWarmReply{{status: http.StatusTooManyRequests}}, true},
+		"B 被拒":  {[]gwpoolWarmReply{{status: http.StatusOK, minted: gwpoolEchoFreshTicket}, {status: http.StatusForbidden}}, true},
+		"传输失败":  {[]gwpoolWarmReply{{err: errors.New("dial tcp: i/o timeout")}}, false},
 	} {
 		replies, sent := tc.replies, tc.sent
 		t.Run(name, func(t *testing.T) {

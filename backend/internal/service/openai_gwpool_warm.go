@@ -173,7 +173,8 @@ func (s *OpenAIGatewayService) gatewayPoolPrepare(
 			gatewayPoolReleaseUnsent(release)
 			return nil
 		}
-		probeCtx, probeCancel := context.WithTimeout(ctx, gatewayPoolWarmBudget)
+		probeCtx := context.WithValue(ctx, gatewayPoolProbeTimeoutKey{}, fresh.gatewayPoolProbeTimeout())
+		probeCtx, probeCancel := context.WithTimeout(probeCtx, gatewayPoolProbeBudget(probeCtx, fresh))
 		early := applied.early
 		if early != nil {
 			intent, _ := ctx.Value(gatewayPoolEarlyIntentKey{}).(*gatewayPoolEarlyIntent)
@@ -235,6 +236,21 @@ func (s *OpenAIGatewayService) gatewayPoolPrepare(
 				if retry {
 					continue
 				}
+			}
+			if early == nil && ctx.Err() == nil && !errors.Is(perr, context.Canceled) &&
+				gatewayPoolRetryableProbeError(perr) {
+				// An unavailable ticket is not a measured quality failure. Retire
+				// only this version; its existing attempt cooldown keeps it out
+				// of the next selection without training a higher cooldown tier.
+				if s.codexCookies.retireGatewayPoolFailedProbe(identity, applied) {
+					s.noteWarmVerdict(request, fresh, applied, "", false)
+					slog.Warn("gwpool_warm_ticket_retired", "account_id", account.ID,
+						"gateway", applied.Gateway, "error", gatewayPoolWarmErrorText(perr))
+				}
+				if s.gatewayPoolNoRemainingRoutes(ctx, fresh) {
+					return errGatewayPoolWarmAttemptsFinished
+				}
+				continue
 			}
 			return errOpenAIGatewayPoolWarmUnverified
 		case full:
@@ -418,7 +434,7 @@ func (s *openAICodexCookieStore) gatewayPoolWarmVerdict(
 		return v.full, v.conclusive, v.sent, v.firstSent, err
 	}
 	key := gatewayPoolLedgerIdentity(identity) + "\x00" + applied.Version
-	timeout := gatewayPoolWarmBudget
+	timeout := gatewayPoolProbeBudget(ctx, account)
 	if pair, state := s.cachedPoolPair(identity); pair.version == applied.Version {
 		if state != openAIGatewayPoolPairLive {
 			return false, false, false, time.Time{}, errOpenAIGatewayPoolWarmUnverified
@@ -578,7 +594,7 @@ func (s *OpenAIGatewayService) gatewayPoolWarmShot(
 	account *Account,
 	proxyURL, cookie, model, state string,
 ) (int, string, error) {
-	shotCtx, cancel := context.WithTimeout(ctx, gatewayPoolWarmShotTimeout)
+	shotCtx, cancel := context.WithTimeout(ctx, gatewayPoolProbeTimeout(ctx, account))
 	defer cancel()
 	_, req, err := s.buildOpenAITurnStateProbe(shotCtx, account, model, gatewayPoolWarmProbeEffort, gatewayPoolWarmProbeText)
 	if err != nil {

@@ -89,7 +89,7 @@ describe('BulkEditAccountModal', () => {
       expect(wrapper.find(`[data-testid="bulk-gwpool-apply-openai_gwpool_${key}"]`).exists()).toBe(false)
     }
     await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_prepare_retries"]').setValue(true)
-    await wrapper.get('[data-testid="bulk-gwpool-value-openai_gwpool_prepare_retries"]').setValue(0)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="bulk-gwpool-value-openai_gwpool_prepare_retries"]').element.value).toBe('0')
     await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_rotation_min_gateways"]').setValue(true)
     await wrapper.get('[data-testid="bulk-gwpool-value-openai_gwpool_rotation_min_gateways"]').setValue(4)
     await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_consumer_key"]').setValue(true)
@@ -113,6 +113,32 @@ describe('BulkEditAccountModal', () => {
     await flushPromises()
     expect(adminAPI.accounts.bulkUpdate).not.toHaveBeenCalled()
     expect(showError).toHaveBeenCalledWith('admin.accounts.bulkEdit.noFieldsSelected')
+    wrapper.unmount()
+  })
+
+  it('票验证超时独立勾选、留空恢复默认，取消后不提交', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth'] })
+    const key = 'openai_gwpool_probe_timeout_s'
+    await wrapper.get(`[data-testid="bulk-gwpool-apply-${key}"]`).setValue(true)
+    const value = wrapper.get<HTMLInputElement>(`[data-testid="bulk-gwpool-value-${key}"]`)
+    expect(value.element.value).toBe('35')
+    await value.setValue(10)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenLastCalledWith([1, 2], expect.objectContaining({
+      extra: { [key]: 10, openai_gwpool_guard_enabled: true, openai_gwpool_probe_model: 'gpt-6-luna' }
+    }))
+    await value.setValue('')
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenLastCalledWith([1, 2], expect.objectContaining({
+      extra: { [key]: null, openai_gwpool_guard_enabled: true, openai_gwpool_probe_model: 'gpt-6-luna' }
+    }))
+    vi.mocked(adminAPI.accounts.bulkUpdate).mockClear()
+    await wrapper.get(`[data-testid="bulk-gwpool-apply-${key}"]`).setValue(false)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 

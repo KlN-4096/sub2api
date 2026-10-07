@@ -22,13 +22,14 @@ func TestBulkUpdateAccountsGatewayPoolSparsePatchAndTargetValidation(t *testing.
 			openAIGatewayPoolWarmTicketsExtraKey:         3,
 			OpenAIGatewayPoolConsumerKeyExtraKey:         "",
 			openAIGatewayPoolRotationMinGatewaysExtraKey: 4,
+			openAIGatewayPoolProbeTimeoutExtraKey:        10,
 		},
 	})
 	require.NoError(t, err)
 	require.Equal(t, 2, result.Success)
 	require.Len(t, repo.bulkUpdates, 1)
 	require.Equal(t, map[string]any{openAIGatewayPoolWarmTicketsExtraKey: 3,
-		openAIGatewayPoolRotationMinGatewaysExtraKey: 4}, repo.bulkUpdates[0].Extra)
+		openAIGatewayPoolRotationMinGatewaysExtraKey: 4, openAIGatewayPoolProbeTimeoutExtraKey: 10}, repo.bulkUpdates[0].Extra)
 	require.Equal(t, "offline-one", a.Extra[OpenAIGatewayPoolConsumerKeyExtraKey])
 	require.Equal(t, "offline-two", b.Extra[OpenAIGatewayPoolConsumerKeyExtraKey])
 	b.Type = AccountTypeAPIKey
@@ -42,7 +43,7 @@ func TestBulkUpdateAccountsGatewayPoolSparsePatchAndTargetValidation(t *testing.
 func TestGatewayPoolConfigValidatesNewNumericAndBooleanFields(t *testing.T) {
 	account := gwpoolTestAccount(1)
 	for _, key := range []string{openAIGatewayPoolRotationMinGatewaysExtraKey, openAIGatewayPoolResumeGatewaysExtraKey, openAIGatewayPoolWarmTicketsExtraKey,
-		openAIGatewayPoolFetchTimeoutExtraKey, openAIGatewayPoolListTimeoutExtraKey} {
+		openAIGatewayPoolFetchTimeoutExtraKey, openAIGatewayPoolListTimeoutExtraKey, openAIGatewayPoolProbeTimeoutExtraKey} {
 		for _, value := range []any{-1, 0, 1.5, "3", true, 1_000_000} {
 			require.True(t, touchesOpenAIGatewayPoolConfig(map[string]any{key: value}))
 			require.Error(t, validateOpenAIGatewayPoolAccountExtra(account, map[string]any{key: value}))

@@ -82,6 +82,7 @@ func TestGatewayPoolWaitRecoversProbeWithoutReplayingBusiness(t *testing.T) {
 	svc, repo, _, account, request, state := ticketWaitFixture(t)
 	account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = true
 	account.Credentials["access_token"] = "offline-token"
+	account.Extra[openAIGatewayPoolRecoveryExtraKey] = 1
 	repo.account = *account
 	sleeps := 0
 	state.sleep = func(context.Context, time.Duration) error { sleeps++; return nil }
@@ -102,7 +103,7 @@ func TestGatewayPoolWaitRecoversProbeWithoutReplayingBusiness(t *testing.T) {
 }
 
 func TestGatewayPoolWaitProbeFailureUsesSharedRecoveryLimitAndStopsAuthentication(t *testing.T) {
-	for _, status := range []int{http.StatusOK, http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests} {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			svc, repo, _, account, request, state := ticketWaitFixture(t)
 			account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = true
@@ -116,13 +117,8 @@ func TestGatewayPoolWaitProbeFailureUsesSharedRecoveryLimitAndStopsAuthenticatio
 					return status, "", nil
 				})
 			require.ErrorIs(t, err, errOpenAIGatewayPoolWarmUnverified)
-			if status == http.StatusOK {
-				require.Equal(t, 2, shots)
-				require.Equal(t, 1, sleeps)
-			} else {
-				require.Equal(t, 1, shots)
-				require.Zero(t, sleeps)
-			}
+			require.Equal(t, 1, shots)
+			require.Zero(t, sleeps)
 		})
 	}
 }

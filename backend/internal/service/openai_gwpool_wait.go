@@ -17,7 +17,7 @@ const (
 	openAIGatewayPoolWaitEnabledExtraKey = "openai_gwpool_auto_wait"
 	openAIGatewayPoolWaitSecondsExtraKey = "openai_gwpool_max_wait_s"
 	openAIGatewayPoolRecoveryExtraKey    = "openai_gwpool_prepare_retries"
-	gatewayPoolRecoveryDefault           = 1
+	gatewayPoolRecoveryDefault           = 0
 	gatewayPoolRecoveryMax               = 10
 	gatewayPoolWaitDefaultSeconds        = 120
 	gatewayPoolWaitMaxSeconds            = 3600

@@ -49,6 +49,8 @@ describe('gateway pool locale keys', () => {
       'gwpoolManualRetryHint',
       'gwpoolMaxWait',
       'gwpoolMaxWaitDesc',
+      'gwpoolProbeTimeout',
+      'gwpoolProbeTimeoutDesc',
       'gwpoolGuard',
       'gwpoolGuardDesc',
       'gwpoolDetails',

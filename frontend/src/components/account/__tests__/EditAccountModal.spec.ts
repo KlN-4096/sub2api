@@ -1290,6 +1290,41 @@ describe('EditAccountModal', () => {
     expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_gwpool_probe_model')
   })
 
+  it('saves ticket timeout independently and restores defaults on clear or account switch', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.extra = { openai_gwpool: true, openai_gwpool_base_url: 'https://pool.example.test',
+      openai_gwpool_prepare_retries: 1 }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    const timeout = wrapper.get<HTMLInputElement>('[data-testid="edit-openai-gwpool-probe-timeout"]')
+    expect(timeout.attributes('placeholder')).toBe('35')
+    expect(timeout.attributes('min')).toBe('1')
+    expect(timeout.attributes('max')).toBe('120')
+    expect(wrapper.get('[data-testid="edit-openai-gwpool-prepare-retries"]').attributes('placeholder')).toBe('0')
+    await timeout.setValue(10)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra?.openai_gwpool_probe_timeout_s).toBe(10)
+    expect(extra?.openai_gwpool_prepare_retries).toBe(1)
+    expect(extra).not.toHaveProperty('openai_gwpool_max_wait_s')
+    await wrapper.setProps({ account: { ...account, id: 99, extra } })
+    expect(timeout.element.value).toBe('10')
+    await timeout.setValue('')
+    updateAccountMock.mockClear()
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_gwpool_probe_timeout_s')
+    await wrapper.setProps({ account: { ...account, id: 100, extra: account.extra } })
+    expect(timeout.element.value).toBe('')
+    await timeout.setValue(10)
+    await wrapper.get('[data-testid="edit-openai-gwpool-enabled"]').setValue(false)
+    updateAccountMock.mockClear()
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_gwpool_probe_timeout_s')
+    wrapper.unmount()
+  })
+
   // 已存的旋钮要回显；清空输入框 = 回到默认值 = 把键删掉。
   it('loads stored gateway pool knobs and drops them when cleared', async () => {
     const account = buildAccount()

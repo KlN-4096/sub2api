@@ -2621,6 +2621,12 @@
             </div>
             <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
+              <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolProbeTimeout') }}</label>
+              <input v-model.number="openAIGwpoolProbeTimeout" data-testid="edit-openai-gwpool-probe-timeout"
+                type="number" min="1" max="120" step="1" placeholder="35" class="input text-xs" />
+              <p class="input-hint">{{ t('admin.accounts.openai.gwpoolProbeTimeoutDesc') }}</p>
+            </div>
+            <div>
               <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolMaxWait') }}</label>
               <input
                 v-model.number="openAIGwpoolMaxWait"
@@ -2633,7 +2639,7 @@
             <div>
               <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolPrepareRetries') }}</label>
               <input v-model.number="openAIGwpoolPrepareRetries" data-testid="edit-openai-gwpool-prepare-retries"
-                type="number" min="0" max="10" step="1" placeholder="1" class="input text-xs" />
+                type="number" min="0" max="10" step="1" placeholder="0" class="input text-xs" />
               <p class="input-hint">{{ t('admin.accounts.openai.gwpoolPrepareRetriesDesc') }}</p>
             </div>
             </div>
@@ -4137,6 +4143,7 @@ const openAIGwpoolEarlyProbe = ref(false)
 const openAIGwpoolMemberIsolation = ref(false)
 const openAIGwpoolUseRecommendation = ref(false)
 const openAIGwpoolMaxWait = ref<number | ''>('')
+const openAIGwpoolProbeTimeout = ref<number | ''>('')
 const openAIGwpoolPrepareRetries = ref<number | ''>('')
 // 降智防护**没有档位了**（2026-10-03）：三个老键 openai_gwpool_guard /
 // openai_gwpool_state_echo / openai_gwpool_degraded_retries 都不再读也不再写，页面上那个
@@ -4710,6 +4717,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	openAIGwpoolMemberIsolation.value = extra?.openai_gwpool_member_isolation === true
 	openAIGwpoolUseRecommendation.value = extra?.openai_gwpool_use_recommended_cooldown === true
 	openAIGwpoolMaxWait.value = typeof extra?.openai_gwpool_max_wait_s === 'number' ? extra.openai_gwpool_max_wait_s : ''
+	openAIGwpoolProbeTimeout.value = typeof extra?.openai_gwpool_probe_timeout_s === 'number' ? extra.openai_gwpool_probe_timeout_s : ''
 	openAIGwpoolPrepareRetries.value = typeof extra?.openai_gwpool_prepare_retries === 'number' ? extra.openai_gwpool_prepare_retries : ''
 	// 续期缺省即关：只有显式 true 才算开（与后端 gatewayPoolRenew 同口径）。
 	openAIGwpoolGatewayWindow.value = readGwpoolSeconds(extra?.openai_gwpool_gateway_window_s)
@@ -6333,6 +6341,7 @@ const handleSubmit = async () => {
         delete newExtra.openai_gwpool_warm_tickets
         for (const [key, value] of [
           ['openai_gwpool_max_wait_s', openAIGwpoolMaxWait.value],
+          ['openai_gwpool_probe_timeout_s', openAIGwpoolProbeTimeout.value],
           ['openai_gwpool_prepare_retries', openAIGwpoolPrepareRetries.value]
         ] as const) {
           if (openAIGwpoolEnabled.value && value !== '') newExtra[key] = value
