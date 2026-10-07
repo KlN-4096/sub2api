@@ -18,9 +18,9 @@ func TestSettingHandlerGatewayPoolActiveAccounts(t *testing.T) {
 		name, initial, body, stored string
 		status                      int
 	}{
-		{"default", "", `{}`, "1", 200},
+		{"default", "", `{}`, "", 200},
 		{"preserve", "2", `{}`, "2", 200},
-		{"set", "", `{"openai_gwpool_active_accounts":2}`, "2", 200},
+		{"set", "", `{"openai_gwpool_active_accounts":2}`, "", 400},
 		{"zero", "", `{"openai_gwpool_active_accounts":0}`, "", 400},
 		{"negative", "", `{"openai_gwpool_active_accounts":-1}`, "", 400},
 		{"excess", "", `{"openai_gwpool_active_accounts":65}`, "", 400},
@@ -44,7 +44,7 @@ func TestSettingHandlerGatewayPoolActiveAccounts(t *testing.T) {
 				Data map[string]any `json:"data"`
 			}
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-			require.Contains(t, body.Data, service.SettingKeyOpenAIGatewayPoolActiveAccounts)
+			require.NotContains(t, body.Data, service.SettingKeyOpenAIGatewayPoolActiveAccounts)
 		})
 	}
 }

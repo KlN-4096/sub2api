@@ -70,8 +70,15 @@ func (s *OpenAIGatewayService) waitGatewayPoolRetry(ctx context.Context, account
 		if sleep == nil {
 			sleep = gatewayPoolSleep
 		}
+		progress, _ := ctx.Value(gatewayPoolProgressRunKey{}).(*gatewayPoolProgressRun)
+		if progress != nil {
+			s.codexCookies.poolProgress.update(progress, "waiting", 0, "", false, false)
+		}
 		if err := sleep(ctx, gap); err != nil {
 			return false, err
+		}
+		if progress != nil {
+			s.codexCookies.poolProgress.update(progress, "fetching", 0, "", false, false)
 		}
 		fresh, err = s.freshGatewayPoolPreparationAccount(ctx, account)
 		return err == nil && gatewayPoolWaitAccountMatches(fresh, account), err
@@ -299,7 +306,7 @@ func (s *OpenAIGatewayService) attachGatewayPoolRouteWithWait(
 		// Fresh exhaustion is actionable immediately. Waiting on a dead queue
 		// for every request would prevent the normal account-rest transition.
 		if shared && s.gatewayPoolNoRemainingRoutes(ctx, account) {
-			return release, err
+			return release, errGatewayPoolWarmAttemptsFinished
 		}
 		if workRemaining != nil && workRemaining() <= 0 {
 			return release, context.DeadlineExceeded

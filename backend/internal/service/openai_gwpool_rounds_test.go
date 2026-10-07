@@ -44,7 +44,7 @@ func TestGatewayPoolRoundsRestIncludesActualProbesAndKeepsRequestCloneExclusions
 	a, b, clone := preferenceAccount(1, group, 20), preferenceAccount(2, group, 1), preferenceAccount(3, group, 20)
 	clone.Credentials = a.Credentials
 	repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*a, *b, *clone}}}
-	svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}, rateLimitService: gatewayPoolSchedulerTestSettings("legacy", 2)}
+	svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}, rateLimitService: gatewayPoolSchedulerTestSettings("legacy")}
 	aid, bid := openAIGatewayPoolAccountKey(a), openAIGatewayPoolAccountKey(b)
 	now := time.Now()
 	svc.codexCookies.poolRounds.touch(aid, now.Add(-time.Hour))
@@ -55,12 +55,12 @@ func TestGatewayPoolRoundsRestIncludesActualProbesAndKeepsRequestCloneExclusions
 	svc.codexCookies.poolRounds.exhaust(group, bid, 0)
 	req := OpenAIAccountScheduleRequest{GroupID: &group, Platform: PlatformOpenAI,
 		RequestedModel: "gpt-6-astra", RequiredTransport: OpenAIUpstreamTransportHTTPSSE}
-	ctx := svc.withGatewayPoolAccountPreferences(context.Background(), req)
+	ctx := svc.withGatewayPoolAccountPreferences(gatewayPoolTestGroupContext(group, 2), req)
 	prefs := gatewayPoolPreferences(ctx)
 	require.True(t, gatewayPoolPreferenceBetter(prefs[b.ID], prefs[a.ID]), "rest beats cooled count after reset")
 	require.Equal(t, prefs[a.ID].lastTouch, prefs[clone.ID].lastTouch)
 	require.Empty(t, gatewayPoolRoundExclusions(ctx, nil))
-	rotating := context.WithValue(context.Background(), gatewayPoolRotationKey{}, &gatewayPoolRotation{
+	rotating := context.WithValue(gatewayPoolTestGroupContext(group, 2), gatewayPoolRotationKey{}, &gatewayPoolRotation{
 		groupID: group, attempted: map[int64]struct{}{a.ID: {}}, domains: map[string]struct{}{gatewayPoolLedgerIdentity(aid): {}},
 	})
 	ctx = svc.withGatewayPoolAccountPreferences(rotating, req)

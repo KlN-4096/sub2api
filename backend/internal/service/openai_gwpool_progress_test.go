@@ -126,3 +126,19 @@ func TestGatewayPoolProgressEndsWithUsageCycle(t *testing.T) {
 	require.Zero(t, after[1].ElapsedMS)
 	require.NotNil(t, after[1].Runtime, "ending a cycle must not erase inventory/history")
 }
+
+func TestGatewayPoolProgressShowsWaitingDuringShortageSleep(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	svc := &OpenAIGatewayService{}
+	progress := svc.codexCookies.poolProgress.start(account.ID, 0)
+	ctx := context.WithValue(context.Background(), gatewayPoolPreparationKey{}, true)
+	ctx = context.WithValue(ctx, gatewayPoolProgressRunKey{}, progress)
+	ctx = context.WithValue(ctx, gatewayPoolPreparationSleepKey{}, func(context.Context, time.Duration) error {
+		require.Equal(t, "waiting", svc.GatewayPoolProgress([]int64{account.ID})[account.ID].Phase)
+		return nil
+	})
+	retry, err := svc.waitGatewayPoolRetry(ctx, account, time.Second)
+	require.NoError(t, err)
+	require.True(t, retry)
+	require.Equal(t, "fetching", svc.GatewayPoolProgress([]int64{account.ID})[account.ID].Phase)
+}

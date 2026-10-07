@@ -1535,7 +1535,7 @@ describe("admin SettingsView payment visible method controls", () => {
     });
   });
 
-  it.each([false, true])("saves the gateway-pool active limit in every scheduler mode (%s)", async (weighted) => {
+  it.each([false, true])("does not expose or resubmit the retired global gateway-pool limit (%s)", async (weighted) => {
     getSettings.mockResolvedValueOnce({
       ...baseSettingsResponse,
       openai_advanced_scheduler_enabled: weighted,
@@ -1543,14 +1543,11 @@ describe("admin SettingsView payment visible method controls", () => {
     });
     const wrapper = mountView();
     await flushPromises();
-    const input = wrapper.get<HTMLInputElement>('[data-testid="openai-gwpool-active-accounts"]');
-    expect(input.element.value).toBe("2");
-    expect(input.attributes("min")).toBe("1");
-    expect(input.attributes("max")).toBe("64");
-    await input.setValue("3");
+    expect(wrapper.find('[data-testid="openai-gwpool-active-accounts"]').exists()).toBe(false);
     await wrapper.find("form").trigger("submit.prevent");
     await flushPromises();
-    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({ openai_gwpool_active_accounts: 3 }));
+    expect(updateSettings).toHaveBeenCalled();
+    expect(updateSettings.mock.calls.at(-1)?.[0]).not.toHaveProperty("openai_gwpool_active_accounts");
   });
 
   it.each([false, true])("clears the OAuth rate without losing zero (weighted=%s)", async (weighted) => {

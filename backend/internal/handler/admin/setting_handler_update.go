@@ -276,7 +276,6 @@ type UpdateSettingsRequest struct {
 
 	// OpenAI account scheduling
 	OpenAILowUpstreamRatePriorityEnabled               *bool    `json:"openai_low_upstream_rate_priority_enabled"`
-	OpenAIGatewayPoolActiveAccounts                    *int     `json:"openai_gwpool_active_accounts" binding:"omitempty,min=1,max=64"`
 	OpenAIOAuthSchedulingRateMultiplier                *float64 `json:"openai_oauth_scheduling_rate_multiplier"`
 	OpenAIAdvancedSchedulerEnabled                     *bool    `json:"openai_advanced_scheduler_enabled"`
 	OpenAIAdvancedSchedulerStickyWeightedEnabled       *bool    `json:"openai_advanced_scheduler_sticky_weighted_enabled"`
@@ -498,6 +497,10 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		return
 	}
 	var req UpdateSettingsRequest
+	if _, legacy := sentFields[service.SettingKeyOpenAIGatewayPoolActiveAccounts]; legacy {
+		response.BadRequest(c, "openai_gwpool_active_accounts is now configured per group")
+		return
+	}
 	if err := c.ShouldBindBodyWith(&req, binding.JSON); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
@@ -1847,12 +1850,6 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.OpenAILowUpstreamRatePriorityEnabled
 		}(),
-		OpenAIGatewayPoolActiveAccounts: func() int {
-			if req.OpenAIGatewayPoolActiveAccounts != nil {
-				return *req.OpenAIGatewayPoolActiveAccounts
-			}
-			return previousSettings.OpenAIGatewayPoolActiveAccounts
-		}(),
 		OpenAIOAuthSchedulingRateMultiplier: func() *float64 {
 			// Omitted fields preserve the override; explicit null clears it.
 			if _, sent := sentFields[service.SettingKeyOpenAIOAuthSchedulingRateMultiplier]; sent {
@@ -2378,7 +2375,6 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		PaymentVisibleMethodAlipayEnabled:                      updatedSettings.PaymentVisibleMethodAlipayEnabled,
 		PaymentVisibleMethodWxpayEnabled:                       updatedSettings.PaymentVisibleMethodWxpayEnabled,
 		OpenAILowUpstreamRatePriorityEnabled:                   updatedSettings.OpenAILowUpstreamRatePriorityEnabled,
-		OpenAIGatewayPoolActiveAccounts:                        updatedSettings.OpenAIGatewayPoolActiveAccounts,
 		OpenAIOAuthSchedulingRateMultiplier:                    updatedSettings.OpenAIOAuthSchedulingRateMultiplier,
 		OpenAIAdvancedSchedulerEnabled:                         updatedSettings.OpenAIAdvancedSchedulerEnabled,
 		OpenAIAdvancedSchedulerStickyWeightedEnabled:           updatedSettings.OpenAIAdvancedSchedulerStickyWeightedEnabled,

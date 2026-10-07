@@ -115,6 +115,7 @@ func (s *OpenAIGatewayService) gatewayPoolPrepare(
 ) (resultErr error) {
 	ctx := context.WithValue(request.Context(), gatewayPoolProbeModelKey{}, model)
 	progress := s.startGatewayPoolProgress(ctx, account, identity)
+	ctx = context.WithValue(ctx, gatewayPoolProgressRunKey{}, progress)
 	s.codexCookies.poolPrepareProgress.Store(identity, progress)
 	phase := "unknown"
 	defer func() {
@@ -270,7 +271,7 @@ func (s *OpenAIGatewayService) gatewayPoolPrepare(
 				return errGatewayPoolWarmAttemptsFinished
 			}
 			if applied.PoolLive > 0 && s.gatewayPoolNoRemainingRoutes(ctx, account) {
-				return errOpenAIGatewayPoolWarmExhausted
+				return errGatewayPoolWarmAttemptsFinished
 			}
 		}
 	}

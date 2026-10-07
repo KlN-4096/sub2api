@@ -23,7 +23,7 @@
         >
           {{ statusText }}
         </button>
-        <span class="max-w-[180px] text-center text-[11px] leading-4 text-gray-500 dark:text-gray-400">
+        <span class="max-w-[180px] whitespace-normal break-words text-center text-[11px] leading-4 text-gray-500 dark:text-gray-400">
           {{ tempUnschedRecoveryText }}
         </span>
       </div>
@@ -176,6 +176,7 @@ import type { Account } from '@/types'
 import { formatCountdown, formatDateTime, formatDateTimeToMinute, formatCountdownWithSuffix, formatTime } from '@/utils/format'
 import { TURN_STATE_HOLD_REASON } from '@/utils/turnState'
 import { useNowTicker } from '@/composables/useNowTicker'
+import { isGatewayPoolRestReason } from '@/utils/gatewayPoolRest'
 
 const { t } = useI18n()
 
@@ -334,6 +335,9 @@ const overloadCountdown = computed(() => {
 
 const tempUnschedRecoveryText = computed(() => {
   if (!isTempUnschedulable.value || !props.account.temp_unschedulable_until) return ''
+  if (isGatewayPoolRestReason(props.account.temp_unschedulable_reason)) {
+    return t('admin.accounts.tempUnschedulable.poolRestPending')
+  }
   return t('admin.accounts.status.tempUnschedulableUntil', {
     time: formatDateTime(props.account.temp_unschedulable_until)
   })

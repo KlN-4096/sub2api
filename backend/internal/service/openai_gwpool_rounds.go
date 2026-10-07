@@ -216,12 +216,12 @@ func (s *OpenAIGatewayService) gatewayPoolRoundSelectionAllowed(ctx context.Cont
 	boundID, _ := ctx.Value(gatewayPoolExistingBindingKey{}).(int64)
 	bound := boundID == account.ID
 	if s.codexCookies.gatewayPoolVerifiedFull(identity) {
-		return bound || s.codexCookies.poolRounds.claim(*group, identity, s.gatewayPoolActiveAccountLimit(ctx))
+		return bound || s.codexCookies.poolRounds.claim(*group, identity, s.gatewayPoolActiveAccountLimit(ctx, group))
 	}
 	if s.gatewayPoolNoRemainingRoutes(ctx, account) {
 		s.codexCookies.poolRounds.exhaust(*group, identity, s.codexCookies.poolRounds.generation(*group))
 		s.restGatewayPoolAccount(ctx, account, identity, *group)
 		return false
 	}
-	return bound || s.codexCookies.poolRounds.claim(*group, identity, s.gatewayPoolActiveAccountLimit(ctx))
+	return bound || s.codexCookies.poolRounds.claim(*group, identity, s.gatewayPoolActiveAccountLimit(ctx, group))
 }

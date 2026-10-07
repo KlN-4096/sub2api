@@ -16,6 +16,31 @@ const (
 
 type gatewayPoolUsageRequestKey struct{}
 type gatewayPoolUsageIdentityKey struct{}
+type gatewayPoolUsageActivityKey struct{}
+
+type gatewayPoolUsageActivity struct {
+	inventory *gatewayPoolInventoryState
+	sending   bool // Protected, with closed, by inventory.mu.
+	closed    bool
+}
+
+// Waiting for a ticket is not an inventory operation. Only a real business
+// dispatch pins the inventory until its response body has finished.
+func gatewayPoolUsageMarkSending(ctx context.Context, identity string) {
+	activity, _ := ctx.Value(gatewayPoolUsageActivityKey{}).(*gatewayPoolUsageActivity)
+	tag, _ := ctx.Value(gatewayPoolUsageIdentityKey{}).(string)
+	if activity == nil || tag != gatewayPoolLedgerTag(identity) {
+		return
+	}
+	inventory := activity.inventory
+	inventory.mu.Lock()
+	defer inventory.mu.Unlock()
+	if !activity.closed && !activity.sending {
+		activity.sending = true
+		inventory.active++
+		inventory.generation++
+	}
+}
 
 func gatewayPoolUsageEventAt(ctx context.Context, at time.Time) time.Time {
 	start, _ := ctx.Value(gatewayPoolUsageRequestKey{}).(time.Time)
@@ -97,10 +122,10 @@ func (s *OpenAIGatewayService) beginGatewayPoolUsageRequest(ctx context.Context,
 	}
 	inventory := s.codexCookies.gatewayPoolInventory(identity)
 	inventory.mu.Lock()
-	wasIdle := inventory.active == 0
-	inventory.active++
-	inventory.generation++
+	wasIdle := inventory.active == 0 && inventory.requests == 0
+	inventory.requests++
 	inventory.mu.Unlock()
+	activity := &gatewayPoolUsageActivity{inventory: inventory}
 	s.changeGatewayPoolUsage(ctx, account, identity, func(state *gatewayPoolUsageLedger) bool {
 		if wasIdle {
 			if end := state.idleCutoff(at); !end.IsZero() {
@@ -121,6 +146,7 @@ func (s *OpenAIGatewayService) beginGatewayPoolUsageRequest(ctx context.Context,
 	})
 	ctx = context.WithValue(ctx, gatewayPoolUsageRequestKey{}, at)
 	ctx = context.WithValue(ctx, gatewayPoolUsageIdentityKey{}, gatewayPoolLedgerTag(identity))
+	ctx = context.WithValue(ctx, gatewayPoolUsageActivityKey{}, activity)
 	var once sync.Once
 	return ctx, func() {
 		once.Do(func() {
@@ -133,8 +159,12 @@ func (s *OpenAIGatewayService) beginGatewayPoolUsageRequest(ctx context.Context,
 				return false
 			})
 			inventory.mu.Lock()
-			inventory.active--
-			inventory.generation++
+			activity.closed = true
+			inventory.requests--
+			if activity.sending {
+				inventory.active--
+				inventory.generation++
+			}
 			inventory.mu.Unlock()
 			s.finishGatewayPoolUsageIfExhausted(ctx, account)
 		})
@@ -158,7 +188,7 @@ func (s *OpenAIGatewayService) maintainGatewayPoolUsage(ctx context.Context, acc
 		inventory := s.codexCookies.gatewayPoolInventory(identity)
 		inventory.mu.Lock()
 		defer inventory.mu.Unlock()
-		if inventory.active != 0 {
+		if inventory.active != 0 || inventory.requests != 0 {
 			return false
 		}
 		if at := state.idleCutoff(now); !at.IsZero() {

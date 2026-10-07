@@ -1557,6 +1557,14 @@
             </div>
           </div>
         </div>
+        <div v-if="createForm.platform === 'openai'" class="border-t border-gray-200 pt-4 mt-4 dark:border-dark-400">
+          <label for="create-gwpool-active-accounts" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+            {{ t("admin.groups.gatewayPoolActiveAccounts") }}
+          </label>
+          <input id="create-gwpool-active-accounts" v-model.number="createForm.openai_gwpool_active_accounts"
+            class="input mt-2 w-24" type="number" min="1" max="64" step="1" data-testid="create-gwpool-active-accounts" />
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t("admin.groups.gatewayPoolActiveAccountsHint") }}</p>
+        </div>
         <!-- OpenAI Fast 开关（OpenAI 与 Composite 平台） -->
         <div
           v-if="supportsGroupOpenAIFast(createForm.platform)"
@@ -3206,6 +3214,14 @@
               />
             </div>
           </div>
+        </div>
+        <div v-if="editForm.platform === 'openai'" class="border-t border-gray-200 pt-4 mt-4 dark:border-dark-400">
+          <label for="edit-gwpool-active-accounts" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+            {{ t("admin.groups.gatewayPoolActiveAccounts") }}
+          </label>
+          <input id="edit-gwpool-active-accounts" v-model.number="editForm.openai_gwpool_active_accounts"
+            class="input mt-2 w-24" type="number" min="1" max="64" step="1" data-testid="edit-gwpool-active-accounts" />
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t("admin.groups.gatewayPoolActiveAccountsHint") }}</p>
         </div>
         <!-- OpenAI Fast 开关（OpenAI 与 Composite 平台） -->
         <div
@@ -4950,6 +4966,7 @@ const createForm = reactive({
   long_context_pricing_enabled: true,
   force_openai_fast: false,
   free_openai_fast: false,
+  openai_gwpool_active_accounts: 1,
   model_pricing: [] as PricingFormEntry[],
   // 图片生成计费配置
   allow_image_generation: false,
@@ -5315,6 +5332,7 @@ const editForm = reactive({
   long_context_pricing_enabled: true,
   force_openai_fast: false,
   free_openai_fast: false,
+  openai_gwpool_active_accounts: 1,
   model_pricing: [] as PricingFormEntry[],
   // 图片生成计费配置
   allow_image_generation: false,
@@ -5792,6 +5810,7 @@ const closeCreateModal = () => {
   createForm.long_context_pricing_enabled = true;
   createForm.force_openai_fast = false;
   createForm.free_openai_fast = false;
+  createForm.openai_gwpool_active_accounts = 1;
   createForm.model_pricing = [];
   createForm.web_search_price_per_call = null;
   createForm.search_price_per_1k = null;
@@ -5877,11 +5896,18 @@ const validateGroupReasoningMultipliers = (pricing: PricingFormEntry[]): boolean
   return true;
 };
 
+const validateGatewayPoolActiveAccounts = (value: number): boolean => {
+  if (Number.isInteger(value) && value >= 1 && value <= 64) return true;
+  appStore.showError(t("admin.groups.gatewayPoolActiveAccountsInvalid"));
+  return false;
+};
+
 const handleCreateGroup = async () => {
   if (!createForm.name.trim()) {
     appStore.showError(t("admin.groups.nameRequired"));
     return;
   }
+  if (createForm.platform === "openai" && !validateGatewayPoolActiveAccounts(createForm.openai_gwpool_active_accounts)) return;
   if (
     supportsReasoningEffortPolicyPlatform(createForm.platform) &&
     createReasoningEffortPolicyRef.value &&
@@ -5905,6 +5931,7 @@ const handleCreateGroup = async () => {
   try {
     const {
       video_model_prices: _createFormVideoModelPrices,
+      openai_gwpool_active_accounts: activeAccounts,
       ...createGroupForm
     } = createForm;
     const videoModelPrices = serializeVideoModelPrices(
@@ -5913,6 +5940,7 @@ const handleCreateGroup = async () => {
     // 构建请求数据，包含模型路由配置
     const requestData = {
       ...createGroupForm,
+      ...(createForm.platform === "openai" ? { openai_gwpool_active_accounts: activeAccounts } : {}),
       force_openai_fast: normalizeGroupOpenAIFast(
         createForm.platform,
         createForm.force_openai_fast,
@@ -6060,6 +6088,7 @@ const handleEdit = async (group: AdminGroup) => {
     group.long_context_pricing_enabled ?? true;
   editForm.force_openai_fast = group.force_openai_fast ?? false;
   editForm.free_openai_fast = group.free_openai_fast ?? false;
+  editForm.openai_gwpool_active_accounts = group.openai_gwpool_active_accounts ?? 1;
   editForm.model_pricing = groupPricingFromAPI(group.model_pricing);
   editForm.allow_image_generation = group.allow_image_generation ?? false;
   editForm.allow_batch_image_generation =
@@ -6194,6 +6223,7 @@ const closeEditModal = () => {
   editForm.long_context_pricing_enabled = true;
   editForm.force_openai_fast = false;
   editForm.free_openai_fast = false;
+  editForm.openai_gwpool_active_accounts = 1;
   editForm.model_pricing = [];
   editForm.web_search_price_per_call = null;
   editForm.search_price_per_1k = null;
@@ -6224,6 +6254,7 @@ const handleUpdateGroup = async () => {
   if (!validateProfitControlForm(editForm)) {
     return;
   }
+  if (editForm.platform === "openai" && !validateGatewayPoolActiveAccounts(editForm.openai_gwpool_active_accounts)) return;
   if (!validateGroupReasoningMultipliers(editForm.model_pricing)) return;
   // 模型白名单：开启且没有任何条目时阻止提交，与后端 400 对齐。
   if (
@@ -6247,8 +6278,10 @@ const handleUpdateGroup = async () => {
   submitting.value = true;
   try {
     // 转换 fallback_group_id: null -> 0 (后端使用 0 表示清除)
+    const { openai_gwpool_active_accounts: activeAccounts, ...editGroupForm } = editForm;
     const payload = {
-      ...editForm,
+      ...editGroupForm,
+      ...(editForm.platform === "openai" ? { openai_gwpool_active_accounts: activeAccounts } : {}),
       force_openai_fast: normalizeGroupOpenAIFast(
         editForm.platform,
         editForm.force_openai_fast,

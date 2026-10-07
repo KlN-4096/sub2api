@@ -152,15 +152,15 @@ func (r *gatewayPoolUsageLedger) endFullUse(ticketKey string, at time.Time) bool
 
 func (s *OpenAIGatewayService) noteGatewayPoolFullUse(ctx context.Context, account *Account, identity string,
 	applied OpenAIGatewayPoolApplied, at time.Time,
-) {
+) bool {
 	if at.IsZero() || applied.Version == "" || account == nil || applied.AccountID != account.ID {
-		return
+		return false
 	}
 	at = gatewayPoolUsageEventAt(ctx, at)
 	pair, _ := s.codexCookies.cachedPoolPair(identity)
 	mark, ok := s.codexCookies.gatewayPoolVerifiedMarkOf(identity)
 	if pair.version != applied.Version || pair.invalidated || !ok || mark.version != applied.Version {
-		return
+		return false
 	}
 	ticket := gatewayPoolUsageTicketKey(applied.Gateway, applied.Version)
 	session := s.codexCookies.gatewayPoolUsageSession()
@@ -183,6 +183,9 @@ func (s *OpenAIGatewayService) noteGatewayPoolFullUse(ctx context.Context, accou
 		}
 		return false
 	})
+	// This mutation includes the attempt as well as full-use accounting. Do not
+	// issue another ledger mutation for the same event, including on DB error.
+	return true
 }
 
 func (s *OpenAIGatewayService) settleGatewayPoolFullUsage(ctx context.Context, account *Account, identity string) {

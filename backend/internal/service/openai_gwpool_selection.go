@@ -81,12 +81,16 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 		}
 		identities[account.ID] = identity
 		contacts := readGatewayPoolContacts(account, gatewayPoolLedgerTag(identity))
+		var lastContact time.Time
 		for _, seen := range contacts.Seen {
-			s.codexCookies.poolRounds.touch(identity, seen.LastAt)
+			if seen.LastAt.After(lastContact) {
+				lastContact = seen.LastAt
+			}
 		}
-		if account.LastUsedAt != nil {
-			s.codexCookies.poolRounds.touch(identity, *account.LastUsedAt)
+		if account.LastUsedAt != nil && account.LastUsedAt.After(lastContact) {
+			lastContact = *account.LastUsedAt
 		}
+		s.codexCookies.poolRounds.touch(identity, lastContact)
 		if s.codexCookies.hydrateGatewayPoolSharedHistory(ctx, account, identity) != nil {
 			continue
 		}
@@ -201,7 +205,7 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 	for _, id := range ordered {
 		candidates = append(candidates, domains[id])
 	}
-	ranks := s.codexCookies.poolRounds.admit(*req.GroupID, candidates, domains, complete, s.gatewayPoolActiveAccountLimit(ctx))
+	ranks := s.codexCookies.poolRounds.admit(*req.GroupID, candidates, domains, complete, s.gatewayPoolActiveAccountLimit(ctx, req.GroupID))
 	for id, poolAccount := range poolIDs {
 		if poolAccount && ranks[domains[id]] == 0 && id != stickyID {
 			shared[id] = struct{}{}

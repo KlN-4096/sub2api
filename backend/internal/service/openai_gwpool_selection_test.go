@@ -254,8 +254,8 @@ func TestGatewayPoolSelectionFreshHistoryIgnoresPoolFreeAndWrongIdentity(t *test
 		Seen: map[string]openAIGatewaySeen{"unified-1": {At: time.Now().Add(-12 * time.Hour)}},
 	}
 	repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*a, *b}}}
-	svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}, rateLimitService: gatewayPoolSchedulerTestSettings("legacy", 2)}
-	ctx := svc.withGatewayPoolAccountPreferences(context.Background(), OpenAIAccountScheduleRequest{
+	svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}, rateLimitService: gatewayPoolSchedulerTestSettings("legacy")}
+	ctx := svc.withGatewayPoolAccountPreferences(gatewayPoolTestGroupContext(group, 2), OpenAIAccountScheduleRequest{
 		GroupID: &group, Platform: PlatformOpenAI, RequiredTransport: OpenAIUpstreamTransportHTTPSSE,
 	})
 	prefs := gatewayPoolPreferences(ctx)

@@ -1,7 +1,6 @@
 package service
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -31,13 +30,13 @@ func TestGatewayPoolModelSubsetExhaustionPreservesHealthyActiveAccounts(t *testi
 	c.Credentials["model_mapping"] = map[string]any{"only-other": "only-other"}
 	svc := &OpenAIGatewayService{
 		accountRepo:      gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*a, *b, *c}}},
-		rateLimitService: gatewayPoolSchedulerTestSettings("legacy", 2),
+		rateLimitService: gatewayPoolSchedulerTestSettings("legacy"),
 	}
 	aid, bid, cid := openAIGatewayPoolAccountKey(a), openAIGatewayPoolAccountKey(b), openAIGatewayPoolAccountKey(c)
 	require.True(t, svc.codexCookies.poolRounds.claim(group, aid, 2))
 	require.True(t, svc.codexCookies.poolRounds.claim(group, bid, 2))
 	svc.codexCookies.poolRounds.rest(group, cid, time.Now().Add(time.Hour))
-	ctx := svc.withGatewayPoolAccountPreferences(context.Background(), OpenAIAccountScheduleRequest{
+	ctx := svc.withGatewayPoolAccountPreferences(gatewayPoolTestGroupContext(group, 2), OpenAIAccountScheduleRequest{
 		GroupID: &group, Platform: PlatformOpenAI, RequestedModel: "only-other",
 		RequiredTransport: OpenAIUpstreamTransportHTTPSSE,
 	})
@@ -51,8 +50,8 @@ func TestGatewayPoolActiveAccountsUnknownSnapshotDoesNotOpenExtraSlots(t *testin
 	r := &gatewayPoolRounds{}
 	require.True(t, r.claim(1, "a", 1))
 	require.Equal(t, map[string]int{"a": 1}, r.admit(1, []string{"b"}, map[int64]string{2: "b"}, false, 1))
-	for _, raw := range []string{"", "0", "-1", "65", "1.5", "bad"} {
-		require.Equal(t, 1, parseGatewayPoolActiveAccounts(raw))
+	for _, raw := range []int{0, -1, 65} {
+		require.Equal(t, 1, normalizeGatewayPoolActiveAccounts(raw))
 	}
-	require.Equal(t, 2, parseGatewayPoolActiveAccounts("2"))
+	require.Equal(t, 2, normalizeGatewayPoolActiveAccounts(2))
 }

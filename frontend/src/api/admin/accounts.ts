@@ -74,7 +74,7 @@ export async function list(
 export interface GatewayPoolProgress {
   run_id?: string
   sequence?: number
-  phase: 'idle' | 'fetching' | 'verifying' | 'waiting' | 'ready' | 'exhausted' | 'unknown' | 'cancelled'
+  phase: 'idle' | 'pending' | 'fetching' | 'verifying' | 'waiting' | 'ready' | 'exhausted' | 'unknown' | 'cancelled'
   attempt: number
   limit: number
   rejected: number
@@ -95,6 +95,7 @@ export interface GatewayPoolProgress {
     gateway_window_seconds?: number
     current_concurrency?: number | null
     concurrency_limit?: number
+    cooldown_estimate?: { resume_gateways: number; eligible_at?: string }
   }
 }
 

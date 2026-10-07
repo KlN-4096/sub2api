@@ -12,6 +12,7 @@ type gatewayPoolInventoryState struct {
 	mu         sync.Mutex
 	generation uint64
 	active     int
+	requests   int // Includes preparation waiters; only used for usage idle detection.
 }
 
 func (s *openAICodexCookieStore) gatewayPoolInventory(identity string) *gatewayPoolInventoryState {

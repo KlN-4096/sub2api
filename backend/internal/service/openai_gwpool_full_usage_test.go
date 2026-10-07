@@ -135,7 +135,9 @@ func TestGatewayPoolFullUsageSettlesBeforeExpiredTicketIsReplaced(t *testing.T) 
 func TestGatewayPoolFullUsageStartsOnBusinessWriteBeforeResponse(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 	account := fake.account(1)
-	svc, repo := gatewayRuntimeService(account)
+	repo := &forkPerformanceRepo{gatewayRuntimeRepo: &gatewayRuntimeRepo{account: *account}}
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	svc.codexCookies.accountByID = repo.GetByID
 	gwpoolEchoSeedVerified(t, svc, account)
 	upstream := &gatewayPoolUsageHeldUpstream{written: make(chan struct{}), release: make(chan struct{})}
 	svc.httpUpstream = upstream
@@ -157,6 +159,7 @@ func TestGatewayPoolFullUsageStartsOnBusinessWriteBeforeResponse(t *testing.T) {
 		t.Fatal("business write did not start")
 	}
 	fresh, readErr := repo.GetByID(context.Background(), 1)
+	writesBeforeResponse := repo.writes
 	close(upstream.release)
 	<-done
 	require.NoError(t, readErr)
@@ -165,4 +168,5 @@ func TestGatewayPoolFullUsageStartsOnBusinessWriteBeforeResponse(t *testing.T) {
 	require.False(t, state.Rounds[0].FullStartedAt.IsZero())
 	require.Equal(t, 1, state.Rounds[0].Full)
 	require.Equal(t, 1, state.Rounds[0].Attempted)
+	require.Equal(t, 2, writesBeforeResponse, "one request-begin write plus one combined business-send write")
 }

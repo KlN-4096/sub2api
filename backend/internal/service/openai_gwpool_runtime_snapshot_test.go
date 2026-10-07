@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -81,4 +83,71 @@ func TestGatewayPoolRuntimeSnapshotMergesCloneHistoryWithoutWriting(t *testing.T
 	original, _ := readOpenAIGatewayHistory(account)
 	require.Equal(t, "a", original.Current)
 	require.Len(t, original.Seen, 1)
+}
+
+func TestGatewayPoolDisplayCachePreservesRowFreshnessAndIndependentResults(t *testing.T) {
+	now := time.Now().UTC()
+	tag := gatewayPoolLedgerTag(gwpoolTestIdentity)
+	account := gwpoolTestAccount(1)
+	older := *gwpoolTestAccount(1) // same ID, a different database observation
+	clone := *gwpoolTestAccount(2)
+	for _, row := range []*Account{account, &older, &clone} {
+		row.Extra[openAIGatewayHistoryExtraKey] = openAIGatewayHistory{
+			LedgerTag: tag, Current: "a", UpdatedAt: now,
+			Seen: map[string]openAIGatewaySeen{"a": {At: now}},
+		}
+		row.Extra[openAIGatewayPoolContactsExtraKey] = gatewayPoolContacts{
+			LedgerTag: tag, Seen: map[string]gatewayPoolContactSeen{"a": {LastAt: now}},
+			Rounds: []gatewayPoolContactRound{{
+				RoundID: gatewayPoolContactHash("round"), Aliases: []string{gatewayPoolContactHash(strconv.FormatInt(row.ID, 10))},
+				Report: gwpool.ContactReport{ID: gatewayPoolContactHash("report"), At: now},
+			}},
+		}
+	}
+	account.Extra[openAIGatewayHistoryExtraKey] = openAIGatewayHistory{
+		LedgerTag: tag, Current: "fresh", UpdatedAt: now.Add(time.Second),
+		Seen: map[string]openAIGatewaySeen{"fresh": {At: now}},
+	}
+	peers := []Account{older, clone}
+	before, err := json.Marshal(peers)
+	require.NoError(t, err)
+	svc := &OpenAIGatewayService{}
+	cache := gatewayPoolDisplayCache{}
+	for _, row := range []*Account{account, &peers[1], account} {
+		wantHistory, wantContacts := svc.gatewayPoolDisplaySnapshot(row, gwpoolTestIdentity, peers)
+		gotHistory, gotContacts := svc.gatewayPoolDisplaySnapshot(row, gwpoolTestIdentity, peers, cache)
+		require.Equal(t, wantHistory, gotHistory)
+		require.Equal(t, wantContacts, gotContacts)
+		delete(gotHistory.Seen, "a")
+		delete(gotContacts.Seen, "a")
+		gotContacts.Rounds[0].Aliases[0] = "modified-output-must-not-reach-cache"
+	}
+	require.Len(t, cache, 3, "each actual snapshot is parsed once, not once per clone output")
+	after, err := json.Marshal(peers)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+}
+
+func TestGatewayPoolRuntimeSnapshotClearsReadyWhenVerifiedTicketDies(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	svc, _ := gatewayRuntimeService(account)
+	identity := openAIGatewayPoolAccountKey(account)
+	now := time.Now()
+	run := svc.codexCookies.poolProgress.start(account.ID, 0, gatewayPoolProgressScope{
+		tag: gatewayPoolLedgerTag(identity), identity: identity, requestStarted: now,
+	})
+	svc.codexCookies.poolProgress.update(run, "ready", 1, "offline", false, true)
+	svc.codexCookies.poolPairs.Store(identity, openAIGatewayPoolPair{
+		gateway: "offline", cookie: "fixture", version: "v", until: now.Add(time.Minute),
+	})
+	svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, "v", "gpt-6-luna")
+	before, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{account.ID})
+	require.NoError(t, err)
+	require.Equal(t, "ready", before[account.ID].Phase)
+	svc.codexCookies.gatewayPoolMarkStale(identity, "v", "offline")
+	after, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{account.ID})
+	require.NoError(t, err)
+	require.Equal(t, "pending", after[account.ID].Phase)
+	require.Empty(t, after[account.ID].Runtime.Tickets)
+	require.Equal(t, before[account.ID].Attempt, after[account.ID].Attempt)
 }

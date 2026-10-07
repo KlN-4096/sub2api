@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"net/url"
 	"strings"
 
@@ -77,6 +78,49 @@ func reorderCodexTopLevelFields(body []byte, order []string) []byte {
 		return true
 	})
 	if duplicate || len(fields) == 0 {
+		return body
+	}
+
+	// Avoid a second body-sized allocation when the complete wire bytes are
+	// already canonical. Key order alone is insufficient: the old path also
+	// removes whitespace between top-level fields, which must stay unchanged.
+	position, canonical := 0, true
+	match := func(raw string) {
+		if !canonical {
+			return
+		}
+		end := position + len(raw)
+		if end > len(body) || !bytes.Equal(body[position:end], []byte(raw)) {
+			canonical = false
+			return
+		}
+		position = end
+	}
+	nextField := 0
+	match("{")
+	check := func(i int) {
+		if i != nextField {
+			canonical = false
+			return
+		}
+		if nextField != 0 {
+			match(",")
+		}
+		match(fields[i].key)
+		match(":")
+		match(fields[i].raw)
+		nextField++
+	}
+	for _, name := range order {
+		if i, ok := index[name]; ok {
+			check(i)
+		}
+	}
+	for i := nextField; canonical && i < len(fields); i++ {
+		check(i)
+	}
+	match("}")
+	if canonical && position == len(body) {
 		return body
 	}
 
