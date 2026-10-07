@@ -56,7 +56,11 @@ export default {
     deployScript: 'Script',
     deployDocker: 'Docker',
     dockerEditCompose: 'Edit the image tag in docker-compose.yml',
-    dockerRecreate: 'Recreate the container'
+    dockerRecreate: 'Recreate the container',
+    upstreamLabel: 'Upstream',
+    forkLabel: 'Fork',
+    upstreamUpdateAvailable: 'Upstream released v{version}. Notice only: updates come through the fork.',
+    upstreamUpToDate: 'Upstream is up to date'
   },
 
   // Recharge / Subscription Page

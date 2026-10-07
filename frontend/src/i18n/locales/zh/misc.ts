@@ -55,7 +55,11 @@ export default {
     deployScript: '脚本部署',
     deployDocker: 'Docker',
     dockerEditCompose: '修改 docker-compose.yml 中的镜像版本',
-    dockerRecreate: '重新创建容器'
+    dockerRecreate: '重新创建容器',
+    upstreamLabel: '上游',
+    forkLabel: '二开',
+    upstreamUpdateAvailable: '上游已发布 v{version}，这里只提示，升级要等二开跟进',
+    upstreamUpToDate: '上游已是最新版本'
   },
 
   // Recharge / Subscription Page
