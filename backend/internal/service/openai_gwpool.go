@@ -839,6 +839,7 @@ func (s *openAICodexCookieStore) gatewayPoolHydrateUsed(account *Account, identi
 			continue
 		}
 		key := gatewayPoolLedgerKey(identity, gateway)
+		s.poolKnown.Store(key, struct{}{})
 		// 旧版无身份绑定的记录只恢复触碰时间，不信任其中的自适应学习字段。
 		if rec.LedgerTag != "" {
 			s.hydrateCooldown(identity, gateway, seen.Cooldown, gatewayPoolCooldownBase(account.gatewayPoolGatewayWindow()), seen.At)

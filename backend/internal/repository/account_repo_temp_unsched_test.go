@@ -25,6 +25,9 @@ func TestAccountRepository_SetTempUnschedulable_NoRowsAffectedDoesNotWriteOutbox
 	require.Contains(t, exec.execQueries[0], "UPDATE accounts")
 	require.Contains(t, exec.execQueries[0], "extra->'openai_gwpool' = 'true'::jsonb")
 	require.Contains(t, exec.execQueries[0], "jsonb_build_object($4::text, NOW())")
+	require.Contains(t, normalizeSQLWhitespace(exec.execQueries[0]),
+		"OR temp_unschedulable_reason LIKE '网关候选低于% / Gateway candidates below %'",
+		"a new shorter auth/error block must replace a longer pool-only deadline")
 	require.Equal(t, service.GatewayPoolUsageBlockedAtKey, exec.execArgs[0][3])
 	require.NotContains(t, strings.Join(exec.execQueries, "\n"), "scheduler_outbox")
 }
@@ -40,6 +43,9 @@ func TestAccountRepository_SetGatewayPoolRestIsAtomicAndPreservesLongerBlock(t *
 	query := normalizeSQLWhitespace(exec.execQueries[0])
 	require.Contains(t, query, "WITH updated AS")
 	require.Contains(t, query, "GREATEST(temp_unschedulable_until, $1)")
+	require.Contains(t, query, "temp_unschedulable_until > NOW()")
+	require.Contains(t, query, "NOT LIKE '网关候选低于% / Gateway candidates below %'")
+	require.Contains(t, query, "LIKE '网关候选低于% / Gateway candidates below %' THEN $1")
 	require.Contains(t, query, "ELSE temp_unschedulable_reason END")
 	require.Contains(t, query, "|| $4::jsonb || jsonb_build_object($5::text, NOW())")
 	require.Contains(t, query, "INSERT INTO scheduler_outbox")

@@ -2727,11 +2727,11 @@ func (h *AccountHandler) GetTempUnschedulable(c *gin.Context) {
 		if runtime := progress[accountID].Runtime; runtime != nil {
 			if rest := runtime.Rest; rest.Active {
 				display := service.TempUnschedState{RuleIndex: -1, ErrorMessage: rest.Reason}
-				if !rest.NextCheck.IsZero() {
-					display.UntilUnix = rest.NextCheck.Unix()
+				if !rest.ResumeAt.IsZero() {
+					display.UntilUnix = rest.ResumeAt.Unix()
 				}
-				if !rest.ChangedAt.IsZero() {
-					display.TriggeredAtUnix = rest.ChangedAt.Unix()
+				if !rest.StartedAt.IsZero() {
+					display.TriggeredAtUnix = rest.StartedAt.Unix()
 				}
 				response.Success(c, gin.H{"active": true, "gateway_pool_rest": true, "state": display})
 				return

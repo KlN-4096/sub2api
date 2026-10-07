@@ -140,7 +140,7 @@ it('失联仍保留已观测时长，归档同排展示且不混入旧模型墙�
   expect(current).toContain('"full":7,"attempted":9')
   expect(current).toContain('\\"minutes\\":1,\\"seconds\\":1')
   const history = wrapper.get('[data-testid="account-gateway-usage-history"]').text()
-  expect(history).toContain('"count":1')
+  expect(history).toContain('"count":2')
   expect(history).not.toContain('legacyArchived')
   expect(history).not.toContain('3418')
   expect(history).not.toContain('gatewayRuntime.incomplete')
@@ -523,7 +523,7 @@ describe('AccountGatewayCell', () => {
     w.unmount()
   })
 
-  it('周期结束后当前计数时长归零，历史不跨周期累加', async () => {
+  it('周期结束后当前计数时长归零，新周期不累计上一周期', async () => {
     const runtime = { observed_at: new Date().toISOString(), tickets: [],
       rounds: [{ id: 'old', model: 'all', started_at: isoAgo(3600), ended_at: isoAgo(1800),
         attempted: 8, full: 3, full_duration_ms: 65000 }], archived: null }
@@ -534,6 +534,9 @@ describe('AccountGatewayCell', () => {
     const empty = w.get('[data-testid="account-gateway-usage-idle"]').text()
     expect(empty).toContain('"full":0,"attempted":0')
     expect(empty).toContain('\\"minutes\\":0,\\"seconds\\":0')
+    const history = w.get('[data-testid="account-gateway-usage-history"]').text()
+    expect(history).toContain('"count":1')
+    expect(history).toContain('\\"minutes\\":1,\\"seconds\\":5')
     await w.setProps({ progress: { ...progress, runtime: { ...runtime,
       rounds: [...runtime.rounds, { id: 'new', model: 'all', started_at: isoAgo(30), ended_at: '',
         attempted: 1, full: 1, full_duration_ms: 5000 }] } } })
@@ -541,6 +544,29 @@ describe('AccountGatewayCell', () => {
     const next = w.get('[data-testid="account-gateway-usage-round"]').text()
     expect(next).toContain('"full":1,"attempted":1')
     expect(next).toContain('\\"minutes\\":0,\\"seconds\\":5')
+    expect(w.get('[data-testid="account-gateway-usage-history"]').text()).toBe(history)
+    w.unmount()
+  })
+
+  it('历史累计包含已结束明细，排除当前轮，压缩归档后保持总数不变', async () => {
+    const active = { id: 'active', model: 'all', started_at: isoAgo(300), attempted: 1,
+      full: 1, full_duration_ms: 5000 }
+    const ended = { id: 'ended', model: 'all', started_at: isoAgo(3600), ended_at: isoAgo(1800),
+      attempted: 8, full: 3, full_duration_ms: 65000 }
+    const runtime = { observed_at: new Date().toISOString(), tickets: [],
+      rounds: [active, ended],
+      archived: { all: { rounds: 2, attempted: 10, full: 4, duration_ms: 95000 } } }
+    const progress = { phase: 'idle' as const, attempt: 0, limit: 5, rejected: 0, elapsed_ms: 0,
+      started_at: '', updated_at: '', active_requests: 0, runtime }
+    const w = mount(AccountGatewayCell, { props: { account: account({}), progress } })
+    const history = () => w.get('[data-testid="account-gateway-usage-history"]').text()
+    expect(history()).toContain('"count":3')
+    expect(history()).toContain('\\"minutes\\":2,\\"seconds\\":40')
+    const before = history()
+    await w.setProps({ progress: { ...progress, runtime: { ...runtime, rounds: [active],
+      archived: { all: { rounds: 3, attempted: 18, full: 7, duration_ms: 160000 } } } } })
+    expect(history()).toBe(before)
+    expect(w.get('[data-testid="account-gateway-usage-round"]').text()).toContain('\\"seconds\\":5')
     w.unmount()
   })
 
