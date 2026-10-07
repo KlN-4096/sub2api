@@ -22160,6 +22160,8 @@ type GroupMutation struct {
 	allow_live                              *bool
 	force_openai_fast                       *bool
 	free_openai_fast                        *bool
+	openai_gwpool_active_accounts           *int
+	addopenai_gwpool_active_accounts        *int
 	require_oauth_only                      *bool
 	require_privacy_set                     *bool
 	default_mapped_model                    *string
@@ -25020,6 +25022,62 @@ func (m *GroupMutation) ResetFreeOpenaiFast() {
 	m.free_openai_fast = nil
 }
 
+// SetOpenaiGwpoolActiveAccounts sets the "openai_gwpool_active_accounts" field.
+func (m *GroupMutation) SetOpenaiGwpoolActiveAccounts(i int) {
+	m.openai_gwpool_active_accounts = &i
+	m.addopenai_gwpool_active_accounts = nil
+}
+
+// OpenaiGwpoolActiveAccounts returns the value of the "openai_gwpool_active_accounts" field in the mutation.
+func (m *GroupMutation) OpenaiGwpoolActiveAccounts() (r int, exists bool) {
+	v := m.openai_gwpool_active_accounts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOpenaiGwpoolActiveAccounts returns the old "openai_gwpool_active_accounts" field's value of the Group entity.
+// If the Group object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GroupMutation) OldOpenaiGwpoolActiveAccounts(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOpenaiGwpoolActiveAccounts is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOpenaiGwpoolActiveAccounts requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOpenaiGwpoolActiveAccounts: %w", err)
+	}
+	return oldValue.OpenaiGwpoolActiveAccounts, nil
+}
+
+// AddOpenaiGwpoolActiveAccounts adds i to the "openai_gwpool_active_accounts" field.
+func (m *GroupMutation) AddOpenaiGwpoolActiveAccounts(i int) {
+	if m.addopenai_gwpool_active_accounts != nil {
+		*m.addopenai_gwpool_active_accounts += i
+	} else {
+		m.addopenai_gwpool_active_accounts = &i
+	}
+}
+
+// AddedOpenaiGwpoolActiveAccounts returns the value that was added to the "openai_gwpool_active_accounts" field in this mutation.
+func (m *GroupMutation) AddedOpenaiGwpoolActiveAccounts() (r int, exists bool) {
+	v := m.addopenai_gwpool_active_accounts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetOpenaiGwpoolActiveAccounts resets all changes to the "openai_gwpool_active_accounts" field.
+func (m *GroupMutation) ResetOpenaiGwpoolActiveAccounts() {
+	m.openai_gwpool_active_accounts = nil
+	m.addopenai_gwpool_active_accounts = nil
+}
+
 // SetRequireOauthOnly sets the "require_oauth_only" field.
 func (m *GroupMutation) SetRequireOauthOnly(b bool) {
 	m.require_oauth_only = &b
@@ -25921,7 +25979,7 @@ func (m *GroupMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *GroupMutation) Fields() []string {
-	fields := make([]string, 0, 66)
+	fields := make([]string, 0, 67)
 	if m.created_at != nil {
 		fields = append(fields, group.FieldCreatedAt)
 	}
@@ -26081,6 +26139,9 @@ func (m *GroupMutation) Fields() []string {
 	if m.free_openai_fast != nil {
 		fields = append(fields, group.FieldFreeOpenaiFast)
 	}
+	if m.openai_gwpool_active_accounts != nil {
+		fields = append(fields, group.FieldOpenaiGwpoolActiveAccounts)
+	}
 	if m.require_oauth_only != nil {
 		fields = append(fields, group.FieldRequireOauthOnly)
 	}
@@ -26234,6 +26295,8 @@ func (m *GroupMutation) Field(name string) (ent.Value, bool) {
 		return m.ForceOpenaiFast()
 	case group.FieldFreeOpenaiFast:
 		return m.FreeOpenaiFast()
+	case group.FieldOpenaiGwpoolActiveAccounts:
+		return m.OpenaiGwpoolActiveAccounts()
 	case group.FieldRequireOauthOnly:
 		return m.RequireOauthOnly()
 	case group.FieldRequirePrivacySet:
@@ -26375,6 +26438,8 @@ func (m *GroupMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldForceOpenaiFast(ctx)
 	case group.FieldFreeOpenaiFast:
 		return m.OldFreeOpenaiFast(ctx)
+	case group.FieldOpenaiGwpoolActiveAccounts:
+		return m.OldOpenaiGwpoolActiveAccounts(ctx)
 	case group.FieldRequireOauthOnly:
 		return m.OldRequireOauthOnly(ctx)
 	case group.FieldRequirePrivacySet:
@@ -26781,6 +26846,13 @@ func (m *GroupMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetFreeOpenaiFast(v)
 		return nil
+	case group.FieldOpenaiGwpoolActiveAccounts:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOpenaiGwpoolActiveAccounts(v)
+		return nil
 	case group.FieldRequireOauthOnly:
 		v, ok := value.(bool)
 		if !ok {
@@ -26952,6 +27024,9 @@ func (m *GroupMutation) AddedFields() []string {
 	if m.addsort_order != nil {
 		fields = append(fields, group.FieldSortOrder)
 	}
+	if m.addopenai_gwpool_active_accounts != nil {
+		fields = append(fields, group.FieldOpenaiGwpoolActiveAccounts)
+	}
 	if m.addrpm_limit != nil {
 		fields = append(fields, group.FieldRpmLimit)
 	}
@@ -27017,6 +27092,8 @@ func (m *GroupMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedFallbackGroupIDOnInvalidRequest()
 	case group.FieldSortOrder:
 		return m.AddedSortOrder()
+	case group.FieldOpenaiGwpoolActiveAccounts:
+		return m.AddedOpenaiGwpoolActiveAccounts()
 	case group.FieldRpmLimit:
 		return m.AddedRpmLimit()
 	case group.FieldProfitMinMargin:
@@ -27199,6 +27276,13 @@ func (m *GroupMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddSortOrder(v)
+		return nil
+	case group.FieldOpenaiGwpoolActiveAccounts:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddOpenaiGwpoolActiveAccounts(v)
 		return nil
 	case group.FieldRpmLimit:
 		v, ok := value.(int)
@@ -27541,6 +27625,9 @@ func (m *GroupMutation) ResetField(name string) error {
 		return nil
 	case group.FieldFreeOpenaiFast:
 		m.ResetFreeOpenaiFast()
+		return nil
+	case group.FieldOpenaiGwpoolActiveAccounts:
+		m.ResetOpenaiGwpoolActiveAccounts()
 		return nil
 	case group.FieldRequireOauthOnly:
 		m.ResetRequireOauthOnly()

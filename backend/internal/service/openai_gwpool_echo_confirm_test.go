@@ -25,7 +25,7 @@ func TestStateEchoConfirmationFollowsNewestStateAndStops(t *testing.T) {
 		calls            int
 	}{
 		{"young-all-refreshed", time.Second, []string{"s2", "s3", "s4"}, 200, nil, false, true, 3},
-		{"middle-all-refreshed", 90 * time.Second, []string{"s2", "s3"}, 200, nil, false, true, 2},
+		{"90s-total-two-including-business", 90 * time.Second, []string{"s2"}, 200, nil, false, true, 1},
 		{"old-all-refreshed", 140 * time.Second, []string{"s2"}, 200, nil, false, true, 1},
 		{"accepted-second", time.Second, []string{"s2", "s2"}, 200, nil, true, true, 2},
 		{"accepted-first", time.Second, []string{"s1"}, 200, nil, true, true, 1},
@@ -90,7 +90,7 @@ func TestStateEchoConfirmationUnknownClosesBusinessWithoutDegrading(t *testing.T
 					if failure == "changed-pair" {
 						pair.version = "new-pair"
 					} else {
-						pair.until = time.Now().Add(-time.Second)
+						pair.routeExpiresAt = time.Now().Add(-time.Second)
 					}
 					svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, pair)
 				}

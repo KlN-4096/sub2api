@@ -96,7 +96,7 @@ func gatewayPoolConfirmationRequest(ctx context.Context, original *http.Request,
 }
 
 // The whole round shares one deadline, bounded by the caller and this exact
-// ticket's remaining lease. It does not refresh the lease or replay the business.
+// probe budget. Reference TTL cannot cancel a confirmation or business response.
 func (s *OpenAIGatewayService) gatewayPoolConfirmResponse(request *http.Request, account *Account,
 	proxyURL, identity, state string, applied OpenAIGatewayPoolApplied,
 ) (bool, bool, error) {
@@ -109,16 +109,14 @@ func (s *OpenAIGatewayService) gatewayPoolConfirmResponse(request *http.Request,
 		return false, false, err
 	}
 	deadline := time.Now().Add(gatewayPoolWarmBudget)
-	if pair.until.Before(deadline) {
-		deadline = pair.until
-	}
 	ctx, cancel := context.WithDeadline(request.Context(), deadline)
 	defer cancel()
 	trace := &gatewayPoolProbeTrace{}
 	started := time.Now()
 	var steps []gatewayPoolProbeStep
+	attempts := gatewayPoolEchoStrikes(time.Since(pair.firstSent))
 	full, conclusive, err := gatewayPoolConfirmState(ctx, request.Header.Get("Cookie"), state,
-		gatewayPoolEchoStrikes(time.Since(pair.firstSent)), func(ctx context.Context, cookie, state string) (int, string, error) {
+		attempts, func(ctx context.Context, cookie, state string) (int, string, error) {
 			current, status := s.codexCookies.cachedPoolPair(identity)
 			if status != openAIGatewayPoolPairLive || current.version != applied.Version {
 				return 0, "", errOpenAIGatewayPoolWarmUnverified
@@ -166,7 +164,7 @@ func (s *OpenAIGatewayService) gatewayPoolConfirmResponse(request *http.Request,
 			return step.Status, fresh, err
 		})
 	current, status := s.codexCookies.cachedPoolPair(identity)
-	if status != openAIGatewayPoolPairLive || current.version != applied.Version || ctx.Err() != nil {
+	if status == openAIGatewayPoolPairNone || current.invalidated || current.version != applied.Version || ctx.Err() != nil {
 		full, conclusive, err = false, false, errOpenAIGatewayPoolWarmUnverified
 	}
 	// Same round as the original business: extra traffic updates last contact
@@ -180,7 +178,7 @@ func (s *OpenAIGatewayService) gatewayPoolConfirmResponse(request *http.Request,
 		DurationMS: time.Since(started).Milliseconds(),
 	})
 	current, status = s.codexCookies.cachedPoolPair(identity)
-	if status != openAIGatewayPoolPairLive || current.version != applied.Version || ctx.Err() != nil {
+	if status == openAIGatewayPoolPairNone || current.invalidated || current.version != applied.Version || ctx.Err() != nil {
 		full, conclusive, err = false, false, errOpenAIGatewayPoolWarmUnverified
 	}
 	return full, conclusive, err

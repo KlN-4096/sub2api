@@ -1535,6 +1535,21 @@ describe("admin SettingsView payment visible method controls", () => {
     });
   });
 
+  it.each([false, true])("does not expose or resubmit the retired global gateway-pool limit (%s)", async (weighted) => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      openai_advanced_scheduler_enabled: weighted,
+      openai_gwpool_active_accounts: 2,
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.find('[data-testid="openai-gwpool-active-accounts"]').exists()).toBe(false);
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings).toHaveBeenCalled();
+    expect(updateSettings.mock.calls.at(-1)?.[0]).not.toHaveProperty("openai_gwpool_active_accounts");
+  });
+
   it.each([false, true])("clears the OAuth rate without losing zero (weighted=%s)", async (weighted) => {
     getSettings.mockResolvedValueOnce({
       ...baseSettingsResponse,
