@@ -3,6 +3,10 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
+	"fmt"
+	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -11,7 +15,9 @@ import (
 // --- Plan Repository ---
 
 type scheduledTestPlanRepository struct {
-	db *sql.DB
+	db           *sql.DB
+	claimMu      sync.Mutex
+	activeClaims int
 }
 
 func NewScheduledTestPlanRepository(db *sql.DB) service.ScheduledTestPlanRepository {
@@ -77,11 +83,112 @@ func (r *scheduledTestPlanRepository) Delete(ctx context.Context, id int64) erro
 	return err
 }
 
-func (r *scheduledTestPlanRepository) UpdateAfterRun(ctx context.Context, id int64, lastRunAt time.Time, nextRunAt time.Time) error {
+func (r *scheduledTestPlanRepository) MarkRunFinished(ctx context.Context, id int64, lastRunAt time.Time) error {
 	_, err := r.db.ExecContext(ctx, `
-		UPDATE scheduled_test_plans SET last_run_at = $2, next_run_at = $3, updated_at = NOW() WHERE id = $1
-	`, id, lastRunAt, nextRunAt)
+		UPDATE scheduled_test_plans SET last_run_at = $2 WHERE id = $1
+	`, id, lastRunAt)
 	return err
+}
+
+type scheduledTestPlanLease struct {
+	conn  *sql.Conn
+	key   string
+	owner *scheduledTestPlanRepository
+}
+
+const (
+	scheduledTestLockReleaseTimeout    = 2 * time.Second
+	scheduledTestReservedDBConnections = 1
+)
+
+// The session lock spans the test, so a slow test cannot overlap the next cron
+// occurrence on another instance. The CAS advances this occurrence before any
+// outbound work and rejects administrator edits, even if next_run_at is equal.
+func (r *scheduledTestPlanRepository) TryClaimDue(ctx context.Context, plan *service.ScheduledTestPlan, now, nextRunAt time.Time) (out service.ScheduledTestPlanLease, claimed bool, err error) {
+	if plan == nil || plan.NextRunAt == nil || !nextRunAt.After(now) {
+		return nil, false, fmt.Errorf("invalid scheduled test claim")
+	}
+	// A lease retains a pool connection while the probe performs ordinary DB
+	// work. Never let our own leases consume the entire pool and deadlock it.
+	r.claimMu.Lock()
+	maxOpen := r.db.Stats().MaxOpenConnections
+	if maxOpen > 0 && r.activeClaims >= maxOpen-scheduledTestReservedDBConnections {
+		r.claimMu.Unlock()
+		if maxOpen <= scheduledTestReservedDBConnections {
+			return nil, false, fmt.Errorf("scheduled tests require at least two database connections")
+		}
+		return nil, false, nil
+	}
+	r.activeClaims++
+	r.claimMu.Unlock()
+	defer func() {
+		if !claimed {
+			r.releaseClaimSlot()
+		}
+	}()
+	conn, err := r.db.Conn(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	lease := &scheduledTestPlanLease{conn: conn, key: fmt.Sprintf("scheduled_test_plan:%d", plan.ID)}
+	var acquired bool
+	if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock(hashtextextended($1, 0))", lease.key).Scan(&acquired); err != nil {
+		// The server may have acquired the lock before the result was lost.
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		_ = conn.Close()
+		return nil, false, err
+	}
+	if !acquired {
+		return nil, false, conn.Close()
+	}
+	result, err := conn.ExecContext(ctx, `
+		UPDATE scheduled_test_plans
+		SET next_run_at = $4, updated_at = NOW()
+		WHERE id = $1 AND enabled = true
+			AND next_run_at = $2 AND next_run_at <= $3 AND updated_at = $5
+	`, plan.ID, *plan.NextRunAt, now, nextRunAt, plan.UpdatedAt)
+	if err != nil {
+		return nil, false, errors.Join(err, lease.Release())
+	}
+	count, err := result.RowsAffected()
+	if err != nil || count == 0 {
+		return nil, false, errors.Join(err, lease.Release())
+	}
+	lease.owner = r
+	return lease, true, nil
+}
+
+func (r *scheduledTestPlanRepository) releaseClaimSlot() {
+	r.claimMu.Lock()
+	r.activeClaims--
+	r.claimMu.Unlock()
+}
+
+func (l *scheduledTestPlanLease) Release() error {
+	if l == nil || l.conn == nil {
+		return nil
+	}
+	conn := l.conn
+	l.conn = nil
+	if l.owner != nil {
+		defer l.owner.releaseClaimSlot()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), scheduledTestLockReleaseTimeout)
+	defer cancel()
+	var released bool
+	err := conn.QueryRowContext(ctx, "SELECT pg_advisory_unlock(hashtextextended($1, 0))", l.key).Scan(&released)
+	if err == nil && !released {
+		err = fmt.Errorf("scheduled test lock was not held")
+	}
+	if err != nil {
+		// Never put an ambiguously locked session back into the shared pool.
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
+	closeErr := conn.Close()
+	if errors.Is(closeErr, sql.ErrConnDone) {
+		closeErr = nil
+	}
+	return errors.Join(err, closeErr)
 }
 
 // --- Result Repository ---

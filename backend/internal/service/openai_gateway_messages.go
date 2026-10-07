@@ -261,9 +261,30 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		if codexResult.PromptCacheKey != "" {
 			promptCacheKey = codexResult.PromptCacheKey
 		}
+		// 双开：把桥伪装成一个真客户端会话——先在入站侧合成客户端原始身份（会话/线程 v7、每轮 turn v7、
+		// 窗口、turn-metadata、默认 prompt_cache_key，见 openai_compat_bridge_identity.go），再交给下面与
+		// /responses 完全相同的账号隔离 → 指纹收敛 → 线协议投影管线派生出站；桥自己不再单独写任何会话头。
+		// 非双开桥零改动（不注入）。入站头在本函数返回时还原，避免漏给 failover 的下一账号。
+		bridgeRestore, bridgeIdentity := s.injectOpenAICompatBridgeIdentity(c, account, reqBody, promptCacheKey)
+		defer bridgeRestore()
 		applyCodexAccountIdentityClientMetadataMap(reqBody, codexAccountIdentitySource(c, account), apiKeyID)
-		delete(reqBody, "prompt_cache_key")
-		if shouldAutoInjectPromptCacheKeyForCompat(upstreamModel) {
+		// 指纹收敛：与 /responses 走同一套解析与暂存。此前 Messages 桥没有这一步，
+		// 同一个账号在两个端点上会报出两套不同的设备身份（体内是按账号命名空间哈希
+		// 客户端原值得到的，而 /responses 是收敛值）。暂存后 buildUpstreamRequest 里的
+		// applyStagedCodexFingerprintHeaders / applyCodexDeviceWireProfile 才能生效。
+		fpIDs := resolveCodexFingerprintIDsWithBody(c, account, nil, reqBody["client_metadata"])
+		if fpIDs != nil {
+			applyCodexFingerprintClientMetadata(reqBody, fpIDs)
+		}
+		stageCodexFingerprintIDs(c, fpIDs)
+		if !bridgeIdentity {
+			// 基线：桥体不带 prompt_cache_key。双开桥的 prompt_cache_key 是合成身份的一部分（默认 PCK =
+			// session_id），已随 client_metadata 一起被账号隔离派生，与出站头 session-id 同值，保留。
+			delete(reqBody, "prompt_cache_key")
+		}
+		// 双开不跨轮回注 x-codex-turn-state：真客户端的 turn_state 是每轮一个 OnceLock（core/src/client.rs:285-292、
+		// turn_state.rs:140/:152），只在同一轮的重试里复用，新的一轮从不带上一轮的 blob；非双开维持基线的跨轮粘连。
+		if shouldAutoInjectPromptCacheKeyForCompat(upstreamModel) && !codexDeviceWireProfileEnabled(c, account) {
 			compatTurnState = s.getOpenAICompatSessionTurnState(ctx, c, account, promptCacheKey)
 		}
 		// OAuth codex transform forces stream=true upstream, so always use
@@ -372,7 +393,11 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 
 	// Override session_id with a deterministic UUID derived from the isolated
 	// session key, ensuring different API keys produce different upstream sessions.
-	if account.Platform != PlatformGrok && promptCacheKey != "" {
+	//
+	// 双开账号跳过：真实 Codex 只发连字符会话头，下划线别名是网关的历史形态。写进去
+	// 会让同一账号同时带两套取值不同的会话标识（连字符那套已由收敛按账号+密钥派生，
+	// 隔离性不依赖这里）。
+	if account.Platform != PlatformGrok && promptCacheKey != "" && !codexDeviceWireProfileEnabled(c, account) {
 		isolatedSessionID := generateSessionUUID(isolateOpenAIUpstreamSessionID(apiKeyID, codexAccountIdentitySource(c, account), promptCacheKey))
 		upstreamReq.Header.Set("session_id", isolatedSessionID)
 		if upstreamReq.Header.Get("conversation_id") != "" {
@@ -385,6 +410,11 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		// originator/OpenAI-Beta 返回 404（issue #3901）。
 		ensureCodexIdentityHeaders(upstreamReq.Header)
 		enforceCodexIdentityHeaders(upstreamReq.Header)
+		// ensureCodexIdentityHeaders 末尾会无条件 Set 回 OpenAI-Beta:responses=experimental，
+		// 把 buildUpstreamRequest 里刚做完的线协议投影抵消掉。双开账号在 /responses 上不发
+		// 该头、在这里发，同一账号就是两种客户端形态。补回投影收口（其内部按双开门控，
+		// 未开投影的账号行为不变）。
+		applyCodexDeviceWireProfile(c, account, upstreamReq.Header, false)
 		logger.L().Debug("openai messages: upstream identity restored",
 			zap.Int64("account_id", account.ID),
 			zap.String("upstream_model", upstreamModel),

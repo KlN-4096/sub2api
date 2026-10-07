@@ -2354,6 +2354,45 @@
         </div>
       </div>
 
+      <!-- 账号级出站 User-Agent（仅 OpenAI OAuth）：留空回落到全局设置 -->
+      <div
+        v-if="account?.platform === 'openai' && account?.type === 'oauth'"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <label class="input-label">{{ t('admin.accounts.openai.codexUserAgent') }}</label>
+        <p class="mt-1 mb-2 text-xs text-gray-500 dark:text-gray-400">
+          {{ t('admin.accounts.openai.codexUserAgentDesc') }}
+        </p>
+        <input
+          v-model="codexUserAgent"
+          type="text"
+          class="input"
+          data-testid="edit-codex-user-agent-input"
+          :placeholder="t('admin.accounts.openai.codexUserAgentPlaceholder')"
+        />
+      </div>
+
+      <!-- klno 实验性指纹收敛：按账号开关，见 backend/internal/service/openai_codex_fingerprint_convergence.go -->
+      <div
+        v-if="account?.platform === 'openai' && account?.type === 'oauth'"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div class="min-w-0">
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.codexFingerprintConvergence') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.openai.codexFingerprintConvergenceDesc') }}
+            </p>
+          </div>
+          <input
+            v-model="codexFingerprintConvergence"
+            data-testid="edit-codex-fingerprint-convergence"
+            type="checkbox"
+            class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+          />
+        </div>
+      </div>
+
       <!-- OpenAI 订阅档位手动覆盖（Plus/Pro/Free），仅 OAuth 非影子账号 -->
       <div
         v-if="account?.platform === 'openai' && account?.type === 'oauth' && !isSparkShadow"
@@ -3699,6 +3738,9 @@ const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
+// 账号级出站 User-Agent：留空表示沿用全局设置（后端 GetOpenAIUserAgent 的回落顺序）
+const codexUserAgent = ref('')
+const codexFingerprintConvergence = ref(false)
 type CodexImageToolMode = 'inherit' | 'enabled' | 'disabled' | 'block'
 const codexImageToolMode = ref<CodexImageToolMode>('inherit')
 type AnthropicAPIKeyAuthScheme = 'x_api_key' | 'authorization_bearer'
@@ -4183,6 +4225,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   codexCLIOnlyEnabled.value = false
   codexCLIOnlyAppServerEnabled.value = false
   codexFingerprintMode.value = 'off'
+  codexFingerprintConvergence.value = false
+  codexUserAgent.value = ''
   codexImageToolMode.value = 'inherit'
   anthropicPassthroughEnabled.value = false
   anthropicAPIKeyAuthScheme.value = 'x_api_key'
@@ -4240,6 +4284,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
       codexFingerprintMode.value = (['off', 'device', 'session', 'full'].includes(fpMode || '')
         ? fpMode as CodexFingerprintMode
         : 'off')
+      codexFingerprintConvergence.value = extra?.codex_experimental_fingerprint_convergence === true
+      codexUserAgent.value = typeof extra?.codex_user_agent === 'string' ? extra.codex_user_agent : ''
     }
     const credentials = newAccount.credentials as Record<string, unknown> | undefined
     const compactMappings = credentials?.compact_model_mapping as Record<string, string> | undefined
@@ -5777,6 +5823,19 @@ const handleSubmit = async () => {
           newExtra.codex_fingerprint_mode = codexFingerprintMode.value
         } else {
           delete newExtra.codex_fingerprint_mode
+        }
+        // klno 实验性指纹收敛：勾选落 true，不勾删键（对应后端 codexFingerprintConvergenceEnabled）
+        if (codexFingerprintConvergence.value) {
+          newExtra.codex_experimental_fingerprint_convergence = true
+        } else {
+          delete newExtra.codex_experimental_fingerprint_convergence
+        }
+        // 账号级出站 UA：留空删键，回落到全局设置
+        const codexUA = codexUserAgent.value.trim()
+        if (codexUA) {
+          newExtra.codex_user_agent = codexUA
+        } else {
+          delete newExtra.codex_user_agent
         }
       }
 
