@@ -167,7 +167,9 @@ func duplicateAccountExtra(value map[string]any) (map[string]any, error) {
 
 func canDuplicateAccountType(accountType string) bool {
 	switch accountType {
-	case AccountTypeAPIKey, AccountTypeUpstream, AccountTypeBedrock, AccountTypeServiceAccount:
+	// cpr 的凭据是静态的（base_url / api_key / admin_* / cpr_account_id），没有任何
+	// 轮换态，与 apikey 同构；OAuth 被排除的理由是 token 会被后台刷新器改写，对 cpr 不成立。
+	case AccountTypeAPIKey, AccountTypeUpstream, AccountTypeBedrock, AccountTypeServiceAccount, AccountTypeCPR:
 		return true
 	default:
 		return false
@@ -479,6 +481,9 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 }
 
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
+	if err := validateCPRAccountShape(input.Platform, input.Type); err != nil {
+		return nil, err
+	}
 	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Extra)
 	if err != nil {
 		return nil, err
@@ -579,8 +584,14 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	if err != nil {
 		return nil, err
 	}
-	if account.Platform == PlatformTypeSafe && input.Type != "" && input.Type != AccountTypeAPIKey {
-		return nil, errors.New("typesafe accounts only support apikey credentials")
+	// Platform 在更新路径不可变，只需用生效后的 type 复核平台×类型组合。
+	if input.Type != "" {
+		if account.Platform == PlatformTypeSafe && input.Type != AccountTypeAPIKey {
+			return nil, errors.New("typesafe accounts only support apikey credentials")
+		}
+		if err := validateCPRAccountShape(account.Platform, input.Type); err != nil {
+			return nil, err
+		}
 	}
 	var normalizedExtra map[string]any
 	if input.Extra != nil {

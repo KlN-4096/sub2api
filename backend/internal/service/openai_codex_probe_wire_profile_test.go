@@ -168,7 +168,14 @@ func TestCodexDeviceWireProfileAccountProbes(t *testing.T) {
 					req := up.lastReq
 					require.Equal(t, resolveCodexOutboundIdentity("").version, req.Header.Get("version"),
 						"version 是 provider 头，所有探针都带且钉到规范身份")
-					require.Equal(t, "responses=experimental", req.Header.Get("OpenAI-Beta"))
+					if probe == "image" && codexDirectImagesEnabled {
+						// 上游 0.2.5 起 usesCodexDirectImages 的模型走自建 payload 与独立
+						// 端点，一律不发 OpenAI-Beta；这与双开开关无关。
+						// 直调端点关闭时图片回落 /responses，与其余探针同形。
+						require.Empty(t, req.Header.Get("OpenAI-Beta"))
+					} else {
+						require.Equal(t, "responses=experimental", req.Header.Get("OpenAI-Beta"))
+					}
 					require.False(t, gjson.GetBytes(up.lastBody, "client_metadata").Exists())
 					if probe == "compact" {
 						require.NotEmpty(t, req.Header.Get("x-codex-window-id"), "非双开 compact 探针保留既有的自造窗口头")

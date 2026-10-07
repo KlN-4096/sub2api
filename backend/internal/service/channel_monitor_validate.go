@@ -236,7 +236,10 @@ func monitorAccountQuotaCapability(account *Account) error {
 		}
 		return ErrChannelMonitorAccountNotSupportable
 	case PlatformOpenAI:
-		if account.Type == AccountTypeOAuth {
+		// cpr 与 oauth 共用 codex 额度口径：下游取数 channel_monitor_quota_fetcher
+		// 走 AccountUsageService.GetUsageForAccount，那里已显式包含 IsCPR()。
+		// 这道校验是唯一的阻塞点，漏掉它 cpr 就没有健康/额度监控与告警。
+		if account.Type == AccountTypeOAuth || account.IsCPR() {
 			return nil
 		}
 		return ErrChannelMonitorAccountNotSupportable

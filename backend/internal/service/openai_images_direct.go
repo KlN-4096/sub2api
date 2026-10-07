@@ -27,8 +27,32 @@ func isOpenAIImagesForceResponses(ctx context.Context) bool {
 	return forced
 }
 
+// codexDirectImagesEnabled 暂时关闭上游 0.2.5 新引入的图片直调端点。
+//
+// 关闭原因（2026-09-15 部署前核查，证据取自 codex-rs e763730）：
+//   - 真客户端的 ImageGenerationRequest / ImageEditRequest 是普通 serde 结构体
+//     （codex-api/src/images.rs:4-31），无 flatten / 无 extra，wire 上不可能出现
+//     client_metadata；而本仓库在 openai_images_responses.go 对 direct 与非 direct
+//     无差别执行 applyCodexFingerprintClientMetadataRaw，把它塞了进去。
+//   - 真客户端在该端点只额外发 x-codex-image-turn-id + originator
+//     （ext/image-generation/src/backend.rs:113-121）；本仓库经 buildUpstreamRequest
+//     把整套 Responses 身份头（session_id / conversation_id / x-codex-beta-features /
+//     x-codex-routing-hint / chatgpt-account-id）一并带了过去。
+//   - 首键也不同：真客户端是 prompt，本仓库的自建 payload 是 map 字典序的 model。
+//
+// 默认图片模型 gpt-image-2.5-sunburst 就在下面的名单里，即默认路径命中，不是边角
+// 用例。关掉后图片回落 /responses——那正是 0.2.4-klno.8 线上一直在跑的形态，
+// 那条路径上 client_metadata 与身份头都是真客户端会发的东西。
+//
+// 重新打开的前提：direct 时跳过 client_metadata 注入、按 image_request_headers
+// 裁剪请求头、payload 改为 prompt 首键的固定字段序，并各自配上会失败的回归测试。
+const codexDirectImagesEnabled = false
+
 // 显式列出已接入的模型，不把未来模型或未知快照自动送到直调端点。
 func usesCodexDirectImages(model string) bool {
+	if !codexDirectImagesEnabled {
+		return false
+	}
 	switch strings.TrimSpace(model) {
 	case "gpt-image-1.5", "gpt-image-2",
 		"gpt-image-2.5-flare", "gpt-image-2.5-sunburst",
