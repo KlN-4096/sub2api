@@ -309,8 +309,10 @@ var openAIGatewayPoolConfigExtraKeys = []string{
 	openAIGatewayPoolExtraKey,
 	openAIGatewayPoolRotationExtraKey,
 	openAIGatewayPoolRotationMinGatewaysExtraKey,
+	openAIGatewayPoolResumeGatewaysExtraKey,
 	openAIGatewayPoolGuardEnabledExtraKey,
 	openAIGatewayPoolGatewayWindowExtraKey,
+	openAIGatewayPoolCooldownResetHoursKey,
 	openAIGatewayPoolWarmTicketsExtraKey,
 	openAIGatewayPoolFetchTimeoutExtraKey,
 	openAIGatewayPoolListTimeoutExtraKey,
@@ -357,6 +359,7 @@ func validateOpenAIGatewayPoolAccountExtra(account *Account, extra map[string]an
 	}
 	for key, limit := range map[string]int{
 		openAIGatewayPoolRotationMinGatewaysExtraKey: gatewayPoolRotationMinGatewaysMax,
+		openAIGatewayPoolResumeGatewaysExtraKey:      gatewayPoolRotationMinGatewaysMax,
 		openAIGatewayPoolWarmTicketsExtraKey:         gatewayPoolWarmMaxTicketsCeiling,
 		openAIGatewayPoolFetchTimeoutExtraKey:        openAIGatewayPoolMaxSeconds,
 		openAIGatewayPoolListTimeoutExtraKey:         openAIGatewayPoolMaxSeconds,
@@ -368,9 +371,18 @@ func validateOpenAIGatewayPoolAccountExtra(account *Account, extra map[string]an
 			}
 		}
 	}
+	if _, ok := gatewayPoolCooldownResetHours(extra[openAIGatewayPoolCooldownResetHoursKey]); !ok {
+		return infraerrors.Newf(http.StatusBadRequest, "GWPOOL_SETTING_INVALID",
+			"%s must be an integer between 0 and %d", openAIGatewayPoolCooldownResetHoursKey, gatewayPoolCooldownResetMaxHours)
+	}
 	probe := &Account{
 		ID: account.ID, Platform: account.Platform, Type: account.Type,
 		ParentAccountID: account.ParentAccountID, Credentials: account.Credentials, Extra: extra,
+	}
+	if raw := extra[openAIGatewayPoolResumeGatewaysExtraKey]; raw != nil &&
+		probe.getExtraInt(openAIGatewayPoolResumeGatewaysExtraKey) < probe.gatewayPoolRotationMinGateways() {
+		return infraerrors.Newf(http.StatusBadRequest, "GWPOOL_SETTING_INVALID",
+			"%s must not be below %s", openAIGatewayPoolResumeGatewaysExtraKey, openAIGatewayPoolRotationMinGatewaysExtraKey)
 	}
 	if !probe.UsesGatewayPool() {
 		return nil
@@ -798,6 +810,10 @@ func (s *openAICodexCookieStore) gatewayPoolHydrateUsed(account *Account, identi
 		return
 	}
 	rec = gatewayPoolHistoryForTag(rec, gatewayPoolLedgerTag(identity))
+	if rec.LedgerTag != "" {
+		s.applyGatewayPoolCooldownReset(identity, rec.CooldownReset.LastAt,
+			gatewayPoolCooldownBase(account.gatewayPoolGatewayWindow()))
+	}
 	for gateway, seen := range rec.Seen {
 		if gateway == "" || seen.At.IsZero() {
 			continue
@@ -805,7 +821,7 @@ func (s *openAICodexCookieStore) gatewayPoolHydrateUsed(account *Account, identi
 		key := gatewayPoolLedgerKey(identity, gateway)
 		// 旧版无身份绑定的记录只恢复触碰时间，不信任其中的自适应学习字段。
 		if rec.LedgerTag != "" {
-			s.hydrateCooldown(identity, gateway, seen.Cooldown, gatewayPoolCooldownBase(account.gatewayPoolGatewayWindow()))
+			s.hydrateCooldown(identity, gateway, seen.Cooldown, gatewayPoolCooldownBase(account.gatewayPoolGatewayWindow()), seen.At)
 		}
 		if prev, loaded := s.poolUsed.Load(key); loaded {
 			if at, isTime := prev.(time.Time); isTime && !seen.At.After(at) {
@@ -968,7 +984,7 @@ func gatewayPoolRetriesBare(err error) bool {
 // 否则自适应退避只是显示数字，真实出站仍会提前重试。
 //
 // 池子不知道「烧过」是按 (上游账号 × 网关) 算的——它只看自己那本账，所以池子的
-// pair_ready / used_by_you 与本地账本是**且**的关系。
+// pair_ready 与本地账本共同准入；used_by_you只是历史提示，真实池端保护由/cookie执行。
 func (s *openAICodexCookieStore) gatewayPoolPick(
 	ctx context.Context,
 	pool *gwpool.Client,
@@ -984,6 +1000,7 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 		// 列表是优化不是闸门：池子没加这个端点 / 临时打不开时照常裸取。绝不能因为列不出来
 		// 就让这一发失败——接这个端点之前的行为就是兜底。
 		slog.Debug("gwpool_gateways_unavailable", "account_id", account.ID, "error", err)
+		s.noteGatewayPoolEarlySkip(account, "catalog_unavailable", time.Time{})
 		return ""
 	}
 	s.noteGatewayPoolCountries(account, gateways)
@@ -1005,8 +1022,7 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 	//     扫描也写它（见池子 gateways.go 的注释）—— 一个在池子里也当铸票者的号，几乎每个它
 	//     铸过的网关都会被标成 used_by_you，于是这个数恒为 0。而「这个 (账号 × 网关) 的满血
 	//     窗口烧没烧」只有本地账本答得准：它记的是**这个号真的打过业务请求**的那些落点。
-	//     挑落点时仍然避开池子说烧过的（下面那个 continue），那是另一回事：报数要准，
-	//     挑落点要保守。
+	//     选择、报数和耗尽共用同一准入；/cookie 仍执行池端短期保护和真实退避。
 	free := 0
 	window := account.gatewayPoolGatewayWindow()
 	for _, candidate := range gateways {
@@ -1019,9 +1035,6 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 		if !burned {
 			free++
 		}
-		if candidate.UsedByYou {
-			continue
-		}
 		if !burned {
 			eligible = append(eligible, candidate)
 		}
@@ -1030,6 +1043,7 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 	// 成对下发，卡片才能把 free=0（全烧过了）和「没问到清单」分开。
 	openAIGatewayPoolSinkFrom(ctx).notePoolCounts(len(gateways), free)
 	if len(eligible) > 0 {
+		s.noteGatewayPoolEarlySkip(account, "normal_candidates_available", time.Time{})
 		// Baseline remains least recently used. Only comparable measured candidates
 		// may exchange positions, and every fifth pick retains this baseline.
 		sort.SliceStable(eligible, func(i, j int) bool { return eligible[i].LastUsedAt.Before(eligible[j].LastUsedAt) })
@@ -1151,6 +1165,9 @@ func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *A
 		go func() {
 			<-fetched
 			fetchFinish()
+			if s.poolUsageFinished != nil {
+				s.poolUsageFinished(context.WithoutCancel(ctx), account)
+			}
 		}()
 		return openAIGatewayPoolPair{}, false, waitCtx.Err()
 	case result := <-fetched:
@@ -1330,6 +1347,18 @@ func (s *openAICodexCookieStore) gatewayPoolTakeBatch(
 	}
 	request.Count = count
 	got, err := pool.Cookies(ctx, request)
+	if early != nil {
+		code := "delivered"
+		if err != nil {
+			code = "fetch_failed"
+			var poolErr *gwpool.PoolError
+			if errors.As(err, &poolErr) {
+				code = poolErr.Code
+			}
+		}
+		slog.Info("gwpool_early_fetch_result", "account_id", account.ID, "gateway", early.gateway,
+			"reserved_at", early.reservedAt, "reason", code, "received", len(got), "sent", false)
+	}
 	if early == nil && steer != "" && gatewayPoolRetriesBare(err) {
 		// 点名的那个在「列表」与「取票」之间被别人租走了。这一发什么都没交付、没烧任何
 		// 槽位，所以退回裸取一次——不然自己挑网关反而把本来能成的请求打成失败。
@@ -1579,6 +1608,7 @@ func (s *openAICodexCookieStore) gatewayPoolDropPair(identity, version string) {
 // 注入过的读数记到后一个号的用量行上。用量侧按它校验（见 routePairInUse）。
 type OpenAIGatewayPoolApplied struct {
 	early             *gatewayPoolEarlyAttempt
+	cooldownResetAt   time.Time
 	LedgerTag         string
 	AccountID         int64
 	Cookie            string
@@ -1635,7 +1665,7 @@ type openAIGatewayPoolSink struct {
 	discarded []OpenAIGatewayPoolDiscardedAttempt
 	// model 是这一发的出站模型名，由 buildUpstreamRequest 在**压缩之前**从明文体里记一笔。
 	//
-	// queue 档的垫话必须用同一个模型（state 绑在 (账号 × 模型 × 这张票) 上），而传输层只拿到
+	// 按实际出站模型选择垫话/补齐state（缓存按凭据×模型，非pair），而传输层只拿到
 	// *http.Request —— 而且双开账号的出站体是 zstd，裸解 JSON 必然失败
 	// （compressCodexRequestBody）。所以在还看得见明文的那一层记下来。
 	model string
@@ -1900,6 +1930,7 @@ func (s *openAICodexCookieStore) AttachRoute(
 		Region:    pair.region, Version: pair.version, RoundID: pair.roundID,
 		DatacenterCountry: pair.datacenterCountry,
 		early:             pair.early,
+		cooldownResetAt:   s.gatewayPoolCooldownResetAt(identity),
 	})
 	return release, nil
 }

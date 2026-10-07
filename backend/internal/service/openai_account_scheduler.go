@@ -2218,7 +2218,17 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 			}
 			return nil, decision, ErrNoAvailableAccounts
 		}
-		if requiredImageCapability != "" || strongBinding || s.gatewayPoolRoundSelectionAllowed(ctx, groupID, selection) {
+		if requiredImageCapability != "" || strongBinding {
+			allowed, restErr := s.gatewayPoolResumeAllowed(ctx, selection.Account, true)
+			if restErr == nil && allowed {
+				return selection, decision, nil
+			}
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			return nil, decision, ErrNoAvailableAccounts // never move a strong binding to bypass rest
+		}
+		if s.gatewayPoolRoundSelectionAllowed(ctx, groupID, selection) {
 			return selection, decision, nil
 		}
 		// A concurrent request exhausted the chosen credential after our snapshot.

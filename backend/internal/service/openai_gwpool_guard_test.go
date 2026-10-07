@@ -24,10 +24,12 @@ func TestGatewayPoolGuardOffSkipsVerificationAndResponseJudgment(t *testing.T) {
 		{status: http.StatusOK, minted: "changed-state"},
 	}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
-	for range 4 {
+	for i := range 4 {
 		request, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 		require.NoError(t, err)
-		request.Header.Set(openAICodexTurnStateHeader, "client-state")
+		if i%2 == 0 {
+			request.Header.Set(openAICodexTurnStateHeader, "client-state")
+		}
 		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 		ctx, _ := withOpenAIGatewayPoolSink(request.Context(), ginCtx)
 		response, err := svc.doOpenAIUpstream(request.WithContext(ctx), "", account)

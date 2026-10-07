@@ -1066,21 +1066,21 @@ func TestGatewayPoolForceNoSlotFailsClosed(t *testing.T) {
 // 自己挑网关（GET /gateways → GET /cookie?gateway=）
 // ---------------------------------------------------------------------------
 
-// 要票前先列网关，在「有活 pair、池子说你没烧过」的里面点一个名。
+// 要票前先列网关：UsedByYou只是历史提示，没有本地冷却的活票仍可点名。
 func TestGatewayPoolPicksUnburntGateway(t *testing.T) {
-	poolCookie := gwpoolTestPairCookie(t, "unified-167")
+	poolCookie := gwpoolTestPairCookie(t, "unified-126")
 	fake := newGwpoolFakePool(t, poolCookie, 150)
 	fake.listGateways = []gwpoolFakeGateway{
 		{Name: "unified-126", PairReady: true, UsedByYou: true}, // 池子记着这个身份烧过
-		{Name: "unified-195"},                  // 没有活 pair
-		{Name: "unified-167", PairReady: true}, // 唯一候选
+		{Name: "unified-195"}, // 没有活 pair
+		{Name: "unified-167", PairReady: true},
 	}
 	store := &openAICodexCookieStore{}
 
 	headers := http.Header{}
 	require.NoError(t, attachRoute(context.Background(), store, fake.account(1), gwpoolTestURL, headers))
 	require.Equal(t, poolCookie, headers.Get("Cookie"))
-	require.Equal(t, gwpoolTestCookieQuery+"&gateway=unified-167", fake.nextQuery(t), "必须点名，而不是让池子随便给")
+	require.Equal(t, gwpoolTestCookieQuery+"&gateway=unified-126", fake.nextQuery(t), "历史交付标记不挡住实际可尝试票")
 	require.Equal(t, gwpoolTestAccountQuery, <-fake.listQueries,
 		"列网关也要报上游账号，否则 used_by_you 是上传者的历史")
 	require.EqualValues(t, 1, fake.listHits.Load(), "一次取票只列一次网关")
@@ -1094,7 +1094,7 @@ func TestGatewayPoolPicksUnburntGateway(t *testing.T) {
 // 的号，几乎每个它铸过的网关都会被标成 used_by_you。跟着它数的话这个数恒为 0，卡片上就是
 // 「池子剩余 0」而池子正有几十个落点可交付（2026-10-03 现网实况）。
 //
-// 挑落点仍然避开 used_by_you（上面那条用例钉着），两件事刻意不同口径：报数要准，挑要保守。
+// 报数与选票共用同一准入，池端/cookie仍执行短期交付保护。
 func TestGatewayPoolFreeCountIgnoresPoolSideUsedByYou(t *testing.T) {
 	poolCookie := gwpoolTestPairCookie(t, "unified-167")
 	fake := newGwpoolFakePool(t, poolCookie, 150)
@@ -1183,7 +1183,7 @@ func TestGatewayPoolRotatesToTheOldestBurntCandidateInsteadOfBareTake(t *testing
 	poolCookie := gwpoolTestPairCookie(t, "unified-142")
 	fake := newGwpoolFakePool(t, poolCookie, 150)
 	fake.listGateways = []gwpoolFakeGateway{
-		{Name: "unified-126", PairReady: true, UsedByYou: true}, // 池子说这张是你自己正拿着的
+		{Name: "unified-126", PairReady: false, UsedByYou: true},
 		{Name: "unified-195"},                  // 没活 pair
 		{Name: "unified-167", PairReady: true}, // 本地 1 分钟前碰过
 		{Name: "unified-84", PairReady: true},  // 本地 3 小时前碰过 ⇒ 轮到它
@@ -1199,12 +1199,12 @@ func TestGatewayPoolRotatesToTheOldestBurntCandidateInsteadOfBareTake(t *testing
 		"点名碰得最早那个，并把它自己从 exclude 里摘掉；别的烧过的照旧带着")
 }
 
-// 一个有活 pair 的候选都没有（池子侧全烧过 / 没活 pair）⇒ 仍然裸取，账本带成 exclude。
+// 一个有活 pair 的候选都没有 ⇒ 仍然裸取，账本带成 exclude。
 func TestGatewayPoolFallsBackToBareTakeWhenNothingIsSteerable(t *testing.T) {
 	poolCookie := gwpoolTestPairCookie(t, "unified-142")
 	fake := newGwpoolFakePool(t, poolCookie, 150)
 	fake.listGateways = []gwpoolFakeGateway{
-		{Name: "unified-126", PairReady: true, UsedByYou: true},
+		{Name: "unified-126", PairReady: false, UsedByYou: true},
 		{Name: "unified-195"},
 	}
 	store := &openAICodexCookieStore{}

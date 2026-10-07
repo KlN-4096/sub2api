@@ -1,6 +1,7 @@
 package service
 
-// 业务 state 被刷新后，以最新 state 连续确认最多 3/2/1 发。
+// 业务 state 被刷新后，以最新 state 连续确认最多 3/1 发。
+// 业务没带 state 时，收到新值也按同一票龄预算回带确认；两边都没有 state 则放行、不造质量结论。
 // 仅 HTTP 200 可下结论；任一确认接受即保留原业务响应，全刷新才丢票。
 // 此处沿用项目 state-echo 启发式，不把它宣称为模型能力证明。
 // 错误/取消/票关联变化为未知，严格防护阻止交付但不计降级。
@@ -18,8 +19,8 @@ import (
 
 // 默认开；仅 guard_enabled=false 关闭，旧 guard/state_echo/retries 键不再读取。
 // 错误响应只说类别，不携带 state、cookie 或上游身份。
-const gatewayPoolDegradedClientMsg = "上游路由连续 state-echo 确认均被刷新，当前网关已标记为要换，本次不交付业务结果" +
-	" / All state-echo confirmations refreshed the state; the route is marked for rotation and the business response is withheld"
+const gatewayPoolDegradedClientMsg = "网关连续回声确认均刷新，当前网关已标记为要换，本次不交付业务结果" +
+	" / All gateway echo confirmations refreshed; the route is marked for rotation and the business response is withheld"
 
 // errOpenAIGatewayPoolRouteDegraded 走的是**和池子 503 完全同一条**失败路径。
 //
@@ -98,12 +99,12 @@ func (s *OpenAIGatewayService) gatewayPoolRouteDegraded(
 		}
 	}
 	sent := strings.TrimSpace(request.Header.Get(openAICodexTurnStateHeader))
-	if sent == "" {
-		// 没送票 ⇒ 没有回声。上游对不带票的请求 87% 会铸一张新的（openai_codex_turn_state_auto.go
-		// 的实测），拿它当降智证据等于把绝大多数首轮请求判死。
+	fresh := extractOpenAICodexTurnState(resp.Header)
+	if sent == "" && fresh == "" {
+		// User-selected policy: no echo evidence permits pass-through, but
+		// is neither a new full-strength observation nor a degraded one.
 		return false, nil
 	}
-	fresh := extractOpenAICodexTurnState(resp.Header)
 	refreshed := fresh != "" && fresh != sent
 	if refreshed {
 		// Freeze this business contact before confirmations update the same
@@ -123,19 +124,15 @@ func (s *OpenAIGatewayService) gatewayPoolRouteDegraded(
 	return refreshed, nil
 }
 
-// 轮开始时冻结确认次数：首次实际出站以来 <90s:3，90–140s:2，>=140s:1。
-const (
-	gatewayPoolEchoYoungAge = 90 * time.Second
-	gatewayPoolEchoMidAge   = 140 * time.Second
-)
+// 轮开始时冻结确认次数：首次实际出站以来 <90s:3，>=90s:1。
+// 老票的「最多两发」包括已经发出的原业务，因此这里只再给一次确认。
+const gatewayPoolEchoYoungAge = 90 * time.Second
 
 // 不含原业务那一发，不跨业务累计，确认时每发跟随最新 state。
 func gatewayPoolEchoStrikes(age time.Duration) int {
 	switch {
 	case age < gatewayPoolEchoYoungAge:
 		return 3
-	case age < gatewayPoolEchoMidAge:
-		return 2
 	default:
 		return 1
 	}

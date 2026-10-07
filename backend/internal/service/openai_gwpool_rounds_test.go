@@ -69,7 +69,7 @@ func TestGatewayPoolRoundsRestIncludesActualProbesAndKeepsRequestCloneExclusions
 }
 
 func TestGatewayPoolRoundsDoNotWaitForDisabledOrIncompatibleAccounts(t *testing.T) {
-	for _, reason := range []string{"disabled", "model", "rotation-off"} {
+	for _, reason := range []string{"disabled", "model", "pool-off"} {
 		t.Run(reason, func(t *testing.T) {
 			group := int64(7)
 			a, b := preferenceAccount(1, group, 1), preferenceAccount(2, group, 20)
@@ -78,8 +78,8 @@ func TestGatewayPoolRoundsDoNotWaitForDisabledOrIncompatibleAccounts(t *testing.
 				b.Schedulable = false
 			case "model":
 				b.Credentials["model_mapping"] = map[string]any{"other": "other"}
-			case "rotation-off":
-				b.Extra[openAIGatewayPoolRotationExtraKey] = false
+			case "pool-off":
+				b.Extra[openAIGatewayPoolExtraKey] = false
 			}
 			repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*a, *b}}}
 			svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}}

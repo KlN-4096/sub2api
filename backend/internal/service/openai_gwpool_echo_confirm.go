@@ -114,8 +114,9 @@ func (s *OpenAIGatewayService) gatewayPoolConfirmResponse(request *http.Request,
 	trace := &gatewayPoolProbeTrace{}
 	started := time.Now()
 	var steps []gatewayPoolProbeStep
+	attempts := gatewayPoolEchoStrikes(time.Since(pair.firstSent))
 	full, conclusive, err := gatewayPoolConfirmState(ctx, request.Header.Get("Cookie"), state,
-		gatewayPoolEchoStrikes(time.Since(pair.firstSent)), func(ctx context.Context, cookie, state string) (int, string, error) {
+		attempts, func(ctx context.Context, cookie, state string) (int, string, error) {
 			current, status := s.codexCookies.cachedPoolPair(identity)
 			if status != openAIGatewayPoolPairLive || current.version != applied.Version {
 				return 0, "", errOpenAIGatewayPoolWarmUnverified

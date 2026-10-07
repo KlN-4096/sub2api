@@ -52,6 +52,16 @@ func (r *gatewayPoolRounds) rest(group int64, identity string, until time.Time) 
 	}
 }
 
+func (r *gatewayPoolRounds) recovered(identity string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	domain := gatewayPoolLedgerIdentity(identity)
+	for _, state := range r.groups {
+		delete(state.resting, domain)
+		delete(state.exhausted, domain)
+	}
+}
+
 func (r *gatewayPoolRounds) generation(group int64) uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -197,6 +207,9 @@ func (s *OpenAIGatewayService) gatewayPoolRoundSelectionAllowed(ctx context.Cont
 		return true
 	}
 	if !account.IsSchedulable() {
+		return false
+	}
+	if allowed, err := s.gatewayPoolResumeAllowed(ctx, account, true); err != nil || !allowed {
 		return false
 	}
 	identity, err := s.codexCookies.gatewayPoolIdentity(ctx, account)

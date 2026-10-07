@@ -59,6 +59,10 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 		}
 		domains[account.ID] = gatewayPoolLedgerIdentity(identity)
 		freshAccounts[account.ID] = account
+		if allowed, err := s.gatewayPoolResumeAllowed(ctx, account, true); err != nil || !allowed {
+			s.codexCookies.poolRounds.rest(*req.GroupID, identity, time.Now().Add(gatewayPoolRestMin))
+			continue
+		}
 		contacts := readGatewayPoolContacts(account, gatewayPoolLedgerTag(identity))
 		for _, seen := range contacts.Seen {
 			s.codexCookies.poolRounds.touch(identity, seen.LastAt)

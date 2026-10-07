@@ -73,6 +73,7 @@ export async function list(
 
 export interface GatewayPoolProgress {
   run_id?: string
+  sequence?: number
   phase: 'idle' | 'fetching' | 'verifying' | 'waiting' | 'ready' | 'exhausted' | 'unknown' | 'cancelled'
   attempt: number
   limit: number

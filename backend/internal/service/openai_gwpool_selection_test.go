@@ -30,7 +30,7 @@ func TestGatewayPoolSelectionCanReachHealthyFourthAccount(t *testing.T) {
 	for id := int64(1); id <= 4; id++ {
 		account := preferenceAccount(id, group, int(10-id))
 		fake := newGwpoolFakePool(t, "offline", 150)
-		fake.listGateways = []gwpoolFakeGateway{{Name: "unified-300", PairReady: true, UsedByYou: id != 4}}
+		fake.listGateways = []gwpoolFakeGateway{{Name: "unified-300", PairReady: id == 4, UsedByYou: id != 4}}
 		fake.configure(account)
 		accounts = append(accounts, *account)
 	}
@@ -187,6 +187,8 @@ func TestGatewayPoolSelectionRechecksConcurrentExhaustionBySelectingRemainingAcc
 func TestGatewayPoolSelectionRoundPersistsAcrossRequestsAndRestartsAfterLastAccount(t *testing.T) {
 	group := int64(7)
 	a, b := preferenceAccount(1, group, 20), preferenceAccount(2, group, 1)
+	a.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 1
+	b.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 1
 	fake := newGwpoolFakePool(t, "offline-cookie", 150)
 	fake.listGateways = []gwpoolFakeGateway{{Name: "unified-201", PairReady: true}}
 	fake.configure(a, b)
@@ -227,6 +229,8 @@ func TestGatewayPoolSelectionRoundPersistsAcrossRequestsAndRestartsAfterLastAcco
 	for i := range repo.accounts {
 		past := time.Now().Add(-time.Second)
 		repo.accounts[i].TempUnschedulableUntil = &past
+		identity := openAIGatewayPoolAccountKey(&repo.accounts[i])
+		gatewayPoolRestDue(t, svc, repo, repo.accounts[i].ID, identity)
 	}
 	svc.codexCookies.poolRounds.mu.Lock()
 	for domain := range svc.codexCookies.poolRounds.groups[group].resting {
@@ -254,7 +258,7 @@ func TestGatewayPoolSelectionFreshHistoryIgnoresPoolFreeAndWrongIdentity(t *test
 }
 
 func TestGatewayPoolSelectionIneligibleAlternativeCannotBreakSticky(t *testing.T) {
-	for _, reason := range []string{"attempted", "model", "disabled", "other-group", "rotation-off"} {
+	for _, reason := range []string{"attempted", "model", "disabled", "other-group", "pool-off"} {
 		t.Run(reason, func(t *testing.T) {
 			group := int64(7)
 			a, b := preferenceAccount(1, group, 1), preferenceAccount(2, group, 20)
@@ -269,8 +273,8 @@ func TestGatewayPoolSelectionIneligibleAlternativeCannotBreakSticky(t *testing.T
 				b.Schedulable = false
 			case "other-group":
 				b.GroupIDs = []int64{8}
-			case "rotation-off":
-				b.Extra[openAIGatewayPoolRotationExtraKey] = false
+			case "pool-off":
+				b.Extra[openAIGatewayPoolExtraKey] = false
 			}
 			repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*a, *b}}}
 			svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}}

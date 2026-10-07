@@ -22,19 +22,6 @@
           class="ml-3 rounded border-gray-300 text-primary-600"
           @change="set(field.key, ($event.target as HTMLInputElement).checked)"
         />
-        <select
-          v-else-if="field.type === 'model'"
-          class="input text-xs"
-          :data-testid="`bulk-gwpool-value-${field.key}`"
-          :disabled="!selected(field.key)"
-          :value="modelValue[field.key] ?? field.default"
-          @change="set(field.key, ($event.target as HTMLSelectElement).value)"
-        >
-          <option value="gpt-6-luna">Luna</option>
-          <option value="gpt-6-sol">Sol</option>
-          <option value="gpt-6-astra">Astra</option>
-          <option value="business">{{ t('admin.accounts.openai.gwpoolProbeModelBusiness') }}</option>
-        </select>
         <input
           v-else
           class="input text-xs"
@@ -42,7 +29,7 @@
           :type="field.type"
           :disabled="!selected(field.key)"
           :value="modelValue[field.key] ?? ''"
-          :min="field.type === 'number' ? 1 : undefined"
+          :min="field.type === 'number' ? (field.min ?? 1) : undefined"
           :max="field.max"
           :step="field.type === 'number' ? 1 : undefined"
           :placeholder="String(field.default)"
@@ -58,22 +45,22 @@
 import { useI18n } from 'vue-i18n'
 
 type Value = string | number | boolean | null
-type Field = { key: string; label: string; type: string; default: Value; max?: number }
+type Field = { key: string; label: string; type: string; default: Value; min?: number; max?: number }
 const props = defineProps<{ modelValue: Record<string, Value> }>()
 const emit = defineEmits<{ 'update:modelValue': [Record<string, Value>] }>()
 const { t } = useI18n()
+const cooldownResetMaxHours = 365 * 24
 const fields: Field[] = [
   { key: 'openai_gwpool', label: 'gwpool', type: 'boolean', default: true },
-  { key: 'openai_gwpool_guard_enabled', label: 'gwpoolGuard', type: 'boolean', default: true },
   { key: 'openai_gwpool_base_url', label: 'gwpoolBaseUrl', type: 'url', default: '' },
   { key: 'openai_gwpool_consumer_key', label: 'gwpoolConsumerKey', type: 'password', default: '' },
-  { key: 'openai_gwpool_probe_model', label: 'gwpoolProbeModel', type: 'model', default: 'gpt-6-luna' },
   { key: 'openai_gwpool_gateway_window_s', label: 'gwpoolGatewayWindow', type: 'number', default: 3600, max: 86400 },
+  { key: 'openai_gwpool_cooldown_reset_hours', label: 'gwpoolCooldownResetHours', type: 'number', default: 24, min: 0, max: cooldownResetMaxHours },
   { key: 'openai_gwpool_warm_tickets', label: 'gwpoolWarmTickets', type: 'number', default: 5, max: 8 },
   { key: 'openai_gwpool_fetch_timeout_s', label: 'gwpoolFetchTimeout', type: 'number', default: 25, max: 86400 },
   { key: 'openai_gwpool_list_timeout_s', label: 'gwpoolListTimeout', type: 'number', default: 2, max: 86400 },
-  { key: 'openai_gwpool_rotation', label: 'gwpoolRotation', type: 'boolean', default: false },
   { key: 'openai_gwpool_rotation_min_gateways', label: 'gwpoolRotationMinGateways', type: 'number', default: 1, max: 512 },
+  { key: 'openai_gwpool_resume_gateways', label: 'gwpoolResumeGateways', type: 'number', default: 50, max: 512 },
   { key: 'openai_gwpool_auto_wait', label: 'gwpoolAutoWait', type: 'boolean', default: false },
   { key: 'openai_gwpool_max_wait_s', label: 'gwpoolMaxWait', type: 'number', default: 120, max: 3600 }
 ]

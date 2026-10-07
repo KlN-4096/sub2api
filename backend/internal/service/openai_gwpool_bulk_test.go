@@ -41,7 +41,7 @@ func TestBulkUpdateAccountsGatewayPoolSparsePatchAndTargetValidation(t *testing.
 
 func TestGatewayPoolConfigValidatesNewNumericAndBooleanFields(t *testing.T) {
 	account := gwpoolTestAccount(1)
-	for _, key := range []string{openAIGatewayPoolRotationMinGatewaysExtraKey, openAIGatewayPoolWarmTicketsExtraKey,
+	for _, key := range []string{openAIGatewayPoolRotationMinGatewaysExtraKey, openAIGatewayPoolResumeGatewaysExtraKey, openAIGatewayPoolWarmTicketsExtraKey,
 		openAIGatewayPoolFetchTimeoutExtraKey, openAIGatewayPoolListTimeoutExtraKey} {
 		for _, value := range []any{-1, 0, 1.5, "3", true, 1_000_000} {
 			require.True(t, touchesOpenAIGatewayPoolConfig(map[string]any{key: value}))
