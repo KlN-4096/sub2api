@@ -28,7 +28,8 @@ func (s *openAICodexCookieStore) gatewayPoolRestDuration(identity string, accoun
 		if !ok || !timeOK || !matches || gateway == "" {
 			return true
 		}
-		base, _ := s.gatewayPoolInitialCooldown(identity, gateway, account.gatewayPoolGatewayWindow())
+		_, _ = s.gatewayPoolUsedAt(identity, gateway, account.gatewayPoolGatewayWindow(), account.gatewayPoolUseRecommendation())
+		base, _ := s.gatewayPoolInitialCooldown(identity, gateway, account.gatewayPoolGatewayWindow(), account.gatewayPoolUseRecommendation())
 		until := at.Add(time.Duration(base) * time.Second)
 		if cooldown, found := s.cooldownEntry(identity, gateway); found {
 			until = cooldown.Until

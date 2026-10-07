@@ -328,12 +328,7 @@ describe('AccountGatewayCell', () => {
     }
   })
 
-  // 状态色只有三种（2026-10-02 从四种并成三种）：绿 = 此刻真的在 183 秒满血窗口里；
-  // 红 = 窗口内碰过、现在打过去就是降智；灰 = 已过本地账本窗口，可以再用。
-  //
-  // 原来那档琥珀（「碰过没判据」/「曾判满血但 183 秒窗口已过」）并进红色：它们在
-  // 「现在能不能用」这个问题上和降智完全等价，分两色只会让人以为琥珀比红安全。
-  it('窗口内只分满血与降智，窗口外一律淡显', () => {
+  it('没有真实活票快照时历史满血也不染绿，冷却外淡显', () => {
     const w = render(
       account({
         current: 'unified-73',
@@ -348,14 +343,14 @@ describe('AccountGatewayCell', () => {
         updated_at: isoAgo(60)
       })
     )
-    expect(tone(w, 'east-asia')).toBe('full')
+    expect(tone(w, 'east-asia')).toBe('degraded')
     expect(tone(w, 'us-west')).toBe('degraded')
     expect(tone(w, 'us-east')).toBe('degraded') // 碰过没判据 = 窗口已经烧了
     expect(tone(w, 'oceania')).toBe('idle')
     expect(cell(w, 'europe').text()).toContain('-')
 
     // 色退化成装饰（9px 字号 + 红绿色盲 + title 在触屏上摸不到）时信息仍然读得出来。
-    expect(markOf(w, 'east-asia')).toBe('✓ ')
+    expect(markOf(w, 'east-asia')).toBe('! ')
     expect(markOf(w, 'us-west')).toBe('! ')
     expect(markOf(w, 'us-east')).toBe('! ')
     expect(markOf(w, 'oceania')).toBe('')
@@ -367,9 +362,7 @@ describe('AccountGatewayCell', () => {
     expect(cell(w, 'us-east').attributes('title')).toContain('gatewayHistory.verdicts.none')
   })
 
-  // 判过满血、但 183 秒窗口已经过去 ⇒ 红，不是绿也不是琥珀：窗口是 (账号 × 网关) 首次接触
-  // 那一下给的，过了就没了。
-  it('满血判定过了 183 秒窗口就变红', () => {
+  it('旧满血只保留为历史，不用固定183秒推算当前票', () => {
     const w = render(
       account({
         current: 'unified-73',
@@ -382,6 +375,34 @@ describe('AccountGatewayCell', () => {
     expect(tone(w, 'east-asia')).toBe('degraded')
     expect(cell(w, 'east-asia').attributes('title')).toContain('gatewayHistory.verdicts.fullExpired')
     expect(w.get('[data-testid="account-gateway-current"] span[title]').attributes('title')).toContain('gatewayHistory.verdicts.fullExpired')
+  })
+
+  it('活票按真实租约及已验模型显示，快照失效即撤绿', async () => {
+    const progress = {
+      phase: 'idle' as const, attempt: 0, limit: 0, rejected: 0, elapsed_ms: 0,
+      started_at: '', updated_at: '', active_requests: 0,
+      runtime: {
+        observed_at: new Date().toISOString(),
+        tickets: [{ gateway: 'unified-73', region: 'east-asia', expires_at: new Date(Date.now() + 240_000).toISOString(), verified_models: ['gpt-6-luna'] }],
+        rounds: [{ id: 'round', model: 'gpt-6-luna', started_at: isoAgo(240), attempted: 8, full: 3 }],
+        archived: { 'gpt-6-luna': { rounds: 2, attempted: 20, full: 5, duration_ms: 200_000 } }
+      }
+    }
+    const w = mount(AccountGatewayCell, { props: {
+      account: account({ current: 'unified-73', seen: { 'unified-73': { at: isoAgo(300), region: 'east-asia', verdict: 'full', full_at: isoAgo(300) } } }),
+      progress
+    } })
+    expect(tone(w, 'east-asia')).toBe('full')
+    expect(w.get('[data-testid="account-gateway-live"]').text()).toContain('gpt-6-luna')
+    expect(w.get('[data-testid="account-gateway-live"]').text()).not.toContain('gpt-6-astra')
+    expect(w.get('[data-testid="account-gateway-usage-round"]').text()).toContain('"full":3,"attempted":8')
+    expect(w.find('[data-testid="account-gateway-progress"]').exists()).toBe(false)
+    await w.setProps({ progress: { ...progress, runtime: { ...progress.runtime, observed_at: isoAgo(10) } } })
+    expect(tone(w, 'east-asia')).toBe('degraded')
+    await w.setProps({ progress, progressUnavailable: true })
+    expect(w.find('[data-testid="account-gateway-live"]').exists()).toBe(false)
+    expect(tone(w, 'east-asia')).toBe('degraded')
+    w.unmount()
   })
 
   it('认不出的判定值按「没判过」处理', () => {

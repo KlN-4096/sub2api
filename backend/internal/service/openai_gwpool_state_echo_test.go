@@ -142,7 +142,7 @@ func gwpoolEchoSeedVerified(t *testing.T, svc *OpenAIGatewayService, acct *Accou
 		}
 	}
 	pair, _ := svc.codexCookies.cachedPoolPair(identity)
-	svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, pair.version)
+	svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, pair.version, acct.gatewayPoolProbeModel("gpt-6-astra"))
 }
 
 // ---------------------------------------------------------------------------

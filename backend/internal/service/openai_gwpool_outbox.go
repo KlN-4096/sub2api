@@ -428,6 +428,6 @@ func (s *OpenAIGatewayService) completeGatewayPoolPending(ctx context.Context, a
 		slog.Warn("gwpool_feedback_update_failed", "account_id", accountID)
 	}
 	if sendErr == nil && !bindingChanged && pending.Kind != "contact" {
-		s.codexCookies.noteGatewayPoolRecommendation(identity, pending.Report.Gateway, recommendation)
+		s.codexCookies.noteGatewayPoolRecommendationAt(identity, pending.Report.Gateway, recommendation, startedAt)
 	}
 }

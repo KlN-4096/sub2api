@@ -1149,7 +1149,9 @@ func (s *OpenAITurnStateHunterService) doProbe(ctx context.Context, account, egr
 	started := time.Now()
 	// 直接走 httpUpstream，不经 doOpenAIUpstream 的插件路径：插件协议不携带 req.Close，
 	// 插件进程自己池化连接，一装上就会静默地从同一条隧道反复探测，换不了出口。
-	resp, err := s.gateway.httpUpstream.Do(req, proxyURL, egress.ID, egress.Concurrency)
+	resp, err := s.gateway.recordOpenAIHTTP(account, req, "turn_state_probe", func(req *http.Request) (*http.Response, error) {
+		return s.gateway.httpUpstream.Do(req, proxyURL, egress.ID, egress.Concurrency)
+	})
 	attempt.LatencyMs = time.Since(started).Milliseconds()
 	if err != nil {
 		attempt.Error = sanitizeUpstreamErrorMessage(err.Error())

@@ -31,6 +31,14 @@ func (m *mockTempUnscheduler) TempUnscheduleRetryableError(_ context.Context, ac
 	m.calls = append(m.calls, tempUnscheduleCall{accountID: accountID, failoverErr: failoverErr})
 }
 
+func TestSameAccountRetryAbsoluteReservationDoesNotRestartSleep(t *testing.T) {
+	failure := &service.UpstreamFailoverError{SameAccountRetryDelay: time.Second,
+		SameAccountRetryNotBefore: time.Now().Add(50 * time.Millisecond)}
+	require.LessOrEqual(t, sameAccountRetryDelayFor(failure, 1), 50*time.Millisecond)
+	failure.SameAccountRetryNotBefore = time.Now().Add(-time.Second)
+	require.Zero(t, sameAccountRetryDelayFor(failure, 1))
+}
+
 func TestSameAccountRetryDelayFor(t *testing.T) {
 	capacityErr := &service.UpstreamFailoverError{RequestScopedTransient: true}
 

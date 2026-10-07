@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strconv"
 	"sync"
 	"time"
 )
@@ -8,15 +9,17 @@ import (
 const gatewayPoolProgressRetention = time.Minute
 
 type GatewayPoolProgress struct {
-	Phase          string    `json:"phase"`
-	Attempt        int       `json:"attempt"`
-	Limit          int       `json:"limit"`
-	Rejected       int       `json:"rejected"`
-	Gateway        string    `json:"gateway,omitempty"`
-	StartedAt      time.Time `json:"started_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
-	ElapsedMS      int64     `json:"elapsed_ms"`
-	ActiveRequests int       `json:"active_requests"`
+	Runtime        *GatewayPoolRuntimeView `json:"runtime,omitempty"`
+	RunID          string                  `json:"run_id"`
+	Phase          string                  `json:"phase"`
+	Attempt        int                     `json:"attempt"`
+	Limit          int                     `json:"limit"`
+	Rejected       int                     `json:"rejected"`
+	Gateway        string                  `json:"gateway,omitempty"`
+	StartedAt      time.Time               `json:"started_at"`
+	UpdatedAt      time.Time               `json:"updated_at"`
+	ElapsedMS      int64                   `json:"elapsed_ms"`
+	ActiveRequests int                     `json:"active_requests"`
 }
 
 type gatewayPoolProgressRun struct {
@@ -27,6 +30,7 @@ type gatewayPoolProgressRun struct {
 type gatewayPoolProgressTracker struct {
 	mu   sync.Mutex
 	runs map[int64][]*gatewayPoolProgressRun
+	next uint64
 }
 
 func (p *gatewayPoolProgressTracker) start(account int64, limit int) *gatewayPoolProgressRun {
@@ -36,7 +40,10 @@ func (p *gatewayPoolProgressTracker) start(account int64, limit int) *gatewayPoo
 		p.runs = map[int64][]*gatewayPoolProgressRun{}
 	}
 	now := time.Now()
-	run := &gatewayPoolProgressRun{progress: GatewayPoolProgress{Phase: "fetching", Limit: limit, StartedAt: now, UpdatedAt: now}}
+	p.next++
+	run := &gatewayPoolProgressRun{progress: GatewayPoolProgress{
+		RunID: strconv.FormatUint(p.next, 10), Phase: "fetching", Limit: limit, StartedAt: now, UpdatedAt: now,
+	}}
 	var active []*gatewayPoolProgressRun
 	for _, prev := range p.runs[account] {
 		if !prev.done {
@@ -54,7 +61,7 @@ func (p *gatewayPoolProgressTracker) update(run *gatewayPoolProgressRun, phase s
 		return
 	}
 	run.progress.Phase, run.progress.UpdatedAt = phase, time.Now()
-	if attempt > 0 {
+	if attempt > run.progress.Attempt {
 		run.progress.Attempt = attempt
 	}
 	if gateway != "" {
@@ -82,8 +89,10 @@ func (p *gatewayPoolProgressTracker) snapshot(ids []int64, now time.Time) map[in
 			if !run.done {
 				active++
 			}
+			// Keep the oldest active request on screen until it exits.
 			if chosen == nil || (chosen.done && !run.done) ||
-				(chosen.done == run.done && run.progress.StartedAt.After(chosen.progress.StartedAt)) {
+				(!chosen.done && !run.done && run.progress.StartedAt.Before(chosen.progress.StartedAt)) ||
+				(chosen.done && run.done && run.progress.UpdatedAt.After(chosen.progress.UpdatedAt)) {
 				chosen = run
 			}
 		}
