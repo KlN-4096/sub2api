@@ -1730,7 +1730,17 @@ export interface CodexSessionImportResult {
 // ==================== Usage & Redeem Types ====================
 
 export type RedeemCodeType = 'balance' | 'concurrency' | 'subscription' | 'invitation'
-export type UsageRequestType = 'unknown' | 'sync' | 'stream' | 'ws_v2' | 'cyber' | 'live' | 'probe'
+export type UsageRequestType =
+  | 'unknown'
+  | 'sync'
+  | 'stream'
+  | 'ws_v2'
+  | 'cyber'
+  | 'live'
+  | 'probe'
+  // gwpool_degraded: state-echo 判定路由降智后整发丢掉的那次上游尝试。它真的到了上游，
+  // 但判定点在响应体一个字节都没读的时刻 ⇒ token 与金额恒为 0，是审计行不是账单行。
+  | 'gwpool_degraded'
 export type ImageSizeSource = 'output' | 'input' | 'default' | 'legacy'
 export type ImageSizeBreakdown = Record<string, number>
 
@@ -1829,6 +1839,12 @@ export interface AdminUsageLog extends UsageLog {
   // 这一发生效的路由对读数：网关段从 __oailb 的 JWT 载荷解出，整串留着以便原样复现
   route_gateway?: string | null
   route_pair?: string | null
+  // 这一发出站的路由对由网关池下发（顶掉了账号罐回放）；null = 账号类型不适用
+  route_pair_overridden?: boolean | null
+  // 池子交付这组 pair 时说的网关；与 route_gateway 比对就知道注入被上游接受没有
+  route_pair_pool_gateway?: string | null
+  // 池子给这张票的身份（cookie_version），用来和池子侧日志对账；不是 cookie 本体
+  route_pair_pool_version?: string | null
 
   // 账号计费倍率（仅管理员可见）
   account_rate_multiplier?: number | null

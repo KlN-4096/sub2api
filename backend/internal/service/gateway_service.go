@@ -700,6 +700,7 @@ type UpstreamFailoverError struct {
 	Scope                    GatewayFailureScope
 	Reason                   GatewayFailureReason
 	NextAccountAction        NextAccountAction
+	GatewayPoolRotation      bool // availability-only; handler must enforce opt-in and same-group scope
 	ClientStatusCode         int
 	ClientMessage            string
 	// RawRelayResponse：原样中继账号整体不可用。换号耗尽时 handler 把 StatusCode/
@@ -731,7 +732,10 @@ func (e *UpstreamFailoverError) ShouldReportAccountScheduleFailure() bool {
 		return false
 	}
 	// 降智暂停是网关本地判定（缺 292 就换号），不是账号出错，不进调度器的错误率。
-	if e.Reason == OpenAITurnStateHoldReason {
+	// 网关池同理：没票 / 池子挂了 / 判降智说的都是**路由**，这个账号的凭据好好的，
+	// 记进错误率会让池子一抖就把一批健康账号的健康度打下去
+	// （classifyUpstreamTransportError 对 gwpool.ErrPool 的豁免是同一个道理）。
+	if e.Reason == OpenAITurnStateHoldReason || e.Reason == OpenAIGatewayPoolReason {
 		return false
 	}
 	return !e.IsCredentialFailure() || e.Scope == GatewayFailureScopeAccount

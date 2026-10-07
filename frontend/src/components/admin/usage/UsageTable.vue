@@ -87,6 +87,35 @@
                 {{ isLikelyModelVariant(row) ? t('usage.modelVariant') : t('usage.modelMismatch') }}
               </span>
             </div>
+            <!-- 网关池覆写徽标挂在这里而不是 route_gateway 列：那列默认隐藏
+                 （UsageView 的 DEFAULT_HIDDEN_COLUMNS），默认看不见的徽标等于没做；
+                 turn_state_overridden 的徽标所在的 turn_state_sent 列同样默认隐藏，照不了。
+                 turn_state 列虽可见但整格 v-if="row.turn_state"，没票的那发会把徽标一起吞掉，
+                 所以选恒渲染的模型列。 -->
+            <div
+              v-if="routePairOverrideState(row) !== 'none'"
+              data-testid="route-pair-overridden-marker"
+              :data-state="routePairOverrideState(row)"
+              class="pl-3 text-[11px]"
+            >
+              <span
+                class="inline-flex rounded px-1 py-px text-[10px] font-medium ring-1 ring-inset"
+                :class="routePairOverrideState(row) === 'rerouted'
+                  ? 'bg-rose-50 text-rose-700 ring-rose-200 dark:bg-rose-500/10 dark:text-rose-300 dark:ring-rose-500/30'
+                  : 'bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/30'"
+                :title="routePairOverrideTitle(row)"
+              >
+                {{ routePairOverrideState(row) === 'rerouted'
+                  ? t('admin.usage.routePairReroutedShort')
+                  : t('admin.usage.routePairOverriddenShort') }}
+              </span>
+              <span class="ml-1 break-all font-mono text-gray-500 dark:text-gray-400">
+                <template v-if="routePairOverrideState(row) === 'rerouted'">
+                  {{ row.route_pair_pool_gateway }} → {{ row.route_gateway }}
+                </template>
+                <template v-else>{{ row.route_gateway || row.route_pair_pool_gateway }}</template>
+              </span>
+            </div>
             <!-- safety_buffering_enabled / _faster_model 只落库不展示（用户 2026-09-25 定）：
                  faster-model 是客户端「换更快模型重试」的备选，不是路由结果，摆在模型下面会被读成错误路由。 -->
           </div>
@@ -355,7 +384,7 @@
         </template>
 
         <!-- 路由对：显示 __oailb 里解出的后端网关，复制拿到的是整组 __cflb/__oailb（可原样复现）。
-             这是走哪条路由的观测读数，不代表满血与否。 -->
+             这是走哪条路由的观测读数，不代表满血与否。覆写徽标在模型列（这列默认隐藏）。 -->
         <template #cell-route_gateway="{ row }">
           <div v-if="row.route_gateway" class="flex max-w-[200px] items-center gap-1.5">
             <span class="truncate font-mono text-xs text-gray-600 dark:text-gray-400" :title="row.route_pair || row.route_gateway">
@@ -728,6 +757,34 @@ const isLikelyModelVariant = (row: AdminUsageLog): boolean => {
   return sent !== '' && response !== '' && normalizeModelVariant(sent) === normalizeModelVariant(response)
 }
 
+// 网关池覆写的两种状态：池子交付时说的网关与实际落点一致 = 注入生效；不一致 = 上游下发了
+// 新的 __oailb 把这一发改派走了（健康的借来 pair 上游不下发 Set-Cookie，
+// docs/tasks/gateway-pool.md 第二节），也就是注入被拒。
+// 池子没报出网关名（老数据、或交付时没带）时无从比对，按「已覆写」记，不编一个没有的结论。
+const routePairOverrideState = (row: AdminUsageLog): 'none' | 'applied' | 'rerouted' => {
+  if (!row.route_pair_overridden) return 'none'
+  const promised = row.route_pair_pool_gateway?.trim() || ''
+  const landed = row.route_gateway?.trim() || ''
+  if (promised === '' || landed === '') return 'applied'
+  return promised === landed ? 'applied' : 'rerouted'
+}
+
+const routePairOverrideTitle = (row: AdminUsageLog): string => {
+  const lines = [
+    routePairOverrideState(row) === 'rerouted'
+      ? t('admin.usage.routePairRerouted', {
+          promised: row.route_pair_pool_gateway || '-',
+          landed: row.route_gateway || '-',
+        })
+      : t('admin.usage.routePairOverridden'),
+  ]
+  // 票的身份（cookie_version）只进 tooltip：它是和池子日志对账的键，不是读表时要扫的列。
+  if (row.route_pair_pool_version) {
+    lines.push(`${t('admin.usage.routePairPoolVersion')}: ${row.route_pair_pool_version}`)
+  }
+  return lines.join('\n')
+}
+
 const modelAuditTitle = (row: AdminUsageLog): string => [
   `${t('usage.requestedModel')}: ${row.model || '-'}`,
   `${t('usage.sentUpstreamModel')}: ${sentUpstreamModel(row) || '-'}`,
@@ -831,6 +888,7 @@ const getRequestTypeLabel = (row: AdminUsageLog): string => {
   const requestType = resolveUsageRequestType(row)
   if (requestType === 'cyber') return t('usage.cyber')
   if (requestType === 'probe') return t('usage.probe')
+  if (requestType === 'gwpool_degraded') return t('usage.gwpoolDegraded')
   if (requestType === 'live') return t('usage.live')
   if (requestType === 'ws_v2') return t('usage.ws')
   if (requestType === 'stream') return t('usage.stream')
@@ -842,6 +900,7 @@ const getRequestTypeBadgeClass = (row: AdminUsageLog): string => {
   const requestType = resolveUsageRequestType(row)
   if (requestType === 'cyber') return 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'
   if (requestType === 'probe') return 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200'
+  if (requestType === 'gwpool_degraded') return 'bg-rose-100 text-rose-800 dark:bg-rose-900 dark:text-rose-200'
   if (requestType === 'live') return 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200'
   if (requestType === 'ws_v2') return 'bg-violet-100 text-violet-800 dark:bg-violet-900 dark:text-violet-200'
   if (requestType === 'stream') return 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
