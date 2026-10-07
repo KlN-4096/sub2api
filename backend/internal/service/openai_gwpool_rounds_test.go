@@ -44,7 +44,7 @@ func TestGatewayPoolRoundsRestIncludesActualProbesAndKeepsRequestCloneExclusions
 	a, b, clone := preferenceAccount(1, group, 20), preferenceAccount(2, group, 1), preferenceAccount(3, group, 20)
 	clone.Credentials = a.Credentials
 	repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*a, *b, *clone}}}
-	svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}}
+	svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}, rateLimitService: gatewayPoolSchedulerTestSettings("legacy")}
 	aid, bid := openAIGatewayPoolAccountKey(a), openAIGatewayPoolAccountKey(b)
 	now := time.Now()
 	svc.codexCookies.poolRounds.touch(aid, now.Add(-time.Hour))
@@ -55,12 +55,12 @@ func TestGatewayPoolRoundsRestIncludesActualProbesAndKeepsRequestCloneExclusions
 	svc.codexCookies.poolRounds.exhaust(group, bid, 0)
 	req := OpenAIAccountScheduleRequest{GroupID: &group, Platform: PlatformOpenAI,
 		RequestedModel: "gpt-6-astra", RequiredTransport: OpenAIUpstreamTransportHTTPSSE}
-	ctx := svc.withGatewayPoolAccountPreferences(context.Background(), req)
+	ctx := svc.withGatewayPoolAccountPreferences(gatewayPoolTestGroupContext(group, 2), req)
 	prefs := gatewayPoolPreferences(ctx)
 	require.True(t, gatewayPoolPreferenceBetter(prefs[b.ID], prefs[a.ID]), "rest beats cooled count after reset")
 	require.Equal(t, prefs[a.ID].lastTouch, prefs[clone.ID].lastTouch)
 	require.Empty(t, gatewayPoolRoundExclusions(ctx, nil))
-	rotating := context.WithValue(context.Background(), gatewayPoolRotationKey{}, &gatewayPoolRotation{
+	rotating := context.WithValue(gatewayPoolTestGroupContext(group, 2), gatewayPoolRotationKey{}, &gatewayPoolRotation{
 		groupID: group, attempted: map[int64]struct{}{a.ID: {}}, domains: map[string]struct{}{gatewayPoolLedgerIdentity(aid): {}},
 	})
 	ctx = svc.withGatewayPoolAccountPreferences(rotating, req)
@@ -69,7 +69,7 @@ func TestGatewayPoolRoundsRestIncludesActualProbesAndKeepsRequestCloneExclusions
 }
 
 func TestGatewayPoolRoundsDoNotWaitForDisabledOrIncompatibleAccounts(t *testing.T) {
-	for _, reason := range []string{"disabled", "model", "rotation-off"} {
+	for _, reason := range []string{"disabled", "model", "pool-off"} {
 		t.Run(reason, func(t *testing.T) {
 			group := int64(7)
 			a, b := preferenceAccount(1, group, 1), preferenceAccount(2, group, 20)
@@ -78,8 +78,8 @@ func TestGatewayPoolRoundsDoNotWaitForDisabledOrIncompatibleAccounts(t *testing.
 				b.Schedulable = false
 			case "model":
 				b.Credentials["model_mapping"] = map[string]any{"other": "other"}
-			case "rotation-off":
-				b.Extra[openAIGatewayPoolRotationExtraKey] = false
+			case "pool-off":
+				b.Extra[openAIGatewayPoolExtraKey] = false
 			}
 			repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*a, *b}}}
 			svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}}
@@ -88,8 +88,14 @@ func TestGatewayPoolRoundsDoNotWaitForDisabledOrIncompatibleAccounts(t *testing.
 				GroupID: &group, Platform: PlatformOpenAI, RequestedModel: "gpt-6-astra",
 				RequiredTransport: OpenAIUpstreamTransportHTTPSSE,
 			})
-			require.Equal(t, uint64(1), svc.codexCookies.poolRounds.generation(group))
-			require.Empty(t, gatewayPoolRoundExclusions(ctx, nil))
+			if reason == "model" {
+				require.Equal(t, uint64(0), svc.codexCookies.poolRounds.generation(group))
+				require.Contains(t, gatewayPoolRoundExclusions(ctx, nil), a.ID,
+					"a healthy account for another model still belongs to the group-wide round")
+			} else {
+				require.Equal(t, uint64(1), svc.codexCookies.poolRounds.generation(group))
+				require.NotContains(t, gatewayPoolRoundExclusions(ctx, nil), a.ID)
+			}
 		})
 	}
 }

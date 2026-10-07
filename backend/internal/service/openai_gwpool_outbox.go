@@ -257,6 +257,13 @@ func (s *OpenAIGatewayService) flushGatewayPoolReports(ctx context.Context) {
 			return
 		}
 		account := &accounts[i]
+		s.maintainGatewayPoolUsage(ctx, account, time.Now().UTC())
+		resetCtx, resetCancel := context.WithTimeout(ctx, gatewayPoolWarmNoteTimeout)
+		resetErr := s.maintainGatewayPoolCooldownReset(resetCtx, account, time.Now().UTC())
+		resetCancel()
+		if resetErr != nil {
+			slog.Warn("gwpool_cooldown_reset_failed", "account_id", account.ID)
+		}
 		if account.Extra[openAIGatewayPoolOutboxExtraKey] == nil {
 			continue
 		}

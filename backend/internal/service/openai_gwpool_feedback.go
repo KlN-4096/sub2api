@@ -41,6 +41,9 @@ func (s *openAICodexCookieStore) noteGatewayPoolRecommendation(identity, gateway
 }
 
 func (s *openAICodexCookieStore) noteGatewayPoolRecommendationAt(identity, gateway string, recommendation *gwpool.CooldownRecommendation, observed time.Time) {
+	if !observed.After(s.gatewayPoolCooldownResetAt(identity)) {
+		return
+	}
 	key := gatewayPoolLedgerKey(identity, gateway)
 	next := gatewayPoolRecommendation{at: observed}
 	if recommendation != nil && recommendation.Valid() {
@@ -76,7 +79,8 @@ func (s *openAICodexCookieStore) gatewayPoolInitialCooldown(identity, gateway st
 		return base, nil
 	}
 	rec, ok := raw.(gatewayPoolRecommendation)
-	if !ok || !rec.Valid() || time.Since(rec.at) > gatewayPoolRecommendationTTL {
+	if !ok || !rec.Valid() || time.Since(rec.at) > gatewayPoolRecommendationTTL ||
+		!rec.at.After(s.gatewayPoolCooldownResetAt(identity)) {
 		return base, nil
 	}
 	if rec.Seconds > base {

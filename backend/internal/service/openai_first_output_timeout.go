@@ -286,11 +286,14 @@ func (s *OpenAIGatewayService) newOpenAIFirstOutputTimeoutError(
 }
 
 type openAIFirstOutputHeaderGuard struct {
-	cancel  context.CancelFunc
-	release context.CancelFunc
-	timer   *time.Timer
-	fired   chan struct{}
-	once    sync.Once
+	mu             sync.Mutex
+	closed         bool
+	preparedBudget *gatewayPoolFirstOutputBudget
+	cancel         context.CancelFunc
+	release        context.CancelFunc
+	timer          *time.Timer
+	fired          chan struct{}
+	once           sync.Once
 }
 
 func newOpenAIFirstOutputHeaderGuard(
@@ -300,19 +303,26 @@ func newOpenAIFirstOutputHeaderGuard(
 ) (context.Context, *openAIFirstOutputHeaderGuard) {
 	guardedCtx, cancel := context.WithCancel(ctx)
 	guard := &openAIFirstOutputHeaderGuard{cancel: cancel, release: release, fired: make(chan struct{})}
+	guard.armLocked(deadline)
+	return guardedCtx, guard
+}
+
+func (g *openAIFirstOutputHeaderGuard) armLocked(deadline time.Time) {
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
 		remaining = time.Nanosecond
 	}
-	guard.timer = time.AfterFunc(remaining, func() {
-		close(guard.fired)
-		cancel()
+	g.timer = time.AfterFunc(remaining, func() {
+		close(g.fired)
+		g.cancel()
 	})
-	return guardedCtx, guard
 }
 
 func (g *openAIFirstOutputHeaderGuard) stopHeaderWait() bool {
-	if g.timer.Stop() {
+	g.mu.Lock()
+	timer := g.timer
+	g.mu.Unlock()
+	if timer == nil || timer.Stop() {
 		return false
 	}
 	<-g.fired
@@ -321,7 +331,12 @@ func (g *openAIFirstOutputHeaderGuard) stopHeaderWait() bool {
 
 func (g *openAIFirstOutputHeaderGuard) close() {
 	g.once.Do(func() {
-		g.timer.Stop()
+		g.mu.Lock()
+		g.closed = true
+		if g.timer != nil {
+			g.timer.Stop()
+		}
+		g.mu.Unlock()
 		g.cancel()
 		g.release()
 	})

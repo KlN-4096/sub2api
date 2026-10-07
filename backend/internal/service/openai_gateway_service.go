@@ -632,6 +632,7 @@ func NewOpenAIGatewayService(
 	svc.codexCookies.poolCooldownPersist = svc.persistGatewayPoolCooldownRefresh
 	svc.codexCookies.poolUsageAttempt = svc.noteGatewayPoolUsage
 	svc.codexCookies.poolUsageFinished = svc.finishGatewayPoolUsageIfExhausted
+	svc.codexCookies.poolUsageSettle = svc.settleGatewayPoolFullUsage
 	if svc.accountRepo != nil {
 		svc.codexCookies.accountByID = svc.accountRepo.GetByID
 		svc.codexCookies.historyByTag = svc.gatewayPoolHistoryPeers

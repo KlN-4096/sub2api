@@ -296,7 +296,7 @@ func TestClientCookieRejectsUnusablePayloads(t *testing.T) {
 	}{
 		"非 200":    {http.StatusInternalServerError, `{}`},
 		"空 cookie": {http.StatusOK, `{"gateway":"unified-1","cookie":"","valid_for_s":150}`},
-		"窗口已过":     {http.StatusOK, `{"gateway":"unified-1","cookie":"__cflb=a","valid_for_s":0}`},
+		"非法截止":     {http.StatusOK, `{"gateway":"unified-1","cookie":"__cflb=a","route_expires_at":"not-a-time"}`},
 		"不是 JSON":  {http.StatusOK, `not json`},
 	}
 	for name, tc := range cases {
@@ -310,6 +310,20 @@ func TestClientCookieRejectsUnusablePayloads(t *testing.T) {
 				t.Fatal("want error")
 			}
 		})
+	}
+}
+
+func TestClientCookieReferenceTTLIsIndependentOfRouteDeadline(t *testing.T) {
+	deadline := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	for _, seconds := range []int{-1, 0, 150} {
+		pair, err := (cookiePayload{Cookie: "__cflb=a; __oailb=b", ValidForS: seconds, RouteExpiresAt: deadline}).pair()
+		if err != nil || !pair.RouteExpiresAt.Equal(deadline) {
+			t.Fatalf("reference %d must not reject or modify route deadline: %v", seconds, err)
+		}
+	}
+	pair, err := (cookiePayload{Cookie: "__cflb=a; __oailb=b", ValidForS: 150}).pair()
+	if err != nil || !pair.RouteExpiresAt.IsZero() {
+		t.Fatal("missing deadline must remain unknown")
 	}
 }
 

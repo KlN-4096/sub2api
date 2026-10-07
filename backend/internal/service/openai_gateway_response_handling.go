@@ -217,7 +217,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	var firstOutputTimer *time.Timer
 	var firstOutputCh <-chan time.Time
 	if firstOutputTimeout > 0 {
-		remaining := time.Until(startTime.Add(firstOutputTimeout))
+		remaining := time.Until(gatewayPoolFirstOutputStart(ctx, startTime).Add(firstOutputTimeout))
 		if remaining <= 0 {
 			remaining = time.Nanosecond
 		}
