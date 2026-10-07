@@ -38,7 +38,6 @@ export function useGatewayPoolProgress(ids: ComputedRef<number[]>) {
       }
     } catch {
       if (current === generation) {
-        progress.value = {}
         unavailable.value = true
       }
     } finally {

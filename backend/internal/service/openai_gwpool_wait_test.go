@@ -95,7 +95,7 @@ func TestGatewayPoolWaitRecoversProbeWithoutReplayingBusiness(t *testing.T) {
 	require.Equal(t, 1, sleeps)
 	require.Len(t, upstream.sentBodies, 4)
 	progress := svc.GatewayPoolProgress([]int64{account.ID})[account.ID]
-	require.Equal(t, 2, progress.Attempt, "recoverable failures consume the original attempt allowance")
+	require.Equal(t, 1, progress.Attempt, "retrying the same ticket does not invent a second ticket; work budget is separate")
 	require.Zero(t, progress.Rejected, "unknown is not a quality verdict")
 }
 

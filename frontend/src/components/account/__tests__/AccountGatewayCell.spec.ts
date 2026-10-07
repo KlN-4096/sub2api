@@ -37,8 +37,40 @@ it('网关落点在没有历史时也显示真实验证进度，失败不继续�
   } } })
   expect(wrapper.get('[data-testid="account-gateway-progress"]').text()).toContain('"attempt":2,"limit":5,"seconds":8')
   await wrapper.setProps({ progress: undefined, progressUnavailable: true })
-  expect(wrapper.find('[data-testid="account-gateway-progress"]').exists()).toBe(false)
+  expect(wrapper.find('[data-testid="account-gateway-progress"]').exists()).toBe(true)
   expect(wrapper.get('[data-testid="account-gateway-progress-unavailable"]').text()).toContain('unavailable')
+  wrapper.unmount()
+})
+
+it('失联或无落点历史仍保留轮次计数，旧归档不混入新时长且保留完整性提示', () => {
+  const wrapper = mount(AccountGatewayCell, { props: {
+    account: account(undefined), progressUnavailable: true,
+    progress: {
+      phase: 'idle', attempt: 0, limit: 8, rejected: 0, elapsed_ms: 0,
+      started_at: '', updated_at: '', active_requests: 0,
+      runtime: {
+        observed_at: new Date().toISOString(), tickets: [],
+        rounds: [
+          { id: 'active', model: 'all', started_at: isoAgo(1000), full: 7, attempted: 9, full_duration_ms: 61000, full_active_until: ['0001-01-01T00:00:00Z'] },
+          { id: 'ended', model: 'all', started_at: isoAgo(3000), ended_at: isoAgo(2000), full: 2, attempted: 5, incomplete: true }
+        ],
+        archived: {
+          all: { rounds: 1, full: 3, attempted: 6, duration_ms: 1000, incomplete: true },
+          'gpt-6-luna': { rounds: 3, full: 19, attempted: 71, duration_ms: 3418000 }
+        },
+        incomplete: true
+      }
+    }
+  } })
+  const current = wrapper.get('[data-testid="account-gateway-usage-round"]').text()
+  expect(current).toContain('"full":7,"attempted":9')
+  expect(current).toContain('\\"minutes\\":1,\\"seconds\\":1')
+  const history = wrapper.get('[data-testid="account-gateway-usage-history"]').text()
+  expect(history).toContain('legacyArchived')
+  expect(history).toContain('"model":"gpt-6-luna","count":3,"full":19,"attempted":71')
+  expect(history).not.toContain('3418')
+  expect(history.match(/gatewayRuntime.incomplete/g)).toHaveLength(2)
+  expect(history).not.toContain('gatewayRuntime.durationIncomplete')
   wrapper.unmount()
 })
 
@@ -384,7 +416,7 @@ describe('AccountGatewayCell', () => {
       runtime: {
         observed_at: new Date().toISOString(),
         tickets: [{ gateway: 'unified-73', region: 'east-asia', expires_at: new Date(Date.now() + 240_000).toISOString(), verified_models: ['gpt-6-luna'] }],
-        rounds: [{ id: 'round', model: 'gpt-6-luna', started_at: isoAgo(240), attempted: 8, full: 3 }],
+        rounds: [{ id: 'round', model: 'all', started_at: isoAgo(240), attempted: 8, full: 3, full_duration_ms: 65000 }],
         archived: { 'gpt-6-luna': { rounds: 2, attempted: 20, full: 5, duration_ms: 200_000 } }
       }
     }
@@ -393,15 +425,33 @@ describe('AccountGatewayCell', () => {
       progress
     } })
     expect(tone(w, 'east-asia')).toBe('full')
-    expect(w.get('[data-testid="account-gateway-live"]').text()).toContain('gpt-6-luna')
-    expect(w.get('[data-testid="account-gateway-live"]').text()).not.toContain('gpt-6-astra')
+    expect(w.get('[data-testid="account-gateway-current"]').text()).not.toContain('gpt-6-luna')
     expect(w.get('[data-testid="account-gateway-usage-round"]').text()).toContain('"full":3,"attempted":8')
-    expect(w.find('[data-testid="account-gateway-progress"]').exists()).toBe(false)
+    expect(w.find('[data-testid="account-gateway-progress"]').exists()).toBe(true)
     await w.setProps({ progress: { ...progress, runtime: { ...progress.runtime, observed_at: isoAgo(10) } } })
     expect(tone(w, 'east-asia')).toBe('degraded')
     await w.setProps({ progress, progressUnavailable: true })
     expect(w.find('[data-testid="account-gateway-live"]').exists()).toBe(false)
     expect(tone(w, 'east-asia')).toBe('degraded')
+    w.unmount()
+  })
+
+  it('零时间不显示远古天数，满血使用读逐票累计而非轮次墙钟', () => {
+    const w = mount(AccountGatewayCell, { props: {
+      account: account({ current: 'unified-178', updated_at: '0001-01-01T00:00:00Z' }),
+      progress: {
+        phase: 'idle', attempt: 0, limit: 8, rejected: 0, elapsed_ms: 0,
+        started_at: '', updated_at: '', active_requests: 0,
+        runtime: { observed_at: new Date().toISOString(), tickets: [],
+          rounds: [{ id: 'r', model: 'all', started_at: isoAgo(3418), attempted: 71, full: 20, full_duration_ms: 1202000 }],
+          archived: null }
+      }
+    } })
+    expect(w.get('[data-testid="account-gateway-current-time"]').text()).toBe('—')
+    const usage = w.get('[data-testid="account-gateway-usage-round"]').text()
+    expect(usage).toContain('\\"minutes\\":20,\\"seconds\\":2')
+    expect(usage).not.toContain('3418')
+    expect(w.text()).not.toContain('gatewayRuntime.hint')
     w.unmount()
   })
 

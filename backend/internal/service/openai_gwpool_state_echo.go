@@ -166,7 +166,7 @@ func (s *openAICodexCookieStore) gatewayPoolMarkStaleMatched(identity, version, 
 	if !isPair {
 		return 0, false
 	}
-	if exact && !time.Now().Before(cached.until) {
+	if cached.invalidated {
 		return 0, false
 	}
 	// 票号对不上时**再按落点比一次**，别直接放弃。
@@ -181,7 +181,8 @@ func (s *openAICodexCookieStore) gatewayPoolMarkStaleMatched(identity, version, 
 		return 0, false
 	}
 	next := cached
-	next.until = time.Time{} // 零值早于任何时刻 ⇒ cachedPoolPair 判 Stale。
+	next.invalidated = true
+	next.invalidatedAt = time.Now().UTC()
 	if !s.poolPairs.CompareAndSwap(identity, cached, next) {
 		return 0, false
 	}
@@ -221,6 +222,7 @@ func (s *OpenAIGatewayService) dropDegradedGatewayPoolRoute(
 		if !marked {
 			return false
 		}
+		s.endGatewayPoolFullUse(detached, account, identity, applied, time.Now().UTC())
 		openAIGatewayPoolSinkFrom(request.Context()).noteVerdict(applied.Gateway, openAIGatewayVerdictDegraded)
 		applied.Verdict = openAIGatewayVerdictDegraded
 		applied.FullHeldMs = held.Milliseconds()

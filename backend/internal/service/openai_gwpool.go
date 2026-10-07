@@ -608,13 +608,16 @@ type openAIGatewayPoolPair struct {
 	datacenterCountry string
 	// region 是池子报的「铸这张票的出口属于哪个大区」。只用于账号卡片上按大区归档落点，
 	// 一个判定都不接（口径见 gwpool.Pair.Region）。空 = 池子没报。
-	region  string
-	version string
-	until   time.Time
+	region         string
+	version        string
+	until          time.Time // advisory only, not a quality or route-expiry decision
+	routeExpiresAt time.Time // absolute deadline from the pool/cookie; zero = unknown
+	invalidated    bool      // confirmed state-echo rejection, independent of TTL
+	invalidatedAt  time.Time
 	// since 是取票时刻，只用于识别缓存窗口；不能作为上游首次接触的起点。
 	//
 	// **不能拿 until 推**：until 是池子的交付租约（gwpool 的 DeliverTTL，150 秒），
-	// 和满血窗口（约 183 秒）不是同一个数，也不是同一个起点。
+	// 不是实际使用起点，也不是 Cookie 到期时间。
 	//
 	since time.Time
 	// firstSent 排除明确未发送的前置失败；响应不明的传输尝试保守计时。
@@ -1076,8 +1079,8 @@ func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *A
 	if err != nil {
 		return openAIGatewayPoolPair{}, false, err
 	}
-	// 租着的那张过了建议窗口 ⇒ 要一张**不同的**网关（force=1）。池子的 valid_for_s 只是建议值
-	// （ttl_is_advisory），换不换由这边判；不带 force 的话池子可能把同一张再发回来。
+	// Confirmed rejection or the route credential's own deadline rotates.
+	// Crossing valid_for_s alone never changes the cached ticket.
 	force := state == openAIGatewayPoolPairStale
 	waitCtx, waitCancel := context.WithTimeout(ctx, gatewayPoolFetchTimeoutForContext(ctx, account))
 	defer waitCancel()
@@ -1095,6 +1098,11 @@ func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *A
 		// 排在后面的请求醒来时第一名可能已经取到了。
 		if pair, cached := s.cachedPoolPair(identity); cached == openAIGatewayPoolPairLive {
 			return fetchResult{pair: pair}, nil
+		}
+		// Settle the old ticket while its exact expiry/rejection evidence is
+		// still available. A replacement must not erase held-idle duration.
+		if s.poolUsageSettle != nil {
+			s.poolUsageSettle(fetchCtx, account, identity)
 		}
 		if _, hasSpare := s.poolSpare.Load(identity); hasSpare {
 			readCtx, readCancel := context.WithTimeout(fetchCtx, account.gatewayPoolFetchTimeout())
@@ -1195,12 +1203,10 @@ func (b *gatewayPoolTicketBatch) next(ctx context.Context) (openAIGatewayPoolPai
 			}
 		}
 		pair = b.pairs[b.idx]
-		spare := b.idx > 0
 		b.idx++
-		// Listing/ranking can take time. Recheck before consuming the lease;
-		// skipping a stale/cooling route must rerank the remaining candidates.
-		// Preserve the existing short-lease allowance only for a fresh first ticket.
-		if spare && time.Until(pair.until) < openAIGatewayPoolMinRemaining {
+		// Recheck route credential expiry after listing/ranking, never the
+		// reference delivery window.
+		if pair.routeExpired(time.Now()) || pair.invalidated {
 			pair = openAIGatewayPoolPair{}
 			continue
 		}
@@ -1237,17 +1243,9 @@ func (b *gatewayPoolTicketBatch) next(ctx context.Context) (openAIGatewayPoolPai
 	return pair, true
 }
 
-// dropAged 把剩余寿命不够的票丢掉：**不记账本**（没碰过的落点记进去等于白锁一个窗口，见类型
-// 注释），也不还（过了池子的租约 /release 不受理）。
-//
-// 只给架子上的备用票用（gatewayPoolSparePop）；rankRemaining/next 还会检查全部剩余备用。
-// 刚取回的新批首张不过这道闸：池子的 min_remaining 是请求参数、不是它的承诺，
-// 一张只剩几秒的新票仍可能把这一发发出去，不因本地备用票门槛直接判死。
-//
-// 门槛用 openAIGatewayPoolMinRemaining，理由与它本身一样：一张票按身份缓存、窗口内所有请求
-// 共用，只剩几秒等于下一发立刻再取一张，而供给是个位数张/小时。
+// dropAged skips expired route credentials, never advisory windows.
 func (b *gatewayPoolTicketBatch) dropAged() {
-	for b.idx < len(b.pairs) && time.Until(b.pairs[b.idx].until) < openAIGatewayPoolMinRemaining {
+	for b.idx < len(b.pairs) && (b.pairs[b.idx].routeExpired(time.Now()) || b.pairs[b.idx].invalidated) {
 		slog.Debug("gwpool_spare_expired", "account_id", b.account.ID,
 			"gateway", b.pairs[b.idx].gateway)
 		b.idx++
@@ -1378,7 +1376,7 @@ func (s *openAICodexCookieStore) gatewayPoolTakeBatch(
 			gateway = openAICodexRouteGateway(cookie)
 		}
 		if early != nil && (gateway != early.gateway || openAICodexRouteGateway(cookie) != early.gateway ||
-			one.Version == "" || one.ValidFor < minRemaining) {
+			one.Version == "") {
 			continue // no wrong-gateway, unidentified or short-lived early probes
 		}
 		// 同一个落点在一批里只留一张。池子承诺每张不同落点，但那是**它的**承诺：
@@ -1402,6 +1400,7 @@ func (s *openAICodexCookieStore) gatewayPoolTakeBatch(
 			region:            strings.TrimSpace(one.Region),
 			version:           one.Version,
 			until:             now.Add(one.ValidFor),
+			routeExpiresAt:    gatewayPoolRouteExpiresAt(cookie, one.RouteExpiresAt),
 			since:             now,
 			roundID:           gatewayPoolContactRoundID(identity, one.Version, now),
 			early:             early,
@@ -1546,7 +1545,7 @@ func (s *openAICodexCookieStore) cachedPoolPair(identity string) (openAIGatewayP
 	if !ok || pair.cookie == "" {
 		return openAIGatewayPoolPair{}, openAIGatewayPoolPairNone
 	}
-	if !time.Now().Before(pair.until) {
+	if pair.invalidated || pair.routeExpired(time.Now()) {
 		return pair, openAIGatewayPoolPairStale
 	}
 	return pair, openAIGatewayPoolPairLive

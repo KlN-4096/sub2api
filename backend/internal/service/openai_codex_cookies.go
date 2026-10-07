@@ -41,7 +41,7 @@ type openAICodexCookieStore struct {
 	// poolVerified 是「这个身份手上那张票**验过是满血**」（openai_gwpool_warm.go）。
 	//
 	// 必须单独记，**不能拿 poolPairs 的 Live 当「验过」**：Live 的唯一含义是取票那一刻写的
-	// `until = now + valid_for_s`，和验没验过是两件事。两条路都会留下一张 Live 的未验票 ——
+	// route credential未到期且未被拒绝，和验没验过是两件事。两条路都会留下一张 Live 的未验票 ——
 	// 并发取票（singleflight 的 shared 对领头者也为真 ⇒ 谁都拿不到还票闭包），以及同一份凭据
 	// 挂在多个账号行上（键是凭证域身份，别的行取的票这一行照样看得见）。换票即失效。
 	//
@@ -56,13 +56,16 @@ type openAICodexCookieStore struct {
 	poolRounds              gatewayPoolRounds
 	poolUsageLocks          sync.Map // ledger tag -> *sync.Mutex, durable usage rounds
 	poolUsageCache          sync.Map // ledger tag -> *gatewayPoolUsageLedger, immutable committed snapshot
+	poolUsageSessionOnce    sync.Once
+	poolUsageSession        string
 	poolUsageAttempt        func(context.Context, *Account, string, string, OpenAIGatewayPoolApplied, time.Time, bool)
 	poolUsageFinished       func(context.Context, *Account)
+	poolUsageSettle         func(context.Context, *Account, string)
 	poolProgress            gatewayPoolProgressTracker
 	poolRotationAccounts    sync.Map // account ID -> fresh opt-in observed during preference hydration
 	// poolWarm 把同一张票上的并发预热判据收口成一次（openai_gwpool_warm.go）。
 	// 取票本身已经被 poolFetch 收成一次 ⇒ 同身份的并发请求手里是**同一张票**、同一个
-	// (上游账号 × 网关) 单元；同验证模型共享 A/B，各自取消不影响其它等待者，
+	// (上游账号 × 网关) 单元；跨模型共享 A/B，各自取消不影响其它等待者，
 	// 而供给只有个位数张/小时。键按票号分，换了票要重新验。
 	poolWarm gatewayPoolProbeFlights
 	// poolUsed 是「这个凭证域身份最近碰过哪些网关」的本地账本，用来挑一个没烧过的落点，

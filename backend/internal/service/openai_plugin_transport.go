@@ -125,8 +125,7 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 			probeModel = gatewayPoolWarmModel(request)
 		}
 		if identityErr != nil || applied.AccountID != account.ID || applied.Version == "" ||
-			!verified || mark.version != applied.Version || s.codexCookies.gatewayPoolVerifiedVersionFor(identity, probeModel) != applied.Version ||
-			(applied.early != nil && applied.early.model != gatewayPoolWarmModel(request)) {
+			!verified || mark.version != applied.Version || s.codexCookies.gatewayPoolVerifiedVersionFor(identity, probeModel) != applied.Version {
 			gatewayPoolReleaseUnsent(release)
 			return nil, false, errGatewayPoolPreflightChanged
 		}
@@ -140,6 +139,7 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 	}
 	resp, sentAt, err := s.gatewayPoolObservedRoundTrip(request, proxyURL, account, poolRequest, func(at time.Time) {
 		s.noteGatewayPoolUsage(request.Context(), account, identity, gatewayPoolWarmModel(request), applied, at, false)
+		s.noteGatewayPoolFullUse(request.Context(), account, identity, applied, at)
 	})
 	if !sentAt.IsZero() {
 		s.codexCookies.gatewayPoolMarkSent(identity, applied.Version, sentAt)
@@ -158,7 +158,7 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 		}
 		if poolRequest && (account.gatewayPoolGuardEnabled() || applied.early != nil) {
 			current, state := s.codexCookies.cachedPoolPair(identity)
-			if state != openAIGatewayPoolPairLive || current.version != applied.Version {
+			if state == openAIGatewayPoolPairNone || current.invalidated || current.version != applied.Version {
 				openAIGatewayPoolSinkFrom(request.Context()).noteVerdict(applied.Gateway, "")
 				if resp.Body != nil {
 					_ = resp.Body.Close()

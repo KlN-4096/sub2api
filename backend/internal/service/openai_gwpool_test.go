@@ -414,13 +414,9 @@ func TestGatewayPoolBatchServesRotationFromTheSpareShelf(t *testing.T) {
 	require.Contains(t, fake.nextQuery(t), "force=1", "再取仍然要点明换网关")
 }
 
-// 架子上躺过头的备用票直接丢：不记账本、不还、也不拿出去用。
-//
-// 丢而不用：一张票按身份缓存、窗口内所有请求共用，只剩几秒等于下一发立刻再取一张
-// （openAIGatewayPoolMinRemaining 的口径）。**不记账本**同上。
+// 路由凭据已到期的备用票直接丢：不记账本、不还、也不拿出去用。
 func TestGatewayPoolBatchDropsAgedSpares(t *testing.T) {
-	// valid_for_s=30 < openAIGatewayPoolMinRemaining(60) ⇒ 一取回来备用票就已经过门槛。
-	// 第一张照常用（取票路径不过这道闸：min_remaining 是请求参数、不是池子的承诺）。
+	// 参考 valid_for_s=30 不拒票；随后显式让备用票的路由凭据到期。
 	fake := newGwpoolFakePool(t, "", 30)
 	fake.batchGateways = []string{"unified-11", "unified-22", "unified-33"}
 	store := &openAICodexCookieStore{}
@@ -429,19 +425,26 @@ func TestGatewayPoolBatchDropsAgedSpares(t *testing.T) {
 	first := http.Header{}
 	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, first))
 	require.Equal(t, gwpoolTestPairCookie(t, "unified-11"), first.Get("Cookie"),
-		"剩余寿命不够也要把这一发发出去，不许判死")
+		"参考 TTL 较短不能判路由凭据失效")
 
 	cached, _ := store.cachedPoolPair(gwpoolTestIdentity)
 	store.gatewayPoolMarkStale(gwpoolTestIdentity, cached.version, cached.gateway)
 	// 新一批是不同落点；否则测试会再次交付之前的备用网关，无法区分新取与旧架子。
+	value, loaded := store.poolSpare.Load(gwpoolTestIdentity)
+	require.True(t, loaded)
+	batch, ok := value.(*gatewayPoolTicketBatch)
+	require.True(t, ok)
+	for i := batch.idx; i < len(batch.pairs); i++ {
+		batch.pairs[i].routeExpiresAt = time.Now().Add(-time.Second)
+	}
 	fake.batchGateways = []string{"unified-44", "unified-55", "unified-66"}
 	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, http.Header{}))
-	require.EqualValues(t, 2, fake.hits.Load(), "架子上全过门槛 ⇒ 老老实实再取一批")
+	require.EqualValues(t, 2, fake.hits.Load(), "备用票的路由凭据全部到期，应再取一批")
 	for _, spare := range []string{"unified-22", "unified-33"} {
 		require.False(t, store.gatewayPoolUsedRecently(gwpoolTestIdentity, spare, time.Hour),
 			"丢掉的备用票不许留在账本里: %s", spare)
 	}
-	require.EqualValues(t, 0, fake.releaseHits.Load(), "过了池子租约还不回去，别白打一发 /release")
+	require.EqualValues(t, 0, fake.releaseHits.Load(), "已到期的备用票不再发送 /release")
 }
 
 // 老池子（线上那台 d6edc7e）**不认 count**：它把未知参数静默忽略、回扁平那一张。
@@ -1009,7 +1012,7 @@ func TestGatewayPoolKeepsOnlyRouteCookieNames(t *testing.T) {
 
 // 建议窗口（ttl_is_advisory）到点 ⇒ 换一张**不同的**网关：第一次不带 force，到期后带 force=1。
 // 换不换由这边判，池子不操心；不带 force 的话池子可能把烧过的那张原样发回来。
-func TestGatewayPoolForcesRotationAfterWindow(t *testing.T) {
+func TestGatewayPoolForcesRotationAfterRouteExpiry(t *testing.T) {
 	first := gwpoolTestPairCookie(t, "unified-142")
 	fake := newGwpoolFakePool(t, first, 150)
 	fake.forceCookie = "__cflb=pool-lb2; __oailb=" + routeCookieTestOailb(t, "chat.gateway.unified-84.api.openai.com")
@@ -1023,7 +1026,7 @@ func TestGatewayPoolForcesRotationAfterWindow(t *testing.T) {
 
 	// 把窗口拨到过去，模拟 valid_for_s 到点。
 	store.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
-		cookie: first, gateway: "unified-142", version: "tkt-1", until: time.Now().Add(-time.Second)})
+		cookie: first, gateway: "unified-142", version: "tkt-1", routeExpiresAt: time.Now().Add(-time.Second)})
 
 	rotated := http.Header{}
 	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, rotated))
@@ -1046,7 +1049,7 @@ func TestGatewayPoolForceNoSlotFailsClosed(t *testing.T) {
 	// 罐里有一张能回放的：也不许用。
 	store.Store(acct, gwpoolTestURL, codexCookieUpstreamResponse())
 	store.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
-		cookie: stale, gateway: "unified-142", version: "tkt-stale", until: time.Now().Add(-time.Second)})
+		cookie: stale, gateway: "unified-142", version: "tkt-stale", invalidated: true})
 
 	for range 2 {
 		headers := http.Header{}
@@ -1270,7 +1273,7 @@ func TestGatewayPoolLedgerIsKeyedByCredentialIdentityNotRowID(t *testing.T) {
 
 	// 把缓存那张拨到过期，逼下一发重新取票（否则同身份直接复用窗口内那张）。
 	store.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
-		cookie: first, gateway: "unified-167", until: time.Now().Add(-time.Second)})
+		cookie: first, gateway: "unified-167", invalidated: true})
 
 	// 行 35 是同一份凭据的另一个本地行：账本必须共用 ⇒ 167 已经烧过，只能挑 183。
 	rotated := http.Header{}

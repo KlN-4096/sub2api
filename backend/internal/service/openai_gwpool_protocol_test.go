@@ -330,7 +330,7 @@ func TestGatewayPoolExcludesStaleTicketVersion(t *testing.T) {
 	// 窗口到点：手里这张转 stale ⇒ 下一次取票带上它的票号。
 	store.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
 		cookie: first.cookie, gateway: first.gateway, version: first.version,
-		until: time.Now().Add(-time.Second)})
+		invalidated: true})
 	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, http.Header{}))
 	require.Contains(t, fake.nextQuery(t), "exclude_versions=tkt-1")
 
@@ -563,7 +563,7 @@ func TestGatewayPoolPairExpiresByValidForNotLedgerWindow(t *testing.T) {
 // valid_for_s 用 1 秒而不是 150 秒：判据是「现在过了 until 没有」（cachedPoolPair），
 // 与具体秒数无关，而单个后端测试要留在 60s 预算内。上面那条用例钉的正是「until 来自
 // valid_for_s」，两条合起来覆盖「151 秒后不复用」。
-func TestGatewayPoolRefetchesAfterValidForElapses(t *testing.T) {
+func TestGatewayPoolReusesAfterValidForElapses(t *testing.T) {
 	first := gwpoolTestPairCookie(t, "unified-142")
 	fake := newGwpoolFakePool(t, first, 1)
 	fake.forceCookie = gwpoolTestPairCookie(t, "unified-84")
@@ -582,13 +582,14 @@ func TestGatewayPoolRefetchesAfterValidForElapses(t *testing.T) {
 	require.Equal(t, first, reused.Get("Cookie"))
 	require.EqualValues(t, 1, fake.hits.Load(), "窗口内复用同一张，不许每发都取票")
 
-	time.Sleep(1100 * time.Millisecond) // 过 valid_for_s
+	pair, _ := store.cachedPoolPair(gwpoolTestIdentity)
+	pair.until = time.Now().Add(-time.Second)
+	store.poolPairs.Store(gwpoolTestIdentity, pair)
 
 	rotated := http.Header{}
 	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, rotated))
-	require.EqualValues(t, 2, fake.hits.Load(), "过了满血窗口必须重新取票")
-	require.Equal(t, fake.forceCookie, rotated.Get("Cookie"), "出站换成新那张，不许继续带烧过的")
-	require.Contains(t, fake.nextQuery(t), "force=1", "换票要点明「换一个不同的网关」")
+	require.EqualValues(t, 1, fake.hits.Load(), "reference expiry cannot refetch")
+	require.Equal(t, first, rotated.Get("Cookie"))
 }
 
 // 还票判据必须覆盖 doOpenAIUpstreamRoundTrip 的**两条出口**的全部错误形态。

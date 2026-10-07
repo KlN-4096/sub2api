@@ -9,7 +9,8 @@ import (
 type GatewayPoolLiveTicket struct {
 	Gateway        string    `json:"gateway"`
 	Region         string    `json:"region"`
-	ExpiresAt      time.Time `json:"expires_at"`
+	ExpiresAt      time.Time `json:"expires_at,omitzero"`
+	VerifiedAt     time.Time `json:"verified_at,omitzero"`
 	VerifiedModels []string  `json:"verified_models"`
 }
 
@@ -63,13 +64,15 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 		}
 		runtime := &GatewayPoolRuntimeView{ObservedAt: time.Now().UTC(), Tickets: []GatewayPoolLiveTicket{},
 			Rounds: make([]GatewayPoolUsageRound, len(state.Rounds)), Archived: state.Archived, Incomplete: state.Incomplete}
-		copy(runtime.Rounds, state.Rounds)
-		for i := range runtime.Rounds {
-			runtime.Rounds[i].Tickets = nil
+		live := s.codexCookies.gatewayPoolUsageLive(identity)
+		session := s.codexCookies.gatewayPoolUsageSession()
+		for i := range state.Rounds {
+			runtime.Rounds[i] = state.Rounds[i].fullUsageView(live, session, runtime.ObservedAt)
 		}
 		if pair, live := s.codexCookies.cachedPoolPair(identity); live == openAIGatewayPoolPairLive {
-			ticket := GatewayPoolLiveTicket{Gateway: pair.gateway, Region: pair.region, ExpiresAt: pair.until, VerifiedModels: []string{}}
+			ticket := GatewayPoolLiveTicket{Gateway: pair.gateway, Region: pair.region, ExpiresAt: pair.routeExpiresAt, VerifiedModels: []string{}}
 			if mark, ok := s.codexCookies.gatewayPoolVerifiedMarkOf(identity); ok && mark.version == pair.version && mark.models != nil {
+				ticket.VerifiedAt = mark.at
 				for model := range *mark.models {
 					ticket.VerifiedModels = append(ticket.VerifiedModels, model)
 				}

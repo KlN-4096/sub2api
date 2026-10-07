@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-const gatewayPoolProgressRetention = time.Minute
+type gatewayPoolProgressTriedKey struct{}
 
 type GatewayPoolProgress struct {
 	Runtime        *GatewayPoolRuntimeView `json:"runtime,omitempty"`
@@ -25,6 +25,9 @@ type GatewayPoolProgress struct {
 type gatewayPoolProgressRun struct {
 	progress GatewayPoolProgress
 	done     bool
+	tickets  map[string]struct{}
+	account  int64
+	order    uint64
 }
 
 type gatewayPoolProgressTracker struct {
@@ -41,7 +44,7 @@ func (p *gatewayPoolProgressTracker) start(account int64, limit int) *gatewayPoo
 	}
 	now := time.Now()
 	p.next++
-	run := &gatewayPoolProgressRun{progress: GatewayPoolProgress{
+	run := &gatewayPoolProgressRun{account: account, order: p.next, tickets: map[string]struct{}{}, progress: GatewayPoolProgress{
 		RunID: strconv.FormatUint(p.next, 10), Phase: "fetching", Limit: limit, StartedAt: now, UpdatedAt: now,
 	}}
 	var active []*gatewayPoolProgressRun
@@ -52,6 +55,33 @@ func (p *gatewayPoolProgressTracker) start(account int64, limit int) *gatewayPoo
 	}
 	p.runs[account] = append(active, run)
 	return run
+}
+
+func (p *gatewayPoolProgressTracker) resume(run *gatewayPoolProgressRun) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	run.done = false
+	for _, current := range p.runs[run.account] {
+		if current == run {
+			return
+		}
+	}
+	p.runs[run.account] = append(p.runs[run.account], run)
+}
+
+// Distinct tickets actually sent for verification; neither fetch failures,
+// A/B request count nor unused prefetched tickets.
+func (p *gatewayPoolProgressTracker) tried(run *gatewayPoolProgressRun, ticket string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if ticket == "" || run == nil || run.done {
+		return
+	}
+	if run.tickets == nil {
+		run.tickets = map[string]struct{}{}
+	}
+	run.tickets[ticket] = struct{}{}
+	run.progress.Attempt = len(run.tickets)
 }
 
 func (p *gatewayPoolProgressTracker) update(run *gatewayPoolProgressRun, phase string, attempt int, gateway string, rejected bool, done bool) {
@@ -82,19 +112,19 @@ func (p *gatewayPoolProgressTracker) snapshot(ids []int64, now time.Time) map[in
 		active := 0
 		var retained []*gatewayPoolProgressRun
 		for _, run := range p.runs[id] {
-			if run.done && now.Sub(run.progress.UpdatedAt) > gatewayPoolProgressRetention {
-				continue
-			}
 			retained = append(retained, run)
 			if !run.done {
 				active++
 			}
 			// Keep the oldest active request on screen until it exits.
 			if chosen == nil || (chosen.done && !run.done) ||
-				(!chosen.done && !run.done && run.progress.StartedAt.Before(chosen.progress.StartedAt)) ||
+				(!chosen.done && !run.done && run.order < chosen.order) ||
 				(chosen.done && run.done && run.progress.UpdatedAt.After(chosen.progress.UpdatedAt)) {
 				chosen = run
 			}
+		}
+		if chosen != nil && chosen.done {
+			retained = []*gatewayPoolProgressRun{chosen}
 		}
 		if len(retained) == 0 {
 			delete(p.runs, id)

@@ -160,9 +160,10 @@ type Pair struct {
 	Region string
 	// Cookie 是直接写进出站 Cookie 头的整串 "__cflb=...; __oailb=..."。
 	Cookie string
-	// ValidFor 是**满血窗口**的剩余量（池子的 valid_for_s），不是 cookie 的有效期。
-	// 窗口内同一张 pair 可以复用，过了就该再要一张。
+	// ValidFor is advisory, never a quality or cookie-expiry decision.
 	ValidFor time.Duration
+	// Absolute route deadline calculated by the pool; zero means unknown.
+	RouteExpiresAt time.Time
 	// PairRemaining 是**这张 pair 自己**的剩余寿命（池子的 pair_remaining_s = __cflb 的死期
 	// 减现在）。和 ValidFor 是两根轴：ValidFor = min(满血窗口剩余, pair 剩余)，绝大多数时候
 	// 等于那 183 秒的窗口，分不出 pair 还剩 50 分钟还是 8 分钟 ⇒ 判「这张要不要续」只能用这个。
@@ -500,21 +501,22 @@ func (c *Client) Cookies(ctx context.Context, request CookieRequest) ([]Pair, er
 // （池子的 batchResponse.tickets[]），所以单取和批量共用这一份解析与校验 —— 分两份写
 // 必然走散，而走散的那一半是信任边界。
 type cookiePayload struct {
-	Gateway           string `json:"gateway"`
-	DatacenterCountry string `json:"datacenter_country"`
-	Region            string `json:"region"`
-	Cookie            string `json:"cookie"`
-	ValidForS         int    `json:"valid_for_s"`
-	VerifiedFull      bool   `json:"verified_full"`
-	TTLIsAdvisory     bool   `json:"ttl_is_advisory"`
-	CookieVersion     string `json:"cookie_version"`
-	PairRemainingS    int    `json:"pair_remaining_s"`
+	Gateway           string    `json:"gateway"`
+	DatacenterCountry string    `json:"datacenter_country"`
+	Region            string    `json:"region"`
+	Cookie            string    `json:"cookie"`
+	ValidForS         int       `json:"valid_for_s"`
+	VerifiedFull      bool      `json:"verified_full"`
+	TTLIsAdvisory     bool      `json:"ttl_is_advisory"`
+	CookieVersion     string    `json:"cookie_version"`
+	PairRemainingS    int       `json:"pair_remaining_s"`
+	RouteExpiresAt    time.Time `json:"route_expires_at"`
 }
 
 // pair 校验并转成 Pair。
 //
 // 这里是信任边界（外部服务的响应 → 要带着该账号的 Authorization 发给 chatgpt.com 的头）：
-// 空 cookie 等于裸打（落点不可控），窗口 ≤0 的 pair 本来就过期，控制字符会劈开出站头。
+// 空 cookie 等于裸打（落点不可控），控制字符会劈开出站头；建议窗口不参与拒收。
 // cookie 名字的收口在消费侧（只留 __cflb / __oailb），这里只拦明显畸形。
 func (p cookiePayload) pair() (Pair, error) {
 	if strings.TrimSpace(p.Cookie) == "" {
@@ -523,15 +525,13 @@ func (p cookiePayload) pair() (Pair, error) {
 	if strings.ContainsFunc(p.Cookie, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return Pair{}, fmt.Errorf("%w: cookie response carried control characters", ErrPool)
 	}
-	if p.ValidForS <= 0 {
-		return Pair{}, fmt.Errorf("%w: cookie response carried a non-positive valid_for_s", ErrPool)
-	}
 	return Pair{
 		Gateway: sanitizeOpaque(p.Gateway, maxGatewayLen),
 		// 同样过 sanitizeOpaque：池子的响应是信任边界，这个串会进账号 extra 和前端。
 		Region:            sanitizeOpaque(p.Region, maxGatewayLen),
 		Cookie:            strings.TrimSpace(p.Cookie),
 		ValidFor:          clampDuration(time.Duration(p.ValidForS)*time.Second, 0, maxValidFor),
+		RouteExpiresAt:    p.RouteExpiresAt,
 		VerifiedFull:      p.VerifiedFull,
 		TTLIsAdvisory:     p.TTLIsAdvisory,
 		Version:           sanitizeOpaque(p.CookieVersion, maxVersionLen),
