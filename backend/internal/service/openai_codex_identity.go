@@ -38,7 +38,8 @@ func buildCodexCLIUserAgent(version string) string {
 	if version = NormalizeCodexClientVersion(version); version == "" {
 		return codexCLIUserAgent
 	}
-	return openai.CodexDefaultOriginator + "/" + version + codexCLIUserAgentSuffix
+	return openai.CodexDefaultOriginator + "/" + version + codexCLIUserAgentSuffix +
+		" (" + openai.CodexDefaultOriginator + "; " + version + ")"
 }
 
 // codexIdentityEnforcement 控制 enforceCodexIdentityHeaders 是否强制统一出站身份，

@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const (
@@ -62,6 +63,11 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Co
 		return nil, err
 	}
 	SetOpsUpstreamModel(c, upstreamModel)
+
+	// settings.user_location 带的是客户端本机城市，与已按出口改写的 environment_context
+	// 时区自相矛盾。放在 PAT 分支之前：下面那条兜底会把这个字段搬进 Responses 的
+	// tools[].user_location，改在源头一次就够（openai_codex_wire_user_location.go）。
+	body = rewriteCodexAlphaSearchUserLocation(c, account, body)
 
 	// Codex Personal Access Token（at-...）目前可访问 ChatGPT Codex
 	// /responses，但会被 standalone /alpha/search 的 access enforcement
@@ -228,7 +234,13 @@ func openAIAlphaSearchSchedulingModel(account *Account, requestedModel string) s
 }
 
 func (s *OpenAIGatewayService) buildOpenAIAlphaSearchResponsesWebSearchRequest(ctx context.Context, c *gin.Context, account *Account, alphaBody []byte, body []byte, token string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatgptCodexURL, bytes.NewReader(body))
+	// 这条兜底同样打 /responses：双开按真客户端默认压缩（PersonalAccessToken 也 uses_codex_backend，
+	// protocol/src/auth.rs），同一账号不能压缩与明文混发。
+	wireBody, contentEncoding, err := compressCodexRequestBody(c, account, chatgptCodexURL, body)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatgptCodexURL, bytes.NewReader(wireBody))
 	if err != nil {
 		return nil, err
 	}
@@ -249,6 +261,9 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchResponsesWebSearchRequest(c
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	if contentEncoding != "" {
+		req.Header.Set("Content-Encoding", contentEncoding)
+	}
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("OpenAI-Beta", "responses=experimental")
 	if turnMetadata := openAIAlphaSearchInboundHeader(c, "X-Codex-Turn-Metadata"); turnMetadata != "" {
@@ -284,6 +299,9 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchResponsesWebSearchRequest(c
 	applyCodexAccountIdentityHeaders(req.Header, codexAccountIdentitySource(c, account), apiKeyID)
 	enforceCodexIdentityHeadersWithUA(req.Header, s.codexIdentityOverrideUA(account))
 	account.ApplyHeaderOverrides(req.Header)
+	// 这条兜底打的是 /responses：双开账号的头也要按线协议投影收口，否则同一账号出现
+	// 「双开的体 + 非双开的头」两种形态（体已按双开压缩，见 compressCodexRequestBody）。
+	applyCodexDeviceWireProfile(c, account, req.Header, false)
 	return req, nil
 }
 
@@ -400,6 +418,14 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchRequest(ctx context.Context
 			req.Header.Set("X-Codex-Turn-Metadata", turnMetadata)
 		}
 		applyCodexAccountIdentityHeaders(req.Header, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
+		// 双开使用 MCP 投影，不补 Responses 专属设备字段；其他配置维持既有行为。
+		if !codexDeviceWireProfileEnabled(c, account) {
+			if ids := resolveCodexFingerprintIDsFromRequest(c, account, nil); ids != nil {
+				rewriteCodexTurnMetadataFields(req.Header, map[string]any{
+					"installation_id": ids.installationID,
+				}, ids)
+			}
+		}
 		canonical := resolveCodexOutboundIdentity("")
 		if version := openAIAlphaSearchInboundHeader(c, "Version"); version != "" {
 			req.Header.Set("Version", version)
@@ -426,7 +452,42 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchRequest(ctx context.Context
 
 	account.ApplyHeaderOverrides(req.Header)
 	stripOpenAIAlphaSearchResponsesHeaders(req.Header)
+	applyCodexAlphaSearchWireProfile(c, account, req.Header, body)
+	syncOpenAIAlphaSearchBodySession(c, req, body)
 	return req, nil
+}
+
+// syncOpenAIAlphaSearchBodySession 让搜索请求体的 id 跟随出站 turn-metadata 的会话派生。
+// 真实客户端两者同源：SearchRequest.id 直接取自 session_id，与随请求发出的
+// x-codex-turn-metadata 出自同一会话（codex-rs ext/web-search/src/tool.rs 的
+// handle_call 与 search_request_headers）。而账号隔离与指纹收敛只改写了头里的
+// turn-metadata，body.id 会停在客户端原值上，使同一个请求带着两套会话身份出站。
+//
+// 仅在入站 body.id 与入站 turn-metadata.session_id 都是字符串且原值相等时派生：
+// SearchRequest.id 允许是任意自定义值，类型转换或去除空白都不能作为同源证据。
+func syncOpenAIAlphaSearchBodySession(c *gin.Context, req *http.Request, body []byte) {
+	if req == nil {
+		return
+	}
+	bodyID := gjson.GetBytes(body, "id")
+	if bodyID.Type != gjson.String || strings.TrimSpace(bodyID.Str) == "" {
+		return
+	}
+	inbound := gjson.Parse(openAIAlphaSearchInboundHeader(c, "X-Codex-Turn-Metadata")).Get("session_id")
+	if inbound.Type != gjson.String || inbound.Str != bodyID.Str {
+		return
+	}
+	outbound := gjson.Parse(req.Header.Get("X-Codex-Turn-Metadata")).Get("session_id")
+	if outbound.Type != gjson.String || strings.TrimSpace(outbound.Str) == "" || outbound.Str == bodyID.Str {
+		return
+	}
+	next, err := sjson.SetBytes(body, "id", outbound.Str)
+	if err != nil {
+		return
+	}
+	req.Body = io.NopCloser(bytes.NewReader(next))
+	req.ContentLength = int64(len(next))
+	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(next)), nil }
 }
 
 // stripOpenAIAlphaSearchResponsesHeaders 让独立搜索请求与官方 Codex
