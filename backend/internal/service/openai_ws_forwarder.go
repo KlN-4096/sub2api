@@ -277,6 +277,7 @@ func (s *OpenAIGatewayService) getOpenAIWSConnPool() *openAIWSConnPool {
 		if s.openaiWSPool == nil {
 			s.openaiWSPool = newOpenAIWSConnPool(s.cfg)
 			s.openaiWSPool.cookies = &s.codexCookies
+			s.openaiWSPool.recordingGateway = s
 		}
 	})
 	return s.openaiWSPool

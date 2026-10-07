@@ -19,6 +19,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/upstreamrecord"
 	"github.com/Wei-Shaw/sub2api/internal/platform/liveattestation"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/cespare/xxhash/v2"
@@ -487,6 +488,8 @@ type OpenAIGatewayService struct {
 	userPlatformQuotaRepo UserPlatformQuotaRepository
 	liveAttestation       liveattestation.Provider
 	liveAttestationCipher SecretEncryptor
+	openaiRecordingOnce   sync.Once
+	openaiRecording       *upstreamrecord.Recorder
 
 	openaiWSPoolOnce              sync.Once
 	openaiWSStateStoreOnce        sync.Once
@@ -515,6 +518,7 @@ type OpenAIGatewayService struct {
 	openaiAccountRuntimeBlockGeneration sync.Map // key: int64(accountID), value: uint64
 	openaiAccountRuntimeBlockSequence   atomic.Uint64
 	openaiOAuth429RetryStartedAt        sync.Map // key: int64(accountID), value: time.Time
+	openaiOAuth429RetrySlots            sync.Map // legacy upstream ledger identity -> last reserved retry time
 	grokCredentialMutationLocks         sync.Map // key: int64(accountID), value: *sync.Mutex
 	openaiOAuth429WindowStartUnixNano   atomic.Int64
 	openaiOAuth429WindowCount           atomic.Int64
@@ -624,11 +628,13 @@ func NewOpenAIGatewayService(
 	// 网关池接管推理面的路由 cookie（openai_gwpool.go）。配置全在账号 extra 上，客户端按需建。
 	svc.codexCookies.identity = svc.codexCredentialIdentity
 	svc.codexCookies.poolProbeObserved = svc.noteGatewayPoolProbeAndContact
+	svc.codexCookies.poolEarlyClaim = svc.claimGatewayPoolEarly
+	svc.codexCookies.poolCooldownPersist = svc.persistGatewayPoolCooldownRefresh
+	svc.codexCookies.poolUsageAttempt = svc.noteGatewayPoolUsage
+	svc.codexCookies.poolUsageFinished = svc.finishGatewayPoolUsageIfExhausted
 	if svc.accountRepo != nil {
 		svc.codexCookies.accountByID = svc.accountRepo.GetByID
-		svc.codexCookies.historyByTag = func(ctx context.Context, tag string) ([]Account, error) {
-			return svc.accountRepo.FindByExtraField(ctx, openAIGatewayLedgerTagExtraKey, tag)
-		}
+		svc.codexCookies.historyByTag = svc.gatewayPoolHistoryPeers
 	}
 	return svc
 }

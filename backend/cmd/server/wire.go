@@ -359,6 +359,7 @@ func provideCleanup(
 				if openAIGateway != nil {
 					openAIGateway.StopGatewayPoolReporter()
 					openAIGateway.CloseOpenAIWSPool()
+					return openAIGateway.StopOpenAIRecording(ctx)
 				}
 				return nil
 			}},

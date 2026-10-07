@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -395,7 +396,13 @@ func (s *OpenAIGatewayService) newOpenAIAccountFailoverErrorWithClassificationHe
 	)
 	if oauth429Retry {
 		failoverErr.SameAccountRetryDeadline = s.openAIOAuth429RetryDeadline(account)
-		failoverErr.SameAccountRetryDelay = openAIOAuth429SameAccountRetryDelay(responseHeaders, failoverErr.SameAccountRetryDeadline)
+		var reserved bool
+		failoverErr.SameAccountRetryDelay, reserved = s.reserveOpenAIOAuth429Retry(account, responseHeaders, failoverErr.SameAccountRetryDeadline)
+		failoverErr.SameAccountRetryNotBefore = time.Now().Add(failoverErr.SameAccountRetryDelay)
+		if !reserved {
+			failoverErr.RetryableOnSameAccount = false
+			failoverErr.NextAccountAction = NextAccountStop
+		}
 	}
 	return failoverErr
 }

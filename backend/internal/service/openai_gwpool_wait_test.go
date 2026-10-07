@@ -76,6 +76,55 @@ func TestGatewayPoolWaitStillVerifiesActualTicketBeforeBusiness(t *testing.T) {
 	require.Len(t, upstream.sentBodies, 3, "two state-echo probes then exactly one unchanged business request")
 }
 
+func TestGatewayPoolWaitRecoversProbeWithoutReplayingBusiness(t *testing.T) {
+	svc, repo, _, account, request, state := ticketWaitFixture(t)
+	account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = true
+	account.Credentials["access_token"] = "offline-token"
+	repo.account = *account
+	sleeps := 0
+	state.sleep = func(context.Context, time.Duration) error { sleeps++; return nil }
+	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
+		{status: http.StatusOK}, // A has no state: recoverable, not degraded.
+		{status: http.StatusOK, minted: "probe-state"}, {status: http.StatusOK},
+		{status: http.StatusOK}, // business, sent only once
+	}}
+	svc.httpUpstream = upstream
+	response, err := svc.doOpenAIUpstream(request, "", account)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, 1, sleeps)
+	require.Len(t, upstream.sentBodies, 4)
+	progress := svc.GatewayPoolProgress([]int64{account.ID})[account.ID]
+	require.Equal(t, 2, progress.Attempt, "recoverable failures consume the original attempt allowance")
+	require.Zero(t, progress.Rejected, "unknown is not a quality verdict")
+}
+
+func TestGatewayPoolWaitProbeFailurePreservesAttemptLimitAndStopsAuthentication(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			svc, repo, _, account, request, state := ticketWaitFixture(t)
+			account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = true
+			account.Extra[openAIGatewayPoolWarmTicketsExtraKey] = 2
+			repo.account = *account
+			sleeps, shots := 0, 0
+			state.sleep = func(context.Context, time.Duration) error { sleeps++; return nil }
+			err := svc.gatewayPoolWarmUpWith(request, account, gwpoolTestIdentity, gwpoolWarmModel,
+				func(context.Context, string, string) (int, string, error) {
+					shots++
+					return status, "", nil
+				})
+			require.ErrorIs(t, err, errOpenAIGatewayPoolWarmUnverified)
+			if status == http.StatusOK {
+				require.Equal(t, 2, shots)
+				require.Equal(t, 1, sleeps)
+			} else {
+				require.Equal(t, 1, shots)
+				require.Zero(t, sleeps)
+			}
+		})
+	}
+}
+
 func TestGatewayPoolWaitRejectsNonShortageErrors(t *testing.T) {
 	for _, code := range []string{gwpool.CodeConsumerRejected, gwpool.CodeUpstreamRejected, gwpool.CodeBadRequest,
 		gwpool.CodeRateLimited, gwpool.CodeNoExit, gwpool.CodeMintFailed, "unknown"} {
@@ -293,4 +342,37 @@ func TestGatewayPoolWaitAbandonedFetchRemainsPending(t *testing.T) {
 			require.Equal(t, openAIGatewayPoolPairLive, cached, "independent fetch still completes for the next caller")
 		})
 	}
+}
+
+func TestGatewayPoolWaitRetriesChangedVerifiedFastPathWithoutReplayingBusiness(t *testing.T) {
+	svc, _, _, account, request, state := ticketWaitFixture(t)
+	account.Credentials["access_token"] = "offline"
+	account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = true
+	// This fixture reads fresh settings during retries.
+	repo, ok := svc.accountRepo.(*gatewayRuntimeRepo)
+	require.True(t, ok)
+	repo.mu.Lock()
+	repo.account = *account
+	repo.mu.Unlock()
+	identity := gwpoolTestIdentity
+	pair := openAIGatewayPoolPair{cookie: "offline-cookie", gateway: "old", version: "old", until: time.Now().Add(time.Minute)}
+	svc.codexCookies.poolPairs.Store(identity, pair)
+	svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, pair.version, "gpt-6-luna")
+	resolved := 0
+	svc.codexCookies.identity = func(context.Context, *Account) (string, error) {
+		resolved++
+		if resolved == 2 {
+			next := pair
+			next.gateway, next.version = "new", "new"
+			svc.codexCookies.poolPairs.Store(identity, next)
+		}
+		return identity, nil
+	}
+	state.sleep = func(context.Context, time.Duration) error { return nil }
+	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{{status: 200, minted: "state"}, {status: 200}, {status: 200}}}
+	svc.httpUpstream = upstream
+	response, err := svc.doOpenAIUpstream(request, "", account)
+	require.NoError(t, err)
+	_ = response.Body.Close()
+	require.Len(t, upstream.sentBodies, 3, "one A/B and exactly one business send")
 }

@@ -15,23 +15,24 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 )
 
-func TestGatewayPoolRecommendationsAffectNextCycleButNotCurrentOrFixed(t *testing.T) {
+func TestGatewayPoolRecommendationsRefreshCurrentCycleButNotFixed(t *testing.T) {
 	store := &openAICodexCookieStore{}
 	rec := &gwpool.CooldownRecommendation{Seconds: 7200, Samples: 2, Source: "account"}
 	store.noteGatewayPoolRecommendation(gwpoolTestIdentity, "unified-142", rec)
-	require.True(t, store.beginGatewayPoolAttempt(gwpoolTestIdentity, "unified-142", time.Hour))
+	require.True(t, store.beginGatewayPoolAttempt(gwpoolTestIdentity, "unified-142", time.Hour, true))
 	c, _ := store.cooldownEntry(gwpoolTestIdentity, "unified-142")
 	require.Equal(t, 7200, c.WindowSeconds, "不是只显示建议，必须真正进入冷却状态")
 	require.Equal(t, "account", c.RecommendationSource)
 	until := c.Until
 	store.noteGatewayPoolRecommendation(gwpoolTestIdentity, "unified-142",
 		&gwpool.CooldownRecommendation{Seconds: 3600, Samples: 2, Source: "account"})
+	store.gatewayPoolUsedAt(gwpoolTestIdentity, "unified-142", time.Hour, true)
 	unchanged, _ := store.cooldownEntry(gwpoolTestIdentity, "unified-142")
-	require.Equal(t, until, unchanged.Until, "新推荐不得缩短正在执行的窗口")
+	require.Equal(t, until.Add(-time.Hour), unchanged.Until, "only the recommendation's added hour is removed")
 	c.FixedSeconds, c.Successes = 3600, map[int]int{3600: 2}
 	store.poolCooldown[gatewayPoolLedgerKey(gwpoolTestIdentity, "unified-142")] = c
 	store.noteGatewayPoolRecommendation(gwpoolTestIdentity, "unified-142", rec)
-	store.observeGatewayPoolCooldown(gwpoolTestIdentity, "unified-142", openAIGatewayVerdictFull, time.Hour)
+	store.observeGatewayPoolCooldown(gwpoolTestIdentity, "unified-142", openAIGatewayVerdictFull, time.Hour, true)
 	c, _ = store.cooldownEntry(gwpoolTestIdentity, "unified-142")
 	require.Equal(t, 3600, c.WindowSeconds, "本地已学到的固定档优先")
 }
@@ -171,6 +172,7 @@ func TestGatewayPoolRecommendationListActuallyChangesBareTakeExclusion(t *testin
 	}))
 	defer server.Close()
 	account := gwpoolTestAccount(1)
+	account.Extra[openAIGatewayPoolUseRecommendationKey] = true
 	account.Extra[openAIGatewayPoolBaseURLExtraKey] = server.URL
 	account.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = "test-consumer"
 	store := &openAICodexCookieStore{}

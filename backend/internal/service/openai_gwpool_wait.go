@@ -33,11 +33,66 @@ type gatewayPoolWaitHolder struct {
 const gatewayPoolWaitGinKey = "openai_gwpool_wait_budget"
 
 type gatewayPoolWaitState struct {
+	mu       sync.Mutex
 	max      time.Duration
 	deadline time.Time
 	waited   time.Duration
 	now      func() time.Time
 	sleep    func(context.Context, time.Duration) error
+}
+
+func (s *gatewayPoolWaitState) snapshot() (time.Duration, time.Time, time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.max, s.deadline, s.waited
+}
+
+// retry waits within the original request budget, shared by supply waits and
+// recoverable preflight failures. It never resets the verification work budget.
+func (s *OpenAIGatewayService) waitGatewayPoolRetry(ctx context.Context, account *Account, gap time.Duration) (bool, error) {
+	state := gatewayPoolWaitFrom(ctx)
+	if state == nil {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if remaining, ok := ctx.Value(gatewayPoolWaitWorkKey{}).(func() time.Duration); ok && remaining() <= 0 {
+		return false, context.DeadlineExceeded
+	}
+	fresh, err := s.codexCookies.freshGatewayPoolAccount(ctx, account)
+	if err != nil || !gatewayPoolWaitAccountMatches(fresh, account) {
+		return false, err
+	}
+	state.mu.Lock()
+	maxWait := min(state.max, fresh.gatewayPoolMaxWait())
+	now := state.now()
+	if state.deadline.IsZero() {
+		state.deadline = now.Add(maxWait)
+	}
+	remaining := min(state.deadline.Sub(now), maxWait-state.waited)
+	state.mu.Unlock()
+	if remaining <= 0 {
+		return false, nil
+	}
+	if gap <= 0 {
+		gap = gatewayPoolWaitDefaultGap
+	}
+	if gap < gatewayPoolWaitMinGap {
+		gap = gatewayPoolWaitMinGap
+	}
+	gap = min(gap, gatewayPoolWaitMaxGap, remaining)
+	before := state.now()
+	sleepErr := state.sleep(ctx, gap)
+	state.mu.Lock()
+	state.waited += state.now().Sub(before)
+	expired := !state.now().Before(state.deadline) || state.waited >= maxWait
+	state.mu.Unlock()
+	if sleepErr != nil || expired {
+		return false, sleepErr
+	}
+	fresh, err = s.codexCookies.freshGatewayPoolAccount(ctx, account)
+	return err == nil && gatewayPoolWaitAccountMatches(fresh, account), err
 }
 
 func gatewayPoolWaitSeconds(raw any) (int, bool) {
@@ -140,6 +195,7 @@ func gatewayPoolWaitAccountMatches(fresh, original *Account) bool {
 	return fresh != nil && fresh.IsSchedulable() && fresh.gatewayPoolMaxWait() > 0 &&
 		fresh.gatewayPoolBaseURL() == original.gatewayPoolBaseURL() &&
 		fresh.gatewayPoolConsumerKey() == original.gatewayPoolConsumerKey() &&
+		fresh.getExtraBool(openAIGatewayPoolMemberIsolationKey) == original.getExtraBool(openAIGatewayPoolMemberIsolationKey) &&
 		codexAccountIdentityNamespace(fresh) == codexAccountIdentityNamespace(original)
 }
 
@@ -152,8 +208,9 @@ func gatewayPoolFetchTimeoutForContext(ctx context.Context, account *Account) ti
 	if remaining, ok := ctx.Value(gatewayPoolWaitWorkKey{}).(func() time.Duration); ok {
 		timeout = min(timeout, remaining())
 	}
-	if !state.deadline.IsZero() {
-		timeout = min(timeout, state.deadline.Sub(state.now()), state.max-state.waited)
+	maxWait, deadline, waited := state.snapshot()
+	if !deadline.IsZero() {
+		timeout = min(timeout, deadline.Sub(state.now()), maxWait-waited)
 	}
 	return timeout
 }
@@ -188,45 +245,12 @@ func (s *OpenAIGatewayService) attachGatewayPoolRouteWithWait(
 		if workRemaining != nil && workRemaining() <= 0 {
 			return release, context.DeadlineExceeded
 		}
-		fresh, readErr := s.codexCookies.freshGatewayPoolAccount(ctx, account)
-		// Do not revive a disabled account or replay stale credentials after a
-		// config/identity change while waiting.
-		if readErr != nil || !gatewayPoolWaitAccountMatches(fresh, account) {
-			return release, err
-		}
-		maxWait := min(state.max, fresh.gatewayPoolMaxWait())
-		now := state.now()
-		if state.deadline.IsZero() {
-			state.deadline = now.Add(maxWait)
-		}
-		remaining := min(state.deadline.Sub(now), maxWait-state.waited)
-		if remaining <= 0 {
-			return release, err
-		}
-		gap := poolErr.RetryAfter
-		if gap <= 0 {
-			gap = gatewayPoolWaitDefaultGap
-		}
-		gap = min(gap, gatewayPoolWaitMaxGap)
-		if gap < gatewayPoolWaitMinGap {
-			gap = gatewayPoolWaitMinGap
-		}
-		if gap > remaining {
-			gap = remaining
-		}
-		before := state.now()
-		sleepErr := state.sleep(ctx, gap)
+		retry, sleepErr := s.waitGatewayPoolRetry(ctx, account, poolErr.RetryAfter)
 		waited = true
-		state.waited += state.now().Sub(before)
 		if sleepErr != nil {
 			return release, sleepErr
 		}
-		if !state.now().Before(state.deadline) {
-			return release, err
-		}
-		// Re-read before retry, not just after the next failed fetch.
-		fresh, readErr = s.codexCookies.freshGatewayPoolAccount(ctx, account)
-		if readErr != nil || !gatewayPoolWaitAccountMatches(fresh, account) {
+		if !retry {
 			return release, err
 		}
 	}
