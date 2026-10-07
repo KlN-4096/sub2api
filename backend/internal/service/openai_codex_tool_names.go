@@ -12,9 +12,11 @@ import (
 
 const (
 	codexReservedPythonToolName = "python"
-	codexPythonToolAlias        = "python__sub2api"
-	codexToolNameReverseKey     = "openai_codex_tool_name_reverse"
-	codexToolNameSessionKey     = "openai_codex_tool_name_session_reverse"
+	// issue #6911：别名不能带 sub2api 字样（会随工具声明发给上游）。反查表按次请求/WS 会话
+	// 现算，响应里已还原成 python，客户端历史里不会存别名，改名不影响既有会话。
+	codexPythonToolAlias    = "python_tool"
+	codexToolNameReverseKey = "openai_codex_tool_name_reverse"
+	codexToolNameSessionKey = "openai_codex_tool_name_session_reverse"
 )
 
 type codexToolNameField struct {

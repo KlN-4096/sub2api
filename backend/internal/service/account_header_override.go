@@ -28,6 +28,8 @@ const (
 //   - content-type：承载报文框架信息（multipart boundary 为每请求随机值），静态覆写必然与 body 不匹配；
 //   - authorization/x-api-key/cookie 等：上游认证头由账号凭据统一注入，禁止通过覆写篡改或重新引入；
 //   - accept-encoding：强制压缩会破坏网关对上游流式响应（SSE/usage）的解析；
+//   - content-encoding：与 content-type 同理，承载报文框架信息。双开账号的 /responses
+//     请求体是网关压出来的 zstd，静态覆写必然与实际字节不符（谎报编码）；
 //   - sec-websocket-*：WebSocket 握手头由拨号器管理（OpenAI WS 模式）；
 //   - session_id/x-claude-code-session-id/x-grok-conv-id 等：逐请求会话隔离头，
 //     固定值会造成会话串扰。
@@ -49,6 +51,7 @@ var headerOverrideBlockedNames = map[string]struct{}{
 	"x-goog-api-key":           {},
 	"cookie":                   {},
 	"accept-encoding":          {},
+	"content-encoding":         {},
 	"sec-websocket-key":        {},
 	"sec-websocket-version":    {},
 	"sec-websocket-extensions": {},
