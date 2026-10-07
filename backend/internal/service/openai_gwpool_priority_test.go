@@ -74,7 +74,7 @@ func TestGatewayPoolSpareRankingExcludesUnusableHeldCandidates(t *testing.T) {
 			svc, repo := gatewayRuntimeService(account)
 			pairs := []openAIGatewayPoolPair{{gateway: "already-tried"}, {
 				cookie: "offline", gateway: "valid", until: time.Now().Add(2 * time.Minute),
-			}, {cookie: "offline", gateway: "expired", until: time.Now().Add(-time.Second)}}
+			}, {cookie: "offline", gateway: "expired", routeExpiresAt: time.Now().Add(-time.Second)}}
 			if mode == "cooling-hides-global" {
 				pairs[1].gateway = "cooling"
 				pairs[2] = openAIGatewayPoolPair{

@@ -397,7 +397,7 @@ func (s *OpenAIGatewayService) noteGatewayPoolProbeAndContact(ctx context.Contex
 			}
 			s.noteGatewayPoolCooldownVerdict(ctx, account, observation.Applied, verdict)
 		}
-		s.noteOpenAIGatewayUse(ctx, account, observation.Applied.Gateway, observation.Applied.Region, verdict, false,
+		s.noteOpenAIGatewayUse(context.WithValue(ctx, gatewayPoolObservationEpochKey{}, observation.Applied.cooldownResetAt), account, observation.Applied.Gateway, observation.Applied.Region, verdict, false,
 			observation.Applied.PoolLive, observation.Applied.PoolFree, observation.Applied.FullHeldMs, observation.Applied.LedgerTag)
 	}
 	outcome := "unknown"
@@ -440,6 +440,9 @@ func (s *OpenAIGatewayService) noteGatewayPoolBusinessContact(request *http.Requ
 		Model: gatewayPoolWarmModel(request), Source: "business", Outcome: outcome, FirstSent: started, LastSent: started})
 	if outcome == "full" && snapshot.Version == applied.Version {
 		s.codexCookies.gatewayPoolMarkVerifiedFull(identity, applied.Version, gatewayPoolWarmModel(request))
+		if s.noteGatewayPoolFullUse(request.Context(), account, identity, applied, started) {
+			return
+		}
 	}
 	s.noteGatewayPoolUsage(request.Context(), account, identity, gatewayPoolWarmModel(request), applied, started, outcome == "full")
 }

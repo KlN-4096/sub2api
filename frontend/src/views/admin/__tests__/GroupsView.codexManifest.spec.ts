@@ -12,12 +12,18 @@ const {
   getUsageSummary,
   getCapacitySummary,
   getLiveCapability,
+  createGroup,
+  updateGroup,
+  showError,
 } = vi.hoisted(() => ({
   listGroups: vi.fn(),
   getModelAllowlistCandidates: vi.fn(),
   getUsageSummary: vi.fn(),
   getCapacitySummary: vi.fn(),
   getLiveCapability: vi.fn(),
+  createGroup: vi.fn(),
+  updateGroup: vi.fn(),
+  showError: vi.fn(),
 }));
 
 vi.mock("@/api/admin", () => ({
@@ -29,8 +35,8 @@ vi.mock("@/api/admin", () => ({
       getUsageSummary,
       getCapacitySummary,
       getLiveCapability,
-      create: vi.fn(),
-      update: vi.fn(),
+      create: createGroup,
+      update: updateGroup,
       delete: vi.fn(),
       duplicate: vi.fn(),
       updateSortOrder: vi.fn(),
@@ -44,7 +50,7 @@ vi.mock("@/api/admin", () => ({
 
 vi.mock("@/stores/app", () => ({
   useAppStore: () => ({
-    showError: vi.fn(),
+    showError,
     showSuccess: vi.fn(),
   }),
 }));
@@ -80,6 +86,7 @@ const sourceGroup = {
   long_context_pricing_enabled: true,
   force_openai_fast: false,
   free_openai_fast: false,
+  openai_gwpool_active_accounts: 2,
   model_pricing: [],
   profit_control_enabled: false,
   profit_min_margin: 0,
@@ -154,6 +161,13 @@ const BaseDialogStub = defineComponent({
   template: '<div v-if="show"><slot /><slot name="footer" /></div>',
 });
 
+const ReasoningEffortPolicyStub = defineComponent({
+  setup(_, { expose }) {
+    expose({ validate: () => true, resetValidation: () => undefined });
+    return () => h("div");
+  },
+});
+
 const CodexManifestAccountsFieldStub = defineComponent({
   name: "CodexManifestAccountsField",
   props: {
@@ -220,7 +234,7 @@ const mountView = () =>
         GroupCapacityBadge: true,
         GroupRateMultipliersModal: true,
         GroupRPMOverridesModal: true,
-        ReasoningEffortPolicyFields: true,
+        ReasoningEffortPolicyFields: ReasoningEffortPolicyStub,
         CodexManifestAccountsField: CodexManifestAccountsFieldStub,
         PricingEntryCard: true,
         VueDraggable: true,
@@ -236,6 +250,11 @@ describe("GroupsView Codex manifest binding", () => {
     getUsageSummary.mockReset();
     getCapacitySummary.mockReset();
     getLiveCapability.mockReset();
+    createGroup.mockReset();
+    updateGroup.mockReset();
+    showError.mockReset();
+    createGroup.mockResolvedValue(sourceGroup);
+    updateGroup.mockResolvedValue(sourceGroup);
 
     listGroups.mockResolvedValue({
       items: [sourceGroup],
@@ -283,6 +302,87 @@ describe("GroupsView Codex manifest binding", () => {
       }),
     );
 
+    wrapper.unmount();
+  });
+
+  it("edits this group's active account count without a global settings write", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    const edit = wrapper.findAll("button").find(button => button.text().includes("common.edit"));
+    await edit!.trigger("click");
+    await flushPromises();
+    const input = wrapper.get<HTMLInputElement>('[data-testid="edit-gwpool-active-accounts"]');
+    expect(input.element.value).toBe("2");
+    expect(input.attributes("min")).toBe("1");
+    expect(input.attributes("max")).toBe("64");
+    await input.setValue("3");
+    await wrapper.get("#edit-group-form").trigger("submit");
+    await flushPromises();
+    expect(updateGroup).toHaveBeenCalledWith(sourceGroup.id, expect.objectContaining({ openai_gwpool_active_accounts: 3 }));
+    wrapper.unmount();
+  });
+
+  it("creates a group with the independent default active count of one", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.findAll("button").find(button => button.text().includes("admin.groups.createGroup"))!.trigger("click");
+    await flushPromises();
+    wrapper.getComponent('[data-tour="group-form-platform"]').vm.$emit("update:modelValue", "openai");
+    await flushPromises();
+    const input = wrapper.get<HTMLInputElement>('[data-testid="create-gwpool-active-accounts"]');
+    expect(input.element.value).toBe("1");
+    await wrapper.get('[data-tour="group-form-name"]').setValue("new-group");
+    await wrapper.get("#create-group-form").trigger("submit");
+    await flushPromises();
+    expect(createGroup).toHaveBeenCalledWith(expect.objectContaining({ openai_gwpool_active_accounts: 1 }));
+    wrapper.unmount();
+  });
+
+  it.each(["0", "65", "1.5"])("rejects invalid group active count %s before saving", async value => {
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.findAll("button").find(button => button.text().includes("common.edit"))!.trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="edit-gwpool-active-accounts"]').setValue(value);
+    await wrapper.get("#edit-group-form").trigger("submit");
+    await flushPromises();
+    expect(updateGroup).not.toHaveBeenCalled();
+    expect(showError).toHaveBeenCalledWith("admin.groups.gatewayPoolActiveAccountsInvalid");
+    wrapper.unmount();
+  });
+
+  it("does not submit a hidden OpenAI limit after changing the new group's platform", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.findAll("button").find(button => button.text().includes("admin.groups.createGroup"))!.trigger("click");
+    await flushPromises();
+    const platform = wrapper.getComponent('[data-tour="group-form-platform"]');
+    platform.vm.$emit("update:modelValue", "openai");
+    await flushPromises();
+    await wrapper.get('[data-testid="create-gwpool-active-accounts"]').setValue("65");
+    platform.vm.$emit("update:modelValue", "anthropic");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="create-gwpool-active-accounts"]').exists()).toBe(false);
+    await wrapper.get('[data-tour="group-form-name"]').setValue("non-openai");
+    await wrapper.get("#create-group-form").trigger("submit");
+    await flushPromises();
+    expect(createGroup).toHaveBeenCalled();
+    expect(createGroup.mock.calls.at(-1)?.[0]).not.toHaveProperty("openai_gwpool_active_accounts");
+    expect(showError).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("does not overwrite the hidden limit when editing a non-OpenAI group", async () => {
+    listGroups.mockResolvedValueOnce({ items: [{ ...sourceGroup, platform: "anthropic" }], total: 1 });
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.findAll("button").find(button => button.text().includes("common.edit"))!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="edit-gwpool-active-accounts"]').exists()).toBe(false);
+    await wrapper.get("#edit-group-form").trigger("submit");
+    await flushPromises();
+    expect(updateGroup).toHaveBeenCalled();
+    expect(updateGroup.mock.calls.at(-1)?.[1]).not.toHaveProperty("openai_gwpool_active_accounts");
     wrapper.unmount();
   });
 });
