@@ -55,7 +55,9 @@ jobs:
           go version | grep -q 'go1.27.0'
       - name: Unit tests
         working-directory: backend
-        run: make test-unit
+        run: |
+          python3 ../tools/test_backend_unit_runner_test.py
+          make test-unit
       - name: Integration tests
         working-directory: backend
         run: make test-integration
