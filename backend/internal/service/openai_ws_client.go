@@ -63,6 +63,16 @@ type openAIWSForceCloser interface {
 	CloseNow() error
 }
 
+// openAIWSRawTextWriter 把已序列化好的 JSON 文本帧原样写出。openAIWSClientConn.WriteJSON
+// 经 wsjson → json.Encoder：HTML 转义 <>& 并追加尾部换行；真客户端是
+// serde_json::to_string + Message::Text（codex-api/src/endpoint/responses_websocket.rs:899,
+// 920-923），两者都没有。双开账号的帧只能走这里。
+type openAIWSRawTextWriter interface {
+	WriteFrame(ctx context.Context, msgType coderws.MessageType, payload []byte) error
+}
+
+var _ openAIWSRawTextWriter = (*coderOpenAIWSClientConn)(nil)
+
 // openAIWSClientDialer 抽象 WS 建连器。
 type openAIWSClientDialer interface {
 	Dial(ctx context.Context, wsURL string, headers http.Header, proxyURL string) (openAIWSClientConn, int, http.Header, error)

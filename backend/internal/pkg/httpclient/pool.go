@@ -47,6 +47,9 @@ type Options struct {
 	InsecureSkipVerify    bool          // 是否跳过 TLS 证书验证（已禁用，不允许设置为 true）
 	ValidateResolvedIP    bool          // 是否校验解析后的 IP（防止 DNS Rebinding）
 	AllowPrivateHosts     bool          // 允许私有地址解析（与 ValidateResolvedIP 一起使用）
+	// ForceHTTP2 让 transport 在 TLS 上协商 h2。设了自定义 DialContext 后 Go 不会自动
+	// 启用 HTTP/2，出站会退回 HTTP/1.1；需要与其它出站路径共用同一协议画像时置 true。
+	ForceHTTP2 bool
 
 	// 可选的连接池参数（不设置则使用默认值）
 	MaxIdleConns        int // 最大空闲连接总数（默认 100）
@@ -121,6 +124,7 @@ func buildTransport(opts Options) (*http.Transport, error) {
 		MaxConnsPerHost:       opts.MaxConnsPerHost, // 0 表示无限制
 		IdleConnTimeout:       defaultIdleConnTimeout,
 		ResponseHeaderTimeout: opts.ResponseHeaderTimeout,
+		ForceAttemptHTTP2:     opts.ForceHTTP2,
 	}
 
 	if opts.InsecureSkipVerify {
@@ -144,7 +148,7 @@ func buildTransport(opts Options) (*http.Transport, error) {
 }
 
 func buildClientKey(opts Options) string {
-	return fmt.Sprintf("%s|%s|%s|%t|%t|%t|%d|%d|%d",
+	return fmt.Sprintf("%s|%s|%s|%t|%t|%t|%d|%d|%d|%t",
 		strings.TrimSpace(opts.ProxyURL),
 		opts.Timeout.String(),
 		opts.ResponseHeaderTimeout.String(),
@@ -154,6 +158,7 @@ func buildClientKey(opts Options) string {
 		opts.MaxIdleConns,
 		opts.MaxIdleConnsPerHost,
 		opts.MaxConnsPerHost,
+		opts.ForceHTTP2,
 	)
 }
 

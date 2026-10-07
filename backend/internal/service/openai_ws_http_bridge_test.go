@@ -2380,7 +2380,7 @@ func TestProxyOpenAIWSHTTPBridgeTurn_StagesCodexFingerprint(t *testing.T) {
 	}
 
 	full := newTestOAuthAccount(7101, map[string]any{"codex_fingerprint_mode": "full"})
-	ids := resolveCodexFingerprintIDsFromRequest(full, nil)
+	ids := resolveCodexFingerprintIDsFromRequest(nil, full, nil)
 	require.NotNil(t, ids)
 	first := run(full)
 	require.Equal(t, ids.sessionID, first.Header.Get("session_id"))

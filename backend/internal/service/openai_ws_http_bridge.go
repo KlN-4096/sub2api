@@ -454,11 +454,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	// prompt_cache_key get random upstream prompt-cache routing and rarely hit the cache.
 	stageCodexFingerprintIDs(c, nil)
 	if account.UsesOpenAICodexProtocol() {
-		var clientHeaders http.Header
-		if c != nil && c.Request != nil {
-			clientHeaders = c.Request.Header
-		}
-		fpIDs := resolveCodexFingerprintIDsFromRequest(account, clientHeaders)
+		fpIDs := resolveCodexFingerprintIDsWithBody(c, account, nil, gjson.GetBytes(body, "client_metadata"))
 		if fpIDs != nil {
 			fpBody, fpChanged, fpErr := applyCodexFingerprintClientMetadataRaw(body, fpIDs)
 			if fpErr != nil {

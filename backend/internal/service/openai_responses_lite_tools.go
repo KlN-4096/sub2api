@@ -272,7 +272,8 @@ func normalizeOpenAIResponsesLitePayloadForAccount(body []byte, account *Account
 	if account == nil || !account.IsOpenAI() {
 		return body, false, nil
 	}
-	if account.IsOpenAIOAuthLike() {
+	// 按「上游是谁」分流：cpr 与 oauth 打的是同一个 Codex 后端。
+	if account.TargetsChatGPTCodexUpstream() {
 		return normalizeOpenAIResponsesLiteToolsPayload(body)
 	}
 	return normalizeOpenAIResponsesLiteParallelToolCallsPayload(body)
