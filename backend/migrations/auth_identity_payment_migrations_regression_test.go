@@ -240,3 +240,23 @@ func TestMigration173AllowsCyberBlockedUsageRequestType(t *testing.T) {
 	require.Contains(t, sql, "ADD CONSTRAINT usage_logs_request_type_check")
 	require.Contains(t, sql, "CHECK (request_type IN (0, 1, 2, 3, 4)) NOT VALID")
 }
+
+// 猎手探测记账写 request_type=6：约束不放开的话钱扣了、用量行却写不进去。
+func TestMigration244AllowsProbeUsageRequestType(t *testing.T) {
+	content, err := FS.ReadFile("244_allow_probe_usage_request_type.sql")
+	require.NoError(t, err)
+	sql := string(content)
+	require.Contains(t, sql, "DROP CONSTRAINT IF EXISTS usage_logs_request_type_check")
+	require.Contains(t, sql, "ADD CONSTRAINT usage_logs_request_type_check")
+	require.Contains(t, sql, "CHECK (request_type >= 0 AND request_type <= 6)")
+}
+
+// 降智暂停改成模型级后，klno.13 写下的账号级停调度没有代码会放回：升级要一次性清掉。
+func TestMigration245ClearsAccountLevelTurnStateHold(t *testing.T) {
+	content, err := FS.ReadFile("245_clear_account_level_turn_state_hold.sql")
+	require.NoError(t, err)
+	sql := string(content)
+	require.Contains(t, sql, "UPDATE accounts")
+	require.Contains(t, sql, "temp_unschedulable_until = NULL")
+	require.Contains(t, sql, "temp_unschedulable_reason LIKE 'turn_state_hold:%'")
+}

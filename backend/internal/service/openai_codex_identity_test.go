@@ -292,17 +292,30 @@ func TestEnforceCodexIdentityHeadersIsIdempotent(t *testing.T) {
 	require.Equal(t, openai.CodexDefaultOriginator, h.Get("originator"))
 }
 
-// 缺少 originator 时必须保持 no-op：compat 桥接等非 ChatGPT 内部接口路径会显式删除
-// originator，不应被补回身份头。
-func TestEnforceCodexIdentityHeaders_NoOriginatorIsNoop(t *testing.T) {
+// 缺少 originator 只表示「不要把 originator 补回去」（compat 桥接等路径会显式删掉它），
+// 不表示整体 no-op：UA 与 version 照样收口。
+//
+// 这条原先断言「UA 保持客户端原值」，那正是一个洞：/v1/responses 直连命中桥标记时
+// 没有后续的 ensure+enforce，客户端自报的 UA 就原样出站——2026-09-20 的审计用端到端
+// 测试实测到出站 chatgpt.com 的 User-Agent 就是 curl/8.5.0。
+func TestEnforceCodexIdentityHeaders_NoOriginatorStillNormalizesUA(t *testing.T) {
 	h := make(http.Header)
 	h.Set("user-agent", "third-party-client/1.0.0")
 
 	enforceCodexIdentityHeaders(h)
 
-	require.Empty(t, h.Get("originator"))
-	require.Empty(t, h.Get("version"))
-	require.Equal(t, "third-party-client/1.0.0", h.Get("user-agent"))
+	require.Empty(t, h.Get("originator"), "桥形态删掉的 originator 不能被补回")
+	require.Equal(t, CodexCanonicalUserAgent(), h.Get("user-agent"), "客户端自报的 UA 不得出站")
+	require.Equal(t, CodexCanonicalClientVersion(), h.Get("version"), "version 与 UA 同源")
+
+	// 关闭强制统一后的兜底路径同样守这条边界。
+	SetCodexIdentityEnforcementEnabled(false)
+	defer SetCodexIdentityEnforcementEnabled(true)
+	paired := make(http.Header)
+	paired.Set("user-agent", "third-party-client/1.0.0")
+	enforceCodexIdentityHeaders(paired)
+	require.Empty(t, paired.Get("originator"))
+	require.NotEqual(t, "third-party-client/1.0.0", paired.Get("user-agent"))
 }
 
 func TestNormalizeCodexClientVersion(t *testing.T) {

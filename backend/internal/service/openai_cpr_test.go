@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -70,9 +71,23 @@ func cprTestDetailJSON(status, planType string, windows string) string {
 		`"id":"` + cprTestCPRAccount + `","email":"a@b.c","provider":"openai",` +
 		`"planType":"` + planType + `","planTypeDisplay":"Pro","status":"` + status + `",` +
 		`"errorReason":null,"enabled":true,` +
+		`"outboundProxyEndpoint":"` + cprTestOutboundProxyRaw + `",` +
 		`"quota":{"refreshedAtDisplay":"3 分钟前","limitReached":false,` +
 		`"rateLimitedUntil":null,"windows":[` + windows + `]}}}}`
 }
+
+// wire fixture 里刻意放一个**带凭据**的出站代理。
+//
+// 两件事一起钉住：
+//  1. JSON 字段名 outboundProxyEndpoint 拼错的话功能会静默什么都不做，而只测
+//     buildCPRCodexExtraUpdates 的用例照样全绿——解码那一层根本没被走到。
+//  2. 生产调用点（buildCPRAccountState 里那次 sanitizeCPROutboundProxy）真的在剥凭据。
+//     fixture 放干净值的话，把那次调用换成裸 TrimSpace 测试也全绿，这道防泄漏闸门等于
+//     没有测试。CPR 现在返回的确实是脱敏值，但那是上游的行为、不是我们的不变量。
+const (
+	cprTestOutboundProxyRaw  = "socks5h://cpruser:cprpass@198.51.100.7:1080"
+	cprTestOutboundProxyView = "socks5h://198.51.100.7:1080"
+)
 
 func cprTestWindow(role string, windowSeconds int, usedPercent float64, resetAtDisplay string) string {
 	return fmt.Sprintf(`{"key":"codex:%ds","group":"shortTerm","limitId":"codex",`+
@@ -185,6 +200,23 @@ func TestCPRDoesNotDisturbOtherAccountTypes(t *testing.T) {
 
 // --- 额度适配器 ---
 
+// TestCPRAdminDoesNotFollowRedirects 钉住：白名单只校验初始地址，admin 客户端不能跟着 3xx 把
+// x-api-key 带去别的主机（Go 只在跨域时剥 Authorization，自定义头原样带走）。
+func TestCPRAdminDoesNotFollowRedirects(t *testing.T) {
+	leak, leaked := startCPRAdminStub(t, http.StatusOK, `{"code":200,"data":{"account":{}}}`)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, leak.URL+r.URL.RequestURI(), http.StatusFound)
+	}))
+	t.Cleanup(redirector.Close)
+
+	account := newCPRTestAccount()
+	account.Credentials["admin_base_url"] = redirector.URL
+
+	_, err := NewCPRQuotaService(cprTestConfig()).FetchAccountState(context.Background(), account)
+	require.Error(t, err)
+	require.Empty(t, *leaked, "重定向目标一个请求都不该收到，更不该收到 x-api-key")
+}
+
 func TestCPRQuotaAdapterMapsWindows(t *testing.T) {
 	now := time.Now()
 	// 5h 窗口 2 小时后重置，7d 窗口 3 天后重置。
@@ -212,6 +244,12 @@ func TestCPRQuotaAdapterMapsWindows(t *testing.T) {
 	require.Equal(t, "normal", state.Status)
 	require.True(t, state.Schedulable())
 	require.Equal(t, "pro", state.PlanType)
+	// 走完整解码路径，钉住 JSON 字段名 outboundProxyEndpoint，以及生产调用点上的脱敏。
+	// 只测 buildCPR* 的话，这个名字拼错会让功能静默失效而所有断言照样绿；fixture 放干净
+	// 值的话，把那次 sanitize 调用换成裸 TrimSpace 也照样绿。
+	require.Equal(t, cprTestOutboundProxyView, state.OutboundProxyEndpoint)
+	require.NotContains(t, state.OutboundProxyEndpoint, "cprpass")
+	require.NotContains(t, state.OutboundProxyEndpoint, "cpruser")
 	require.NotNil(t, state.RateLimit)
 
 	require.NotNil(t, state.RateLimit.PrimaryWindow)
@@ -241,7 +279,8 @@ func TestCPRExtraUpdatesMatchOAuthDisplayKeys(t *testing.T) {
 	require.NotEmpty(t, oauthShape)
 
 	cprShape := buildCPRCodexExtraUpdates(newCPRTestAccount(), &CPRAccountState{
-		Status: "normal", PlanType: "pro", RateLimit: rateLimit, FetchedAt: now,
+		Status: "normal", PlanType: "pro", RateLimit: rateLimit,
+		OutboundProxyEndpoint: "socks5h://198.51.100.7:1080", FetchedAt: now,
 	})
 
 	for key, want := range oauthShape {
@@ -251,12 +290,15 @@ func TestCPRExtraUpdatesMatchOAuthDisplayKeys(t *testing.T) {
 	require.Contains(t, cprShape, "codex_7d_used_percent")
 	require.Contains(t, cprShape, "codex_usage_updated_at")
 
-	// cpr_plan_type 是本条守卫的唯一例外：它不是展示键（前端不读），而是订阅优先
-	// 调度要用的档位，OAuth 那边存在 credentials.plan_type 里、不经本函数。
-	// 这里把它摘掉再比数量，而不是把期望值加一——否则守卫就形同虚设。
+	// 两个例外，都不是本条守卫要防的「无人消费的状态键」：
+	//   - cpr_plan_type：不是展示键（前端不读），是订阅优先调度要用的档位，
+	//     OAuth 那边存在 credentials.plan_type 里、不经本函数。
+	//   - cpr_outbound_proxy：cpr 独有的出口展示。OAuth 账号没有 CPR 这一层，
+	//     压根没有对应概念，所以它「多出来」是正当的。
+	// 摘掉再比数量，而不是把期望值加二——否则守卫就形同虚设。
 	displayShape := make(map[string]any, len(cprShape))
 	for key, value := range cprShape {
-		if key == CPRPlanTypeExtraKey {
+		if key == CPRPlanTypeExtraKey || key == CPROutboundProxyExtraKey {
 			continue
 		}
 		displayShape[key] = value
@@ -1408,4 +1450,249 @@ func TestCPRPlanGatedModelCoolsDownLikeOAuth(t *testing.T) {
 		rateLimits.HandleUpstreamModelNotFound(context.Background(), oauth, "gpt-5.4", http.StatusBadRequest, body),
 		rateLimits.HandleUpstreamModelNotFound(context.Background(), cpr, "gpt-5.4", http.StatusBadRequest, body))
 	require.False(t, rateLimits.HandleUpstreamModelNotFound(context.Background(), apikey, "gpt-5.4", http.StatusBadRequest, body))
+}
+
+// TestOpenAITurnStateOverrideAppliesToCodexUpstreams 锁定账号级 turn-state 覆写的适用范围
+// 与优先级：oauth / setup-token / cpr 三种落到 ChatGPT Codex 后端的账号都生效，
+// 其余上游一个字节都不碰；覆写必须能盖过守卫的剥离结果。
+func TestOpenAITurnStateOverrideAppliesToCodexUpstreams(t *testing.T) {
+	const blob = "gAAAAABqqrNHYSOlO_EUJI-hlduVBqJ8slR-floDb7J"
+	svc := &OpenAIGatewayService{}
+	withOverride := func(platform, accType string) *Account {
+		return &Account{
+			Platform: platform,
+			Type:     accType,
+			Extra: map[string]any{openAITurnStateOverrideExtraKey: map[string]any{
+				turnStateTestModel: blob,
+			}},
+		}
+	}
+
+	// 适用：三种都会落到 ChatGPT Codex 后端
+	for _, tc := range []struct{ platform, accType string }{
+		{PlatformOpenAI, AccountTypeOAuth},
+		{PlatformOpenAI, AccountTypeSetupToken},
+		{PlatformOpenAI, AccountTypeCPR},
+	} {
+		acc := withOverride(tc.platform, tc.accType)
+		require.Equal(t, blob, acc.OpenAICodexTurnStateOverride(turnStateTestModel), "%s/%s 应支持覆写", tc.platform, tc.accType)
+
+		h := http.Header{}
+		h.Set(openAICodexTurnStateHeader, "客户端自己回带的旧值")
+		svc.applyOpenAICodexTurnStateOverrideHeader(newTurnStateTestCtx(), acc, h)
+		require.Equal(t, blob, h.Get(openAICodexTurnStateHeader), "覆写必须盖过客户端回带值")
+
+		// 守卫剥光之后（头已不存在）覆写照样要写进去，否则「配了但不生效」
+		stripped := http.Header{}
+		svc.applyOpenAICodexTurnStateOverrideHeader(newTurnStateTestCtx(), acc, stripped)
+		require.Equal(t, blob, stripped.Get(openAICodexTurnStateHeader), "守卫剥离后覆写仍须生效")
+
+		require.Equal(t, blob,
+			svc.applyOpenAICodexTurnStateOverrideWSManualOnly(newTurnStateTestCtx(), acc, ""), "值形态（WS 路径）同样生效")
+	}
+
+	// 不适用：上游不是 Codex 后端的账号，一个字节都不能碰
+	for _, tc := range []struct{ platform, accType string }{
+		{PlatformOpenAI, AccountTypeAPIKey},
+		{PlatformAnthropic, AccountTypeOAuth},
+		{PlatformAnthropic, AccountTypeBedrock},
+	} {
+		acc := withOverride(tc.platform, tc.accType)
+		require.Empty(t, acc.OpenAICodexTurnStateOverride(turnStateTestModel), "%s/%s 不该支持覆写", tc.platform, tc.accType)
+
+		h := http.Header{}
+		svc.applyOpenAICodexTurnStateOverrideHeader(newTurnStateTestCtx(), acc, h)
+		require.Empty(t, h.Get(openAICodexTurnStateHeader))
+		require.Equal(t, "原值", svc.applyOpenAICodexTurnStateOverrideWSManualOnly(newTurnStateTestCtx(), acc, "原值"))
+	}
+
+	// 未配置 = 功能不存在，出站行为与改动前逐字节一致
+	plain := &Account{Platform: PlatformOpenAI, Type: AccountTypeCPR}
+	h := http.Header{}
+	h.Set(openAICodexTurnStateHeader, "客户端自己回带的值")
+	svc.applyOpenAICodexTurnStateOverrideHeader(newTurnStateTestCtx(), plain, h)
+	require.Equal(t, "客户端自己回带的值", h.Get(openAICodexTurnStateHeader), "未配置时不得改写")
+	require.Equal(t, "原值", svc.applyOpenAICodexTurnStateOverrideWSManualOnly(newTurnStateTestCtx(), plain, "原值"))
+	require.Empty(t, (*Account)(nil).OpenAICodexTurnStateOverride(turnStateTestModel), "nil 账号不 panic")
+}
+
+// newTurnStateTestCtx 造一个最小 gin 上下文：覆写解析会往里写注入标记。
+// 必须带模型——覆写表按模型取票，读不到本次模型就一律不注入。
+func newTurnStateTestCtx() *gin.Context {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	SetOpsUpstreamModel(c, turnStateTestModel)
+	return c
+}
+
+// TestValidateOpenAITurnStateOverrideExtra 钉住写入校验：覆写表是 {模型: blob}，
+// 每条 blob 只放行 Fernet 信封形状。
+func TestValidateOpenAITurnStateOverrideExtra(t *testing.T) {
+	// 真实捕获样本（pro3，292 字符）
+	const real = "gAAAAABqqrNHYSOlO_EUJI-hlduVBqJ8slR-floDb7J-ZYvvLXj7WV7dOZ_zk10RDMl_N4dRvG0UqxWR19XdSGbeHFUEAzwv7yQBADQrB1QhpOKkfcUPeSy2qsvZIvq__OHHoF2yCZfSTPq6YvkKahwLUxkeORhQZ9Ug86sMJwkrJXUefsa6fTpRqzZSN7SLphKU-6Ys6FV3GveSXjgk0UcCaKvfShFj4_EmGriyCb-JVoU0D8LJbjsClcivKgDNu1jfZfF-6q8VXHGF1Uck7vDVXdiNh1kRXw=="
+
+	// 两端空白剔掉；空 blob = 清空这条票，丢弃但不报错。
+	extra := map[string]any{openAITurnStateOverrideExtraKey: map[string]any{
+		"  gpt-6-astra  ": "  " + real + "  ",
+		"blank-blob":      "   ",
+	}}
+	require.NoError(t, ValidateOpenAITurnStateOverrideExtra(extra))
+	require.Equal(t, map[string]any{"gpt-6-astra": real}, extra[openAITurnStateOverrideExtraKey])
+
+	// 空模型名是畸形输入而不是「清空」，静默丢掉会让管理员看到「保存成功但未配置」。
+	require.Error(t, ValidateOpenAITurnStateOverrideExtra(
+		map[string]any{openAITurnStateOverrideExtraKey: map[string]any{"   ": real}}))
+
+	// 取值按 EqualFold 匹配，而 Go map 遍历顺序随机：留着大小写冲突的键，
+	// 注出去的是哪条每次调用都可能不同。当场拒掉。
+	require.Error(t, ValidateOpenAITurnStateOverrideExtra(
+		map[string]any{openAITurnStateOverrideExtraKey: map[string]any{"GPT-5": real, "gpt-5": real}}))
+
+	// 整表空了就把键删掉（否则空对象会被当成"已配置"存进 DB）
+	blank := map[string]any{openAITurnStateOverrideExtraKey: map[string]any{"m": "   "}}
+	require.NoError(t, ValidateOpenAITurnStateOverrideExtra(blank))
+	require.NotContains(t, blank, openAITurnStateOverrideExtraKey)
+
+	// 显式 null 等价于未配置，别在 extra 里留个 null
+	nulled := map[string]any{openAITurnStateOverrideExtraKey: nil}
+	require.NoError(t, ValidateOpenAITurnStateOverrideExtra(nulled))
+	require.NotContains(t, nulled, openAITurnStateOverrideExtraKey)
+
+	// 没这个键 = 不干预
+	require.NoError(t, ValidateOpenAITurnStateOverrideExtra(map[string]any{"other": 1}))
+	require.NoError(t, ValidateOpenAITurnStateOverrideExtra(nil))
+
+	for name, bad := range map[string]any{
+		"旧的单字符串形态": real,
+		"整体非对象":    123,
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Error(t, ValidateOpenAITurnStateOverrideExtra(
+				map[string]any{openAITurnStateOverrideExtraKey: bad}))
+		})
+	}
+	for name, bad := range map[string]any{
+		"非字符串":     123,
+		"不是base64": "这不是 base64!!",
+		"太短":       "gAAA",
+		"版本字节不对":   base64.URLEncoding.EncodeToString(append([]byte{0x79}, make([]byte, 80)...)),
+		"超长":       strings.Repeat("A", maxOpenAITurnStateOverrideLen+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Error(t, ValidateOpenAITurnStateOverrideExtra(
+				map[string]any{openAITurnStateOverrideExtraKey: map[string]any{"gpt-6-astra": bad}}))
+		})
+	}
+
+	// 条目数上限
+	tooMany := map[string]any{}
+	for i := 0; i <= maxOpenAITurnStateOverrideModels; i++ {
+		tooMany[string(rune('a'+i))] = real
+	}
+	require.Error(t, ValidateOpenAITurnStateOverrideExtra(
+		map[string]any{openAITurnStateOverrideExtraKey: tooMany}))
+}
+
+// TestUsageCodexTurnStateRecording 锁定使用记录里两列的取值来源。
+func TestUsageCodexTurnStateRecording(t *testing.T) {
+	const blob = "gAAAAABqqrNHYSOlO_EUJI"
+
+	h := http.Header{}
+	require.Nil(t, usageCodexTurnStatePtr(h), "上游没回该头时记 NULL")
+	require.Nil(t, usageCodexTurnStatePtr(nil))
+	h.Set(openAICodexTurnStateHeader, blob)
+	require.Equal(t, blob, *usageCodexTurnStatePtr(h))
+
+	cpr := &Account{Platform: PlatformOpenAI, Type: AccountTypeCPR}
+	require.False(t, *usageCodexTurnStateOverriddenPtr(cpr, ""), "本次没注入 = false")
+	require.True(t, *usageCodexTurnStateOverriddenPtr(cpr, turnStateSourceManual), "注入了 = true")
+	require.Nil(t, usageCodexTurnStateSourcePtr(cpr, ""), "没注入时来源记 NULL")
+	require.Equal(t, turnStateSourceAuto, *usageCodexTurnStateSourcePtr(cpr, turnStateSourceAuto))
+
+	apikey := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	require.Nil(t, usageCodexTurnStateOverriddenPtr(apikey, turnStateSourceAuto), "不适用的账号类型记 NULL")
+	require.Nil(t, usageCodexTurnStateSourcePtr(apikey, turnStateSourceAuto))
+	require.Nil(t, usageCodexTurnStateOverriddenPtr(nil, turnStateSourceManual))
+	require.Nil(t, usageCodexTurnStateSourcePtr(nil, turnStateSourceManual))
+}
+
+// TestCPRExtraUpdatesCarryOutboundProxy 钉住 CPR 侧出站代理写进展示键。
+//
+// cpr 账号真正的出口 IP 由 CPR 决定：sub2api 账号上绑的 proxy 只作用于
+// sub2api→CPR 那一跳，而那一跳是 127.0.0.1。不把 CPR 的出口显示出来，账号页就
+// 回答不了「这个号现在从哪出去」——排 turn-state / 降智问题的第一个问题。
+//
+// CPR 返回的 endpoint 已由它自己脱敏（不含 user:pass），所以可以原样存进 extra。
+func TestCPRExtraUpdatesCarryOutboundProxy(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	const endpoint = "socks5h://24.120.102.167:35444"
+
+	updates := buildCPRCodexExtraUpdates(newCPRTestAccount(), &CPRAccountState{
+		OutboundProxyEndpoint: endpoint, FetchedAt: now,
+	})
+	require.Equal(t, endpoint, updates[CPROutboundProxyExtraKey])
+
+	known := newCPRTestAccount()
+	if known.Extra == nil {
+		known.Extra = map[string]any{}
+	}
+	known.Extra[CPROutboundProxyExtraKey] = endpoint
+	require.NotContains(t,
+		buildCPRCodexExtraUpdates(known, &CPRAccountState{OutboundProxyEndpoint: endpoint, FetchedAt: now}),
+		CPROutboundProxyExtraKey, "没变就不写，否则每次 /usage 刷新都要写一次库")
+
+	require.NotContains(t,
+		buildCPRCodexExtraUpdates(known, &CPRAccountState{FetchedAt: now}),
+		CPROutboundProxyExtraKey, "空值不写：mergeAccountExtra 只写不删，写空串会把已知出口抹成未知")
+}
+
+// TestSanitizeCPROutboundProxy 钉住:存进 extra 之前一定把凭据剥掉。
+//
+// CPR 现在返回的是脱敏值,但那是上游的行为、不是我们能保证的不变量。CPR 换版本、
+// 换配置,或某个账号配的是带认证的 socks5,`socks5h://user:pass@host:port` 就会落进
+// accounts.extra、随账号列表接口下发、在管理页明文显示密码。本仓库对代理 URL 的硬
+// 约定(internal/pkg/proxyurl 包文档)本来就不允许这么处理。
+func TestSanitizeCPROutboundProxy(t *testing.T) {
+	require.Equal(t, "socks5h://host:1080", sanitizeCPROutboundProxy("acct-1", "socks5h://u:p@host:1080"),
+		"凭据必须剥掉")
+	require.Equal(t, "socks5h://host:1080", sanitizeCPROutboundProxy("acct-1", "socks5h://onlyuser@host:1080"),
+		"只有用户名也要剥")
+	require.Equal(t, "socks5h://host:1080", sanitizeCPROutboundProxy("acct-1", "  socks5h://host:1080  "))
+	// socks5 会被 proxyurl.Parse 升级成 socks5h(防 DNS 泄漏),这里跟着走同一套。
+	require.Equal(t, "socks5h://host:1080", sanitizeCPROutboundProxy("acct-1", "socks5://host:1080"))
+	require.Equal(t, "http://host:8080", sanitizeCPROutboundProxy("acct-1", "http://host:8080"))
+
+	// 凭据不只藏在 userinfo 里。没有 userinfo 就把原串放行的话，这几条会整串落进
+	// accounts.extra、随账号列表接口下发、在管理页明文显示。
+	require.Equal(t, "http://host:8080", sanitizeCPROutboundProxy("acct-1", "http://host:8080/?token=secret"),
+		"query 里的凭据也要剥")
+	require.Equal(t, "socks5h://host:1080", sanitizeCPROutboundProxy("acct-1", "socks5h://host:1080/u:p"),
+		"path 也不该带出去")
+	require.Equal(t, "http://host:8080", sanitizeCPROutboundProxy("acct-1", "http://host:8080#frag"))
+
+	require.Empty(t, sanitizeCPROutboundProxy("acct-1", ""))
+	require.Empty(t, sanitizeCPROutboundProxy("acct-1", "not a url"), "解不开就整个丢弃,不存半个")
+	require.Empty(t, sanitizeCPROutboundProxy("acct-1", "ftp://host:21"), "白名单外的协议不存")
+}
+
+// TestCPRAccountStateSanitizesOutboundProxy 钉住生产调用点：翻译 CPR 视图的那一步就
+// 已经把凭据剥了，落进 extra 的值永远是干净的。
+//
+// 刻意断言 buildCPRAccountState 而不是 buildCPRCodexExtraUpdates：后者的入参是
+// CPRAccountState，测试自己先 sanitize 一遍再喂进去就成了「我洗过的值传过去还是干净的」
+// ——把生产端唯一的脱敏调用点换成裸 TrimSpace，那种测试全绿。
+func TestCPRAccountStateSanitizesOutboundProxy(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	state := buildCPRAccountState(&cprAccountView{
+		ID:                    "acct-1",
+		Status:                CPRAccountStatusNormal,
+		OutboundProxyEndpoint: "socks5h://u:p@24.120.102.167:35444",
+	}, now)
+	require.NotNil(t, state)
+	require.Equal(t, "socks5h://24.120.102.167:35444", state.OutboundProxyEndpoint)
+
+	// 写入侧只是把已经干净的值原样带过去，一起过一遍确认没有再引入一条旁路。
+	updates := buildCPRCodexExtraUpdates(newCPRTestAccount(), state)
+	stored, _ := updates[CPROutboundProxyExtraKey].(string)
+	require.Equal(t, "socks5h://24.120.102.167:35444", stored)
 }

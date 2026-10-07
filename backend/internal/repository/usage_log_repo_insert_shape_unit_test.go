@@ -129,7 +129,9 @@ func TestPrepareUsageLogInsert_UpstreamRequestIDArgWiring(t *testing.T) {
 	})
 	require.Len(t, prepared.args, len(usageLogInsertArgTypes))
 
-	idx := len(prepared.args) - 4
+	// 尾部顺序：upstream_request_id, session_id, native_compaction_v2,
+	// turn_state, turn_state_overridden, turn_state_source, turn_state_sent, created_at
+	idx := len(prepared.args) - 8
 	arg, ok := prepared.args[idx].(sql.NullString)
 	require.True(t, ok, "upstream_request_id arg should be sql.NullString, got %T", prepared.args[idx])
 	require.True(t, arg.Valid)
@@ -142,4 +144,85 @@ func TestPrepareUsageLogInsert_UpstreamRequestIDArgWiring(t *testing.T) {
 	require.False(t, nullArg.Valid, "absent upstream request id must be NULL")
 
 	require.Contains(t, usageLogSelectColumns, "upstream_request_id")
+}
+
+// TestPrepareUsageLogInsert_TurnStateArgWiring 把插入参数尾部六位全部钉死。
+//
+// 本文件顶部的契约要求新增 usage_logs 列时同步更新 4 处清单；turn_state /
+// turn_state_overridden / turn_state_source 加进来后，既有断言只钉到
+// native_compaction_v2，这三个新列与 created_at 之间互换位置所有单测都照过
+// （生产会在 lib/pq 那里炸——响亮失败，但正是这条契约该拦住的一类）。
+func TestPrepareUsageLogInsert_TurnStateArgWiring(t *testing.T) {
+	turnState := "gAAAAAB-turn-state-blob"
+	overridden := true
+	source := "auto_stale"
+	sent := "gAAAAAB-turn-state-sent"
+	prepared := prepareUsageLogInsert(&service.UsageLog{
+		UserID:              1,
+		APIKeyID:            2,
+		RequestID:           "client:turn-state-wiring",
+		Model:               "gpt-5",
+		TurnState:           &turnState,
+		TurnStateOverridden: &overridden,
+		TurnStateSource:     &source,
+		TurnStateSent:       &sent,
+		CreatedAt:           time.Now().UTC(),
+	})
+	require.Len(t, prepared.args, len(usageLogInsertArgTypes))
+
+	n := len(prepared.args)
+	// 尾部顺序：... native_compaction_v2, turn_state, turn_state_overridden,
+	// turn_state_source, turn_state_sent, created_at
+	require.Equal(t, "boolean", usageLogInsertArgTypes[n-6], "native_compaction_v2 必须仍在倒数第 6")
+
+	tsArg, ok := prepared.args[n-5].(sql.NullString)
+	require.True(t, ok, "turn_state 应是 sql.NullString，实际 %T", prepared.args[n-5])
+	require.True(t, tsArg.Valid)
+	require.Equal(t, turnState, tsArg.String)
+	require.Equal(t, "text", usageLogInsertArgTypes[n-5])
+
+	ovArg, ok := prepared.args[n-4].(sql.NullBool)
+	require.True(t, ok, "turn_state_overridden 应是 sql.NullBool，实际 %T", prepared.args[n-4])
+	require.True(t, ovArg.Valid)
+	require.True(t, ovArg.Bool)
+	require.Equal(t, "boolean", usageLogInsertArgTypes[n-4])
+
+	srcArg, ok := prepared.args[n-3].(sql.NullString)
+	require.True(t, ok, "turn_state_source 应是 sql.NullString，实际 %T", prepared.args[n-3])
+	require.True(t, srcArg.Valid)
+	require.Equal(t, source, srcArg.String)
+	require.Equal(t, "text", usageLogInsertArgTypes[n-3])
+
+	sentArg, ok := prepared.args[n-2].(sql.NullString)
+	require.True(t, ok, "turn_state_sent 应是 sql.NullString，实际 %T", prepared.args[n-2])
+	require.True(t, sentArg.Valid)
+	require.Equal(t, sent, sentArg.String)
+	require.Equal(t, "text", usageLogInsertArgTypes[n-2])
+
+	_, ok = prepared.args[n-1].(time.Time)
+	require.True(t, ok, "created_at 必须仍在末位，实际 %T", prepared.args[n-1])
+	require.Equal(t, "timestamptz", usageLogInsertArgTypes[n-1])
+
+	// 四列都未提供时必须是 NULL，而不是空串 / false
+	absent := prepareUsageLogInsert(&service.UsageLog{
+		UserID: 1, APIKeyID: 2, RequestID: "client:turn-state-absent", Model: "gpt-5",
+		CreatedAt: time.Now().UTC(),
+	})
+	nullTS, ok := absent.args[n-5].(sql.NullString)
+	require.True(t, ok)
+	require.False(t, nullTS.Valid, "没有 turn_state 时必须写 NULL")
+	nullOV, ok := absent.args[n-4].(sql.NullBool)
+	require.True(t, ok)
+	require.False(t, nullOV.Valid, "不适用的账号类型必须写 NULL，而不是 false")
+	nullSrc, ok := absent.args[n-3].(sql.NullString)
+	require.True(t, ok)
+	require.False(t, nullSrc.Valid, "没注入覆写时来源必须写 NULL")
+	nullSent, ok := absent.args[n-2].(sql.NullString)
+	require.True(t, ok)
+	require.False(t, nullSent.Valid, "没带 turn-state 时出站值必须写 NULL")
+
+	require.Contains(t, usageLogSelectColumns, "turn_state")
+	require.Contains(t, usageLogSelectColumns, "turn_state_overridden")
+	require.Contains(t, usageLogSelectColumns, "turn_state_source")
+	require.Contains(t, usageLogSelectColumns, "turn_state_sent")
 }

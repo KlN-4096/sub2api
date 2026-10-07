@@ -408,7 +408,12 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchRequest(ctx context.Context
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	if account.Type == AccountTypeOAuth {
+	// 口径与全仓一致用 UsesOpenAICodexProtocol（含 setup-token）。原先这里是孤例的
+	// `Type == AccountTypeOAuth`，而 openAIAlphaSearchURL 对 setup-token 返回的同样是
+	// chatgpt.com——于是 setup-token 的搜索请求整块身份都没有（连 req.Host、
+	// chatgpt-account-id 都没设），net/http 顺手填上 Go-http-client/1.1 直达上游
+	// （2026-09-20 审计实测）。
+	if account.UsesOpenAICodexProtocol() {
 		req.Host = "chatgpt.com"
 		if err := resolveAndSetOpenAIChatGPTAccountHeaders(ctx, s.accountRepo, req.Header, account); err != nil {
 			return nil, fmt.Errorf("resolve chatgpt account headers: %w", err)
