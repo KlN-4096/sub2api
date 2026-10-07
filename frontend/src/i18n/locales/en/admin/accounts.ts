@@ -650,7 +650,7 @@ export default {
           duration: '{minutes}m {seconds}s',
           history: 'Usage history',
           ended: '{full}/{attempted} tickets · full-strength use {duration} · ended {end}',
-          archived: 'Full-use archive {duration} / {count} rounds',
+          archived: 'Historical full-use total {duration} / {count} rounds',
           legacy: 'Legacy · {model} · {full}/{attempted} tickets',
           legacyArchived: 'Legacy archive · {model} · {count} rounds · {full}/{attempted} tickets',
           durationIncomplete: ' (some duration unobserved)',

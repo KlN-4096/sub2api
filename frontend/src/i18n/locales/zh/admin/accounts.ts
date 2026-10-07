@@ -767,7 +767,7 @@ export default {
           duration: '{minutes}分{seconds}秒',
           history: '使用历史',
           ended: '{full}/{attempted}张 · 满血使用 {duration} · {end}结束',
-          archived: '历史满血归档 {duration} / {count}轮',
+          archived: '历史满血累计 {duration} / {count}轮',
           legacy: '旧统计 · {model} · {full}/{attempted}张',
           legacyArchived: '旧归档 · {model} · {count}轮 · {full}/{attempted}张',
           durationIncomplete: '（部分时长未观测）',
