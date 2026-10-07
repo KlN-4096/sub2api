@@ -27,7 +27,16 @@ const (
 // 返回值约定：仅当上游返回 2xx（一次真实成功的搜索）时返回非 nil 的
 // *OpenAIForwardResult（WebSearchCalls=1，供按次计费）；上游错误被原样透传
 // 给客户端时返回 (nil, nil)，不产生计费。
-func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+func (s *OpenAIGatewayService) ForwardAlphaSearch(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+) (result *OpenAIForwardResult, err error) {
+	// 网关池的 per-request 标记（openai_gwpool.go）：AttachRoute 往 sink 写，这里 publish 到结果上。
+	// 新增一条能打到 chatgpt.com 的转发入口时要照抄这两行。
+	ctx, gwpoolSink := withOpenAIGatewayPoolSink(ctx)
+	defer func() { gwpoolSink.publish(result) }()
 	if s == nil || c == nil || account == nil {
 		return nil, fmt.Errorf("service, context, and account are required")
 	}

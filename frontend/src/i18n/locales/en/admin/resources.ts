@@ -529,6 +529,13 @@ export default {
       turnStateSent: 'Turn-state sent',
       routeGateway: 'Route gateway',
       routePairCopy: 'Copy the full __cflb/__oailb pair',
+      routePairOverriddenShort: 'POOL',
+      routePairOverridden:
+        'The outbound __cflb/__oailb pair came from the gateway pool instead of this account cookie jar, and the request landed on the gateway the pool promised',
+      routePairPoolVersion: 'Pool ticket id',
+      routePairReroutedShort: 'REROUTED',
+      routePairRerouted:
+        'The pool handed out a pair for {promised} but the new __oailb from the upstream re-dispatched this request to {landed}, so the injection was rejected. A new __oailb that decodes to the same gateway is not a re-dispatch (the renewal request swaps in a fresh pair without changing the route)',
       turnStateHint: '{chars} chars (ciphertext {blocks} blocks); under PKCS#7 the plaintext falls in {min}–{max} bytes. Baseline is 292 chars (332 on team accounts). Block count only brackets the plaintext to a 16-byte window, so this is a suspicion, not proof. Minted {minted}',
       turnStateUndecodable: 'Not a parsable Fernet envelope; falling back to char length {n}',
       turnStateUnknownShape: 'Yellow: not a known shape (healthy 292/332, degraded 312/356), so degradation cannot be judged.',

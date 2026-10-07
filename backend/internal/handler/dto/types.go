@@ -706,6 +706,12 @@ type AdminUsageLog struct {
 	// 整串留着以便原样复现。只作观测。
 	RouteGateway *string `json:"route_gateway,omitempty"`
 	RoutePair    *string `json:"route_pair,omitempty"`
+	// RoutePairOverridden 表示这一发出站的路由对由网关池下发，不是账号罐里回放的那一组。
+	RoutePairOverridden *bool `json:"route_pair_overridden,omitempty"`
+	// RoutePairPoolGateway 是池子交付时说的网关；与 RouteGateway 不一致 = 上游把这一发改派走了。
+	RoutePairPoolGateway *string `json:"route_pair_pool_gateway,omitempty"`
+	// RoutePairPoolVersion 是池子给这张票的身份，用来和池子侧日志对账（不是 cookie 本体）。
+	RoutePairPoolVersion *string `json:"route_pair_pool_version,omitempty"`
 	// BillingTier 计费层级标签（per_request/image 模式）
 	BillingTier *string `json:"billing_tier,omitempty"`
 
