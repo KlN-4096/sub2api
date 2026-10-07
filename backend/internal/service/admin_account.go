@@ -450,6 +450,9 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 	}
 	// 预计算固定时间重置的下次重置时间
 	if account.Extra != nil {
+		if err := validateOpenAIGatewayPoolAccountExtra(account, account.Extra); err != nil {
+			return nil, err
+		}
 		if err := ValidateQuotaResetConfig(account.Extra); err != nil {
 			return nil, err
 		}
@@ -746,6 +749,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 				normalizedExtra[key] = v
 			}
 		}
+		// 网关池 consumer key 是凭据：页面不回显原值，只有非空字符串才算改动（openai_gwpool.go）。
+		// 不能进上面那个无条件保留清单——那会让真正改 key 的提交被旧值顶回去。
+		mergeOpenAIGatewayPoolConsumerKey(account.Extra, normalizedExtra)
 		normalizedExtra = prepareCodexFingerprintExtraForUpdate(account, normalizedExtra)
 		account.Extra = normalizedExtra
 		if account.Platform == PlatformAntigravity && wasOveragesEnabled && !account.IsOveragesEnabled() {
@@ -758,6 +764,10 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if account.Platform == PlatformAntigravity && !wasOveragesEnabled && account.IsOveragesEnabled() {
 			delete(account.Extra, modelRateLimitsKey)
 			delete(account.Extra, "antigravity_credits_overages") // 清理旧版 overages 运行态
+		}
+		// 网关池与 WS 上游互斥（openai_gwpool.go）：按合并后的最终 extra 判，否则改一半就绕过去了。
+		if err := validateOpenAIGatewayPoolAccountExtra(account, account.Extra); err != nil {
+			return nil, err
 		}
 		// 校验并预计算固定时间重置的下次重置时间
 		if err := ValidateQuotaResetConfig(account.Extra); err != nil {
@@ -980,12 +990,25 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 	delete(updates, openAITurnStatePoolExtraKey)
 	delete(updates, openAITurnStateHuntExtraKey)
 	delete(updates, openAITurnStateObservedExtraKey)
+	// 网关池 consumer key：没带非空字符串就当没提，jsonb 合并天然不动库里那份。
+	mergeOpenAIGatewayPoolConsumerKey(nil, updates)
 	if _, exists := updates[openAILongContextBillingEnabledKey]; exists {
 		account, err := s.accountRepo.GetByID(ctx, id)
 		if err != nil {
 			return err
 		}
 		if err := ValidateOpenAILongContextBillingExtra(account.Platform, updates); err != nil {
+			return err
+		}
+	}
+	// 网关池与 WS 上游互斥（openai_gwpool.go）。这是部分更新，要按「现有 extra + 本次更新」的
+	// 合并结果判：只写一边也能把两个开关凑齐。
+	if touchesOpenAIGatewayPoolConfig(updates) {
+		account, err := s.accountRepo.GetByID(ctx, id)
+		if err != nil {
+			return err
+		}
+		if err := validateOpenAIGatewayPoolAccountExtra(account, mergeMap(account.Extra, updates)); err != nil {
 			return err
 		}
 	}
@@ -1036,6 +1059,8 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	delete(input.Extra, openAITurnStatePoolExtraKey)
 	delete(input.Extra, openAITurnStateHuntExtraKey)
 	delete(input.Extra, openAITurnStateObservedExtraKey)
+	// 批量共用一份 input.Extra：绝不能从某个目标账号回填，否则会把它的凭据写进其它账号。
+	mergeOpenAIGatewayPoolConsumerKey(nil, input.Extra)
 
 	if len(input.AccountIDs) == 0 && input.Filters != nil {
 		accountIDs, err := s.resolveBulkUpdateTargetIDs(ctx, input.Filters)
@@ -1071,7 +1096,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 
 	// 预取所有目标账号，供凭据守卫/代理守卫/混合渠道检查共用，避免多次 DB 查询。
 	var cachedTargets []*Account
-	if len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil {
+	if len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil || touchesOpenAIGatewayPoolConfig(input.Extra) {
 		loaded, err := s.accountRepo.GetByIDs(ctx, input.AccountIDs)
 		if err != nil {
 			return nil, err
@@ -1102,6 +1127,19 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 			}
 		}
 	}
+	// 网关池与 WS 上游互斥（openai_gwpool.go）：批量把 gwpool 打开时，目标里任何一个已经开着
+	// WS 上游的账号都要整体拒绝——漏过去的那个账号每条 WS 请求都会被运行期闸门拒掉。
+	if touchesOpenAIGatewayPoolConfig(input.Extra) {
+		for _, acc := range cachedTargets {
+			if !acc.IsOpenAIOAuthLike() {
+				return nil, infraerrors.New(http.StatusBadRequest, "GWPOOL_TARGET_INVALID", "gateway pool settings require OpenAI OAuth accounts")
+			}
+			if err := validateOpenAIGatewayPoolAccountExtra(acc, mergeMap(acc.Extra, input.Extra)); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	// 影子账号绝不持有凭据:批量更新携带凭据时,目标中不得含影子(外审 G5,与单账号
 	// UpdateAccount 守卫对齐)。覆盖显式 IDs 与 filter 解析出的 IDs(此处 AccountIDs 已解析完成)。
 	if len(input.Credentials) > 0 {
