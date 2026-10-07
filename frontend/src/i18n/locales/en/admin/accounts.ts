@@ -713,10 +713,18 @@ export default {
           "Effective only when the switch above is on. When enabled, this account also allows third-party clients that embed the Codex engine over the app-server protocol (e.g. Claude Code's codex plugin); they still pass the global engine-fingerprint gate. OR-combined with the global app-server toggle.",
         codexFingerprintMode: 'Codex fingerprint convergence',
         codexFingerprintModeDesc: 'When multiple users share the same OAuth account, converge device/session identifiers to account-level stable values to reduce upstream-visible device and session count. Off by default (client identifiers pass through as-is); opt in explicitly when needed. Some accounts reported quota shrinkage after enabling convergence, so choose based on your own measurements.',
+        codexFingerprintConvergence: 'Experimental fingerprint convergence (klno)',
+        codexFingerprintConvergenceDesc: "Make this account's outbound identity match a real Codex client on HTTP and WS: forward session-id / thread-id headers, x-client-request-id equals thread-id, drop session_id / conversation_id aliases, derive root_turn_id and related fields consistently, keep UUIDv7. Off means upstream behaviour; enabling rotates the account's session identifiers once.",
         codexFingerprintOff: 'Off (passthrough, default)',
         codexFingerprintDevice: 'Device only',
         codexFingerprintSession: 'Device + Session',
         codexFingerprintFull: 'Full convergence',
+        codexUserAgent: 'Codex outbound User-Agent',
+        codexUserAgentDesc: 'Client identity this account reports upstream, shared by HTTP, the WS handshake and quota queries. '
+          + 'Leave empty to use the global setting. Keep it consistent with the real OS of this account\u0027s users: a Windows UA '
+          + 'paired with Linux paths and shell in the request body contradicts itself. The gateway rewrites the version segment '
+          + 'to the effective client version, so the value you type there does not matter.',
+        codexUserAgentPlaceholder: 'Leave empty to use the global setting',
         codexImageTool: 'Codex image bridge policy',
         codexImageToolDesc:
           'Controls the hosted image_generation bridge and client-declared image tools on Codex /responses text requests. Hosted auto-injection applies only to non-Responses Lite requests. Account policy takes precedence over channel and global settings; standalone image-generation endpoints are unaffected.',
@@ -1153,6 +1161,24 @@ export default {
         apiKeyHint: 'API Key for the upstream service',
         pleaseEnterBaseUrl: 'Please enter upstream Base URL',
         pleaseEnterApiKey: 'Please enter upstream API Key'
+      },
+      // CPR (codex-proxy-rs) relay
+      cpr: {
+        typeHint: 'codex-proxy-rs relay',
+        baseUrl: 'CPR Gateway URL',
+        baseUrlHint: 'Where codex-proxy-rs listens, e.g. http://127.0.0.1:18081. Required; it never falls back to the official endpoint.',
+        clientKey: 'CPR Client Key',
+        clientKeyHint: 'A key created under "Client Keys" in CPR. It should be bound to a single group containing exactly one CPR account.',
+        accountId: 'CPR Account ID',
+        accountIdHint: 'The account id in CPR (looks like acct_xxx), used to read quota.',
+        adminApiKey: 'CPR Admin API Key',
+        adminApiKeyHint: "CPR's admin API key (starts with admin-), used only to read quota and account status.",
+        adminBaseUrl: 'CPR Admin URL (optional)',
+        adminBaseUrlHint: 'Defaults to the gateway URL when left empty.',
+        baseUrlRequired: 'Please enter the CPR gateway URL',
+        clientKeyRequired: 'Please enter the CPR client key',
+        accountIdRequired: 'Please enter the CPR account ID',
+        adminApiKeyRequired: 'Please enter the CPR admin API key'
       },
       // OAuth flow
       oauth: {

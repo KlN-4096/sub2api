@@ -4425,6 +4425,10 @@ func (c *openAIWSWriteFailAfterFirstTurnConn) WriteJSON(context.Context, any) er
 	return nil
 }
 
+func (c *openAIWSWriteFailAfterFirstTurnConn) WriteFrame(ctx context.Context, _ coderws.MessageType, _ []byte) error {
+	return c.WriteJSON(ctx, nil)
+}
+
 func (c *openAIWSWriteFailAfterFirstTurnConn) ReadMessage(context.Context) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -217,7 +217,9 @@ func (s *AccountTestService) FetchOpenAIAccountModels(ctx context.Context, accou
 	// Codex discovery lists Responses drivers, not image_generation tool models.
 	// Add locally supported image choices only to the OAuth test picker; keep the
 	// shared upstream catalog and API-key discovery authoritative.
-	if account != nil && account.IsOpenAIOAuthLike() {
+	// cpr 的 /v1/models 同样来自 CPR 的 Codex 目录，只列 Responses driver、不含
+	// image_generation 工具模型；而 SupportsOpenAIImageCapability 已把 cpr 列为支持。
+	if account != nil && account.TargetsChatGPTCodexUpstream() {
 		passthrough := account.IsOpenAIPassthroughEnabled()
 		seen := make(map[string]bool, len(payload.Data))
 		for _, model := range payload.Data {
@@ -812,6 +814,15 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	// /responses wire and does NOT apply the legacy compact-only mapping
 	// (post-#5641 semantics: compact_model_mapping is /responses/compact-only).
 	testModelID = account.GetMappedModel(testModelID)
+	// 双开账号：三种探针（normal / compact / image）以及定时测试统一伪装成刚启动的新 Codex
+	// 会话，发真客户端启动后的第一条请求 GET /backend-api/codex/models，而不是自造
+	// /responses——半套 client_metadata、带 responses=experimental 的形态没有任何真客户端
+	// 会发，按 cron 反复发更不行。探针只验证凭据：成功标 CredentialsOnly，管理端与定时任务
+	// 都只按凭据范围恢复账号状态（AccountRecoveryOptions.CredentialsOnly）；失败侧 401/429
+	// 与原探针同责地写回账号状态。
+	if s.codexDeviceProbeAsFreshSession(ctx, account) {
+		return s.testOpenAICodexFreshSessionProbe(c, ctx, account, testModelID)
+	}
 	if mode == AccountTestModeCompact {
 		return s.testOpenAICompactConnection(c, account, testModelID)
 	}
@@ -822,7 +833,13 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 		if imagePrompt == "" {
 			imagePrompt = defaultOpenAIImageTestPrompt
 		}
-		if account.Type == "apikey" {
+		// cpr 必须走 apikey 那条：OAuth 那条会设 req.Host = "chatgpt.com" 并发
+		// GetOpenAIAccessToken()，而该 getter 只按 platform 门控、不按 type——
+		// 改类型时凭据是 merge 不是 replace，残留的 access_token 会被真的发出去，
+		// 正是 cpr 类型存在的理由所要避免的事。
+		// 用 Type 而非 IsCPR()：IsCPR() 还要求 platform==openai，平台错配的脏数据
+		// 会从这里漏到 OAuth 那条（下游 testOpenAIImageAPIKey 的 cpr 分支同样按 Type）。
+		if account.Type == AccountTypeAPIKey || account.Type == AccountTypeCPR {
 			return s.testOpenAIImageAPIKey(c, ctx, account, testModelID, imagePrompt)
 		}
 		return s.testOpenAIImageOAuth(c, ctx, account, testModelID, imagePrompt)
@@ -873,6 +890,22 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 			return s.testOpenAIChatCompletionsConnection(c, account, testModelID, prompt, normalizedBaseURL, authToken)
 		}
 		apiURL = buildOpenAIResponsesURLForPlatform(credentialAccount.Platform, normalizedBaseURL)
+	} else if credentialAccount.IsCPR() {
+		// cpr 形状与 apikey 一致（Bearer + 自定义 base_url），差别只是绝不回落官方端点：
+		// base_url 为空直接报错，而不是把 CPR 的 client key 发给 api.openai.com。
+		authToken = credentialAccount.GetCPRClientKey()
+		if authToken == "" {
+			return s.sendErrorAndEnd(c, "No CPR client key available")
+		}
+		baseURL := credentialAccount.GetCPRGatewayBaseURL()
+		if baseURL == "" {
+			return s.sendErrorAndEnd(c, "cpr account requires credentials.base_url")
+		}
+		normalizedBaseURL, err := s.validateUpstreamBaseURL(baseURL)
+		if err != nil {
+			return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid base URL: %s", err.Error()))
+		}
+		apiURL = buildOpenAIResponsesURL(normalizedBaseURL)
 	} else {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Unsupported account type: %s", account.Type))
 	}
@@ -2223,9 +2256,30 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid base URL: %s", err.Error()))
 		}
 		apiURL = buildOpenAIResponsesURLForPlatform(account.Platform, normalizedBaseURL)
+	case account.IsCPR():
+		// 与本文件普通测试那条 cpr 分支同构：Bearer + 自定义 base_url，
+		// 但绝不回落官方端点——base_url 为空直接报错，而不是把 CPR 的
+		// client key 发给 api.openai.com。
+		authToken = account.GetCPRClientKey()
+		if authToken == "" {
+			return s.sendErrorAndEnd(c, "No CPR client key available")
+		}
+		baseURL := account.GetCPRGatewayBaseURL()
+		if baseURL == "" {
+			return s.sendErrorAndEnd(c, "cpr account requires credentials.base_url")
+		}
+		normalizedBaseURL, err := s.validateUpstreamBaseURL(baseURL)
+		if err != nil {
+			return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid base URL: %s", err.Error()))
+		}
+		apiURL = buildOpenAIResponsesURL(normalizedBaseURL)
 	default:
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Unsupported account type: %s", account.Type))
 	}
+	// 请求体按「上游是谁」构造：cpr 的上游就是 ChatGPT internal API，同样要求
+	// store:false，少了它探针被拒 → openai_compact_supported 假阴性。身份头仍只
+	// 给 oauth（cpr 的身份画像由 CPR 负责）。
+	chatGPTUpstream := isOAuth || account.IsCPR()
 
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
@@ -2233,11 +2287,12 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Flush()
 
-	// 原生 v2 走普通 /responses 线：OAuth 与真实转发一致做上游模型归一化。
-	if isOAuth {
+	// 原生 v2 走普通 /responses 线：与真实转发走同一个模型归一化入口
+	// （对 cpr 当前是空操作——闸门在 UsesOpenAICodexProtocol()，与转发一致）。
+	if chatGPTUpstream {
 		testModelID = normalizeOpenAIModelForUpstream(credentialAccount, testModelID)
 	}
-	payloadBytes, _ := json.Marshal(createOpenAICompactProbePayload(testModelID, isOAuth))
+	payloadBytes, _ := json.Marshal(createOpenAICompactProbePayload(testModelID, chatGPTUpstream))
 	if !agentIdentityTaskRecoveryWasTried(ctx) {
 		s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
 	}
@@ -2279,7 +2334,7 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 		// 指纹收敛：探测与真实转发走同一个 /responses 端点，身份也必须同构，
 		// 否则探测流量会以「缺 x-codex-installation-id + 非收敛 session」的
 		// 形态暴露在上游眼里。账号关闭收敛（off）时返回 nil，探测保持原样。
-		if fpIDs := resolveCodexFingerprintIDsFromRequest(account, req.Header); fpIDs != nil {
+		if fpIDs := resolveCodexFingerprintIDsFromRequest(nil, account, req.Header); fpIDs != nil {
 			applyCodexFingerprintHeaders(req.Header, fpIDs)
 		}
 	}
@@ -2773,6 +2828,76 @@ func (s *AccountTestService) processGeminiStream(c *gin.Context, body io.Reader)
 	}
 }
 
+// accountTestCredentialsOnlyKey 标记本次测试只验证了凭据（GET /models 探针），没有跑推理。
+// RunTestBackground 把它带进 ScheduledTestResult.CredentialsOnly，管理端经 AccountTestCredentialsOnly
+// 读取；两条链路都只按"凭据可用"的范围恢复账号状态（AccountRecoveryOptions.CredentialsOnly）。
+const accountTestCredentialsOnlyKey = "account_test_credentials_only"
+
+// AccountTestCredentialsOnly 报告刚结束的这次测试是否只验证了凭据。
+func AccountTestCredentialsOnly(c *gin.Context) bool {
+	return c != nil && c.GetBool(accountTestCredentialsOnlyKey)
+}
+
+// codexDeviceProbeAsFreshSession 判断账号是否走"刚启动的新 Codex 会话"探针：双开
+// （device 模式 + 凭证源开启实验收敛）。判定与真实转发的 codexDeviceWireProfileEnabled
+// 同源，凭证源与转发一样取影子账号解析出的凭证账号。
+func (s *AccountTestService) codexDeviceProbeAsFreshSession(ctx context.Context, account *Account) bool {
+	if account == nil {
+		return false
+	}
+	credentialAccount := account
+	if account.IsCredentialShadow() {
+		resolved, err := resolveCredentialAccount(ctx, s.accountRepo, account)
+		if err != nil {
+			return false
+		}
+		credentialAccount = resolved
+	}
+	return codexDeviceWireProfileEnabledFor(account, credentialAccount)
+}
+
+// testOpenAICodexFreshSessionProbe 双开账号的探针：一次不走缓存的模型清单请求，出站
+// 形态由 buildCodexModelsManifestRequest 与真实 /models 转发共用（见
+// ProbeCodexModelsManifest）。不会发送任何 /responses、/images 请求。
+func (s *AccountTestService) testOpenAICodexFreshSessionProbe(c *gin.Context, ctx context.Context, account *Account, testModelID string) error {
+	if s.openaiGatewayService == nil {
+		return s.sendErrorAndEnd(c, "OpenAI gateway service is not configured for the Codex fresh-session probe")
+	}
+	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
+	manifest, err := s.openaiGatewayService.ProbeCodexModelsManifest(ctx, account)
+	if err != nil {
+		// 失败侧与原 /responses 探针同责（不走转发侧的临时下线）：401 标 StatusError、429 同步
+		// 限流窗口，定时任务才仍能把吊销/限流的账号移出调度；成功侧的 CredentialsOnly 恢复只清
+		// StatusError，与这里对称。
+		var upstreamErr *codexModelsManifestUpstreamError
+		if errors.As(err, &upstreamErr) {
+			switch upstreamErr.statusCode {
+			case http.StatusTooManyRequests:
+				s.reconcileOpenAI429State(ctx, account, upstreamErr.headers, upstreamErr.body)
+			case http.StatusUnauthorized:
+				if s.accountRepo != nil {
+					_ = s.accountRepo.SetError(ctx, account.ID, fmt.Sprintf("Authentication failed (401): %s", string(upstreamErr.body)))
+				}
+			}
+		}
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Codex fresh-session probe (GET /models) failed: %v", err))
+	}
+	if manifest == nil {
+		return s.sendErrorAndEnd(c, "Codex fresh-session probe (GET /models) returned an empty manifest")
+	}
+	s.sendEvent(c, TestEvent{
+		Type: "content",
+		Text: fmt.Sprintf(
+			"Fresh-session probe: GET /backend-api/codex/models returned %d models; no /responses request was sent (device fingerprint convergence).",
+			gjson.GetBytes(manifest.Body, "models.#").Int(),
+		),
+	})
+	// 这次成功只证明了凭据可用：恢复账号状态的两条链路据此只清 StatusError。
+	c.Set(accountTestCredentialsOnlyKey, true)
+	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+	return nil
+}
+
 // createOpenAITestPayload creates a test payload for OpenAI Responses API
 func createOpenAITestPayload(modelID string, isOAuth bool) map[string]any {
 	payload := map[string]any{
@@ -3022,12 +3147,22 @@ func (s *AccountTestService) processOpenAIStream(c *gin.Context, body io.Reader)
 
 // testOpenAIImageAPIKey tests OpenAI image generation using an API Key account.
 func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.Context, account *Account, modelID, prompt string) error {
+	if _, err := resolveConfiguredProxyURL(ctx, nil, account.ProxyID, account.Proxy); err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
 	authToken := account.GetOpenAIApiKey()
+	baseURL := account.GetOpenAIBaseURL()
+	if account.Type == AccountTypeCPR {
+		// 与 buildOpenAIImagesRequest 保持同一守卫：client key 只对 CPR 网关有效，
+		// base_url 缺失时必须报错，绝不回落 api.openai.com。
+		authToken = account.GetCPRClientKey()
+		if baseURL == "" {
+			return s.sendErrorAndEnd(c, "cpr account requires credentials.base_url")
+		}
+	}
 	if authToken == "" {
 		return s.sendErrorAndEnd(c, "No API key available")
 	}
-
-	baseURL := account.GetOpenAIBaseURL()
 	if baseURL == "" {
 		baseURL = "https://api.openai.com"
 	}
@@ -3316,12 +3451,13 @@ func (s *AccountTestService) RunTestBackground(ctx context.Context, accountID in
 	}
 
 	return &ScheduledTestResult{
-		Status:       status,
-		ResponseText: responseText,
-		ErrorMessage: errMsg,
-		LatencyMs:    finishedAt.Sub(startedAt).Milliseconds(),
-		StartedAt:    startedAt,
-		FinishedAt:   finishedAt,
+		Status:          status,
+		ResponseText:    responseText,
+		ErrorMessage:    errMsg,
+		LatencyMs:       finishedAt.Sub(startedAt).Milliseconds(),
+		StartedAt:       startedAt,
+		FinishedAt:      finishedAt,
+		CredentialsOnly: ginCtx.GetBool(accountTestCredentialsOnlyKey),
 	}, nil
 }
 

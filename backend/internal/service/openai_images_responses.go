@@ -356,6 +356,28 @@ func isOpenAIImagesSelfBuiltRequest(ctx context.Context) bool {
 	return selfBuilt
 }
 
+// openAIImagesWireTargetContextKey 携带自建图片请求最终会发往的端点。
+// buildUpstreamRequest 按它自己算出的 .../responses 决定顶层字段序与 zstd 压缩，
+// 而真实 URL 要到它返回之后才被换成 /images/*（见本文件 forwardOpenAIImagesOAuth）。
+// 不把真端点传进去，direct 图片体就会被套上 Responses 字段表、并带着
+// Content-Encoding: zstd 发给一个不压缩的端点。
+type openAIImagesWireTargetContextKey struct{}
+
+func withOpenAIImagesWireTarget(ctx context.Context, target string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, openAIImagesWireTargetContextKey{}, target)
+}
+
+func openAIImagesWireTarget(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	target, _ := ctx.Value(openAIImagesWireTargetContextKey{}).(string)
+	return target
+}
+
 func buildOpenAIImagesResponsesRequest(parsed *OpenAIImagesRequest, toolModel string) ([]byte, error) {
 	if parsed == nil {
 		return nil, fmt.Errorf("parsed images request is required")
@@ -980,7 +1002,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesErrorResponse(
 	}
 
 	// 主控不可用不代表图片模型配额耗尽，直接透传，避免误冷却整个图片账号池。
-	if account.IsOpenAIOAuthLike() && isOpenAIImagesMainModelError(resp.StatusCode, body) {
+	if account.TargetsChatGPTCodexUpstream() && isOpenAIImagesMainModelError(resp.StatusCode, body) {
 		upErr := openAIImagesUpstreamErrorFromHTTP(resp.StatusCode, resp.Header, body)
 		writeOpenAIImagesUpstreamErrorResponse(c, upErr)
 		return nil, upErr
@@ -1000,7 +1022,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesErrorResponse(
 		shouldDisable,
 		false,
 	)
-	shouldFailover := shouldDisable || (account.IsOpenAIOAuthLike() && resp.StatusCode == http.StatusTooManyRequests && failoverErr.RetryableOnSameAccount)
+	shouldFailover := shouldDisable || (account.TargetsChatGPTCodexUpstream() && resp.StatusCode == http.StatusTooManyRequests && failoverErr.RetryableOnSameAccount)
 	kind := "http_error"
 	if shouldFailover {
 		kind = "failover"
@@ -1794,7 +1816,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		requestModel = mapped
 	}
 	if requestModel == "" {
-		requestModel = "gpt-image-2"
+		requestModel = openAIImagesDefaultModel
 	}
 	if err := validateOpenAIImagesModel(requestModel); err != nil {
 		return nil, err
@@ -1834,6 +1856,17 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		return nil, err
 	}
 	upstreamCtx = withOpenAIImagesSelfBuiltRequest(upstreamCtx)
+	upstreamCtx = withOpenAIImagesWireTarget(upstreamCtx, targetURL)
+	// 图片是自建 Responses body：先落设备载体，再允许线协议收口去掉独立安装头。
+	ids := resolveCodexFingerprintIDsFromRequest(c, account, nil)
+	stageCodexFingerprintIDs(c, ids)
+	if codexDeviceWireProfileEnabled(c, account) {
+		responsesBody, _, err = applyCodexFingerprintClientMetadataRaw(responsesBody, ids)
+		if err != nil {
+			return nil, fmt.Errorf("apply image device metadata: %w", err)
+		}
+		stageCodexConvergenceBodyIdentityRaw(c, codexAccountIdentitySource(c, account), responsesBody)
+	}
 	upstreamReq, err := s.buildUpstreamRequest(upstreamCtx, c, account, responsesBody, token, true, parsed.StickySessionSeed(), false)
 	if err != nil {
 		return nil, err
@@ -1850,7 +1883,8 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		if !parsed.Stream {
 			upstreamReq.Header.Set("Accept", "application/json")
 		}
-	} else {
+	} else if !codexDeviceWireProfileEnabled(c, account) {
+		// 双开账号按真 Codex 客户端收口：真客户端不发 OpenAI-Beta。
 		upstreamReq.Header.Set("OpenAI-Beta", "responses=experimental")
 	}
 

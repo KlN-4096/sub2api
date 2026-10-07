@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -41,6 +42,7 @@ const (
 	openAIImageMaxDownloadBytes            = 20 << 20 // 20MB per image download
 	openAIImageMaxUploadPartSize           = 20 << 20 // 20MB per multipart upload part
 	openAIImagesResponsesMainModel         = "gpt-5.6-luna"
+	openAIImagesDefaultModel               = "gpt-image-2.5-sunburst"
 	openAIImagesVerbatimPromptInstructions = "When invoking the image_generation tool, use the user's image prompt verbatim. Do not rewrite, expand, summarize, embellish, translate, normalize punctuation, or add or remove visual details or constraints. Preserve the original language, wording, capitalization, quotes, and punctuation exactly."
 )
 
@@ -472,7 +474,7 @@ func applyOpenAIImagesDefaults(req *OpenAIImagesRequest) {
 		req.Model = strings.TrimSpace(req.Model)
 		return
 	}
-	req.Model = "gpt-image-2"
+	req.Model = openAIImagesDefaultModel
 }
 
 func isOpenAIImageGenerationModel(model string) bool {
@@ -608,7 +610,9 @@ func (s *OpenAIGatewayService) ForwardImages(
 		return nil, fmt.Errorf("parsed images request is required")
 	}
 	switch account.Type {
-	case AccountTypeAPIKey:
+	// cpr 与 apikey 同一条：Bearer + {base_url}/v1/images/*。差别只在 buildOpenAIImagesRequest
+	// 里——cpr 的 base_url 为空时直接报错，绝不回落 api.openai.com。
+	case AccountTypeAPIKey, AccountTypeCPR:
 		return s.forwardOpenAIImagesAPIKey(ctx, c, account, body, parsed, channelMappedModel)
 	case AccountTypeOAuth, AccountTypeSetupToken:
 		return s.forwardOpenAIImagesOAuth(ctx, c, account, parsed, channelMappedModel)
@@ -728,7 +732,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 			})
 			shouldDisable := s.handleFailoverSideEffects(upstreamCtx, resp, account, respBody, upstreamModel)
 			retryableOnSameAccount := !shouldDisable && account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode)
-			if account.IsOpenAIOAuthLike() && resp.StatusCode == http.StatusTooManyRequests {
+			if account.TargetsChatGPTCodexUpstream() && resp.StatusCode == http.StatusTooManyRequests {
 				return nil, s.newOpenAIAccountFailoverError(account, resp.StatusCode, resp.Header, respBody, upstreamMsg, shouldDisable, retryableOnSameAccount)
 			}
 			if isOpenAIHTTPUpstreamAccessStateError(resp.StatusCode, upstreamMsg, respBody) {
@@ -825,6 +829,12 @@ func (s *OpenAIGatewayService) buildOpenAIImagesRequest(
 		targetURL = openAIImagesEditsURL
 	}
 	baseURL := account.GetOpenAIBaseURL()
+	// 用 Type 而非 IsCPR()：IsCPR() 还要求 platform==openai，而 GetOpenAIBaseURL
+	// 对平台错配的 cpr 账号返回空串——此时 IsCPR() 为 false，守卫不触发，
+	// targetURL 就停在 api.openai.com，而 GetAccessToken 会把 client key 发过去。
+	if baseURL == "" && account.Type == AccountTypeCPR {
+		return nil, errors.New("cpr account requires credentials.base_url")
+	}
 	if baseURL != "" {
 		validatedURL, err := s.validateUpstreamBaseURL(baseURL)
 		if err != nil {

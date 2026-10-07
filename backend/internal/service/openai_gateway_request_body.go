@@ -31,16 +31,23 @@ func (s *OpenAIGatewayService) validateUpstreamBaseURL(raw string) (string, erro
 
 // validateOutboundURL 按 security.url_allowlist 策略校验网关主动连接的出站 URL。
 func (s *OpenAIGatewayService) validateOutboundURL(raw string) (string, error) {
-	if s.cfg == nil {
+	return validateOutboundURLWithConfig(s.cfg, raw)
+}
+
+// validateOutboundURLWithConfig 是上面那条策略的无接收者形态，供不持有
+// OpenAIGatewayService 的调用方（CPR 额度适配器）复用同一套白名单判定，
+// 避免出现"网关地址过校验、admin 地址不过"的不一致。
+func validateOutboundURLWithConfig(cfg *config.Config, raw string) (string, error) {
+	if cfg == nil {
 		return urlvalidator.ValidateURLFormat(raw, false)
 	}
-	if !s.cfg.Security.URLAllowlist.Enabled {
-		return urlvalidator.ValidateURLFormat(raw, s.cfg.Security.URLAllowlist.AllowInsecureHTTP)
+	if !cfg.Security.URLAllowlist.Enabled {
+		return urlvalidator.ValidateURLFormat(raw, cfg.Security.URLAllowlist.AllowInsecureHTTP)
 	}
 	return urlvalidator.ValidateHTTPSURL(raw, urlvalidator.ValidationOptions{
-		AllowedHosts:     s.cfg.Security.URLAllowlist.UpstreamHosts,
+		AllowedHosts:     cfg.Security.URLAllowlist.UpstreamHosts,
 		RequireAllowlist: true,
-		AllowPrivate:     s.cfg.Security.URLAllowlist.AllowPrivateHosts,
+		AllowPrivate:     cfg.Security.URLAllowlist.AllowPrivateHosts,
 	})
 }
 
@@ -70,7 +77,7 @@ func shouldPreserveOpenAIResponsesNoneReasoningEffort(account *Account) bool {
 	if account.IsOpenAIPassthroughEnabled() {
 		return true
 	}
-	if account.IsOpenAIOAuthLike() {
+	if account.TargetsChatGPTCodexUpstream() {
 		return true
 	}
 	if !account.IsOpenAIApiKey() {
@@ -598,7 +605,17 @@ func normalizeOpenAICompactRequestBody(body []byte) ([]byte, bool, error) {
 	}
 	normalized := []byte(`{}`)
 	// Keep the current Codex /compact schema while still dropping request-scoped
-	// fields such as prompt_cache_key, store, and stream.
+	// fields such as store and stream.
+	//
+	// prompt_cache_key 放行：真实客户端的 compact 请求体带该字段（codex-rs
+	// codex-api/src/common.rs 的 CompactionInput.prompt_cache_key，仅在缺省时
+	// 省略），而 store / stream 确实不在该结构里。本函数在 handler 里执行，
+	// 那时还没选出账号（failover 还会换账号），所以只放行不裁剪；是否保留、
+	// 如何做账号隔离由 service 层按账号收口（applyCodexCompactPromptCacheKey）。
+	//
+	// access_programs 同理（CompactionInput.access_programs，common.rs:65）。它在
+	// /responses 上本来就一路原样透传（那条路径没有任何字段裁剪），compact 单独丢弃
+	// 会让同一个账号在两个端点上声明不同的准入等级——那才是确凿的形态矛盾。
 	for _, field := range []string{
 		"model",
 		"input",
@@ -609,6 +626,8 @@ func normalizeOpenAICompactRequestBody(body []byte) ([]byte, bool, error) {
 		"service_tier",
 		"text",
 		"previous_response_id",
+		"prompt_cache_key",
+		"access_programs",
 	} {
 		value := gjson.GetBytes(body, field)
 		if !value.Exists() {
@@ -874,7 +893,7 @@ func normalizeOpenAIAPIKeyStoreFalseReasoningReplayDecoded(body []byte, knownSto
 }
 
 func normalizeOpenAICodexCompactReasoningEffortForAccount(c *gin.Context, account *Account, body []byte) ([]byte, bool, error) {
-	if account == nil || !account.IsOpenAIOAuthLike() || !isOpenAIResponsesCompactPath(c) {
+	if account == nil || !account.TargetsChatGPTCodexUpstream() || !isOpenAIResponsesCompactPath(c) {
 		return body, false, nil
 	}
 
@@ -1956,6 +1975,7 @@ func evaluateOpenAIFastPolicyWithSettings(settings *OpenAIFastPolicySettings, us
 	}
 	isOAuth := account != nil && account.IsOAuth()
 	isBedrock := account != nil && account.IsBedrock()
+	isCPR := account != nil && account.IsCPR()
 
 	// 用户专属规则先于全局规则。规则组内仍按配置顺序首条命中，允许
 	// 管理员为某位用户配置例外，而不被先出现的全局规则覆盖。
@@ -1964,7 +1984,7 @@ func evaluateOpenAIFastPolicyWithSettings(settings *OpenAIFastPolicySettings, us
 			if (len(rule.UserIDs) > 0) != userScoped || !openAIFastPolicyUserMatches(rule.UserIDs, userID) {
 				continue
 			}
-			if !betaPolicyScopeMatches(rule.Scope, isOAuth, isBedrock) {
+			if !betaPolicyScopeMatches(rule.Scope, isOAuth, isBedrock, isCPR) {
 				continue
 			}
 			ruleTier := strings.ToLower(strings.TrimSpace(rule.ServiceTier))

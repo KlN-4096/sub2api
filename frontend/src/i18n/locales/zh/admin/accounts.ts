@@ -822,10 +822,17 @@ export default {
         codexCLIOnlyAppServerDesc: '仅在上方开关开启时生效。开启后本账号额外放行内嵌 Codex 引擎、经 app-server 协议接入的第三方客户端（如 Claude Code 的 codex 插件），仍需通过全局引擎指纹门；与全局 app-server 开关取 OR（任一开即放行）。',
         codexFingerprintMode: 'Codex 指纹收敛',
         codexFingerprintModeDesc: '多人共享同一 OAuth 账号时，将各用户的设备/会话标识收敛为账号级恒定值，减少上游可见的设备数和会话数。默认关闭（原样透传客户端标识），需要时再显式开启；部分账号开启收敛后出现过额度缩水，请按自己的实测结果选择。',
+        codexFingerprintConvergence: '实验性指纹收敛（klno）',
+        codexFingerprintConvergenceDesc: '让这把 API key 的出站身份在 HTTP / WS 上与真 Codex 客户端形态一致：补齐 session-id / thread-id 头，x-client-request-id 等于 thread-id，去掉 session_id / conversation_id 别名，root_turn_id 等与同类字段同源派生，保持 UUIDv7。关闭时与上游行为完全一致；开启那一刻该账号的会话标识会一次性轮换。',
         codexFingerprintOff: '关闭（透传，默认）',
         codexFingerprintDevice: '仅设备',
         codexFingerprintSession: '设备+会话',
         codexFingerprintFull: '完全收敛',
+        codexUserAgent: 'Codex 出站 User-Agent',
+        codexUserAgentDesc: '该账号出站时自报的客户端标识，HTTP、WS 握手与额度查询共用。留空使用全局设置。'
+          + '要与该账号使用者的真实系统一致：UA 报 Windows、请求体里却是 Linux 路径和 shell，两者互相矛盾。'
+          + '版本号会被网关统一改写为生效版本，填什么都一样。',
+        codexUserAgentPlaceholder: '留空使用全局设置',
         codexImageTool: 'Codex 图片桥接策略',
         codexImageToolDesc:
           '统一控制 Codex /responses 文本请求的 hosted image_generation 桥接和客户端图片工具声明。hosted 工具自动注入仅适用于非 Responses Lite 请求；账号级策略优先于渠道和全局配置，不影响独立图片生成接口。',
@@ -1255,6 +1262,24 @@ export default {
         apiKeyHint: '上游服务的 API Key',
         pleaseEnterBaseUrl: '请输入上游 Base URL',
         pleaseEnterApiKey: '请输入上游 API Key'
+      },
+      // CPR（codex-proxy-rs）中继
+      cpr: {
+        typeHint: 'codex-proxy-rs 中继',
+        baseUrl: 'CPR 网关地址',
+        baseUrlHint: 'codex-proxy-rs 的监听地址，例如 http://127.0.0.1:18081。必填，且不会回落到官方端点。',
+        clientKey: 'CPR Client Key',
+        clientKeyHint: 'CPR 后台「客户端密钥」里创建的密钥。该密钥应只绑定一个分组，且分组内只有这一个 CPR 账号。',
+        accountId: 'CPR 账号 ID',
+        accountIdHint: 'CPR 后台里这个账号的 id（形如 acct_xxx），用于拉取额度。',
+        adminApiKey: 'CPR Admin API Key',
+        adminApiKeyHint: 'CPR 的管理 API Key（admin- 开头），仅用于读取额度与账号状态。',
+        adminBaseUrl: 'CPR Admin 地址（可选）',
+        adminBaseUrlHint: '留空则与网关地址相同。',
+        baseUrlRequired: '请输入 CPR 网关地址',
+        clientKeyRequired: '请输入 CPR Client Key',
+        accountIdRequired: '请输入 CPR 账号 ID',
+        adminApiKeyRequired: '请输入 CPR Admin API Key'
       },
       // OAuth flow
       oauth: {

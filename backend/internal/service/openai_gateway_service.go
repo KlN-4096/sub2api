@@ -84,26 +84,34 @@ var openaiAllowedHeaders = map[string]bool{
 	"x-codex-turn-state":      true,
 	"x-codex-turn-metadata":   true,
 	"x-codex-window-id":       true,
-	responsesLiteHeaderKey:    true,
+	// 真实客户端在这两处也发（codex-rs core/src/client.rs 的
+	// build_responses_compatibility_headers 与 responses WS 头构造）：
+	// 前者标记记忆整合子会话，后者是计时指标开关。剥掉会让上游看到一个
+	// 「从不做记忆整合、从不开计时」的客户端。
+	"x-openai-memgen-request":               true,
+	"x-responsesapi-include-timing-metrics": true,
+	responsesLiteHeaderKey:                  true,
 }
 
 // OpenAI passthrough allowed headers whitelist.
 // 透传模式下仅放行这些低风险请求头，避免将非标准/环境噪声头传给上游触发风控。
 var openaiPassthroughAllowedHeaders = map[string]bool{
-	"accept":                  true,
-	"accept-language":         true,
-	"content-type":            true,
-	"conversation_id":         true,
-	"openai-beta":             true,
-	"user-agent":              true,
-	"originator":              true,
-	"session_id":              true,
-	"x-codex-beta-features":   true,
-	"x-codex-installation-id": true,
-	"x-codex-turn-state":      true,
-	"x-codex-turn-metadata":   true,
-	"x-codex-window-id":       true,
-	responsesLiteHeaderKey:    true,
+	"accept":                                true,
+	"accept-language":                       true,
+	"content-type":                          true,
+	"conversation_id":                       true,
+	"openai-beta":                           true,
+	"user-agent":                            true,
+	"originator":                            true,
+	"session_id":                            true,
+	"x-codex-beta-features":                 true,
+	"x-codex-installation-id":               true,
+	"x-codex-turn-state":                    true,
+	"x-codex-turn-metadata":                 true,
+	"x-codex-window-id":                     true,
+	"x-openai-memgen-request":               true,
+	"x-responsesapi-include-timing-metrics": true,
+	responsesLiteHeaderKey:                  true,
 }
 
 // codex_cli_only 拒绝时记录的请求头白名单（仅用于诊断日志，不参与上游透传）
@@ -502,12 +510,16 @@ type OpenAIGatewayService struct {
 	codexSnapshotThrottle               *accountWriteThrottle
 	openAIModelsCache                   openAIModelsCache
 	openaiCompatSessionResponses        sync.Map
+	// openaiCompatBridgeSessions：双开兼容桥会话键 → openAICompatBridgeSession（会话/上下文窗口 v7）
+	openaiCompatBridgeSessions          sync.Map
 	openaiCompatAnthropicDigestSessions sync.Map
-	// openaiCodexTurnStateOrigins: 下游会话 seed → openAICodexTurnStateOrigin，
-	// 记录最近一次向该会话下发 x-codex-turn-state 的铸造账号，供出站守卫
-	// 剥离跨账号回带（openai_codex_turn_state.go）。
+	// openaiCodexTurnStateOrigins: x-codex-turn-state blob 的哈希 → openAICodexTurnStateOrigin
+	// （铸造者 = 凭证域身份），供出站守卫剥离跨账号回带（设计见 openai_codex_turn_state.go）。
 	openaiCodexTurnStateOrigins sync.Map
 	openaiCodexTurnStateWrites  atomic.Uint64
+	// codexSideCalls：双开账号侧信道 GET 的去重窗口（openai_codex_side_calls.go）。
+	// 由构造器初始化；裸结构体（单元测试）里为 nil，侧信道整体停用。
+	codexSideCalls *codexSideCallState
 }
 
 // NewOpenAIGatewayService creates a new OpenAIGatewayService
@@ -585,6 +597,7 @@ func NewOpenAIGatewayService(
 		openAITokenProvider.SetAccountRuntimeBlocker(svc)
 	}
 	svc.logOpenAIWSModeBootstrap()
+	svc.codexSideCalls = newCodexSideCallState()
 	return svc
 }
 
@@ -1272,6 +1285,14 @@ func (s *OpenAIGatewayService) GetAccessToken(ctx context.Context, account *Acco
 			return "", "", errors.New("api_key not found in credentials")
 		}
 		return apiKey, "apikey", nil
+	case AccountTypeCPR:
+		// CPR 中继：凭据就是 CPR 的 client key，直接作为 Bearer 发给 CPR。
+		// 上游的真实 OAuth token 由 CPR 自己持有，sub2api 从不接触。
+		clientKey := account.GetCPRClientKey()
+		if clientKey == "" {
+			return "", "", errors.New("api_key not found in credentials")
+		}
+		return clientKey, "apikey", nil
 	default:
 		return "", "", fmt.Errorf("unsupported account type: %s", account.Type)
 	}
