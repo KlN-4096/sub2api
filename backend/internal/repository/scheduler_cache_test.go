@@ -84,6 +84,20 @@ func TestSchedulerMetadataAccountKeepsProArgonQuotaIsolation(t *testing.T) {
 	require.Zero(t, metadata.GetRateLimitRemainingTime("gemini-3.8-flash"))
 }
 
+func TestSchedulerMetadataAccountKeepsCPRPlanType(t *testing.T) {
+	account := service.Account{
+		ID:       25,
+		Platform: service.PlatformOpenAI,
+		Type:     service.AccountTypeCPR,
+		Extra:    map[string]any{service.CPRPlanTypeExtraKey: "pro"},
+	}
+
+	metadata := buildSchedulerMetadataAccount(account)
+
+	require.True(t, metadata.IsOpenAIChatGPTSubscription(),
+		"cpr 的档位在 extra 里，投影裁掉它订阅优先调度就只在 DB 回退那一次生效")
+}
+
 func TestSchedulerMetadataAccountProjectsUpstreamBillingProbe(t *testing.T) {
 	lastError := strings.Repeat("upstream diagnostic ", 512)
 	probe := map[string]any{

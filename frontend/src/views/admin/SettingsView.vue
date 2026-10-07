@@ -1185,6 +1185,7 @@
                           | 'oauth'
                           | 'apikey'
                           | 'bedrock'
+                          | 'cpr'
                       "
                       :options="openaiFastPolicyScopeOptions"
                     />
@@ -12459,6 +12460,7 @@ const openaiFastPolicyScopeOptions = computed(() => [
     value: "bedrock",
     label: t("admin.settings.openaiFastPolicy.scopeBedrock"),
   },
+  { value: "cpr", label: t("admin.settings.openaiFastPolicy.scopeCPR") },
 ]);
 
 function addOpenAIFastPolicyRule() {
