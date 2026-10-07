@@ -42,7 +42,8 @@ func shouldFlattenOpenAIResponsesNamespaces(
 	passthroughEnabled bool,
 	compactPath bool,
 ) bool {
-	if account == nil || !account.IsOpenAIOAuthLike() {
+	// 按「上游是谁」判定：compact 端点的窄 schema 与账号级摊平开关对 cpr 同样成立。
+	if account == nil || !account.TargetsChatGPTCodexUpstream() {
 		return false
 	}
 	if !compactPath && !account.IsOpenAIResponsesFlattenNamespacesEnabled() {
@@ -58,7 +59,9 @@ func shouldFlattenOpenAIResponsesNamespaces(
 // namespaces for OpenAI OAuth and API Key HTTP forwarding. Native WSv2 keeps
 // namespaces because that protocol supports them and does not restore payloads.
 func shouldStripOpenAIResponsesInputNamespaces(account *Account, transport OpenAIUpstreamTransport, passthroughEnabled bool) bool {
-	if account == nil || (!account.IsOpenAIOAuthLike() && !account.IsOpenAIApiKey()) {
+	// 按「上游是谁」判定：cpr 中继到同一个 Codex 后端，且 CPR 对 input[].namespace
+	// 只读不写（见 TargetsChatGPTCodexUpstream 的注释），上游要求与 oauth 相同。
+	if account == nil || (!account.TargetsChatGPTCodexUpstream() && !account.IsOpenAIApiKey()) {
 		return false
 	}
 	if transport == OpenAIUpstreamTransportResponsesWebsocketV2 && !passthroughEnabled {
@@ -98,7 +101,7 @@ func shouldKeepOpenAIResponsesToolCallNamespaces(
 	if account.IsOpenAIApiKey() {
 		return hasOpenAIResponsesNamespaceToolDeclaration(body)
 	}
-	if !account.IsOpenAIOAuthLike() {
+	if !account.TargetsChatGPTCodexUpstream() {
 		return false
 	}
 	return !shouldFlattenOpenAIResponsesNamespaces(account, transport, passthroughEnabled, compactPath)

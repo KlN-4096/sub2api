@@ -189,6 +189,13 @@ func TestCodexTurnStateShadowRowWSIngressOwnerIsParentIdentity(t *testing.T) {
 					hashCtx.Request.Header[name] = values
 				}
 				sessionHash := svc.GenerateSessionHash(hashCtx, []byte(codexWSTestFrame))
+				// 上游 0.2.5 起 ingress 的 refreshIngressRouteState 把会话级状态按执行作用域
+				// 隔离：帧声明了线程身份时键是 scope 而非原会话哈希。这里必须同源重算，
+				// 否则查的是一个从来没被写过的键。
+				if scope, _ := resolveOpenAIWSExecutionScope(hashCtx, []byte(codexWSTestFrame),
+					getAPIKeyIDFromContext(hashCtx)); scope != "" {
+					sessionHash = scope
+				}
 				if minted != "" {
 					saved, ok := svc.getOpenAIWSStateStore().GetSessionTurnState(0, sessionHash)
 					require.True(t, ok, "会话存储里应有握手铸出的 turn-state")

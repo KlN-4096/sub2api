@@ -113,22 +113,103 @@ func TestCodexDeviceWireProfileImages(t *testing.T) {
 			if enabled {
 				require.Equal(t, wantInstall, gjson.GetBytes(up.lastBody, "client_metadata.x-codex-installation-id").String())
 				require.Empty(t, up.lastReq.Header.Get("x-codex-installation-id"))
-				require.Empty(t, up.lastReq.Header.Get("OpenAI-Beta"))
-				// 自建的 Responses body 同样要按真客户端的字段序出站（16ff14c common.rs:282）。
+				require.Empty(t, up.lastReq.Header.Get("OpenAI-Beta"),
+					"双开按真 Codex 客户端收口：真客户端不发 OpenAI-Beta")
+				// 图片直调端点被 codexDirectImagesEnabled 关着，图片回落 /responses，
+				// 于是体仍是 Responses 形状、仍套 codexResponsesFieldOrder：
+				// model 钉在首位，client_metadata 由 applyCodexFingerprintClientMetadataRaw
+				// 追加因而落在末尾。重开直调端点时这两条都要重写。
+				require.Equal(t, "/backend-api/codex/responses", up.lastReq.URL.Path)
 				keys := topLevelKeys(t, up.lastBody)
-				require.Equal(t, "model", keys[0], "images 出站体首键必须是 model：%v", keys)
-				require.Less(t, indexOf(keys, "instructions"), indexOf(keys, "input"), "%v", keys)
-				require.Less(t, indexOf(keys, "input"), indexOf(keys, "tools"), "%v", keys)
-				require.Equal(t, "client_metadata", keys[len(keys)-1], "%v", keys)
+				require.Equal(t, "model", keys[0], "字段序：%v", keys)
+				require.Equal(t, "client_metadata", keys[len(keys)-1], "字段序：%v", keys)
 			} else {
 				require.False(t, gjson.GetBytes(up.lastBody, "client_metadata").Exists())
 				require.Equal(t, wantInstall, up.lastReq.Header.Get("x-codex-installation-id"))
+				// 非双开走 /responses 的既有形态，保留 OpenAI-Beta。
 				require.Equal(t, "responses=experimental", up.lastReq.Header.Get("OpenAI-Beta"))
 			}
 			require.Equal(t, resolveCodexOutboundIdentity("").version, up.lastReq.Header.Get("version"),
 				"version 是 provider 头（model-provider-info/src/lib.rs:397），钉到规范身份")
 		})
 	}
+}
+
+// TestCodexDirectImagesEndpointNotTreatedAsResponses 钉住 images 端点不套 /responses
+// 的线协议。buildUpstreamRequest 按它自己算出的 targetURL (.../codex/responses) 做
+// 字段序与 zstd，而 openai_images_responses.go 要到它返回之后才把 URL 换成
+// /images/generations——不把真端点经 withOpenAIImagesWireTarget 传进去，发往 images
+// 的体就会被套上 Responses 字段表并被压缩，正是 openai_codex_body_order.go:52 与
+// codexRequestBodyCompressionEnabled 注释里明令排除的两件事。
+//
+// 直接测这两个按路径分流的函数，不经 ForwardImages：直调端点当前被
+// codexDirectImagesEnabled 关着（图片回落 /responses），但这条守卫要在重开时仍然有效。
+func TestCodexDirectImagesEndpointNotTreatedAsResponses(t *testing.T) {
+	account := wireProfileTestAccount(true)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(nil))
+	c.Request.Header.Set("originator", "codex-tui")
+	c.Request.Header.Set("User-Agent", codexCLIUserAgent)
+
+	const imagesURL = "https://chatgpt.com/backend-api/codex/images/generations"
+	const responsesURL = chatgptCodexURL
+	body := []byte(`{"model":"gpt-image-2","prompt":"offline","client_metadata":{"x-codex-installation-id":"i"}}`)
+
+	// 前提：这个账号在 /responses 上确实会被重排与压缩，否则下面两条断言是空的。
+	require.True(t, codexRequestBodyCompressionEnabled(c, account, responsesURL))
+	require.Equal(t, []string{"model", "client_metadata", "prompt"},
+		topLevelKeys(t, applyCodexBodyFieldOrder(c, account, responsesURL, body)),
+		"前提：Responses 字段表会把 client_metadata 提到 prompt 之前")
+
+	require.False(t, codexRequestBodyCompressionEnabled(c, account, imagesURL),
+		"images 端点不压缩；真客户端只对 /responses 做 zstd（codex-api endpoint/images.rs 走 execute，不设 compression）")
+	require.Equal(t, []string{"model", "prompt", "client_metadata"},
+		topLevelKeys(t, applyCodexBodyFieldOrder(c, account, imagesURL, body)),
+		"images 端点不套 Responses 字段表，体原样不动")
+
+	// 再驱动一次真正的构造入口：buildUpstreamRequest 自己算出的 targetURL 是
+	// .../responses，只有 withOpenAIImagesWireTarget 能把真端点告诉它。
+	// 直调端点关着时这条链路在生产上走不到，但 plumbing 必须是对的——它一旦失效，
+	// 重开直调端点就会原样复现「zstd 发给不压缩端点 + 套错字段表」。
+	svc, _ := wireProfileTestService()
+	ctx := withOpenAIImagesWireTarget(withOpenAIImagesSelfBuiltRequest(context.Background()), imagesURL)
+	req, err := svc.buildUpstreamRequest(ctx, c, account, body, "offline-token", true, "", false)
+	require.NoError(t, err)
+	require.Empty(t, req.Header.Get("Content-Encoding"), "images 端点不压缩")
+	wire, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	require.Equal(t, []string{"model", "prompt", "client_metadata"}, topLevelKeys(t, wire))
+
+	// 对照组：不给 override 就会被当成 /responses 处理，证明上面那条断言不是空的。
+	plain, err := svc.buildUpstreamRequest(withOpenAIImagesSelfBuiltRequest(context.Background()),
+		c, account, body, "offline-token", true, "", false)
+	require.NoError(t, err)
+	require.Equal(t, "zstd", plain.Header.Get("Content-Encoding"))
+}
+
+// TestCodexDirectImagesDisabled 钉住图片直调端点当前是关闭的。
+// 关闭原因与重开前提见 openai_images_direct.go 的 codexDirectImagesEnabled：
+// 真客户端在该端点不发 client_metadata、只发 x-codex-image-turn-id + originator，
+// 而本仓库会把整套 Responses 身份头与 client_metadata 带过去。默认图片模型
+// gpt-image-2.5-sunburst 就在直调名单里，即默认路径命中。
+func TestCodexDirectImagesDisabled(t *testing.T) {
+	require.False(t, codexDirectImagesEnabled)
+	for _, model := range []string{"gpt-image-1.5", "gpt-image-2",
+		"gpt-image-2.5-flare", "gpt-image-2.5-sunburst", openAIImagesDefaultModel} {
+		require.False(t, usesCodexDirectImages(model), "%s 必须回落 /responses", model)
+	}
+
+	account := wireProfileTestAccount(true)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(nil))
+	c.Request.Header.Set("originator", "codex-tui")
+	c.Request.Header.Set("User-Agent", codexCLIUserAgent)
+	svc, up := wireProfileTestService()
+	_, _ = svc.ForwardImages(context.Background(), c, account, nil,
+		&OpenAIImagesRequest{Endpoint: "generations", Model: openAIImagesDefaultModel, Prompt: "offline"}, "")
+	require.NotNil(t, up.lastReq)
+	require.Equal(t, "/backend-api/codex/responses", up.lastReq.URL.Path,
+		"图片必须走 /responses——0.2.4-klno.8 线上一直是这个形态")
 }
 
 func TestCodexDeviceWireProfileCompact(t *testing.T) {

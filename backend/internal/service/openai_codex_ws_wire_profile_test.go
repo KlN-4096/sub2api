@@ -750,10 +750,14 @@ func TestCodexDeviceWireProfileWSProjectedFrameBytesOnTheWire(t *testing.T) {
 			t.Cleanup(func() { _ = client.Close() })
 			lease := &openAIWSConnLease{conn: newOpenAIWSConn("wire_bytes", account.ID, client, nil)}
 			require.NoError(t, writeCodexWSFrame(ctx, c, account, lease, payload, frameTimeout))
-			_, err = client.ReadMessage(ctx) // 上游记录帧后才回 completed，避免异步采集竞态。
-			require.NoError(t, err)
-			frames := upstream.Frames()
-			require.Len(t, frames, 1)
+			// 不能直接读 client：newOpenAIWSConn 会为 coder 连接常驻读循环（上游 0.2.5，
+			// 空闲连接也要应答 ping），读权已归它，再读会得到
+			// "previous message not read to completion"。改为等上游把帧记下来。
+			var frames [][]byte
+			require.Eventually(t, func() bool {
+				frames = upstream.Frames()
+				return len(frames) == 1
+			}, frameTimeout, 2*time.Millisecond, "上游未在超时内记录到帧")
 			require.Equal(t, expected, frames[0], "双开逐字节写出投影结果；关闭时保留原编码器行为")
 		})
 	}
@@ -821,7 +825,7 @@ func TestCodexWSTurnStateEchoGuardIngressStateStoreFallback(t *testing.T) {
 	for name, values := range codexWSIngressInbound() {
 		hashCtx.Request.Header[name] = values
 	}
-	sessionHash := svc.GenerateSessionHash(hashCtx, []byte(codexWSTestFrame))
+	sessionHash := codexWSIngressSessionKey(svc, hashCtx, []byte(codexWSTestFrame))
 	saved, ok := svc.getOpenAIWSStateStore().GetSessionTurnState(0, sessionHash)
 	require.True(t, ok, "会话存储里应有 A 铸出的 turn-state（否则本用例没覆盖到回落路径）")
 	require.Equal(t, "minted-A", saved)
@@ -1011,7 +1015,8 @@ func TestCodexDeviceWireProfileWSIngressStateStoreFallbackNotInFrame(t *testing.
 	for name, values := range codexWSIngressInbound() {
 		hashCtx.Request.Header[name] = values
 	}
-	saved, ok := svc.getOpenAIWSStateStore().GetSessionTurnState(0, svc.GenerateSessionHash(hashCtx, []byte(codexWSTestFrame)))
+	saved, ok := svc.getOpenAIWSStateStore().GetSessionTurnState(0,
+		codexWSIngressSessionKey(svc, hashCtx, []byte(codexWSTestFrame)))
 	require.True(t, ok, "会话存储里应有握手铸出的 turn-state（否则本用例没覆盖到回落路径）")
 	require.Equal(t, "minted-1", saved)
 
@@ -1021,4 +1026,14 @@ func TestCodexDeviceWireProfileWSIngressStateStoreFallbackNotInFrame(t *testing.
 	require.Len(t, upstream.rawWrites, 2)
 	require.False(t, gjson.GetBytes(upstream.rawWrites[1], "client_metadata."+openAICodexTurnStateHeader).Exists(),
 		"会话存储回落值不得进帧：%s", upstream.rawWrites[1])
+}
+
+// codexWSIngressSessionKey 与 ingress 的 refreshIngressRouteState 同源地算出会话级
+// 状态键：上游 0.2.5 起帧声明了线程身份时键是执行作用域，而非原会话哈希。测试若只算
+// GenerateSessionHash，查的是一个从来没被写过的键。
+func codexWSIngressSessionKey(svc *OpenAIGatewayService, c *gin.Context, frame []byte) string {
+	if scope, _ := resolveOpenAIWSExecutionScope(c, frame, getAPIKeyIDFromContext(c)); scope != "" {
+		return scope
+	}
+	return svc.GenerateSessionHash(c, frame)
 }

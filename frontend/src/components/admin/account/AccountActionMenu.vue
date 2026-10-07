@@ -107,7 +107,11 @@ useResizeObserver(menuRef, updatePosition)
 
 const canDuplicate = computed(() => {
   if (!props.account || props.account.parent_account_id != null) return false
-  return ['apikey', 'upstream', 'bedrock', 'service_account'].includes(props.account.type)
+  // cpr 与 apikey 同构：凭据是静态的（base_url / api_key / admin_* / cpr_account_id），
+  // 没有会被后台刷新器改写的轮换令牌——那正是 oauth/setup-token 被排除的理由。
+  // 后端 canDuplicateAccountType 已同步放行。注意复制出来的账号仍指向同一个
+  // cpr_account_id，需要手工改，否则调度器会以为有两倍容量。
+  return ['apikey', 'upstream', 'bedrock', 'service_account', 'cpr'].includes(props.account.type)
 })
 const isRateLimited = computed(() => {
   if (props.account?.rate_limit_reset_at && new Date(props.account.rate_limit_reset_at) > new Date()) {
