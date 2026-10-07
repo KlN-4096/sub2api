@@ -1,14 +1,37 @@
 <template>
   <div v-if="isCodexAccount" class="space-y-1" data-testid="account-gateway-cell">
-    <p v-if="usesPool && progress" class="text-[10px] text-primary-600 dark:text-primary-400"
+    <p v-if="usesPool && progress && progress.phase !== 'idle'" class="text-[10px] text-primary-600 dark:text-primary-400"
       role="status" aria-live="polite" data-testid="account-gateway-progress">
+      <span v-if="progress.run_id">{{ t('admin.accounts.openai.gatewayProgress.run', { id: progress.run_id }) }} · </span>
       {{ t(`admin.accounts.openai.gatewayProgress.${progress.phase}`, {
         attempt: progress.attempt, limit: progress.limit, seconds: Math.floor(progress.elapsed_ms / 1000)
       }) }}
       <span v-if="progress.rejected"> · {{ t('admin.accounts.openai.gatewayProgress.rejected', { count: progress.rejected }) }}</span>
       <span v-if="progress.active_requests > 1"> · {{ t('admin.accounts.openai.gatewayProgress.concurrent', { count: progress.active_requests }) }}</span>
     </p>
-    <p v-else-if="usesPool && progressUnavailable" class="text-[10px] text-gray-400" data-testid="account-gateway-progress-unavailable">
+    <template v-if="usesPool && runtime">
+      <p v-for="ticket in liveTickets" :key="ticket.gateway" class="text-[10px] text-gray-500" data-testid="account-gateway-live">
+        {{ t('admin.accounts.openai.gatewayRuntime.live', { gateway: ticket.gateway, seconds: Math.max(0, Math.floor((Date.parse(ticket.expires_at) - now) / 1000)), models: ticket.verified_models.join(', ') || t('admin.accounts.openai.gatewayRuntime.unverified') }) }}
+      </p>
+      <p v-for="round in activeRounds" :key="round.id" class="text-[10px] text-gray-500" data-testid="account-gateway-usage-round">
+        {{ t('admin.accounts.openai.gatewayRuntime.active', { model: round.model, full: round.full, attempted: round.attempted, seconds: roundSeconds(round) }) }}
+        <span v-if="round.incomplete">{{ t('admin.accounts.openai.gatewayRuntime.incomplete') }}</span>
+      </p>
+      <details v-if="runtime.rounds.length || Object.keys(runtime.archived || {}).length" class="text-[10px] text-gray-500" data-testid="account-gateway-usage-history">
+        <summary>{{ t('admin.accounts.openai.gatewayRuntime.history') }}</summary>
+        <p>{{ t('admin.accounts.openai.gatewayRuntime.hint') }}</p>
+        <p v-for="round in endedRounds" :key="round.id">
+          {{ t('admin.accounts.openai.gatewayRuntime.ended', { model: round.model, full: round.full, attempted: round.attempted, seconds: roundSeconds(round), start: formatRelativeTime(round.started_at), end: formatRelativeTime(round.ended_at!) }) }}
+          <span v-if="round.incomplete">{{ t('admin.accounts.openai.gatewayRuntime.incomplete') }}</span>
+        </p>
+        <p v-for="(total, model) in runtime.archived" :key="model">
+          {{ t('admin.accounts.openai.gatewayRuntime.archived', { model, count: total.rounds, full: total.full, attempted: total.attempted, seconds: Math.floor(total.duration_ms / 1000) }) }}
+          <span v-if="total.incomplete">{{ t('admin.accounts.openai.gatewayRuntime.incomplete') }}</span>
+        </p>
+        <p v-if="runtime.incomplete">{{ t('admin.accounts.openai.gatewayRuntime.incomplete') }}</p>
+      </details>
+    </template>
+    <p v-if="usesPool && progressUnavailable" class="text-[10px] text-gray-400" data-testid="account-gateway-progress-unavailable">
       {{ t('admin.accounts.openai.gatewayProgress.unavailable') }}
     </p>
     <!-- 没有读数也要占位：整块消失时，「没接网关池」「接了还没跑过流量」「落点读不出来」
@@ -131,7 +154,7 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { Account } from '@/types'
-import type { GatewayPoolProgress } from '@/api/admin/accounts'
+import type { GatewayPoolProgress, GatewayPoolUsageRound } from '@/api/admin/accounts'
 import { targetsCodexUpstream } from '@/utils/turnState'
 import { formatRelativeTime } from '@/utils/format'
 import { useNowTicker } from '@/composables/useNowTicker'
@@ -155,27 +178,23 @@ const MAX_PER_REGION = 1
 const DEFAULT_WINDOW_MS = 60 * 60 * 1000
 const MAX_WINDOW_MS = 24 * 60 * 60 * 1000
 
-/**
- * 满血窗口 183 秒，**必须和后端 openAIGatewayFullWindow 同值**（跨语言，只能靠这条注释）。
- *
- * 183 不是我们测出来的，是取两边最保守的那个：实测窗口是 200–300 秒，而池子自己的
- * types.FullWindow 就是 183 秒、DeliverTTL 只有 150 秒。取大的会让这一格在池子和后端都认为
- * 窗口已关之后还绿着 —— 而运营方正照着它挑落点。
- *
- * 「验过满血」这一格**必须按它判，不能按本地账本那 4 小时**：后端的 verdict 是粘滞的
- * （没判据的那些发只刷新 at、判定原样留着，见 openai_gwpool_gateway_history.go），
- * 按 4 小时着色的话「3 小时 59 分前判过满血、1 分钟前又用过」会和「刚刚验出满血」长得一样 ——
- * 运营方照着那一格去挑落点，挑中的是一个烧了三个多小时的网关。
- *
- * 过期就回落「碰过」（琥珀），不是「没碰过」（淡显）：窗口过了不代表那次接触没发生。
- * 后端对 `full` 判定有一条节流穿透就是为了这个：持续被验成满血的落点，它的 FullAt 至少每
- * 183 秒刷新一次，否则格子会在写节流（5 分钟）的空档里掉成琥珀。
- */
-const FULL_WINDOW_MS = 183 * 1000
+// Three missed 2s polls invalidate the live snapshot; history never turns green.
+const LIVE_SNAPSHOT_MAX_AGE_MS = 6_000
 
 const props = defineProps<{ account: Account; progress?: GatewayPoolProgress; progressUnavailable?: boolean }>()
 const { t } = useI18n()
 const now = useNowTicker()
+const runtime = computed(() => props.progressUnavailable ? undefined : props.progress?.runtime)
+const liveTickets = computed(() => {
+  const snapshot = runtime.value
+  if (!snapshot || now.value - Date.parse(snapshot.observed_at) > LIVE_SNAPSHOT_MAX_AGE_MS) return []
+  return snapshot.tickets.filter((ticket) => Date.parse(ticket.expires_at) > now.value)
+})
+const activeRounds = computed(() => runtime.value?.rounds.filter((round) => !round.ended_at) || [])
+const endedRounds = computed(() => runtime.value?.rounds.filter((round) => !!round.ended_at) || [])
+function roundSeconds(round: GatewayPoolUsageRound): number {
+  return Math.max(0, Math.floor(((round.ended_at ? Date.parse(round.ended_at) : now.value) - Date.parse(round.started_at)) / 1000))
+}
 
 interface GatewaySeen {
   at?: string
@@ -212,18 +231,8 @@ interface GatewayItem {
   recommendedSeconds: number
 }
 
-/**
- * 格子的三种色：绿 = 此刻真的在满血窗口里；红 = 窗口内碰过、现在打过去就是降智；灰 = 已过
- * 本地账本窗口，可以再用。
- *
- * **原来还有一档琥珀**（「碰过没判据，或曾判满血但 183 秒窗口已过」），2026-10-02 并进红色：
- * 那两种情况在「现在能不能用」这个问题上和降智完全等价 —— 满血窗口是 (账号 × 网关) 首次接触
- * 那一下给的，过了就没了，判没判过不改变这个事实。分成两色只会让人以为琥珀比红安全。
- * 历史判定仍然在 tooltip 里（verdict 粘滞保存）。
- *
- * **窗口外不着色是刻意的**：回归的触发变量未知（后端 openAIGatewaySeen.FullAt 的注释），
- * 过了本地账本窗口那条读数就只是历史，不该再当成当前状态渲染。
- */
+// Green requires a current leased ticket with explicit model proofs. Red means
+// local cooldown, not a new upstream judgment; grey only permits another attempt.
 const TONE_CLASS = {
   full: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
   degraded: 'bg-rose-50 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300',
@@ -295,14 +304,15 @@ const items = computed<GatewayItem[]>(() => {
 })
 
 const current = computed<GatewayItem | null>(() => {
-  const name = history.value.current
+  const live = liveTickets.value[0]
+  const name = live?.gateway || history.value.current
   if (!name) return null
   // 时间和大区取 seen 里那条；没有就退回记录自己的那两个字段（老记录、或被裁过）。
   return (
     items.value.find((i) => i.name === name) ?? {
       name,
       at: history.value.updated_at ?? '',
-      region: history.value.current_region ?? '',
+      region: live?.region || history.value.current_region || '',
       verdict: '',
       fullAt: '',
       fullHeldMs: 0,
@@ -412,11 +422,6 @@ const forecastTitle = computed(() => {
   })
 })
 
-function within(at: string, span: number): boolean {
-  const ts = Date.parse(at)
-  return Number.isFinite(ts) && now.value - ts < span
-}
-
 function cooldownDeadline(item: GatewayItem): number {
   const legacy = Date.parse(item.at) + item.cooldownWindowMs
   const learned = Date.parse(item.cooldownUntil)
@@ -432,10 +437,8 @@ function toneOf(item: GatewayItem | null | undefined): GatewayTone {
   // 没开网关池的号一律中性：见 usesPool 的注释，它的 verdict 恒为空，不拦的话下面那条
   // 兜底会把每个最近用过的落点都染红。
   if (!usesPool.value) return 'idle'
+  if (item && liveTickets.value.some((ticket) => ticket.gateway === item.name && ticket.verified_models.length > 0)) return 'full'
   if (!item || !isHot(item)) return 'idle'
-  // 满血只在真实的满血窗口内才算（见 FULL_WINDOW_MS）。过了它、或者压根没判过，都是红：
-  // 窗口内碰过 ⇒ 这一刻打过去就是降智，这三种情况对使用者是同一件事。
-  if (item.verdict === 'full' && within(item.fullAt, FULL_WINDOW_MS)) return 'full'
   return 'degraded'
 }
 
@@ -515,7 +518,7 @@ function cooldownOf(item: GatewayItem): string {
 function titleOf(item: GatewayItem): string {
   const base = 'admin.accounts.openai.gatewayHistory'
   const state = cooldownOf(item)
-  const verdict = item.verdict === 'full' && !within(item.fullAt, FULL_WINDOW_MS)
+  const verdict = item.verdict === 'full'
     ? t(`${base}.verdicts.fullExpired`)
     : item.verdict
     ? t(`${base}.verdicts.${item.verdict}`)
