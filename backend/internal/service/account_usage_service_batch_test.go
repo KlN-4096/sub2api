@@ -229,7 +229,8 @@ func TestAccountUsageService_OpenAIQueriesPreserveRefreshError(t *testing.T) {
 					account.Extra = map[string]any{"codex_5h_used_percent": 18.0, "codex_7d_used_percent": 34.0}
 				}
 				if scenario == "probe_throttled" {
-					cache.openAIProbeCache.Store(account.ID, time.Now())
+					// 本分支的探测节流在额度服务里；快照够新就不探测，效果相同。
+					account.Extra = map[string]any{"codex_usage_updated_at": time.Now().Format(time.RFC3339)}
 				}
 				// Forced requests take the probe path, but fail locally without
 				// credentials; no external network is needed for this regression.

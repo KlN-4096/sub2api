@@ -12,7 +12,7 @@ import (
 func TestCodexTurnMetadataRewritePreservesHeaderSafeJSON(t *testing.T) {
 	account := newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "session"})
 	account.Credentials = map[string]any{"chatgpt_account_id": "test-account"}
-	ids := resolveCodexFingerprintIDsFromRequest(account, http.Header{})
+	ids := resolveCodexFingerprintIDsFromRequest(nil, account, http.Header{})
 	require.NotNil(t, ids)
 
 	rewriters := map[string]func(*testing.T, string) string{

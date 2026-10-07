@@ -29,6 +29,9 @@ type openAIWSClientFrameConn struct {
 	// model identifier they supplied for the current turn.
 	restoreResponseModel func([]byte) []byte
 	restoreToolNames     func([]byte) []byte
+	// noteTurnState 在下行帧写给客户端的边界记录 turn-state 铸造账号：客户端在 WS 上
+	// 持有的 blob 只来自这里转发的 response.metadata 事件。
+	noteTurnState func([]byte)
 }
 
 // openAIWSPolicyEnforcingFrameConn wraps a client-side FrameConn and runs
@@ -641,6 +644,9 @@ func (c *openAIWSClientFrameConn) WriteFrame(ctx context.Context, msgType coderw
 		ctx = context.Background()
 	}
 	if msgType == coderws.MessageText {
+		if c.noteTurnState != nil {
+			c.noteTurnState(payload)
+		}
 		if normalized, changed := normalizeCompletedImageGenerationStatus(payload); changed {
 			payload = normalized
 		}
@@ -746,6 +752,8 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		firstClientMessage = s.ReplaceModelInBody(firstClientMessage, capturedSessionModel)
 	}
 	firstMessageResponsesLite := isOpenAIResponsesLiteWebSocketPayload(firstClientMessage)
+	// 抢在归一化删掉 internal_chat_message_metadata_passthrough（上游 #7066）之前投影时区。
+	firstClientMessage = rewriteCodexEnvironmentTimezone(c, account, firstClientMessage)
 	if normalized, compatibilityChanged, normalizeErr := normalizeOpenAIResponsesWebSocketCompatibilityBodyWithConfig(s.cfg, firstClientMessage, account, firstMessageResponsesLite); normalizeErr != nil {
 		return fmt.Errorf("normalize first websocket response.create: %w", normalizeErr)
 	} else if compatibilityChanged {
@@ -761,13 +769,18 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			firstClientMessage = aliasedBody
 		}
 	}
-	accountScopedFirst, accountScoped, scopeErr := applyCodexAccountIdentityClientMetadataRaw(firstClientMessage, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
-	if scopeErr != nil {
-		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket identity metadata", scopeErr)
+	turnState := ""
+	turnMetadata := ""
+	if c != nil {
+		// 客户端回带的 turn-state：已知由其他账号铸造（failover 换号）则剥离。
+		turnState = s.guardOpenAICodexTurnStateValue(c, account, c.GetHeader(openAIWSTurnStateHeader))
+		turnMetadata = strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader))
 	}
-	if accountScoped {
-		firstClientMessage = accountScopedFirst
+	identityFirst, identityErr := applyCodexIdentityToWSPayload(c, account, firstClientMessage)
+	if identityErr != nil {
+		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket identity metadata", identityErr)
 	}
+	firstClientMessage = identityFirst
 	usageMeta := newOpenAIWSPassthroughUsageMeta(initialRequestModel, firstClientMessage)
 	updatedFirst, blocked, policyErr := s.applyOpenAIFastPolicyToWSResponseCreate(ctx, account, capturedSessionModel, firstClientMessage)
 	if policyErr != nil {
@@ -833,12 +846,6 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	}
 	if s.cfg != nil && s.cfg.Gateway.ForceCodexCLI {
 		isCodexCLI = true
-	}
-	turnState := ""
-	turnMetadata := ""
-	if c != nil {
-		turnState = strings.TrimSpace(c.GetHeader(openAIWSTurnStateHeader))
-		turnMetadata = strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader))
 	}
 	headers, _, buildHdrErr := s.buildOpenAIWSHeaders(
 		ctx,
@@ -969,6 +976,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		restoreToolNames: func(payload []byte) []byte {
 			return restoreCodexToolNamesFromContext(c, payload)
 		},
+		noteTurnState: func(payload []byte) {
+			s.noteOpenAICodexTurnStateFromWSEvent(c, account, payload)
+		},
 	}
 	policyClientConn := &openAIWSPolicyEnforcingFrameConn{
 		inner: clientFrameConn,
@@ -998,6 +1008,8 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			}
 			responsesLite := isResponseCreate && isOpenAIResponsesLiteWebSocketPayload(payload)
 			if isResponseCreate {
+				// 抢在归一化删掉 internal_chat_message_metadata_passthrough（上游 #7066）之前投影时区。
+				payload = rewriteCodexEnvironmentTimezone(c, account, payload)
 				if normalized, compatibilityChanged, normalizeErr := normalizeOpenAIResponsesWebSocketCompatibilityBodyWithConfig(s.cfg, payload, account, responsesLite); normalizeErr != nil {
 					return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", normalizeErr)
 				} else if compatibilityChanged {
@@ -1014,7 +1026,13 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					payload = aliasedBody
 				}
 			}
-			if isResponseCreate || eventType == "session.update" {
+			if isResponseCreate {
+				identityPayload, identityErr := applyCodexIdentityToWSPayload(c, account, payload)
+				if identityErr != nil {
+					return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket identity metadata", identityErr)
+				}
+				payload = identityPayload
+			} else if eventType == "session.update" {
 				accountScopedPayload, accountScoped, scopeErr := applyCodexAccountIdentityClientMetadataRaw(payload, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 				if scopeErr != nil {
 					return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket identity metadata", scopeErr)
@@ -1111,6 +1129,10 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			//     覆盖（Store(nil)），因为 OpenAI 上游对该帧实际不传
 			//     service_tier 时按 default 处理，billing 应如实反映。
 			if policyErr == nil && blocked == nil && isResponseCreate {
+				// 双开：后续帧的发送边界，与首帧同一收口。
+				out = s.guardOpenAICodexWSFrameTurnState(c, account, out)
+				out = applyCodexWSFrameWireProfile(c, account, out, turnState)
+				s.scheduleCodexWSSideCalls(c, account, headers, out)
 				usageMeta.updateFromResponseCreate(out, model, requestModelForThisFrame)
 				_, actualModel := usageMeta.turnModels(requestModelForThisFrame)
 				SetOpsUpstreamModel(c, actualModel)
@@ -1136,6 +1158,10 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	}
 	upstreamFirstMessageSent := false
 	firstWriteCtx, cancelFirstWrite := context.WithTimeout(ctx, s.openAIWSWriteTimeout())
+	// 双开：首帧的发送边界——turn-state 走帧内、字段序对齐真客户端（握手上已被投影删掉）。
+	firstClientMessage = s.guardOpenAICodexWSFrameTurnState(c, account, firstClientMessage)
+	firstClientMessage = applyCodexWSFrameWireProfile(c, account, firstClientMessage, turnState)
+	s.scheduleCodexWSSideCalls(c, account, headers, firstClientMessage)
 	firstWriteErr := relayUpstreamFrameConn.WriteFrame(firstWriteCtx, coderws.MessageText, firstClientMessage)
 	cancelFirstWrite()
 	if firstWriteErr != nil {

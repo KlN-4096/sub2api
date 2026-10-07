@@ -8,8 +8,11 @@ import (
 )
 
 const (
-	openAICompatClaudeCodeTodoGuardMarker = "<sub2api-claude-code-todo-guard>"
-	openAICompatClaudeCodeTodoGuardText   = openAICompatClaudeCodeTodoGuardMarker + "\nWhen using Claude Code todo or task tracking tools, keep the visible task list consistent. Do not send final or summary text while any item remains in_progress. Before finishing, asking the user to choose, or reporting a blocker, update the todo list so completed work is completed and deferred work is pending/open; leave an item in_progress only when active work will continue in the same turn.\n</sub2api-claude-code-todo-guard>"
+	// issue #6911：随请求发往上游的明文标记不得暴露代理名。旧标记只留在去重判断里——
+	// 在途会话的 input 里可能还带着它，认不出来就会再插一条重复的 developer 消息。
+	openAICompatClaudeCodeTodoGuardMarker       = "<todo-guard>"
+	openAICompatClaudeCodeTodoGuardLegacyMarker = "<sub2api-claude-code-todo-guard>"
+	openAICompatClaudeCodeTodoGuardText         = openAICompatClaudeCodeTodoGuardMarker + "\nWhen using Claude Code todo or task tracking tools, keep the visible task list consistent. Do not send final or summary text while any item remains in_progress. Before finishing, asking the user to choose, or reporting a blocker, update the todo list so completed work is completed and deferred work is pending/open; leave an item in_progress only when active work will continue in the same turn.\n</todo-guard>"
 )
 
 func appendOpenAICompatClaudeCodeTodoGuard(req *apicompat.ResponsesRequest) bool {
@@ -21,7 +24,9 @@ func appendOpenAICompatClaudeCodeTodoGuard(req *apicompat.ResponsesRequest) bool
 	if err := json.Unmarshal(req.Input, &items); err != nil {
 		return false
 	}
-	if len(items) == 0 || responsesInputItemsContainText(items, openAICompatClaudeCodeTodoGuardMarker) {
+	if len(items) == 0 ||
+		responsesInputItemsContainText(items, openAICompatClaudeCodeTodoGuardMarker) ||
+		responsesInputItemsContainText(items, openAICompatClaudeCodeTodoGuardLegacyMarker) {
 		return false
 	}
 
@@ -62,7 +67,9 @@ func appendOpenAICompatClaudeCodeTodoGuardToRequestBody(reqBody map[string]any) 
 	}
 
 	input, ok := reqBody["input"].([]any)
-	if !ok || len(input) == 0 || inputContainsText(input, openAICompatClaudeCodeTodoGuardMarker) {
+	if !ok || len(input) == 0 ||
+		inputContainsText(input, openAICompatClaudeCodeTodoGuardMarker) ||
+		inputContainsText(input, openAICompatClaudeCodeTodoGuardLegacyMarker) {
 		return false
 	}
 

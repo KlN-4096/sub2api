@@ -18,6 +18,7 @@ import (
 )
 
 func TestCodexDirectImagesMultipartEdit(t *testing.T) {
+	requireCodexDirectImages(t)
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
 	for key, value := range map[string]string{"model": "gpt-image-2.5-sunburst", "prompt": "编辑", "quality": "xhigh", "n": "2", "output_format": "webp", "output_compression": "75", "partial_images": "2", "input_fidelity": "high"} {
@@ -105,6 +106,7 @@ func TestCodexImagesLunaErrorDoesNotCoolImageAccount(t *testing.T) {
 }
 
 func TestCodexDirectImagesShadowCredentials(t *testing.T) {
+	requireCodexDirectImages(t)
 	parent := directImagesTestAccount()
 	parent.Status = StatusActive
 	shadow := &Account{ID: 99, ParentAccountID: &parent.ID, Platform: PlatformOpenAI, Type: AccountTypeOAuth}

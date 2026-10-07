@@ -148,11 +148,11 @@ func TestScopedAdminSnapshotWriteDoesNotNotifyAutomaticReset(t *testing.T) {
 	})
 }
 
-func TestScopedAdminQuotaHeaderReloadRechecksScope(t *testing.T) {
+func TestScopedAdminQuotaSnapshotRechecksScope(t *testing.T) {
 	a := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, GroupIDs: []int64{2}}
 	svc := &OpenAIQuotaService{accountRepo: &stubQuotaAccountRepo{accounts: map[int64]*Account{1: a}}}
-	headers, _, err := svc.buildCodexQuotaHeaders(scopedStatisticsServiceContext("openai.quota.read"), 1, "token", "upstream-id", false)
-	require.Nil(t, headers)
+	call, err := svc.loadQuotaCallSnapshot(scopedStatisticsServiceContext("openai.quota.read"), 1, false)
+	require.Nil(t, call)
 	require.Equal(t, 404, infraerrors.Code(err))
 }
 
@@ -203,12 +203,12 @@ func (r *scopedQuotaParentDisappears) GetByID(_ context.Context, id int64) (*Acc
 	}
 	return nil, fmt.Errorf("母账户读取失败")
 }
-func TestScopedAdminQuotaHeaderParentResolveFailureFailsClosed(t *testing.T) {
+func TestScopedAdminQuotaSnapshotParentResolveFailureFailsClosed(t *testing.T) {
 	parentID := int64(2)
 	repo := &scopedQuotaParentDisappears{shadow: &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, GroupIDs: []int64{1}, ParentAccountID: &parentID}, parent: &Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth, GroupIDs: []int64{1}}}
 	svc := &OpenAIQuotaService{accountRepo: repo}
-	headers, _, err := svc.buildCodexQuotaHeaders(scopedStatisticsServiceContext("openai.quota.read"), 1, "old-token", "old-account-id", false)
-	require.Nil(t, headers)
+	call, err := svc.loadQuotaCallSnapshot(scopedStatisticsServiceContext("openai.quota.read"), 1, false)
+	require.Nil(t, call)
 	require.Equal(t, 404, infraerrors.Code(err))
 }
 
@@ -220,11 +220,10 @@ func TestScopedAdminOpenAIUsageRefreshNeverGeneratesModelRequests(t *testing.T) 
 	for _, tc := range []struct {
 		name                     string
 		restricted, shadow, full bool
-		wantModel                int
 		wantUsage                float64
 	}{
-		{"受限普通账户", true, false, false, 0, 37}, {"受限影子账户", true, true, false, 0, 67},
-		{"JWT普通账户", false, false, false, 1, 98}, {"全权密钥普通账户", false, false, true, 1, 98},
+		{"受限普通账户", true, false, false, 37}, {"受限影子账户", true, true, false, 67},
+		{"JWT普通账户", false, false, false, 37}, {"全权密钥普通账户", false, false, true, 37},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			parentID := int64(2)
@@ -276,13 +275,9 @@ func TestScopedAdminOpenAIUsageRefreshNeverGeneratesModelRequests(t *testing.T) 
 			}
 			usage, err := svc.GetUsageForAccount(ctx, a, true)
 			require.NoError(t, err)
-			require.Equal(t, tc.wantModel, modelCalls, "读取额度不能合成模型消费请求")
-			if tc.restricted {
-				require.Equal(t, 1, quotaCalls)
-				require.Zero(t, nonReadCalls)
-			} else {
-				require.Zero(t, quotaCalls)
-			}
+			require.Zero(t, modelCalls, "读取额度不能合成模型消费请求")
+			require.Equal(t, 1, quotaCalls)
+			require.Zero(t, nonReadCalls)
 			require.NotNil(t, usage.FiveHour)
 			require.Equal(t, tc.wantUsage, usage.FiveHour.Utilization)
 			select {
