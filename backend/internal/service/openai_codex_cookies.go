@@ -41,20 +41,17 @@ type openAICodexCookieStore struct {
 	// 并发取票（singleflight 的 shared 对领头者也为真 ⇒ 谁都拿不到还票闭包），以及同一份凭据
 	// 挂在多个账号行上（键是凭证域身份，别的行取的票这一行照样看得见）。换票即失效。
 	//
-	// 值连**判出满血的时刻**一起存：满血时长的样本和后台预热的触发点都从它算
-	// （openai_gwpool_prewarm.go）。
-	poolVerified sync.Map // 凭证域身份 → gatewayPoolVerifiedMark
-	// 结束后保留当前窗口标记：失败不能在下一条业务请求上重新烧一轮。
-	poolPrewarm             sync.Map // 凭证域身份 → gatewayPoolPrewarmMark
-	poolWarmDuration        sync.Map // 凭证域身份 → 最近一次有结论的验证耗时
+	// 判出满血的时刻用于观测窗口时长（openai_gwpool_window.go）。
+	poolVerified            sync.Map // 凭证域身份 → gatewayPoolVerifiedMark
 	poolProbeObserved       func(context.Context, *Account, gatewayPoolProbeObservation)
 	poolContactLocks        sync.Map // 凭证域摘要 -> *sync.Mutex；只协调本进程。
 	poolContactPicks        sync.Map // 凭证域摘要 -> *atomic.Uint64；每五次保留一次原顺序探索。
+	poolDatacenterCountries sync.Map // pool base URL + gateway -> historical datacenter country
 	poolFeedbackPolicies    sync.Map // binding+gateway -> latest reporting-policy observation
 	poolFeedbackPolicyPrune atomic.Int64
 	poolRounds              gatewayPoolRounds
-	// 历史样本仅辅助提前准备，不能代替当前缓存的实际租约。
-	poolFullWindow gatewayPoolFullWindow
+	poolProgress            gatewayPoolProgressTracker
+	poolRotationAccounts    sync.Map // account ID -> fresh opt-in observed during preference hydration
 	// poolWarm 把同一张票上的并发预热判据收口成一次（openai_gwpool_warm.go）。
 	// 取票本身已经被 poolFetch 收成一次 ⇒ 同身份的并发请求手里是**同一张票**、同一个
 	// (上游账号 × 网关) 单元、同一个满血窗口 ⇒ 结论必然相同，各自打一遍纯属白烧配额，

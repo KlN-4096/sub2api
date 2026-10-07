@@ -81,9 +81,10 @@ type gatewayPoolProbeTotals struct {
 }
 
 type gatewayPoolProbeMetrics struct {
-	Foreground gatewayPoolProbeTotals `json:"foreground"`
-	Background gatewayPoolProbeTotals `json:"background"`
-	UpdatedAt  time.Time              `json:"updated_at"`
+	Foreground   gatewayPoolProbeTotals `json:"foreground"`
+	Background   gatewayPoolProbeTotals `json:"background"`
+	Confirmation gatewayPoolProbeTotals `json:"confirmation"`
+	UpdatedAt    time.Time              `json:"updated_at"`
 }
 
 // 只记录可观测的请求尝试、结果和耗时，不编造 token 或金额；同票单飞只记领头者。
@@ -104,8 +105,11 @@ func (s *OpenAIGatewayService) noteGatewayPoolProbe(ctx context.Context, account
 	raw, _ := json.Marshal(fresh.Extra[openAIGatewayPoolMetricsExtraKey])
 	_ = json.Unmarshal(raw, &metrics)
 	total := &metrics.Foreground
-	if observation.Source == "background" {
+	switch observation.Source {
+	case "background":
 		total = &metrics.Background
+	case "business":
+		total = &metrics.Confirmation
 	}
 	// 防外部导入的不合理统计溢出；计数上限远大于正常生命周期内可能产生的请求。
 	const metricLimit int64 = 1_000_000_000_000
@@ -124,6 +128,8 @@ func (s *OpenAIGatewayService) noteGatewayPoolProbe(ctx context.Context, account
 	total.Rounds = add(total.Rounds, 1)
 	total.Requests = add(total.Requests, int64(observation.Shots))
 	switch {
+	case observation.Source == "business":
+		// Count confirmation traffic only, not an independent quality result.
 	case !observation.Conclusive:
 		total.Inconclusive = add(total.Inconclusive, 1)
 	case observation.Full:

@@ -1131,6 +1131,9 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	// WS 上游的账号都要整体拒绝——漏过去的那个账号每条 WS 请求都会被运行期闸门拒掉。
 	if touchesOpenAIGatewayPoolConfig(input.Extra) {
 		for _, acc := range cachedTargets {
+			if !acc.IsOpenAIOAuthLike() {
+				return nil, infraerrors.New(http.StatusBadRequest, "GWPOOL_TARGET_INVALID", "gateway pool settings require OpenAI OAuth accounts")
+			}
 			if err := validateOpenAIGatewayPoolAccountExtra(acc, mergeMap(acc.Extra, input.Extra)); err != nil {
 				return nil, err
 			}

@@ -1491,6 +1491,9 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	// 到那时双开账号的体已经是 zstd 了，解不出来（openai_gwpool_warm.go 的 gatewayPoolWarmModel）。
 	// 没挂 sink 的路径（猎手探测等）这一行是空操作。
 	openAIGatewayPoolSinkFrom(ctx).noteModel(gjson.GetBytes(body, "model").String())
+	if account.UsesGatewayPool() && account.gatewayPoolGuardEnabled() {
+		ctx = context.WithValue(ctx, gatewayPoolConfirmBodyKey{}, gatewayPoolConfirmBody(body))
+	}
 
 	// 上线字节：双开 /responses 的请求体按真客户端默认做 zstd 压缩（openai_codex_request_compression.go）。
 	// body 仍是明文 JSON，供下面的路由提示与诊断日志读取；每次构造独立压缩。

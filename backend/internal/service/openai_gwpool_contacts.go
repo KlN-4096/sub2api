@@ -56,6 +56,7 @@ type gatewayPoolContacts struct {
 	LedgerTag        string                            `json:"ledger_tag"`
 	TrackingSince    time.Time                         `json:"tracking_since"`
 	HistoryTruncated bool                              `json:"history_truncated,omitempty"`
+	LastUSAt         time.Time                         `json:"last_us_at,omitempty"`
 	Seen             map[string]gatewayPoolContactSeen `json:"seen"`
 	Rounds           []gatewayPoolContactRound         `json:"rounds"`
 }
@@ -93,12 +94,15 @@ func readGatewayPoolContacts(account *Account, tag string) gatewayPoolContacts {
 }
 
 func pruneGatewayPoolContacts(state *gatewayPoolContacts, now time.Time) {
+	if state.LastUSAt.After(now.Add(time.Minute)) {
+		state.LastUSAt = time.Time{}
+	}
 	rounds := state.Rounds[:0]
 	for _, r := range state.Rounds {
 		if len(r.RoundID) == 64 && len(r.Report.ID) == 64 &&
 			!r.Report.At.Before(now.Add(-gatewayPoolOutboxRetention)) && !r.Report.At.After(now.Add(time.Minute)) {
-			if len(r.Steps) > 2 {
-				r.Steps = r.Steps[:2]
+			if len(r.Steps) > gatewayPoolEchoStrikes(0) {
+				r.Steps = r.Steps[:gatewayPoolEchoStrikes(0)]
 			}
 			if len(r.Aliases) > gatewayPoolContactAliasLimit {
 				r.Aliases = r.Aliases[:gatewayPoolContactAliasLimit]
@@ -131,6 +135,9 @@ func mergeGatewayPoolContacts(state *gatewayPoolContacts, other gatewayPoolConta
 		state.TrackingSince = other.TrackingSince
 	}
 	state.HistoryTruncated = state.HistoryTruncated || other.HistoryTruncated
+	if other.LastUSAt.After(state.LastUSAt) {
+		state.LastUSAt = other.LastUSAt
+	}
 	for name, seen := range other.Seen {
 		prev := state.Seen[name]
 		if prev.FirstAt.IsZero() || (!seen.FirstAt.IsZero() && seen.FirstAt.Before(prev.FirstAt)) {
@@ -254,6 +261,27 @@ func (s *OpenAIGatewayService) noteGatewayPoolContact(ctx context.Context, accou
 	}
 	s.changeGatewayPoolContacts(ctx, account, event.Identity, func(fresh *Account, state *gatewayPoolContacts) *gwpool.ContactReport {
 		at, last := event.FirstSent.UTC(), event.LastSent.UTC()
+		country := event.Applied.DatacenterCountry
+		// A response reporting a different gateway overrides the expected
+		// metadata. Unknown drift must never be guessed to be in the US.
+		touchedUS := false
+		if len(event.Steps) == 0 {
+			touchedUS = country == "US"
+		}
+		for _, step := range event.Steps {
+			if !step.Sent {
+				continue
+			}
+			actualCountry := country
+			if step.ActualGateway != "" && step.ActualGateway != event.Applied.Gateway {
+				value, _ := s.codexCookies.poolDatacenterCountries.Load(account.gatewayPoolBaseURL() + "\x00" + step.ActualGateway)
+				actualCountry, _ = value.(string)
+			}
+			touchedUS = touchedUS || actualCountry == "US"
+		}
+		if touchedUS && last.After(state.LastUSAt) {
+			state.LastUSAt = last
+		}
 		gateway := event.Applied.Gateway
 		seen := state.Seen[gateway]
 		if state.TrackingSince.IsZero() {
@@ -366,7 +394,19 @@ func (s *OpenAIGatewayService) noteGatewayPoolProbeAndContact(ctx context.Contex
 }
 
 func (s *OpenAIGatewayService) noteGatewayPoolBusinessContact(request *http.Request, account *Account, identity string,
-	applied OpenAIGatewayPoolApplied, started time.Time) {
+	applied OpenAIGatewayPoolApplied, started time.Time, responses ...*http.Response) {
+	if len(responses) > 0 && responses[0] != nil {
+		for _, cookie := range responses[0].Cookies() {
+			if cookie.Name != "__oailb" {
+				continue
+			}
+			actual := openAICodexRouteGateway("__oailb=" + cookie.Value)
+			if actual != "" && actual != applied.Gateway {
+				value, _ := s.codexCookies.poolDatacenterCountries.Load(account.gatewayPoolBaseURL() + "\x00" + actual)
+				applied.DatacenterCountry, _ = value.(string)
+			}
+		}
+	}
 	outcome := "unknown"
 	snapshot := openAIGatewayPoolSinkFrom(request.Context()).snapshot()
 	if snapshot.AccountID == account.ID && snapshot.RoundID == applied.RoundID {

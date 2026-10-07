@@ -119,9 +119,6 @@ const (
 	// openAIGatewayPoolWarmTicketsExtraKey 是一轮预热最多试几张票（见
 	// gatewayPoolWarmMaxTickets 那笔供给账）。缺省 / 非正数 / 超上限走默认值。
 	openAIGatewayPoolWarmTicketsExtraKey = "openai_gwpool_warm_tickets"
-	// openAIGatewayPoolPrewarmExtraKey 决定要不要开**后台**预热（openai_gwpool_prewarm.go）。
-	// **缺省即关**，只有显式 true 才开：它会在没有客户端等着的时候自己花票。
-	openAIGatewayPoolPrewarmExtraKey = "openai_gwpool_prewarm"
 	// openAIGatewayPoolMinRemaining 是能接受的 pair 最低剩余寿命（池子的 min_remaining）。
 	//
 	// 定这个值看的**不是**「够这一发用」：路由只在**建连那一刻**生效，连上之后这一轮跑多久都不
@@ -220,14 +217,6 @@ func (a *Account) gatewayPoolWarmTickets() int {
 	return gatewayPoolWarmMaxTickets
 }
 
-// gatewayPoolPrewarmEnabled 报告要不要开后台预热（openai_gwpool_prewarm.go）。
-//
-// 缺省即关。业务触发，每个当前窗口最多尝试一个候选，不受前台张数配置影响。
-// 它以额外请求和候选冷却换取较短等待，不保证下一次请求无需前台验证。
-func (a *Account) gatewayPoolPrewarmEnabled() bool {
-	return a.gatewayPoolGuardEnabled() && a.getExtraBool(openAIGatewayPoolPrewarmExtraKey)
-}
-
 const (
 	gatewayPoolProbeModelAstra    = "gpt-6-astra"
 	gatewayPoolProbeModelSol      = "gpt-6-sol"
@@ -319,6 +308,12 @@ func (a *Account) UsesGatewayPool() bool {
 var openAIGatewayPoolConfigExtraKeys = []string{
 	openAIGatewayPoolExtraKey,
 	openAIGatewayPoolRotationExtraKey,
+	openAIGatewayPoolRotationMinGatewaysExtraKey,
+	openAIGatewayPoolGuardEnabledExtraKey,
+	openAIGatewayPoolGatewayWindowExtraKey,
+	openAIGatewayPoolWarmTicketsExtraKey,
+	openAIGatewayPoolFetchTimeoutExtraKey,
+	openAIGatewayPoolListTimeoutExtraKey,
 	openAIGatewayPoolBaseURLExtraKey,
 	OpenAIGatewayPoolConsumerKeyExtraKey,
 	openAIGatewayPoolProbeModelExtraKey,
@@ -348,6 +343,27 @@ func touchesOpenAIGatewayPoolConfig(extra map[string]any) bool {
 func validateOpenAIGatewayPoolAccountExtra(account *Account, extra map[string]any) error {
 	if account == nil {
 		return nil
+	}
+	for _, key := range []string{openAIGatewayPoolExtraKey, openAIGatewayPoolRotationExtraKey,
+		openAIGatewayPoolGuardEnabledExtraKey, openAIGatewayPoolWaitEnabledExtraKey} {
+		if raw := extra[key]; raw != nil {
+			if _, ok := raw.(bool); !ok {
+				return infraerrors.Newf(http.StatusBadRequest, "GWPOOL_SETTING_INVALID", "%s must be boolean", key)
+			}
+		}
+	}
+	for key, limit := range map[string]int{
+		openAIGatewayPoolRotationMinGatewaysExtraKey: gatewayPoolRotationMinGatewaysMax,
+		openAIGatewayPoolWarmTicketsExtraKey:         gatewayPoolWarmMaxTicketsCeiling,
+		openAIGatewayPoolFetchTimeoutExtraKey:        openAIGatewayPoolMaxSeconds,
+		openAIGatewayPoolListTimeoutExtraKey:         openAIGatewayPoolMaxSeconds,
+		openAIGatewayPoolGatewayWindowExtraKey:       openAIGatewayPoolMaxSeconds,
+	} {
+		if raw := extra[key]; raw != nil {
+			if _, ok := gatewayPoolInteger(raw, limit); !ok {
+				return infraerrors.Newf(http.StatusBadRequest, "GWPOOL_SETTING_INVALID", "%s must be an integer between 1 and %d", key, limit)
+			}
+		}
 	}
 	probe := &Account{
 		ID: account.ID, Platform: account.Platform, Type: account.Type,
@@ -584,8 +600,9 @@ func mergeOpenAIGatewayPoolConsumerKey(existing, incoming map[string]any) {
 //
 // 必须保持可比较（sync.Map 的 CompareAndDelete 要用，见 gatewayPoolRelease）。
 type openAIGatewayPoolPair struct {
-	cookie  string
-	gateway string
+	cookie            string
+	gateway           string
+	datacenterCountry string
 	// region 是池子报的「铸这张票的出口属于哪个大区」。只用于账号卡片上按大区归档落点，
 	// 一个判定都不接（口径见 gwpool.Pair.Region）。空 = 池子没报。
 	region  string
@@ -601,9 +618,6 @@ type openAIGatewayPoolPair struct {
 	// 不包括备用架等待；续票保留。缺失时票龄回落最严档，不编造首次接触。
 	firstSent time.Time
 	roundID   string // 不含票据/凭据；同缓存窗口续票时保留。
-	// echoMisses 是**连续**几发业务请求带着活 turn-state 又收到了一张新的。
-	// 读到一次没被刷新就归零，见 gatewayPoolNoteEcho。
-	echoMisses int
 }
 
 // openAICodexCredentialIdentity 解析「凭证域身份」：影子行自己不持凭据，必须按母账号算。
@@ -941,13 +955,15 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 ) string {
 	listCtx, cancel := context.WithTimeout(ctx, account.gatewayPoolListTimeout())
 	defer cancel()
-	gateways, err := pool.Gateways(listCtx, gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(account, identity))
+	model, _ := ctx.Value(gatewayPoolProbeModelKey{}).(string)
+	gateways, err := pool.GatewaysForModel(listCtx, gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(account, identity), model)
 	if err != nil {
 		// 列表是优化不是闸门：池子没加这个端点 / 临时打不开时照常裸取。绝不能因为列不出来
 		// 就让这一发失败——接这个端点之前的行为就是兜底。
 		slog.Debug("gwpool_gateways_unavailable", "account_id", account.ID, "error", err)
 		return ""
 	}
+	s.noteGatewayPoolCountries(account, gateways)
 	// /gateways 只列此刻有活 pair 的网关 ⇒ 列表长度就是池子的可交付网关数。账号卡片拿它当
 	// 「还剩几个落点没用」的分母（见 OpenAIGatewayPoolApplied.PoolLive）。
 	var eligible []gwpool.Gateway
@@ -1069,7 +1085,7 @@ func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *A
 		// 预热循环换票那几轮全靠这一格：它是「标 Stale → 再取一张」，而一批里每张落点都不同
 		// （gatewayPoolTakeBatch 的去重），刚被标 Stale 的那张也是这一批弹出去的
 		// ⇒ 备用票必然是另一个网关，force 要的就是这个。
-		if spare, ok := s.gatewayPoolSparePop(account, identity); ok {
+		if spare, ok := s.gatewayPoolSparePop(fetchCtx, account, identity); ok {
 			s.poolPairs.Store(identity, spare)
 			return fetchResult{pair: spare, took: true}, nil
 		}
@@ -1086,7 +1102,7 @@ func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *A
 		if err != nil {
 			return nil, err
 		}
-		pair, available := batch.next()
+		pair, available := batch.next(callCtx)
 		if !available {
 			return nil, &gwpool.PoolError{Code: gwpool.CodeAllCooling, RetryAfter: time.Minute}
 		}
@@ -1119,50 +1135,12 @@ func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *A
 	}
 }
 
-// gatewayPoolTakeFresh 向池子要**一张新票**，并且**不碰 (身份 → pair) 缓存**。
-//
-// 分出来是为了后台预热（openai_gwpool_prewarm.go）：它要在手里那张还 Live、还在服务业务请求的
-// 时候另取一张候选票去验，验出满血才换上去。走 gatewayPoolPair 的话第一句就命中「缓存里还
-// Live」早返回，拿回来的是同一张；而先标 Stale 再取会让紧接着的业务请求落在一张**没验过**的
-// 票上 —— 那正是预热要消灭的那一格。
-//
-// 本地账本（poolUsed）照记：票真的取了、槽位真的烧了，谁取的无关。
-func (s *openAICodexCookieStore) gatewayPoolTakeFresh(
-	ctx context.Context,
-	pool *gwpool.Client,
-	account *Account,
-	identity string,
-	force bool,
-	excludeVersions []string,
-	minRemaining time.Duration,
-) (openAIGatewayPoolPair, error) {
-	batch, err := s.gatewayPoolTakeBatch(ctx, pool, account, identity, force, excludeVersions, 1, minRemaining)
-	if err != nil {
-		return openAIGatewayPoolPair{}, err
-	}
-	// 后台候选尚未共享给业务；明确不能使用时先还票，不进入 next() 的触碰/冷却账本。
-	candidate := batch.pairs[0]
-	if ctx.Err() != nil || candidate.version == "" || time.Until(candidate.until) < minRemaining {
-		batch.releaseSpare()
-		if ctx.Err() != nil {
-			return openAIGatewayPoolPair{}, ctx.Err()
-		}
-		return openAIGatewayPoolPair{}, fmt.Errorf("%w: candidate has no version or insufficient lease", gwpool.ErrPool)
-	}
-	// count=1 ⇒ 恰好一张，没有备用票要还。批至少一张（gatewayPoolTakeBatch 的尾判）⇒ 必中。
-	pair, available := batch.next()
-	if !available {
-		return openAIGatewayPoolPair{}, &gwpool.PoolError{Code: gwpool.CodeAllCooling, RetryAfter: time.Minute}
-	}
-	return pair, nil
-}
-
 // gatewayPoolTicketBatch 是一次批量取票的手持库存。
 //
 // **它存在的全部理由是「备用票不许进本地账本」。** 本地账本（poolUsed）记的是「我们碰过这个
 // 落点」，而一张没发出过任何字节的备用票**一个窗口都没烧**。把它记进去的后果是实打实的供给
 // 损失：gatewayPoolPick 会绕开它、exclude 会把它报给池子，于是一个全新的落点被我们自己
-// 锁 4 小时（默认窗口）—— 批量每轮都会多出 N−1 张备用票，这个损失是会累积的。
+// 锁一个冷却窗口——批量每轮都会多出 N−1 张备用票，这个损失是会累积的。
 //
 // 所以 next() 才记账（调用方马上就要拿它出站），没弹出去的那几张由 releaseSpare() 异步还回
 // 池子、**一个字都不写账本**。反过来「先全记上、用不着的再删」不行：gatewayPoolMarkUsed 是
@@ -1181,14 +1159,28 @@ type gatewayPoolTicketBatch struct {
 }
 
 // next 弹一张票并把它记进本地账本。批里空了回 false。
-func (b *gatewayPoolTicketBatch) next() (openAIGatewayPoolPair, bool) {
+func (b *gatewayPoolTicketBatch) next(ctx context.Context) (openAIGatewayPoolPair, bool) {
 	if b == nil || b.idx >= len(b.pairs) {
 		return openAIGatewayPoolPair{}, false
 	}
 	var pair openAIGatewayPoolPair
 	for b.idx < len(b.pairs) {
+		if b.idx > 0 {
+			b.rankRemaining(ctx)
+			if b.idx >= len(b.pairs) {
+				break
+			}
+		}
 		pair = b.pairs[b.idx]
+		spare := b.idx > 0
 		b.idx++
+		// Listing/ranking can take time. Recheck before consuming the lease;
+		// skipping a stale/cooling route must rerank the remaining candidates.
+		// Preserve the existing short-lease allowance only for a fresh first ticket.
+		if spare && time.Until(pair.until) < openAIGatewayPoolMinRemaining {
+			pair = openAIGatewayPoolPair{}
+			continue
+		}
 		if b.store.beginGatewayPoolAttempt(b.identity, pair.gateway, b.account.gatewayPoolGatewayWindow()) {
 			break
 		}
@@ -1221,9 +1213,9 @@ func (b *gatewayPoolTicketBatch) next() (openAIGatewayPoolPair, bool) {
 // dropAged 把剩余寿命不够的票丢掉：**不记账本**（没碰过的落点记进去等于白锁一个窗口，见类型
 // 注释），也不还（过了池子的租约 /release 不受理）。
 //
-// 只给架子上的备用票用（gatewayPoolSparePop）。**刚取回来的那一批不过这道闸**：池子的
-// min_remaining 是请求参数、不是它的承诺，而一张只剩几秒的新票仍然能把这一发发出去 ——
-// 在取票路径上按这个门槛判死，等于把一个能成的请求打成硬失败。
+// 只给架子上的备用票用（gatewayPoolSparePop）；rankRemaining/next 还会检查全部剩余备用。
+// 刚取回的新批首张不过这道闸：池子的 min_remaining 是请求参数、不是它的承诺，
+// 一张只剩几秒的新票仍可能把这一发发出去，不因本地备用票门槛直接判死。
 //
 // 门槛用 openAIGatewayPoolMinRemaining，理由与它本身一样：一张票按身份缓存、窗口内所有请求
 // 共用，只剩几秒等于下一发立刻再取一张，而供给是个位数张/小时。
@@ -1350,14 +1342,20 @@ func (s *openAICodexCookieStore) gatewayPoolTakeBatch(
 		}
 		seen[gateway] = true
 		now := time.Now()
+		country := one.DatacenterCountry
+		if country == "" {
+			value, _ := s.poolDatacenterCountries.Load(account.gatewayPoolBaseURL() + "\x00" + gateway)
+			country, _ = value.(string)
+		}
 		batch.pairs = append(batch.pairs, openAIGatewayPoolPair{
-			cookie:  cookie,
-			gateway: gateway,
-			region:  strings.TrimSpace(one.Region),
-			version: one.Version,
-			until:   now.Add(one.ValidFor),
-			since:   now,
-			roundID: gatewayPoolContactRoundID(identity, one.Version, now),
+			cookie:            cookie,
+			gateway:           gateway,
+			datacenterCountry: country,
+			region:            strings.TrimSpace(one.Region),
+			version:           one.Version,
+			until:             now.Add(one.ValidFor),
+			since:             now,
+			roundID:           gatewayPoolContactRoundID(identity, one.Version, now),
 		})
 	}
 	if len(batch.pairs) == 0 {
@@ -1380,16 +1378,16 @@ func (s *openAICodexCookieStore) gatewayPoolTakeBatch(
 // 真的亏掉只有一种情形：这个身份突然没请求了，架子上的票在池子租约内没人用。
 const gatewayPoolBatchTickets = 3
 
-// gatewayPoolSparePop 从架子上弹一张备用票，**零 HTTP 往返**。
+// gatewayPoolSparePop 从架子上弹一张备用票；按最新清单重排，但不额外铸票。
 //
 // LoadAndDelete 把整批**独占**走、再把剩下的放回去：批是个带游标的可变结构，而弹票的并发来源
-// 不止一处（业务路径的 poolFetch 闭包按身份收口，后台预热那条路不在同一个 singleflight 里）。
+// 不止一处（同一凭证域可有不同业务会话）。
 // 独占之后游标只有一个 goroutine 在推，不用另加锁。
 //
 // **只在 poolFetch 闭包里调**（而不是在退避闸之前）：同身份的并发请求必须握着同一张票 ——
 // 各弹一张的话 poolPairs 只留得下最后那张，另一张就成了「出过字节却没人记得」的票。
 // 代价是退避期里架子上的票也用不了，而那恰好是最想用它的时候；供给看紧了再说。
-func (s *openAICodexCookieStore) gatewayPoolSparePop(account *Account, identity string) (openAIGatewayPoolPair, bool) {
+func (s *openAICodexCookieStore) gatewayPoolSparePop(ctx context.Context, account *Account, identity string) (openAIGatewayPoolPair, bool) {
 	finish := s.gatewayPoolInventoryOperation(identity)
 	defer finish()
 	value, ok := s.poolSpare.LoadAndDelete(identity)
@@ -1404,7 +1402,7 @@ func (s *openAICodexCookieStore) gatewayPoolSparePop(account *Account, identity 
 	// 所以换掉只影响日志口径和还票时用谁的池子配置，而这一发的那个才是对的。
 	batch.account = account
 	batch.dropAged()
-	pair, ok := batch.next()
+	pair, ok := batch.next(ctx)
 	if !ok {
 		return openAIGatewayPoolPair{}, false // 剩下的全快到点了，dropAged 已经丢掉
 	}
@@ -1532,9 +1530,10 @@ func (s *openAICodexCookieStore) gatewayPoolDropPair(identity, version string) {
 // AccountID 是**这一发实际用的账号**：故障转移在同一个 ctx 里换号重试，不带账号就会把前一个号
 // 注入过的读数记到后一个号的用量行上。用量侧按它校验（见 routePairInUse）。
 type OpenAIGatewayPoolApplied struct {
-	AccountID int64
-	Cookie    string
-	Gateway   string
+	AccountID         int64
+	Cookie            string
+	Gateway           string
+	DatacenterCountry string
 	// Region 是池子说的「这张票是哪个大区铸的」，给账号卡片按大区归档落点用。空 = 不知道。
 	Region  string
 	Version string
@@ -1848,6 +1847,7 @@ func (s *openAICodexCookieStore) AttachRoute(
 	openAIGatewayPoolSinkFrom(ctx).mark(OpenAIGatewayPoolApplied{
 		AccountID: account.ID, Cookie: pair.cookie, Gateway: pair.gateway,
 		Region: pair.region, Version: pair.version, RoundID: pair.roundID,
+		DatacenterCountry: pair.datacenterCountry,
 	})
 	return release, nil
 }

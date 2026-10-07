@@ -41,7 +41,9 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 	// prompt 打出去，而判据对首轮请求结构性失效（没送 turn-state ⇒ 没有回声），所以「客户端
 	// 无感」实际是「降智静默交付」。
 	// 当前 pair 已标 Stale ⇒ 下一发客户端请求的 AttachRoute 自然带 force=1 换网关。
-	s.dropDegradedGatewayPoolRoute(request, resp, account)
+	if !s.dropDegradedGatewayPoolRoute(request, resp, account) {
+		return nil, errOpenAIGatewayPoolWarmUnverified
+	}
 	return nil, errOpenAIGatewayPoolRouteDegraded
 }
 
@@ -102,10 +104,32 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 		s.codexCookies.gatewayPoolMarkSent(identity, applied.Version, sentAt)
 	}
 	if err == nil && resp != nil {
-		degraded := s.gatewayPoolRouteDegraded(request, resp, account)
-		s.noteGatewayPoolBusinessContact(request, account, identity, applied, sentAt)
+		degraded, verifyErr := s.gatewayPoolRouteDegraded(request, resp, account, proxyURL, identity, sentAt)
+		s.noteGatewayPoolBusinessContact(request, account, identity, applied, sentAt, resp)
+		if verifyErr != nil {
+			if resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			return nil, false, verifyErr
+		}
 		if degraded {
 			return resp, true, nil
+		}
+		if poolRequest && account.gatewayPoolGuardEnabled() {
+			current, state := s.codexCookies.cachedPoolPair(identity)
+			if state != openAIGatewayPoolPairLive || current.version != applied.Version {
+				openAIGatewayPoolSinkFrom(request.Context()).noteVerdict(applied.Gateway, "")
+				if resp.Body != nil {
+					_ = resp.Body.Close()
+				}
+				return nil, false, errOpenAIGatewayPoolWarmUnverified
+			}
+		}
+		if err := request.Context().Err(); err != nil {
+			if resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			return nil, false, err
 		}
 		s.codexCookies.Store(account, rawURL, resp.Header)
 		return resp, false, nil

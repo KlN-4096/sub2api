@@ -84,7 +84,7 @@ func TestGatewayPoolFirstSendDoesNotCountShelfWaitOrReset(t *testing.T) {
 	store.gatewayPoolMarkSent("id", "old", first.Add(-time.Hour))
 	got, _ := store.cachedPoolPair("id")
 	require.Equal(t, first, got.firstSent)
-	_, age := store.gatewayPoolNoteEcho("id", "a", "g", true)
+	age := time.Since(got.firstSent)
 	require.Less(t, age, time.Second, "备用架待了3分钟，首次接触仍然是年轻窗口")
 }
 

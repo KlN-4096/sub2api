@@ -2654,20 +2654,11 @@
                 class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
               />
             </div>
-            <div class="flex items-center justify-between gap-4">
-              <div class="min-w-0">
-                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolPrewarm') }}</label>
-                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  {{ t('admin.accounts.openai.gwpoolPrewarmDesc') }}
-                </p>
-              </div>
-              <input
-                v-model="openAIGwpoolPrewarm"
-                data-testid="edit-openai-gwpool-prewarm"
-                :disabled="!openAIGwpoolGuardEnabled"
-                type="checkbox"
-                class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-              />
+            <div v-if="openAIGwpoolRotation">
+              <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolRotationMinGateways') }}</label>
+              <input v-model.number="openAIGwpoolRotationMinGateways" type="number" min="1" max="512" step="1"
+                placeholder="1" class="input text-xs" data-testid="edit-openai-gwpool-rotation-min-gateways" />
+              <p class="input-hint">{{ t('admin.accounts.openai.gwpoolRotationMinGatewaysDesc') }}</p>
             </div>
             <div class="flex items-center justify-between gap-4">
               <div class="min-w-0">
@@ -2770,7 +2761,6 @@
               </summary>
               <div class="mt-2 space-y-2">
                 <p class="input-hint">{{ t('admin.accounts.openai.gwpoolCooldownDetails') }}</p>
-                <p class="input-hint">{{ t('admin.accounts.openai.gwpoolPrewarmDetails') }}</p>
                 <p class="input-hint">{{ t('admin.accounts.openai.gwpoolGuardDetails') }}</p>
                 <p class="input-hint">{{ t('admin.accounts.openai.gwpoolWarmDetails') }}</p>
               </div>
@@ -4134,9 +4124,8 @@ const openAIGwpoolBaseURL = ref('')
 // 输入框恒为空：后端把已存的 key 脱敏成 true，页面从不回显原值。留空 = 不修改。
 const openAIGwpoolConsumerKey = ref('')
 const openAIGwpoolConsumerKeySaved = ref(false)
-// 后台预热缺省即关，与后端 gatewayPoolPrewarmEnabled 同口径（只有显式 true 才开）。
-const openAIGwpoolPrewarm = ref(false)
 const openAIGwpoolRotation = ref(false)
+const openAIGwpoolRotationMinGateways = ref<number | ''>('')
 const openAIGwpoolAutoWait = ref(false)
 const openAIGwpoolMaxWait = ref<number | ''>('')
 const openAIGwpoolGuardEnabled = ref(true)
@@ -4706,10 +4695,9 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	// 后端脱敏成 true = 配过；原值不会下发，所以输入框一律从空开始。
 	openAIGwpoolConsumerKeySaved.value = extra?.openai_gwpool_consumer_key === true
 	openAIGwpoolConsumerKey.value = ''
-	// 自己挑落点缺省即开：只有显式 false 才算关（与后端同口径）。
-	// 后台预热缺省即关：只有显式 true 才算开（与后端同口径）。
-	openAIGwpoolPrewarm.value = extra?.openai_gwpool_prewarm === true
+	// 组内轮转只有显式 true 才开，阈值留空沿用后端默认。
 	openAIGwpoolRotation.value = extra?.openai_gwpool_rotation === true
+	openAIGwpoolRotationMinGateways.value = typeof extra?.openai_gwpool_rotation_min_gateways === 'number' ? extra.openai_gwpool_rotation_min_gateways : ''
 	openAIGwpoolAutoWait.value = extra?.openai_gwpool_auto_wait === true
 	openAIGwpoolMaxWait.value = typeof extra?.openai_gwpool_max_wait_s === 'number' ? extra.openai_gwpool_max_wait_s : ''
 	openAIGwpoolGuardEnabled.value = extra?.openai_gwpool_guard_enabled !== false
@@ -6344,16 +6332,18 @@ const handleSubmit = async () => {
           delete newExtra.openai_gwpool_auto_wait
           delete newExtra.openai_gwpool_max_wait_s
         }
-        // 后台预热缺省即关：只有开着时才落键（后端也只认显式 true）。
-        if (openAIGwpoolPrewarm.value) {
-          newExtra.openai_gwpool_prewarm = true
-        } else {
-          delete newExtra.openai_gwpool_prewarm
-        }
+        // 后台预热已移除，保存时清理旧键。
+        delete newExtra.openai_gwpool_prewarm
         if (openAIGwpoolEnabled.value && openAIGwpoolRotation.value) {
           newExtra.openai_gwpool_rotation = true
+          if (openAIGwpoolRotationMinGateways.value !== '') {
+            newExtra.openai_gwpool_rotation_min_gateways = openAIGwpoolRotationMinGateways.value
+          } else {
+            delete newExtra.openai_gwpool_rotation_min_gateways
+          }
         } else {
           delete newExtra.openai_gwpool_rotation
+          delete newExtra.openai_gwpool_rotation_min_gateways
         }
         if (openAIGwpoolEnabled.value && openAIGwpoolProbeModel.value) {
           newExtra.openai_gwpool_probe_model = openAIGwpoolProbeModel.value

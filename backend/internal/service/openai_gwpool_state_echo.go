@@ -1,40 +1,9 @@
 package service
 
-// state-echo 判据：在业务请求上就地判这一发的上游路由有没有降智。
-//
-// 判据本体（docs/conventions/codex-full-strength-tickets.md 第一节，2026-10-01 实证，与人工
-// 「糖果题」10/10 一致）：带着一张**活的** turn-state 再打一发，只读响应头 ——
-//
-//	送了票 + 上游不回新票（或回的和送出去的那张一样）  ⇒ 满血
-//	送了票 + 上游回了一张**不同的**新票              ⇒ 降智
-//	没送票                                          ⇒ 判不出来（上游对没带票的请求必然铸一张新的，
-//	                                                  那不是回声）
-//
-// 两条判据纪律，都是实测踩出来的，不许省：
-//
-//  1. **HTTP 必须是 200 才下结论。** 作者原版（relay/index.js:832 verifyStateOnce）把 429/403 走
-//     「正常响应」分支，响应头里自然没有 turn-state ⇒ 判成满血，12 发里撞出 2 发假「满血」。
-//     反向同理：429/5xx 带回一张新票**不算**降智证据 —— 那是限流/故障，不是路由质量。
-//  2. **有假阴性、无假阳性。** 满血号偶尔也会下发新票（用户 2026-10-01 确认）⇒ 判「满血」可信，
-//     判「降智」可能偏严。所以这个判据会偶尔白换一次网关、白烧一个槽位，而供给是个位数张/小时。
-//     误判的代价由票龄分档吸收（gatewayPoolEchoStrikes）。防护默认开启，
-//     openai_gwpool_guard_enabled 显式为 false 时跳过预检与业务判据。
-//
-// 判到降智之后做两件事，都刻意不碰别的子系统：
-//
-//   - 把当前 (身份 → pair) 缓存项标成 **Stale**（gatewayPoolMarkStale）⇒ 下一次取票天然带
-//     force=1 + exclude_versions，换一个网关。复用 openai_gwpool.go 已有的三态，不另造机制。
-//   - 按本地账本记一笔「这个上游账号碰过这个网关」（按 chatgpt:<account_id> 收敛，不按 sub2api
-//     的账号行 —— 同一份凭据挂在克隆行上时按行记会让每行都以为自己还有窗口）。
-//
-// **刻意不做的三件事**：
-//   - 不回报给网关池。池子那条回报路径（/touch）是刻意删掉的，理由见 openai_gwpool.go 文件头。
-//   - 不接进账号熔断 / 选号。降智是**路由**质量，不是账号故障；接进去会让一次误判停掉一个账号。
-//     实现上由 errOpenAIGatewayPoolRouteDegraded 包着 gwpool.ErrPool 保证
-//     （classifyUpstreamTransportError 对 ErrPool 豁免停调度），而 (账号 × 模型) 那套瞬时熔断
-//     只在拿到**上游状态码**的路径上记（openai_account_runtime_block_fastpath.go，且只对
-//     apikey / cpr 类型），传输层错误走不到它。
-//   - 不改 routePairOf 的信任边界筛选。
+// 业务 state 被刷新后，以最新 state 连续确认最多 3/2/1 发。
+// 仅 HTTP 200 可下结论；任一确认接受即保留原业务响应，全刷新才丢票。
+// 此处沿用项目 state-echo 启发式，不把它宣称为模型能力证明。
+// 错误/取消/票关联变化为未知，严格防护阻止交付但不计降级。
 
 import (
 	"context"
@@ -47,27 +16,10 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 )
 
-// 降智防护**没有档位**：接了网关池的账号一律走「业务请求只落在验过满血的槽上」
-// （openai_gwpool_warm.go 的预热 + 这里的判据兜底）。
-//
-// 2026-10-03 把三档删成零档，用户的理由是「用我们网关的就是为了满血，其它档没意义」：
-//
-//	off    不判、降智原样交给客户端 —— 和接网关池这件事本身矛盾
-//	cut    判到降智就截断让客户端自己重发 —— 判据对首轮请求结构性失效（没送 turn-state ⇒
-//	       没有回声 ⇒ 判不出来，见 gatewayPoolRouteDegraded），所以它拦不住首轮那一发降智
-//	retry  2026-10-02 先删的那档：重发走 AttachRoute 换一张**没验过**的票就把用户的 prompt
-//	       打出去，「客户端无感」实际是「降智静默交付」
-//
-// 三个老键（openai_gwpool_guard / openai_gwpool_state_echo / openai_gwpool_degraded_retries）
-// 一律**不再读**。存量行里留着它们是无害的死键，但要知道后果：显式配过 `guard: "off"` 的行
-// 升级后开始跑判据 + 预热，会开始花票。这是用户拍的取舍，不是疏漏。
-// gatewayPoolDegradedClientMsg 原样进网关客户端的错误响应与 Ops 错误日志（转发面没有 i18n 协商
-// 通道，与 gatewayPoolNoSlotClientMsg 同口径）。只说类别：票本体、cookie 本体一个字都不许出现。
-const gatewayPoolDegradedClientMsg = "这一发的上游路由已降智（带着活 turn-state 又收到一张新的），" +
-	"当前网关已标记为要换，本次按失败处理（绝不把降智结果交给客户端），稍后重试即可" +
-	" / This request's upstream route is degraded (a live turn-state came back with a fresh one), " +
-	"the current gateway is marked for rotation and this request fails instead of serving a " +
-	"degraded answer; retry shortly"
+// 默认开；仅 guard_enabled=false 关闭，旧 guard/state_echo/retries 键不再读取。
+// 错误响应只说类别，不携带 state、cookie 或上游身份。
+const gatewayPoolDegradedClientMsg = "上游路由连续 state-echo 确认均被刷新，当前网关已标记为要换，本次不交付业务结果" +
+	" / All state-echo confirmations refreshed the state; the route is marked for rotation and the business response is withheld"
 
 // errOpenAIGatewayPoolRouteDegraded 走的是**和池子 503 完全同一条**失败路径。
 //
@@ -123,57 +75,61 @@ func (s *OpenAIGatewayService) gatewayPoolRouteDegraded(
 	request *http.Request,
 	resp *http.Response,
 	account *Account,
-) bool {
+	proxyURL, identity string,
+	sentAt time.Time,
+) (bool, error) {
 	if s == nil || request == nil || resp == nil || !account.gatewayPoolGuardEnabled() {
-		return false
+		return false, nil
 	}
 	applied := openAIGatewayPoolSinkFrom(request.Context()).snapshot()
 	if applied.Cookie == "" || applied.AccountID != account.ID {
-		return false
+		return false, nil
 	}
 	// 纪律 1：非 200 一律不下结论。429/5xx 带回新票是限流/故障的副产物，不是路由质量读数。
 	if resp.StatusCode != http.StatusOK {
-		return false
+		return false, nil
+	}
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == "__oailb" {
+			actual := openAICodexRouteGateway("__oailb=" + cookie.Value)
+			if actual != "" && actual != applied.Gateway {
+				return false, errOpenAIGatewayPoolWarmUnverified
+			}
+		}
 	}
 	sent := strings.TrimSpace(request.Header.Get(openAICodexTurnStateHeader))
 	if sent == "" {
 		// 没送票 ⇒ 没有回声。上游对不带票的请求 87% 会铸一张新的（openai_codex_turn_state_auto.go
 		// 的实测），拿它当降智证据等于把绝大多数首轮请求判死。
-		return false
+		return false, nil
 	}
 	fresh := extractOpenAICodexTurnState(resp.Header)
 	refreshed := fresh != "" && fresh != sent
-	// 两个方向都记：走到这里就是一个**有结论**的读数，而账号卡片上「这个落点验过是满血」
-	// 和「没验过」是两回事（openai_gwpool_gateway_history.go）。满血那条只有这里产出。
-	verdict := openAIGatewayVerdictFull
 	if refreshed {
-		verdict = openAIGatewayVerdictDegraded
+		// Freeze this business contact before confirmations update the same
+		// round. Confirmation traffic is not a new initial-quality sample.
+		s.noteGatewayPoolBusinessContact(request, account, identity, applied, sentAt, resp)
+		full, conclusive, err := s.gatewayPoolConfirmResponse(request, account, proxyURL, identity, fresh, applied)
+		if err != nil || !conclusive {
+			return false, errOpenAIGatewayPoolWarmUnverified
+		}
+		refreshed = !full
 	}
-	openAIGatewayPoolSinkFrom(request.Context()).noteVerdict(applied.Gateway, verdict)
 	if !refreshed {
-		s.noteGatewayPoolCooldownVerdict(request.Context(), account, applied, openAIGatewayVerdictFull)
+		openAIGatewayPoolSinkFrom(request.Context()).noteVerdict(applied.Gateway, openAIGatewayVerdictFull)
+		// The initial A/B already trained this ticket's successful cooldown.
+		// Do not add another learning event before the final delivery check.
 	}
-	return s.gatewayPoolEchoStrike(request, account, applied, refreshed)
+	return refreshed, nil
 }
 
-// 半程 state-echo 的两个票龄分界。
+// 轮开始时冻结确认次数：首次实际出站以来 <90s:3，90–140s:2，>=140s:1。
 const (
 	gatewayPoolEchoYoungAge = 90 * time.Second
 	gatewayPoolEchoMidAge   = 140 * time.Second
 )
 
-// gatewayPoolEchoStrikes 是这个票龄下要**连着**几发被刷新才判这条路由降智。
-//
-//	票龄 < 90s    3 发（含这一发）
-//	90s – 140s    2 发
-//	140s 以上     1 发 —— 被刷新就认窗口到点了
-//
-// 为什么越老越信一次刷新：判据只有假阴、没有假阳（SPEC 第 3 节），而窗口刚开的时候
-// 被刷新更可能就是那个假阴；快到点时被刷新本来就是窗口正常结束，再花几发去确认是白花。
-//
-// **上界刻意开口**（140s 以上，而不是 140–180s）：满血窗口实测是「约 183 秒」不是精确
-// 183 秒（2026-10-02 的测量纪律：窗口不是固定 183s）。写死上界的话一张活得更久的票在
-// 180 秒之后会掉进一个没定义的格子里；开口之后活得久的票只要**不**被刷新就一直能用。
+// 不含原业务那一发，不跨业务累计，确认时每发跟随最新 state。
 func gatewayPoolEchoStrikes(age time.Duration) int {
 	switch {
 	case age < gatewayPoolEchoYoungAge:
@@ -185,64 +141,6 @@ func gatewayPoolEchoStrikes(age time.Duration) int {
 	}
 }
 
-// gatewayPoolEchoStrike 记一次回声读数，返回「这条路由判定降智了吗」。
-//
-// 这就是「半程 state-echo」：被刷新一次**不**判死，要按票龄连着几发才算
-// （gatewayPoolEchoStrikes）。它一发上游都不打 —— 验据就是业务请求自己的响应头，
-// 比请求前的两发探测（openai_gwpool_warm.go）便宜得多。
-//
-// 代价要说清楚：没攒满之前这一发会**照常交给客户端**，所以 queue 档「绝不把降智结果
-// 交给客户端」在窗口刚开那 90 秒里松动成「连着三发都说降智才认」。这是刻意的 ——
-// queue 档的那张票是请求之前刚验过满血的，用一次有假阴的读数去推翻一个刚拿到的
-// 阳性结论，比放过去两发更可能是错的。
-//
-// 身份解析不出来就按**最严**办（判死）：那说明这个号的凭证域身份坏了，而这条路上
-// 我们宁可少服务一发，也不要把降智当满血放出去。
-func (s *OpenAIGatewayService) gatewayPoolEchoStrike(
-	request *http.Request,
-	account *Account,
-	applied OpenAIGatewayPoolApplied,
-	refreshed bool,
-) bool {
-	if !refreshed {
-		// 归零也要落笔：中间夹一发满血就说明这条路由还好着。
-		// 身份解析失败时无处可记，而「不记」对满血读数没有坏处（计数只会偏大一点）。
-		if identity, err := s.codexCookies.gatewayPoolIdentity(request.Context(), account); err == nil {
-			s.codexCookies.gatewayPoolNoteEcho(identity, applied.Version, applied.Gateway, false)
-		}
-		return false
-	}
-	identity, err := s.codexCookies.gatewayPoolIdentity(request.Context(), account)
-	if err != nil {
-		slog.Warn("gwpool_echo_identity_failed", "account_id", account.ID,
-			"gateway", applied.Gateway, "age_s", -1, "misses", 1, "need", 1, "reason", "identity_unavailable",
-			"fallback", "judge degraded on the first refresh")
-		return true
-	}
-	misses, age := s.codexCookies.gatewayPoolNoteEcho(identity, applied.Version, applied.Gateway, true)
-	if misses == 0 {
-		// 缓存里已经是另一张票了（并发换过、还过）⇒ 这一发的读数无处可归。
-		// 按最严办：这一发确实带着活票收到了一张新的。
-		slog.Warn("gwpool_echo_discard", "account_id", account.ID, "gateway", applied.Gateway,
-			"age_s", -1, "misses", 0, "need", 1, "reason", "ticket_association_changed")
-		return true
-	}
-	need := gatewayPoolEchoStrikes(age)
-	if misses >= need {
-		slog.Info("gwpool_echo_discard", "account_id", account.ID, "gateway", applied.Gateway,
-			"age_s", int(age.Seconds()), "misses", misses, "need", need, "reason", "consecutive_refresh_threshold")
-		return true
-	}
-	slog.Info("gwpool_echo_strike",
-		"account_id", account.ID,
-		"gateway", applied.Gateway,
-		"misses", misses,
-		"need", need,
-		"age_s", int(age.Seconds()),
-		"reason", "a live turn-state came back refreshed, but not enough times for this ticket age yet")
-	return false
-}
-
 // gatewayPoolMarkStale 把缓存里那张票的满血窗口按「已到点」处理。
 //
 // 不是删（gatewayPoolDropPair）：删掉之后下一发会走不带 force / 不带 exclude_versions 的
@@ -252,16 +150,24 @@ func (s *OpenAIGatewayService) gatewayPoolEchoStrike(
 // 票号对不上就什么都不做：那说明缓存里已经是另一张票了（并发换过、还过）。
 // 返回值是这张票的满血时长，0 = 没验过满血 / 没标上（见 gatewayPoolNoteFullWindow）。
 func (s *openAICodexCookieStore) gatewayPoolMarkStale(identity, version, gateway string) time.Duration {
+	held, _ := s.gatewayPoolMarkStaleMatched(identity, version, gateway, false)
+	return held
+}
+
+func (s *openAICodexCookieStore) gatewayPoolMarkStaleMatched(identity, version, gateway string, exact bool) (time.Duration, bool) {
 	if s == nil || identity == "" {
-		return 0
+		return 0, false
 	}
 	value, ok := s.poolPairs.Load(identity)
 	if !ok {
-		return 0
+		return 0, false
 	}
 	cached, isPair := value.(openAIGatewayPoolPair)
 	if !isPair {
-		return 0
+		return 0, false
+	}
+	if exact && !time.Now().Before(cached.until) {
+		return 0, false
 	}
 	// 票号对不上时**再按落点比一次**，别直接放弃。
 	//
@@ -271,64 +177,16 @@ func (s *openAICodexCookieStore) gatewayPoolMarkStale(identity, version, gateway
 	// 刚被判死的那条路由在窗口剩余时间里每一发都照走，force=1 也发不出去。
 	//
 	// 被判死的是**落点**不是票号：同一个网关换没换票都该换走，所以落点一致就照标。
-	if cached.version != version && (gateway == "" || cached.gateway != gateway) {
-		return 0
+	if cached.version != version && (exact || gateway == "" || cached.gateway != gateway) {
+		return 0, false
 	}
 	next := cached
 	next.until = time.Time{} // 零值早于任何时刻 ⇒ cachedPoolPair 判 Stale。
 	if !s.poolPairs.CompareAndSwap(identity, cached, next) {
-		return 0
+		return 0, false
 	}
-	// 这张票的满血窗口到此结束 ⇒ 记一个时长样本。两条降智路径（这里和预热的垫话判据）
-	// 都从这个漏斗过，所以样本只在这一处记。后台预热的开始时刻由这些样本的 p95 决定
-	// （openai_gwpool_prewarm.go）。放在 CAS 成功之后：没标上就不是「窗口在这一刻结束」。
-	return s.gatewayPoolNoteFullWindow(identity, cached.version)
-}
-
-// gatewayPoolNoteEcho 把一次回声读数记到缓存里那张票上，返回记完之后的连续刷新数
-// 和这张票的票龄。
-//
-// refreshed=false 要**归零**：窗口真烧完之后每一发都会被刷新，所以中间夹一发没被刷新的
-// 就说明这条路由还好着。不归零的话 刷新/满血/刷新 会被数成「连着两发」。
-//
-// 票号/落点的匹配和 gatewayPoolMarkStale 逐字同一条（并发 + 临期票交叠时票号会变，
-// 被判的是落点不是票号）。对不上就什么都不记、回 0：缓存里已经是另一张票了，
-// 把读数记到它头上等于拿上一条路由的历史判这一条。
-func (s *openAICodexCookieStore) gatewayPoolNoteEcho(
-	identity, version, gateway string, refreshed bool,
-) (int, time.Duration) {
-	if s == nil || identity == "" {
-		return 0, 0
-	}
-	// CAS 失败要重读重试：另一路请求同时在记自己那一发的读数，或者正在标 Stale。
-	// 单发 CAS 的那种写法会把「没抢到」静默读成「这一发没被刷新」，于是并发下
-	// 连续计数永远攒不满，降智判定再也不会触发。
-	for {
-		value, ok := s.poolPairs.Load(identity)
-		if !ok {
-			return 0, 0
-		}
-		cached, isPair := value.(openAIGatewayPoolPair)
-		if !isPair {
-			return 0, 0
-		}
-		if cached.version != version && (gateway == "" || cached.gateway != gateway) {
-			return 0, 0
-		}
-		age := time.Since(cached.firstSent)
-		next := cached
-		next.echoMisses = 0
-		if refreshed {
-			next.echoMisses = cached.echoMisses + 1
-		}
-		// 已经是 0 又要记 0：没得改，别白做一次 CAS（也别因为它失败就重来）。
-		if next.echoMisses == cached.echoMisses {
-			return next.echoMisses, age
-		}
-		if s.poolPairs.CompareAndSwap(identity, cached, next) {
-			return next.echoMisses, age
-		}
-	}
+	// CAS 成功后才结束这张票的统计窗口，避免重复记时。
+	return s.gatewayPoolNoteFullWindow(identity, cached.version), true
 }
 
 // dropDegradedGatewayPoolRoute 丢掉这一发降智的响应，并把当前网关标成要换。
@@ -345,7 +203,7 @@ func (s *OpenAIGatewayService) dropDegradedGatewayPoolRoute(
 	request *http.Request,
 	resp *http.Response,
 	account *Account,
-) {
+) bool {
 	// resp 非 nil 由调用约定保证（判成降智的前提就是拿到了响应）；Body 仍要判，合成响应可以没有。
 	if resp.Body != nil {
 		_ = resp.Body.Close()
@@ -356,7 +214,15 @@ func (s *OpenAIGatewayService) dropDegradedGatewayPoolRoute(
 	detached := context.WithoutCancel(request.Context())
 	if identity, err := s.codexCookies.gatewayPoolIdentity(detached, account); err == nil {
 		// 标 Stale 顺手量到这张票的满血时长 ⇒ 记进 sink，由用量侧落到这个网关的账本上。
-		held := s.codexCookies.gatewayPoolMarkStale(identity, applied.Version, applied.Gateway)
+		if request.Context().Err() != nil {
+			return false
+		}
+		held, marked := s.codexCookies.gatewayPoolMarkStaleMatched(identity, applied.Version, applied.Gateway, true)
+		if !marked {
+			return false
+		}
+		openAIGatewayPoolSinkFrom(request.Context()).noteVerdict(applied.Gateway, openAIGatewayVerdictDegraded)
+		applied.Verdict = openAIGatewayVerdictDegraded
 		applied.FullHeldMs = held.Milliseconds()
 		s.finishGatewayPoolContact(detached, account, identity, applied, held)
 		openAIGatewayPoolSinkFrom(detached).noteFullHeld(applied, held)
@@ -364,6 +230,8 @@ func (s *OpenAIGatewayService) dropDegradedGatewayPoolRoute(
 		// 4 小时内别再点这个落点」的依据。
 		s.codexCookies.gatewayPoolMarkUsed(identity, applied.Gateway)
 		s.noteGatewayPoolCooldownVerdict(detached, account, applied, openAIGatewayVerdictDegraded)
+	} else {
+		return false
 	}
 	sent := strings.TrimSpace(request.Header.Get(openAICodexTurnStateHeader))
 	// **不打 account_key**：它是 chatgpt:<上游 account_id>[:user:<user_id>]，含上游账号/用户
@@ -374,10 +242,11 @@ func (s *OpenAIGatewayService) dropDegradedGatewayPoolRoute(
 		"gateway", applied.Gateway,
 		"status", resp.StatusCode,
 		"sent_state_fingerprint", openAICodexTurnStateKey(sent),
-		"reason", "a live turn-state came back with a different one (state-echo): this route is degraded")
+		"reason", "all state-echo confirmations refreshed: rotate this route")
 	// 丢弃的这一发是一次真实上游请求：把读数留给用量侧落一条可审计的记录
 	// （openai_gateway_usage.go 的 RecordGatewayPoolDiscardedUsageLogs）。
 	openAIGatewayPoolSinkFrom(request.Context()).noteDiscarded(OpenAIGatewayPoolDiscardedAttempt{
 		Applied: applied,
 	})
+	return true
 }

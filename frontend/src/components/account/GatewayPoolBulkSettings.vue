@@ -1,0 +1,93 @@
+<template>
+  <section class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600" data-testid="bulk-gwpool">
+    <h3 class="font-medium">{{ t('admin.accounts.openai.gwpool') }}</h3>
+    <p class="input-hint">{{ t('admin.accounts.openai.gwpoolBulkHint') }}</p>
+    <div v-for="field in fields" :key="field.key" class="grid grid-cols-[auto_1fr] items-start gap-3">
+      <input
+        type="checkbox"
+        :data-testid="`bulk-gwpool-apply-${field.key}`"
+        :aria-label="t('admin.accounts.openai.gwpoolBulkApply', { field: t(`admin.accounts.openai.${field.label}`) })"
+        :checked="selected(field.key)"
+        class="mt-2 rounded border-gray-300 text-primary-600"
+        @change="toggle(field, ($event.target as HTMLInputElement).checked)"
+      />
+      <label class="space-y-1 text-xs">
+        <span>{{ t(`admin.accounts.openai.${field.label}`) }}</span>
+        <input
+          v-if="field.type === 'boolean'"
+          type="checkbox"
+          :data-testid="`bulk-gwpool-value-${field.key}`"
+          :disabled="!selected(field.key)"
+          :checked="modelValue[field.key] === true"
+          class="ml-3 rounded border-gray-300 text-primary-600"
+          @change="set(field.key, ($event.target as HTMLInputElement).checked)"
+        />
+        <select
+          v-else-if="field.type === 'model'"
+          class="input text-xs"
+          :data-testid="`bulk-gwpool-value-${field.key}`"
+          :disabled="!selected(field.key)"
+          :value="modelValue[field.key] ?? field.default"
+          @change="set(field.key, ($event.target as HTMLSelectElement).value)"
+        >
+          <option value="gpt-6-luna">Luna</option>
+          <option value="gpt-6-sol">Sol</option>
+          <option value="gpt-6-astra">Astra</option>
+          <option value="business">{{ t('admin.accounts.openai.gwpoolProbeModelBusiness') }}</option>
+        </select>
+        <input
+          v-else
+          class="input text-xs"
+          :data-testid="`bulk-gwpool-value-${field.key}`"
+          :type="field.type"
+          :disabled="!selected(field.key)"
+          :value="modelValue[field.key] ?? ''"
+          :min="field.type === 'number' ? 1 : undefined"
+          :max="field.max"
+          :step="field.type === 'number' ? 1 : undefined"
+          :placeholder="String(field.default)"
+          autocomplete="off"
+          @input="input(field, ($event.target as HTMLInputElement).value)"
+        />
+      </label>
+    </div>
+  </section>
+</template>
+
+<script setup lang="ts">
+import { useI18n } from 'vue-i18n'
+
+type Value = string | number | boolean | null
+type Field = { key: string; label: string; type: string; default: Value; max?: number }
+const props = defineProps<{ modelValue: Record<string, Value> }>()
+const emit = defineEmits<{ 'update:modelValue': [Record<string, Value>] }>()
+const { t } = useI18n()
+const fields: Field[] = [
+  { key: 'openai_gwpool', label: 'gwpool', type: 'boolean', default: true },
+  { key: 'openai_gwpool_guard_enabled', label: 'gwpoolGuard', type: 'boolean', default: true },
+  { key: 'openai_gwpool_base_url', label: 'gwpoolBaseUrl', type: 'url', default: '' },
+  { key: 'openai_gwpool_consumer_key', label: 'gwpoolConsumerKey', type: 'password', default: '' },
+  { key: 'openai_gwpool_probe_model', label: 'gwpoolProbeModel', type: 'model', default: 'gpt-6-luna' },
+  { key: 'openai_gwpool_gateway_window_s', label: 'gwpoolGatewayWindow', type: 'number', default: 3600, max: 86400 },
+  { key: 'openai_gwpool_warm_tickets', label: 'gwpoolWarmTickets', type: 'number', default: 5, max: 8 },
+  { key: 'openai_gwpool_fetch_timeout_s', label: 'gwpoolFetchTimeout', type: 'number', default: 25, max: 86400 },
+  { key: 'openai_gwpool_list_timeout_s', label: 'gwpoolListTimeout', type: 'number', default: 2, max: 86400 },
+  { key: 'openai_gwpool_rotation', label: 'gwpoolRotation', type: 'boolean', default: false },
+  { key: 'openai_gwpool_rotation_min_gateways', label: 'gwpoolRotationMinGateways', type: 'number', default: 1, max: 512 },
+  { key: 'openai_gwpool_auto_wait', label: 'gwpoolAutoWait', type: 'boolean', default: false },
+  { key: 'openai_gwpool_max_wait_s', label: 'gwpoolMaxWait', type: 'number', default: 120, max: 3600 }
+]
+const selected = (key: string) => Object.prototype.hasOwnProperty.call(props.modelValue, key)
+function set(key: string, value: Value) {
+  emit('update:modelValue', { ...props.modelValue, [key]: value })
+}
+function toggle(field: Field, checked: boolean) {
+  const next = { ...props.modelValue }
+  if (checked) next[field.key] = field.default
+  else delete next[field.key]
+  emit('update:modelValue', next)
+}
+function input(field: Field, value: string) {
+  set(field.key, field.type === 'number' ? (value === '' ? null : Number(value)) : value)
+}
+</script>

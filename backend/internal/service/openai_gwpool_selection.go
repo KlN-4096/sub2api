@@ -11,6 +11,7 @@ type gatewayPoolPreferenceKey struct{}
 
 type gatewayPoolAccountPreference struct {
 	verified  bool
+	current   bool
 	cooled    int
 	restFirst bool
 	lastTouch time.Time
@@ -30,6 +31,7 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 	}
 	prefs := gatewayPoolAccountPreferences{}
 	domains := map[int64]string{}
+	freshAccounts := map[int64]*Account{}
 	complete := true
 	checker := &defaultOpenAIAccountScheduler{service: s}
 	for i := range accounts {
@@ -41,6 +43,7 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 			complete = false
 			continue
 		}
+		s.codexCookies.poolRotationAccounts.Store(accounts[i].ID, gatewayPoolRotationAccount(account, *req.GroupID))
 		if !gatewayPoolRotationAccount(account, *req.GroupID) || !account.IsSchedulable() {
 			continue
 		}
@@ -55,6 +58,7 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 			continue
 		}
 		domains[account.ID] = gatewayPoolLedgerIdentity(identity)
+		freshAccounts[account.ID] = account
 		contacts := readGatewayPoolContacts(account, gatewayPoolLedgerTag(identity))
 		for _, seen := range contacts.Seen {
 			s.codexCookies.poolRounds.touch(identity, seen.LastAt)
@@ -91,6 +95,39 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 		}
 	}
 	shared, restFirst := s.codexCookies.poolRounds.snapshot(*req.GroupID, domains, complete)
+	holdDomains := map[int64]string{}
+	for id, domain := range domains {
+		if _, skip := req.ExcludedIDs[id]; skip {
+			continue
+		}
+		if state := gatewayPoolRotationFrom(ctx); state != nil {
+			if _, skip := state.attempted[id]; skip {
+				continue
+			}
+			if _, skip := state.domains[domain]; skip {
+				continue
+			}
+		}
+		holdDomains[id] = domain
+	}
+	current := s.codexCookies.poolRounds.current(*req.GroupID, holdDomains, complete)
+	if current != "" {
+		for id, domain := range domains {
+			if domain == current {
+				if s.gatewayPoolNoRemainingRoutes(ctx, freshAccounts[id]) {
+					s.codexCookies.poolRounds.exhaust(*req.GroupID, current, s.codexCookies.poolRounds.generation(*req.GroupID))
+					s.restGatewayPoolAccount(ctx, freshAccounts[id], current, *req.GroupID)
+					current = ""
+					for peerID, peerDomain := range domains {
+						if peerDomain == domain {
+							shared[peerID] = struct{}{}
+						}
+					}
+				}
+				break
+			}
+		}
+	}
 	if state := gatewayPoolRotationFrom(ctx); state != nil {
 		attempted := map[string]struct{}{}
 		for domain := range state.domains {
@@ -122,6 +159,14 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 			pref.restFirst, pref.lastTouch = true, s.codexCookies.poolRounds.lastTouch(domain)
 			prefs[id] = pref
 		}
+		if current != "" {
+			pref := prefs[id]
+			pref.current = domain == current
+			prefs[id] = pref
+			if domain != current && !pref.verified {
+				shared[id] = struct{}{}
+			}
+		}
 	}
 	if len(prefs) < 2 {
 		for _, pref := range prefs {
@@ -140,11 +185,14 @@ func gatewayPoolPreferences(ctx context.Context) gatewayPoolAccountPreferences {
 }
 
 func gatewayPoolPreferenceBetter(a, b gatewayPoolAccountPreference) bool {
-	if a.restFirst && b.restFirst && !a.lastTouch.Equal(b.lastTouch) {
-		return a.lastTouch.Before(b.lastTouch)
-	}
 	if a.verified != b.verified {
 		return a.verified
+	}
+	if a.current != b.current {
+		return a.current
+	}
+	if a.restFirst && b.restFirst && !a.lastTouch.Equal(b.lastTouch) {
+		return a.lastTouch.Before(b.lastTouch)
 	}
 	return a.cooled > b.cooled
 }

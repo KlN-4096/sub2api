@@ -30,6 +30,18 @@ const account = (gateways: unknown, extra: Record<string, unknown> = {}): Accoun
 
 const render = (acc: Account) => mount(AccountGatewayCell, { props: { account: acc } })
 
+it('网关落点在没有历史时也显示真实验证进度，失败不继续假装寻找', async () => {
+  const wrapper = mount(AccountGatewayCell, { props: { account: account(undefined), progress: {
+    phase: 'verifying', attempt: 2, limit: 5, rejected: 1, elapsed_ms: 8200,
+    started_at: new Date().toISOString(), updated_at: new Date().toISOString(), active_requests: 1
+  } } })
+  expect(wrapper.get('[data-testid="account-gateway-progress"]').text()).toContain('"attempt":2,"limit":5,"seconds":8')
+  await wrapper.setProps({ progress: undefined, progressUnavailable: true })
+  expect(wrapper.find('[data-testid="account-gateway-progress"]').exists()).toBe(false)
+  expect(wrapper.get('[data-testid="account-gateway-progress-unavailable"]').text()).toContain('unavailable')
+  wrapper.unmount()
+})
+
 // Deliberately not 183s or 100%: 3/5 full × 120s = 72 expected seconds per gateway.
 function accountWithSamples(history: { current: string; seen: Record<string, { at: string; region?: string }> }): Account {
   const rounds = [5 * 3600, 7 * 3600].flatMap((gap, bucket) => Array.from({ length: 5 }, (_, index) => ({
