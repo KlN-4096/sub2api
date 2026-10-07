@@ -77,7 +77,7 @@ func encodeCodexZstdRequestBody(body []byte) ([]byte, error) {
 	}
 	defer codexRequestZstdEncoders.Put(enc)
 	frame := enc.EncodeAll(body, make([]byte, 0, len(body)/3+64))
-	wire, err := normalizeCodexZstdFrameHeader(frame)
+	wire, err := normalizeOwnedCodexZstdFrameHeader(frame)
 	if err != nil {
 		return nil, fmt.Errorf("zstd compress codex request body: %w", err)
 	}
@@ -92,6 +92,16 @@ var (
 // normalizeCodexZstdFrameHeader 把编码器写出的帧头换成 libzstd 流式默认帧头，块内容原样保留。
 // 编码器窗口固定 2MB，块内偏移不会超过它，所以声明 2MB 窗口且不写内容长度对任何解码器都成立。
 func normalizeCodexZstdFrameHeader(frame []byte) ([]byte, error) {
+	return normalizeCodexZstdFrameHeaderWithOwnership(frame, false)
+}
+
+// Only EncodeAll's newly allocated output is owned. Never rewrite a caller's
+// plaintext body or a shared frame in place.
+func normalizeOwnedCodexZstdFrameHeader(frame []byte) ([]byte, error) {
+	return normalizeCodexZstdFrameHeaderWithOwnership(frame, true)
+}
+
+func normalizeCodexZstdFrameHeaderWithOwnership(frame []byte, owned bool) ([]byte, error) {
 	magic := len(codexZstdFrameMagic)
 	if len(frame) < magic+1 || !bytes.Equal(frame[:magic], codexZstdFrameMagic) {
 		return nil, errors.New("unexpected zstd frame magic")
@@ -119,6 +129,16 @@ func normalizeCodexZstdFrameHeader(frame []byte) ([]byte, error) {
 	}
 	if len(frame) < magic+headerLen {
 		return nil, errors.New("short zstd frame header")
+	}
+	if headerLen == len(codexZstdStreamFrameHeader) && bytes.Equal(frame[magic:magic+headerLen], codexZstdStreamFrameHeader) {
+		return frame, nil
+	}
+	if owned {
+		// Every accepted frame has at least a two-byte header. The normalized
+		// header is never longer, so the block payload can move left in place.
+		length := magic + len(codexZstdStreamFrameHeader) + copy(frame[magic+len(codexZstdStreamFrameHeader):], frame[magic+headerLen:])
+		copy(frame[magic:], codexZstdStreamFrameHeader)
+		return frame[:length], nil
 	}
 	out := make([]byte, 0, len(frame)-headerLen+len(codexZstdStreamFrameHeader))
 	out = append(out, codexZstdFrameMagic...)

@@ -204,3 +204,46 @@ func TestNormalizeCodexZstdFrameHeaderRejectsFlagBits(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeOwnedCodexZstdFrameMatchesCopyWithoutChangingInputContract(t *testing.T) {
+	body := forkPerformanceBody(1 << 20)
+	enc, ok := codexRequestZstdEncoders.Get().(*zstd.Encoder)
+	require.True(t, ok)
+	defer codexRequestZstdEncoders.Put(enc)
+	frame := enc.EncodeAll(body, nil)
+	before := bytes.Clone(frame)
+	want, err := normalizeCodexZstdFrameHeader(frame)
+	require.NoError(t, err)
+	require.Equal(t, before, frame, "non-owned normalization must not mutate its input")
+	got, err := normalizeOwnedCodexZstdFrameHeader(frame)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	require.Same(t, &frame[0], &got[0])
+	again, err := normalizeCodexZstdFrameHeader(got)
+	require.NoError(t, err)
+	require.Same(t, &got[0], &again[0])
+	decoder, err := zstd.NewReader(nil)
+	require.NoError(t, err)
+	defer decoder.Close()
+	decoded, err := decoder.DecodeAll(got, nil)
+	require.NoError(t, err)
+	require.Equal(t, body, decoded)
+	for _, malformed := range [][]byte{nil, {0x28, 0xb5, 0x2f, 0xfd, 0x80}, {0x28, 0xb5, 0x2f, 0xfd, 0x04, 0x58}} {
+		before := bytes.Clone(malformed)
+		_, err := normalizeOwnedCodexZstdFrameHeader(malformed)
+		require.Error(t, err)
+		require.Equal(t, before, malformed, "validate before mutating")
+	}
+	for _, header := range [][]byte{
+		{0x00, 0x50}, {0x20, 0x10}, {0x40, 0x58, 0x00, 0x01}, {0x60, 0x00, 0x01},
+		{0x80, 0x58, 1, 0, 0, 0}, {0xc0, 0x58, 1, 0, 0, 0, 0, 0, 0, 0},
+	} {
+		frame := append(bytes.Clone(codexZstdFrameMagic), header...)
+		frame = append(frame, 1, 2, 3, 4, 5)
+		want, err := normalizeCodexZstdFrameHeader(frame)
+		require.NoError(t, err)
+		got, err := normalizeOwnedCodexZstdFrameHeader(frame)
+		require.NoError(t, err)
+		require.Equal(t, want, got, "all supported header length variants keep exact block bytes")
+	}
+}

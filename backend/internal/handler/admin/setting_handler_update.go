@@ -497,6 +497,10 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		return
 	}
 	var req UpdateSettingsRequest
+	if _, legacy := sentFields[service.SettingKeyOpenAIGatewayPoolActiveAccounts]; legacy {
+		response.BadRequest(c, "openai_gwpool_active_accounts is now configured per group")
+		return
+	}
 	if err := c.ShouldBindBodyWith(&req, binding.JSON); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return

@@ -32,7 +32,7 @@ func TestGatewayPoolRecommendationsRefreshCurrentCycleButNotFixed(t *testing.T) 
 	c.FixedSeconds, c.Successes = 3600, map[int]int{3600: 2}
 	store.poolCooldown[gatewayPoolLedgerKey(gwpoolTestIdentity, "unified-142")] = c
 	store.noteGatewayPoolRecommendation(gwpoolTestIdentity, "unified-142", rec)
-	store.observeGatewayPoolCooldown(gwpoolTestIdentity, "unified-142", openAIGatewayVerdictFull, time.Hour, true)
+	store.observeGatewayPoolCooldown(gwpoolTestIdentity, "unified-142", openAIGatewayVerdictFull, time.Hour, time.Time{}, true)
 	c, _ = store.cooldownEntry(gwpoolTestIdentity, "unified-142")
 	require.Equal(t, 3600, c.WindowSeconds, "本地已学到的固定档优先")
 }

@@ -662,6 +662,7 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		AllowLive:                       input.AllowLive,
 		ForceOpenAIFast:                 input.ForceOpenAIFast,
 		FreeOpenAIFast:                  input.FreeOpenAIFast,
+		OpenAIGatewayPoolActiveAccounts: gatewayPoolActiveAccountsDefault,
 		RequireOAuthOnly:                input.RequireOAuthOnly,
 		RequirePrivacySet:               input.RequirePrivacySet,
 		DefaultMappedModel:              input.DefaultMappedModel,
@@ -674,6 +675,12 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		MaxReasoningEffort:          maxReasoningEffort,
 		MaxReasoningEffortOverLimit: maxReasoningEffortOverLimit,
 		ReasoningEffortMappings:     reasoningEffortMappings,
+	}
+	if input.OpenAIGatewayPoolActiveAccounts != nil {
+		if err := validateGatewayPoolActiveAccounts(*input.OpenAIGatewayPoolActiveAccounts); err != nil {
+			return nil, err
+		}
+		group.OpenAIGatewayPoolActiveAccounts = *input.OpenAIGatewayPoolActiveAccounts
 	}
 	sanitizeGroupMessagesDispatchFields(group)
 	sanitizeGroupOpenAIFast(group)
@@ -1040,6 +1047,12 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 	}
 	if input.FreeOpenAIFast != nil {
 		group.FreeOpenAIFast = *input.FreeOpenAIFast
+	}
+	if input.OpenAIGatewayPoolActiveAccounts != nil {
+		if err := validateGatewayPoolActiveAccounts(*input.OpenAIGatewayPoolActiveAccounts); err != nil {
+			return nil, err
+		}
+		group.OpenAIGatewayPoolActiveAccounts = *input.OpenAIGatewayPoolActiveAccounts
 	}
 	if input.RequireOAuthOnly != nil {
 		group.RequireOAuthOnly = *input.RequireOAuthOnly
