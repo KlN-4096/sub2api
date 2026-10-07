@@ -85,7 +85,7 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 				return true
 			}
 			known = true
-			if _, cooling := s.codexCookies.gatewayPoolUsedAt(identity, gateway, account.gatewayPoolGatewayWindow()); !cooling {
+			if _, cooling := s.codexCookies.gatewayPoolUsedAt(identity, gateway, account.gatewayPoolGatewayWindow(), account.gatewayPoolUseRecommendation()); !cooling {
 				pref.cooled++
 			}
 			return true

@@ -521,7 +521,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		// PoolLive 不受 landed 影响：它是整个池子的读数，和这一发落到哪儿无关。
 		s.noteOpenAIGatewayUse(ctx, account, *usageLog.RouteGateway, region, verdict, true,
 			result.GatewayPoolApplied.PoolLive, result.GatewayPoolApplied.PoolFree,
-			result.GatewayPoolApplied.FullHeldMs)
+			result.GatewayPoolApplied.FullHeldMs, result.GatewayPoolApplied.LedgerTag)
 	}
 	isVideoUsage := isGrokVideoUsageResult(result, billingModels)
 	if isVideoUsage {

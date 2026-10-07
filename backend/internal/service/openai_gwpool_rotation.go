@@ -152,12 +152,17 @@ func (s *OpenAIGatewayService) gatewayPoolNoRemainingRoutes(ctx context.Context,
 		if !gateway.PairReady {
 			continue
 		}
-		_, cooling := s.codexCookies.gatewayPoolUsedAt(identity, gateway.Name, account.gatewayPoolGatewayWindow())
+		_, cooling := s.codexCookies.gatewayPoolUsedAt(identity, gateway.Name, account.gatewayPoolGatewayWindow(), account.gatewayPoolUseRecommendation())
 		if !cooling && !gateway.UsedByYou {
 			available[gateway.Name] = struct{}{}
 		}
 	}
 	after, pending, _ := s.codexCookies.gatewayPoolInventoryCandidates(identity, account)
+	if len(available) == 0 && !pending && after == generation &&
+		len(s.codexCookies.gatewayPoolEarlyCandidates(account, identity, gateways)) > 0 &&
+		s.codexCookies.gatewayPoolEarlyDue(ctx, account, identity) {
+		return false // read-only admission; only the later foreground fetch spends budget
+	}
 	return len(available) < account.gatewayPoolRotationMinGateways() && !pending && after == generation
 }
 

@@ -1,6 +1,8 @@
 export default {
     accounts: {
       title: 'Account Management',
+      upstreamRecordingTitle: 'Upstream interaction recording (not recommended)',
+      upstreamRecordingHint: 'Off by default and independent of the gateway pool. Records only this account’s OpenAI/Codex interactions. Sensitive conversation bodies and routing data are encrypted on disk, increasing resource and storage usage; authentication headers are excluded. Records application data actually sent/read without draining canceled or early-closed responses. The per-instance default limit is 2 GiB; collection stops and warns in service logs at capacity. No log viewer is provided; server administrator export is required.',
       description: 'Manage AI platform accounts and credentials',
       createAccount: 'Create Account',
       autoRefresh: 'Auto Refresh',
@@ -629,7 +631,23 @@ export default {
       },
       // OpenAI specific hints
       openai: {
+        gwpoolMemberIsolation: 'Partition gateway records by workspace + member (experimental)',
+        gwpoolUseRecommendation: 'Use pool-recommended cooldown (off by default)',
+        gwpoolUseRecommendationDesc: 'When off, use local configuration and learned backoff only. Recommendations may add waiting but never erase a failure lower bound; fixed cooldowns take priority. Legacy mixed records keep their existing period until a real new cycle.',
+        gwpoolMemberIsolationDesc: 'Off by default. Partition only sub2api gateway records and the gwpool consumer reference by the access-token workspace/user pair. Upstream workspace headers and session identity stay unchanged; undecodable tokens use the previous policy. This does not prove independent upstream cooldowns.',
+        gatewayRuntime: {
+          live: 'Live ticket {gateway} · lease {seconds}s left · verified models: {models}',
+          unverified: 'not verified',
+          active: '{model} round total {full}/{attempted} verified/attempted tickets · {seconds}s elapsed',
+          history: 'Usage history (latest 100 rounds + archived totals)',
+          hint: 'Per model and deduplicated ticket, starting at the actual foreground attempt including A/B. Ends when zero candidates and no live, spare or in-flight work are observed. Includes idle time, not a measured capability lifetime. Verification does not transfer across models.',
+          ended: '{model} {full}/{attempted} verified/attempted · {seconds}s · started {start}, exhaustion observed {end}',
+          archived: '{model}: {count} archived rounds · {full}/{attempted} tickets · {seconds}s total',
+          incomplete: ' (details limited; counts are lower bounds)'
+        },
         gatewayProgress: {
+          run: 'Verification run #{id}',
+          waiting: 'Waiting to retry verification · {attempt}/{limit} attempts · {seconds}s elapsed',
           fetching: 'Fetching ticket {attempt}/{limit} · waiting {seconds}s',
           verifying: 'Verifying ticket {attempt}/{limit} · waiting {seconds}s',
           ready: 'Verified ticket found · {attempt}/{limit} · {seconds}s',
@@ -637,7 +655,7 @@ export default {
           unknown: 'Verification incomplete (supply, timeout or upstream error) · {attempt}/{limit}',
           cancelled: 'Request cancelled · {attempt}/{limit}',
           rejected: '{count} did not pass',
-          concurrent: '{count} waiting requests',
+          concurrent: '{count} requests in preflight (including this request)',
           unavailable: 'Live verification progress unavailable'
         },
         gwpoolRotation: 'Rotate accounts when gateway candidates are low',
@@ -645,9 +663,11 @@ export default {
         gwpoolRotationMinGatewaysDesc: '1–512; blank defaults to 1 (rotate at zero). Counts deliverable, non-cooling candidates, not verified full-strength tickets. Keep a live verified ticket; a failed listing is not zero.',
         gwpoolBulkHint: 'Only checked fields change; others keep each account’s own value. Clear a number for its default. An empty Key keeps the existing key. Runtime statistics are not copied.',
         gwpoolBulkApply: 'Change: {field}',
-        gwpoolAutoWait: 'Wait for tickets (off by default)',
-        gwpoolAutoWaitDesc: 'Before business transmission only, wait when no gateway, no live ticket or all gateways cooling prevents acquisition. Never replays sent business requests or retries authentication, rate-limit or other upstream failures. With rotation enabled, wait on this account first; switching still requires confirmed exhaustion.',
-        gwpoolMaxWait: 'Maximum ticket wait (seconds)',
+        gwpoolAutoWait: 'Wait for tickets or recoverable preflight failures (off by default)',
+        gwpoolEarlyProbe: 'Limited early probe when out of tickets (experimental, off by default)',
+        gwpoolEarlyProbeDesc: 'Only with waiting business traffic and no normal candidate outside local quality cooldown, try one gateway early. Reserve at most one A/B per credential domain every 30 minutes using the business model; use success immediately, never prewarm inventory. Cancellation or acquisition failure does not refund the reservation. An unwaited failure does not raise the cooldown tier; auth, rate limits and manual blocks remain enforced.',
+        gwpoolAutoWaitDesc: 'Bounded backoff before business transmission for missing tickets, cooling or recoverable verification transport failures. Never replays sent business requests. Caller cancellation, exhausted verification time/attempts, authentication and rate limits stop this retry. Rotation still requires confirmed exhaustion.',
+        gwpoolMaxWait: 'Cumulative wait per request (seconds)',
         gwpoolMaxWaitDesc: '1–3600 seconds, default 120 when empty; cumulative for this request, not reset each round. Client, reverse-proxy and first-output deadlines still apply, so a long connection is not guaranteed. Waiting does not increase the candidate count or active verification budget.',
         gwpoolProbeModel: 'State-echo probe model (experimental)',
         gwpoolProbeModelDefault: 'Default: Luna (gpt-6-luna)',
@@ -773,10 +793,10 @@ export default {
         gwpoolGatewayWindow: 'Initial cooldown (s)',
         gwpoolGatewayWindowDesc:
           'Default 3600 seconds (1 hour); accepts 1–24 hours. Cooldown is learned separately per account × gateway. Expiry permits another attempt; it does not guarantee recovery.',
-        gwpoolFetchTimeout: 'Pair fetch timeout (s)',
+        gwpoolFetchTimeout: 'Single pair-fetch timeout (s)',
         gwpoolFetchTimeoutDesc:
           'Default 25 seconds. Limits one ticket fetch, including preparation at the pool. Too short can cause fetch failures; too long increases request waits.',
-        gwpoolListTimeout: 'Gateway list timeout (s)',
+        gwpoolListTimeout: 'Single gateway-list timeout (s)',
         gwpoolListTimeoutDesc:
           'Default 2 seconds. Limits the candidate-list request. On failure or timeout, the pool selects a gateway; local cooldown still applies.',
         gwpoolWarmTickets: 'Foreground candidate limit',
@@ -851,7 +871,7 @@ export default {
           cooldownFixed: 'fixed {minutes}min',
           cooldownRecommended: 'pool suggests {minutes}min',
           legend:
-            '✓ recently verified full · ! local cooldown · grey retry eligible, recovery not yet confirmed',
+            '✓ current live ticket has model verification (models above) · ! local cooldown · grey retry eligible; historical full does not mean available now',
           // Two independent numbers, NO subtraction: "landings" comes from this row's ledger
           // (gateway names touched over the past window), "left in pool" is the current
           // deliverable listing reconciled against that ledger. The two sets do not nest.
@@ -882,7 +902,7 @@ export default {
           // state-echo verdict (backend openai_gwpool_state_echo.go).
           verdicts: {
             full: 'full',
-            fullExpired: 'previously full (window expired, not current availability)',
+            fullExpired: 'historically full (not current ticket or cross-model availability)',
             degraded: 'degraded',
             none: 'never judged'
           },

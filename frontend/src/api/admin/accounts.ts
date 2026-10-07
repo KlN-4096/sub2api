@@ -72,7 +72,8 @@ export async function list(
 }
 
 export interface GatewayPoolProgress {
-  phase: 'fetching' | 'verifying' | 'ready' | 'exhausted' | 'unknown' | 'cancelled'
+  run_id?: string
+  phase: 'idle' | 'fetching' | 'verifying' | 'waiting' | 'ready' | 'exhausted' | 'unknown' | 'cancelled'
   attempt: number
   limit: number
   rejected: number
@@ -81,6 +82,24 @@ export interface GatewayPoolProgress {
   updated_at: string
   elapsed_ms: number
   active_requests: number
+  runtime?: {
+    observed_at: string
+    tickets: Array<{ gateway: string; region: string; expires_at: string; verified_models: string[] }>
+    rounds: GatewayPoolUsageRound[]
+    archived: Record<string, { rounds: number; attempted: number; full: number; duration_ms: number; incomplete?: boolean }> | null
+    incomplete?: boolean
+  }
+}
+
+export interface GatewayPoolUsageRound {
+  id: string
+  model: string
+  started_at: string
+  ended_at?: string
+  end_reason?: string
+  attempted: number
+  full: number
+  incomplete?: boolean
 }
 
 export async function getGatewayPoolProgress(ids: number[], signal?: AbortSignal): Promise<Record<number, GatewayPoolProgress>> {
