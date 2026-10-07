@@ -753,9 +753,12 @@
         </div>
       </div>
 
-      <!-- OpenAI/Grok OAuth Model Mapping (OAuth 类型没有 apikey 容器，需要独立的模型映射区域) -->
+      <!-- OpenAI/Grok OAuth Model Mapping (OAuth 类型没有 apikey 容器，需要独立的模型映射区域)
+           cpr 同理：它的凭据容器只有 5 个输入框，此前整个弹窗找不到「模型限制」，
+           而后端 GetModelMapping() / IsModelSupported() 只读 credentials.model_mapping，
+           与账号类型无关，调度器筛候选集时对 cpr 一视同仁地跑这套逻辑。 -->
       <div
-        v-if="(account.platform === 'openai' || account.platform === 'grok') && account.type === 'oauth'"
+        v-if="((account.platform === 'openai' || account.platform === 'grok') && account.type === 'oauth') || (account.platform === 'openai' && account.type === 'cpr')"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
@@ -910,6 +913,35 @@
             placeholder="sk-..."
           />
           <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }}</p>
+        </div>
+      </div>
+
+      <!-- CPR 中继（密钥留空表示不修改） -->
+      <div v-if="account.type === 'cpr'" class="space-y-4">
+        <div>
+          <label class="input-label">{{ t('admin.accounts.cpr.baseUrl') }}</label>
+          <input v-model="editCprBaseUrl" type="text" class="input" placeholder="http://127.0.0.1:18081" />
+          <p class="input-hint">{{ t('admin.accounts.cpr.baseUrlHint') }}</p>
+        </div>
+        <div>
+          <label class="input-label">{{ t('admin.accounts.cpr.accountId') }}</label>
+          <input v-model="editCprAccountId" type="text" class="input font-mono" placeholder="acct_..." />
+          <p class="input-hint">{{ t('admin.accounts.cpr.accountIdHint') }}</p>
+        </div>
+        <div>
+          <label class="input-label">{{ t('admin.accounts.cpr.clientKey') }}</label>
+          <input v-model="editCprClientKey" type="password" autocomplete="off" class="input font-mono" placeholder="sk_..." />
+          <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }}</p>
+        </div>
+        <div>
+          <label class="input-label">{{ t('admin.accounts.cpr.adminApiKey') }}</label>
+          <input v-model="editCprAdminApiKey" type="password" autocomplete="off" class="input font-mono" placeholder="admin-..." />
+          <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }}</p>
+        </div>
+        <div>
+          <label class="input-label">{{ t('admin.accounts.cpr.adminBaseUrl') }}</label>
+          <input v-model="editCprAdminBaseUrl" type="text" class="input" :placeholder="editCprBaseUrl || 'http://127.0.0.1:18081'" />
+          <p class="input-hint">{{ t('admin.accounts.cpr.adminBaseUrlHint') }}</p>
         </div>
       </div>
 
@@ -1823,7 +1855,7 @@
 
       <!-- OpenAI Codex hosted image_generation bridge policy -->
       <div
-        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
+        v-if="accountHasOpenAIExtraSettings"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="overflow-hidden rounded-lg border border-sky-100 bg-sky-50/60 shadow-sm dark:border-sky-900/50 dark:bg-sky-950/20">
@@ -2271,7 +2303,7 @@
 
       <!-- OpenAI API 长上下文计费开关 -->
       <div
-        v-if="account?.platform === 'openai' && !isSparkShadow && !hideAccountLongContextBilling && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
+        v-if="accountHasOpenAIExtraSettings && !isSparkShadow && !hideAccountLongContextBilling"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between gap-4">
@@ -2433,7 +2465,7 @@
       </div>
 
       <div
-        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
+        v-if="accountHasOpenAIExtraSettings"
         class="border-t border-gray-200 pt-4 dark:border-dark-600 space-y-4"
       >
         <div class="flex items-center justify-between">
@@ -3298,6 +3330,20 @@ const selectableGroups = computed(() => {
 
 // Spark 影子账号(parent_account_id 非空):代理恒继承母账号,不可独立编辑(外审 B/P1),
 // 故隐藏代理选择器。
+// openai 平台上「后端确实会读这些 extra」的账号类型。cpr 必须在列：
+// 自动暂停阈值、长上下文计费、compact 模式、Codex 图像桥接在后端都只按 platform
+// 判定（shouldAutoPauseOpenAIAccountByQuota / openAILongContextBillingGate /
+// GetOpenAICompactMode / CodexImageGenerationBridgeOverride），漏掉 cpr 会让控件
+// 可见可改、保存却静默丢弃。
+// 回填与写入必须共用本判定：只改一头会造成「保存后一刷新变默认值」的假象。
+// 不含 cpr 的另两处（自动透传 v-if、WS 模式 v-if）是刻意的——后端
+// IsOpenAIPassthroughEnabled / ResolveOpenAIResponsesWebSocketV2Mode 对 cpr 硬返回 false。
+const hasOpenAIExtraSettings = (account?: { platform?: string; type?: string } | null): boolean =>
+  account?.platform === 'openai' &&
+  (account.type === 'oauth' || account.type === 'setup-token' || account.type === 'apikey' || account.type === 'cpr')
+
+const accountHasOpenAIExtraSettings = computed(() => hasOpenAIExtraSettings(props.account))
+
 const isSparkShadow = computed(() => props.account?.parent_account_id != null)
 
 const hideAccountLongContextBilling = computed(() => {
@@ -3419,6 +3465,12 @@ interface TempUnschedRuleForm {
 const submitting = ref(false)
 const editBaseUrl = ref('https://api.anthropic.com')
 const editApiKey = ref('')
+// CPR 中继：两把密钥留空表示保持不变，不回显明文。
+const editCprBaseUrl = ref('')
+const editCprAccountId = ref('')
+const editCprClientKey = ref('')
+const editCprAdminApiKey = ref('')
+const editCprAdminBaseUrl = ref('')
 
 // ── 国产供应商（Kimi / Zhipu / DeepSeek）account_mode / api_protocol 编辑 ──
 // account_mode 决定额度/余额监控路径，api_protocol 决定转发端点与格式；
@@ -4269,7 +4321,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   anthropicPassthroughEnabled.value = false
   anthropicAPIKeyAuthScheme.value = 'x_api_key'
   webSearchEmulationMode.value = 'default'
-  if (newAccount.platform === 'openai' && (newAccount.type === 'oauth' || newAccount.type === 'setup-token' || newAccount.type === 'apikey')) {
+  if (hasOpenAIExtraSettings(newAccount)) {
     openaiPassthroughEnabled.value = extra?.openai_passthrough === true || extra?.openai_oauth_passthrough === true
     openaiFlattenNamespacesEnabled.value =
       newAccount.type === 'oauth' && extra?.openai_responses_flatten_namespaces === true
@@ -4588,6 +4640,17 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   } else if (newAccount.type === 'upstream' && newAccount.credentials) {
     const credentials = newAccount.credentials as Record<string, unknown>
     editBaseUrl.value = (credentials.base_url as string) || ''
+  } else if (newAccount.type === 'cpr' && newAccount.credentials) {
+    const credentials = newAccount.credentials as Record<string, unknown>
+    editCprBaseUrl.value = (credentials.base_url as string) || ''
+    editCprAccountId.value = (credentials.cpr_account_id as string) || ''
+    editCprAdminBaseUrl.value = (credentials.admin_base_url as string) || ''
+    // 两把密钥不回显。
+    editCprClientKey.value = ''
+    editCprAdminApiKey.value = ''
+    // 模型白名单/映射与 oauth 同源：后端 GetModelMapping() / IsModelSupported()
+    // 只读 credentials.model_mapping，与账号类型无关。
+    loadModelRestrictionFromMapping(credentials.model_mapping as Record<string, unknown> | undefined)
   } else if ((newAccount.platform === 'gemini' || newAccount.platform === 'anthropic') && newAccount.type === 'service_account' && newAccount.credentials) {
     const credentials = newAccount.credentials as Record<string, unknown>
     editVertexProjectId.value = (credentials.project_id as string) || ''
@@ -5374,6 +5437,31 @@ const handleSubmit = async () => {
       }
 
       updatePayload.credentials = newCredentials
+    } else if (props.account.type === 'cpr') {
+      const currentCredentials = (props.account.credentials as Record<string, unknown>) || {}
+      const newCredentials: Record<string, unknown> = { ...currentCredentials }
+
+      newCredentials.base_url = editCprBaseUrl.value.trim().replace(/\/+$/, '')
+      newCredentials.cpr_account_id = editCprAccountId.value.trim()
+      if (editCprAdminBaseUrl.value.trim()) {
+        newCredentials.admin_base_url = editCprAdminBaseUrl.value.trim().replace(/\/+$/, '')
+      } else {
+        delete newCredentials.admin_base_url
+      }
+      // 留空 = 保持原值，避免清空后无法恢复。
+      if (editCprClientKey.value.trim()) {
+        newCredentials.api_key = editCprClientKey.value.trim()
+      }
+      if (editCprAdminApiKey.value.trim()) {
+        newCredentials.admin_api_key = editCprAdminApiKey.value.trim()
+      }
+
+      applyAccountSchedulingThresholdOverridePatch(newCredentials, currentCredentials)
+      if (!applyTempUnschedConfig(newCredentials)) {
+        return
+      }
+
+      updatePayload.credentials = newCredentials
     } else if (props.account.type === 'upstream') {
       const currentCredentials = (props.account.credentials as Record<string, unknown>) || {}
       const newCredentials: Record<string, unknown> = { ...currentCredentials }
@@ -5515,7 +5603,11 @@ const handleSubmit = async () => {
     }
 
     // OpenAI/Grok OAuth: persist model mapping to credentials
-    if ((props.account.platform === 'openai' || props.account.platform === 'grok') && props.account.type === 'oauth') {
+    if (
+      ((props.account.platform === 'openai' || props.account.platform === 'grok') &&
+        props.account.type === 'oauth') ||
+      (props.account.platform === 'openai' && props.account.type === 'cpr')
+    ) {
       const currentCredentials = isSparkShadow.value
         ? {}
         : (updatePayload.credentials as Record<string, unknown>) ||
@@ -5744,7 +5836,7 @@ const handleSubmit = async () => {
     }
 
     // For OpenAI OAuth/SetupToken/API Key accounts, handle passthrough mode in extra
-    if (props.account.platform === 'openai' && (props.account.type === 'oauth' || props.account.type === 'setup-token' || props.account.type === 'apikey')) {
+    if (hasOpenAIExtraSettings(props.account)) {
       const currentExtra = (props.account.extra as Record<string, unknown>) || {}
       const newExtra: Record<string, unknown> = { ...currentExtra }
       const hadCodexCLIOnlyEnabled = currentExtra.codex_cli_only === true
@@ -5763,10 +5855,14 @@ const handleSubmit = async () => {
         delete newExtra.openai_passthrough
         delete newExtra.openai_oauth_passthrough
       }
-      // 缺省即保留 namespace，不写空值，避免 extra 里堆积默认项
+      // 缺省即保留 namespace，不写空值，避免 extra 里堆积默认项。
+      // cpr 不在此处落键也不清键：这个开关没有对应 UI（表单 ref 恒为默认值），
+      // 而后端 shouldFlattenOpenAIResponsesNamespaces 对 cpr 同样生效——若某个
+      // cpr 账号经 API 设过该键，这里一律 delete 就会在保存时把它静默抹掉。
+      // （上面两个 WS 旧键对 cpr 无意义：后端对 cpr 的 WS 硬 false，照常清理。）
       if (props.account.type === 'oauth' && openaiFlattenNamespacesEnabled.value) {
         newExtra.openai_responses_flatten_namespaces = true
-      } else {
+      } else if (props.account.type !== 'cpr') {
         delete newExtra.openai_responses_flatten_namespaces
       }
       if (isSparkShadow.value) {

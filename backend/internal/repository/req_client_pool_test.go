@@ -150,9 +150,11 @@ func TestGetSharedReqClient_ImpersonateUsesFirefoxFingerprint(t *testing.T) {
 	require.NotContains(t, client.Headers.Get("User-Agent"), "Chrome/")
 }
 
-// Codex 客户端面（额度查询）不得带浏览器指纹：ImpersonateChrome 会连带
-// sec-ch-ua / sec-ch-ua-platform="macOS" / Chrome UA 一整套公共头，与推理面
-// 自报的 codex-tui 身份互相矛盾。对照 CreatePrivacyReqClient 确保本用例有区分力。
+// Codex 客户端面（额度查询）不得带浏览器指纹：浏览器伪装会连带一整套公共头与
+// 浏览器 UA，与推理面自报的 codex-tui 身份互相矛盾。
+// 对照 CreatePrivacyReqClient 确保本用例有区分力——它的伪装目标由
+// getSharedReqClient 决定（当前是 Firefox，历史上是 Chrome），所以对照断言只能盯
+// 「UA 是不是浏览器」，不能盯 sec-ch-ua 这种 Chromium 专有头。
 func TestCreateCodexBackendReqClientSendsNoBrowserFingerprint(t *testing.T) {
 	capture := func(build func(string) (*req.Client, error)) http.Header {
 		var got http.Header
@@ -179,13 +181,16 @@ func TestCreateCodexBackendReqClientSendsNoBrowserFingerprint(t *testing.T) {
 			t.Errorf("codex backend client 不应发浏览器头 %s=%q", h, v)
 		}
 	}
-	if ua := codex.Get("User-Agent"); strings.Contains(ua, "Chrome") {
-		t.Errorf("codex backend client 不应自报 Chrome UA: %q", ua)
+	for _, browser := range []string{"Chrome", "Firefox", "Safari"} {
+		if ua := codex.Get("User-Agent"); strings.Contains(ua, browser) {
+			t.Errorf("codex backend client 不应自报浏览器 UA（含 %s）: %q", browser, ua)
+		}
 	}
 
-	// 区分力对照：隐私设置那条路径仍然是 Chrome 伪装。
+	// 区分力对照：隐私设置那条路径确实在做浏览器伪装。
 	privacy := capture(CreatePrivacyReqClient)
-	if privacy.Get("sec-ch-ua") == "" {
-		t.Fatal("对照组失效：CreatePrivacyReqClient 未发 sec-ch-ua，本用例无法证明差异")
+	privacyUA := privacy.Get("User-Agent")
+	if !strings.Contains(privacyUA, "Firefox") && !strings.Contains(privacyUA, "Chrome") {
+		t.Fatalf("对照组失效：CreatePrivacyReqClient 未自报浏览器 UA(%q)，本用例无法证明差异", privacyUA)
 	}
 }

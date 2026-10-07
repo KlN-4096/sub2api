@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildGrokUsageRefreshKey, buildOpenAIUsageRefreshKey } from '../accountUsageRefresh'
+import { buildGrokUsageRefreshKey, buildOpenAIUsageRefreshKey, isOpenAICodexUsageAccount } from '../accountUsageRefresh'
 
 describe('buildOpenAIUsageRefreshKey', () => {
   it('会在 codex 快照变化时生成不同 key', () => {
@@ -157,5 +157,44 @@ describe('buildGrokUsageRefreshKey', () => {
       platform: 'openai',
       extra: { grok_usage_snapshot: { subscription_tier: 'SuperGrok' } }
     } as any)).toBe('')
+  })
+})
+
+describe('buildOpenAIUsageRefreshKey - cpr', () => {
+  // 回归：cpr 与 oauth 共用 codex_5h_* / codex_7d_*，只是数据源不同。
+  // 之前这里返回空串，导致 AccountUsageCell 的 watch 因 !prevKey 恒直接 return。
+  it('cpr 账号不返回空串，且额度变化时 key 变化', () => {
+    const base = {
+      id: 4,
+      platform: 'openai',
+      type: 'cpr',
+      updated_at: '2026-09-16T10:00:00Z',
+      last_used_at: '2026-09-16T09:59:00Z',
+      extra: {
+        codex_usage_updated_at: '2026-09-16T10:00:00Z',
+        codex_5h_used_percent: 0,
+        codex_7d_used_percent: 14
+      }
+    } as any
+
+    expect(buildOpenAIUsageRefreshKey(base)).not.toBe('')
+    expect(buildOpenAIUsageRefreshKey(base)).not.toBe(
+      buildOpenAIUsageRefreshKey({ ...base, extra: { ...base.extra, codex_7d_used_percent: 15 } })
+    )
+  })
+
+  it('仍然只对 openai 平台生效', () => {
+    expect(buildOpenAIUsageRefreshKey({ id: 5, platform: 'openai', type: 'apikey', extra: {} } as any)).toBe('')
+    expect(buildOpenAIUsageRefreshKey({ id: 6, platform: 'grok', type: 'cpr', extra: {} } as any)).toBe('')
+  })
+})
+
+describe('isOpenAICodexUsageAccount', () => {
+  it('oauth 与 cpr 都算 codex 额度账号，其余不算', () => {
+    expect(isOpenAICodexUsageAccount({ platform: 'openai', type: 'oauth' } as any)).toBe(true)
+    expect(isOpenAICodexUsageAccount({ platform: 'openai', type: 'cpr' } as any)).toBe(true)
+    expect(isOpenAICodexUsageAccount({ platform: 'openai', type: 'apikey' } as any)).toBe(false)
+    expect(isOpenAICodexUsageAccount({ platform: 'openai', type: 'setup-token' } as any)).toBe(false)
+    expect(isOpenAICodexUsageAccount({ platform: 'grok', type: 'oauth' } as any)).toBe(false)
   })
 })

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
@@ -30,16 +31,23 @@ func (s *OpenAIGatewayService) validateUpstreamBaseURL(raw string) (string, erro
 
 // validateOutboundURL 按 security.url_allowlist 策略校验网关主动连接的出站 URL。
 func (s *OpenAIGatewayService) validateOutboundURL(raw string) (string, error) {
-	if s.cfg == nil {
+	return validateOutboundURLWithConfig(s.cfg, raw)
+}
+
+// validateOutboundURLWithConfig 是上面那条策略的无接收者形态，供不持有
+// OpenAIGatewayService 的调用方（CPR 额度适配器）复用同一套白名单判定，
+// 避免出现"网关地址过校验、admin 地址不过"的不一致。
+func validateOutboundURLWithConfig(cfg *config.Config, raw string) (string, error) {
+	if cfg == nil {
 		return urlvalidator.ValidateURLFormat(raw, false)
 	}
-	if !s.cfg.Security.URLAllowlist.Enabled {
-		return urlvalidator.ValidateURLFormat(raw, s.cfg.Security.URLAllowlist.AllowInsecureHTTP)
+	if !cfg.Security.URLAllowlist.Enabled {
+		return urlvalidator.ValidateURLFormat(raw, cfg.Security.URLAllowlist.AllowInsecureHTTP)
 	}
 	return urlvalidator.ValidateHTTPSURL(raw, urlvalidator.ValidationOptions{
-		AllowedHosts:     s.cfg.Security.URLAllowlist.UpstreamHosts,
+		AllowedHosts:     cfg.Security.URLAllowlist.UpstreamHosts,
 		RequireAllowlist: true,
-		AllowPrivate:     s.cfg.Security.URLAllowlist.AllowPrivateHosts,
+		AllowPrivate:     cfg.Security.URLAllowlist.AllowPrivateHosts,
 	})
 }
 
@@ -69,7 +77,7 @@ func shouldPreserveOpenAIResponsesNoneReasoningEffort(account *Account) bool {
 	if account.IsOpenAIPassthroughEnabled() {
 		return true
 	}
-	if account.IsOpenAIOAuthLike() {
+	if account.TargetsChatGPTCodexUpstream() {
 		return true
 	}
 	if !account.IsOpenAIApiKey() {
@@ -887,7 +895,7 @@ func normalizeOpenAIAPIKeyStoreFalseReasoningReplayDecoded(body []byte, knownSto
 }
 
 func normalizeOpenAICodexCompactReasoningEffortForAccount(c *gin.Context, account *Account, body []byte) ([]byte, bool, error) {
-	if account == nil || !account.IsOpenAIOAuthLike() || !isOpenAIResponsesCompactPath(c) {
+	if account == nil || !account.TargetsChatGPTCodexUpstream() || !isOpenAIResponsesCompactPath(c) {
 		return body, false, nil
 	}
 
@@ -1964,6 +1972,7 @@ func evaluateOpenAIFastPolicyWithSettings(settings *OpenAIFastPolicySettings, us
 	}
 	isOAuth := account != nil && account.IsOAuth()
 	isBedrock := account != nil && account.IsBedrock()
+	isCPR := account != nil && account.IsCPR()
 
 	// 用户专属规则先于全局规则。规则组内仍按配置顺序首条命中，允许
 	// 管理员为某位用户配置例外，而不被先出现的全局规则覆盖。
@@ -1972,7 +1981,7 @@ func evaluateOpenAIFastPolicyWithSettings(settings *OpenAIFastPolicySettings, us
 			if (len(rule.UserIDs) > 0) != userScoped || !openAIFastPolicyUserMatches(rule.UserIDs, userID) {
 				continue
 			}
-			if !betaPolicyScopeMatches(rule.Scope, isOAuth, isBedrock) {
+			if !betaPolicyScopeMatches(rule.Scope, isOAuth, isBedrock, isCPR) {
 				continue
 			}
 			ruleTier := strings.ToLower(strings.TrimSpace(rule.ServiceTier))
