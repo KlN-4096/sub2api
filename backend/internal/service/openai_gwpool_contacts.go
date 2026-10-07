@@ -211,6 +211,10 @@ func (s *OpenAIGatewayService) changeGatewayPoolContacts(ctx context.Context, ac
 		slog.Warn("gwpool_contact_read_failed", "account_id", account.ID)
 		return
 	}
+	current, identityErr := s.codexCookies.gatewayPoolIdentity(ctx, fresh)
+	if identityErr != nil || gatewayPoolLedgerTag(current) != tag {
+		return
+	}
 	state := readGatewayPoolContacts(fresh, tag)
 	peers, err := s.accountRepo.FindByExtraField(ctx, openAIGatewayLedgerTagExtraKey, tag)
 	if err != nil {
@@ -381,6 +385,21 @@ func (s *OpenAIGatewayService) noteGatewayPoolProbeAndContact(ctx context.Contex
 	if observation.Shots == 0 {
 		return
 	}
+	if observation.Source == "foreground" {
+		s.noteGatewayPoolUsage(ctx, account, observation.Identity, observation.Model, observation.Applied,
+			observation.FirstSent, observation.Conclusive && observation.Full)
+		// Shared work owns the durable result even if its last caller left.
+		verdict := ""
+		if observation.Conclusive {
+			verdict = openAIGatewayVerdictDegraded
+			if observation.Full {
+				verdict = openAIGatewayVerdictFull
+			}
+			s.noteGatewayPoolCooldownVerdict(ctx, account, observation.Applied, verdict)
+		}
+		s.noteOpenAIGatewayUse(ctx, account, observation.Applied.Gateway, observation.Applied.Region, verdict, false,
+			observation.Applied.PoolLive, observation.Applied.PoolFree, observation.Applied.FullHeldMs, observation.Applied.LedgerTag)
+	}
 	outcome := "unknown"
 	if observation.Conclusive {
 		outcome = "refreshed"
@@ -419,4 +438,8 @@ func (s *OpenAIGatewayService) noteGatewayPoolBusinessContact(request *http.Requ
 	}
 	s.noteGatewayPoolContact(request.Context(), account, gatewayPoolContactEvent{Applied: applied, Identity: identity,
 		Model: gatewayPoolWarmModel(request), Source: "business", Outcome: outcome, FirstSent: started, LastSent: started})
+	if outcome == "full" && snapshot.Version == applied.Version {
+		s.codexCookies.gatewayPoolMarkVerifiedFull(identity, applied.Version, gatewayPoolWarmModel(request))
+	}
+	s.noteGatewayPoolUsage(request.Context(), account, identity, gatewayPoolWarmModel(request), applied, started, outcome == "full")
 }

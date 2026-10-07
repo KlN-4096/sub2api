@@ -98,6 +98,8 @@ func cloneAccountJSONMap(value map[string]any) (map[string]any, error) {
 }
 
 var duplicateAccountDiscardedExtraKeys = map[string]struct{}{
+	// Recording consent belongs to this account row, not its duplicate.
+	openAIUpstreamRecordingExtraKey: {},
 	// A retry identity belongs to the operation that created one copy, not to later copies.
 	duplicateAccountOperationIDExtraKey: {},
 	// External sync identity belongs to one local account only.
@@ -502,6 +504,9 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err := ValidateUpstreamRequestIDHeaderExtra(accountExtra); err != nil {
 		return nil, err
 	}
+	if err := validateOpenAIUpstreamRecordingExtra(input.Platform, accountExtra); err != nil {
+		return nil, err
+	}
 	if err := ValidateOpenAITurnStateOverrideExtra(accountExtra); err != nil {
 		return nil, err
 	}
@@ -623,7 +628,15 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if err != nil {
 			return nil, err
 		}
+		if _, provided := input.Extra[openAIUpstreamRecordingExtraKey]; !provided {
+			if enabled, ok := account.Extra[openAIUpstreamRecordingExtraKey].(bool); ok {
+				normalizedExtra[openAIUpstreamRecordingExtraKey] = enabled
+			}
+		}
 		if err := ValidateUpstreamRequestIDHeaderExtra(normalizedExtra); err != nil {
+			return nil, err
+		}
+		if err := validateOpenAIUpstreamRecordingExtra(account.Platform, normalizedExtra); err != nil {
 			return nil, err
 		}
 		if err := ValidateOpenAITurnStateOverrideExtra(normalizedExtra); err != nil {
@@ -992,6 +1005,18 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 	delete(updates, openAITurnStateObservedExtraKey)
 	// 网关池 consumer key：没带非空字符串就当没提，jsonb 合并天然不动库里那份。
 	mergeOpenAIGatewayPoolConsumerKey(nil, updates)
+	if _, exists := updates[openAIUpstreamRecordingExtraKey]; exists {
+		account, err := s.accountRepo.GetByID(ctx, id)
+		if err != nil {
+			return err
+		}
+		if account == nil {
+			return ErrAccountNotFound
+		}
+		if err := validateOpenAIUpstreamRecordingExtra(account.Platform, updates); err != nil {
+			return err
+		}
+	}
 	if _, exists := updates[openAILongContextBillingEnabledKey]; exists {
 		account, err := s.accountRepo.GetByID(ctx, id)
 		if err != nil {
@@ -1096,7 +1121,8 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 
 	// 预取所有目标账号，供凭据守卫/代理守卫/混合渠道检查共用，避免多次 DB 查询。
 	var cachedTargets []*Account
-	if len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil || touchesOpenAIGatewayPoolConfig(input.Extra) {
+	_, touchesRecording := input.Extra[openAIUpstreamRecordingExtraKey]
+	if len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil || touchesOpenAIGatewayPoolConfig(input.Extra) || touchesRecording {
 		loaded, err := s.accountRepo.GetByIDs(ctx, input.AccountIDs)
 		if err != nil {
 			return nil, err
@@ -1107,6 +1133,17 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	for _, account := range cachedTargets {
 		if account != nil {
 			targetsByID[account.ID] = account
+		}
+	}
+	if touchesRecording {
+		for _, id := range input.AccountIDs {
+			account := targetsByID[id]
+			if account == nil {
+				return nil, ErrAccountNotFound
+			}
+			if err := validateOpenAIUpstreamRecordingExtra(account.Platform, input.Extra); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if openAISettings.any() {

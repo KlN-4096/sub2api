@@ -11,9 +11,14 @@ import (
 )
 
 const (
-	gatewayPoolReportTimeout     = 3 * time.Second
-	gatewayPoolRecommendationTTL = time.Hour
+	gatewayPoolReportTimeout              = 3 * time.Second
+	gatewayPoolRecommendationTTL          = time.Hour
+	openAIGatewayPoolUseRecommendationKey = "openai_gwpool_use_recommended_cooldown"
 )
+
+func (a *Account) gatewayPoolUseRecommendation() bool {
+	return a != nil && a.getExtraBool(openAIGatewayPoolUseRecommendationKey)
+}
 
 type gatewayPoolRecommendation struct {
 	gwpool.CooldownRecommendation
@@ -32,18 +37,40 @@ func gatewayPoolAccountTag(account *Account, identity string) string {
 }
 
 func (s *openAICodexCookieStore) noteGatewayPoolRecommendation(identity, gateway string, recommendation *gwpool.CooldownRecommendation) {
-	key := gatewayPoolLedgerKey(identity, gateway)
-	if recommendation == nil || !recommendation.Valid() {
-		s.poolRecommendations.Delete(key)
-		return
-	}
-	s.poolRecommendations.Store(key, gatewayPoolRecommendation{
-		CooldownRecommendation: *recommendation, at: time.Now(),
-	})
+	s.noteGatewayPoolRecommendationAt(identity, gateway, recommendation, time.Now())
 }
 
-func (s *openAICodexCookieStore) gatewayPoolInitialCooldown(identity, gateway string, window time.Duration) (int, *gwpool.CooldownRecommendation) {
+func (s *openAICodexCookieStore) noteGatewayPoolRecommendationAt(identity, gateway string, recommendation *gwpool.CooldownRecommendation, observed time.Time) {
+	key := gatewayPoolLedgerKey(identity, gateway)
+	next := gatewayPoolRecommendation{at: observed}
+	if recommendation != nil && recommendation.Valid() {
+		next.CooldownRecommendation = *recommendation
+	}
+	for {
+		previous, loaded := s.poolRecommendations.Load(key)
+		if old, ok := previous.(gatewayPoolRecommendation); ok {
+			// Coarse clocks can tie. A withdrawal/shorter recommendation wins;
+			// an indistinguishably older ACK must never resurrect a longer wait.
+			if observed.Before(old.at) || (observed.Equal(old.at) && next.Seconds >= old.Seconds) {
+				return
+			}
+		}
+		if !loaded {
+			if _, raced := s.poolRecommendations.LoadOrStore(key, next); raced {
+				continue
+			}
+		} else if !s.poolRecommendations.CompareAndSwap(key, previous, next) {
+			continue
+		}
+		return
+	}
+}
+
+func (s *openAICodexCookieStore) gatewayPoolInitialCooldown(identity, gateway string, window time.Duration, enabled ...bool) (int, *gwpool.CooldownRecommendation) {
 	base := gatewayPoolCooldownBase(window)
+	if len(enabled) == 0 || !enabled[0] {
+		return base, nil
+	}
 	raw, ok := s.poolRecommendations.Load(gatewayPoolLedgerKey(identity, gateway))
 	if !ok {
 		return base, nil
