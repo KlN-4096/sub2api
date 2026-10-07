@@ -194,7 +194,7 @@ let requestVersion = 0
 const state = computed(() => status.value?.state || null)
 const isPoolRest = computed(() => status.value?.gateway_pool_rest === true || isGatewayPoolRestReason(state.value?.error_message))
 const displayUntil = computed(() => isPoolRest.value
-  ? Date.parse(cooldownEstimate.value?.eligible_at ?? '')
+  ? (state.value?.until_unix ? state.value.until_unix * 1000 : Date.parse(cooldownEstimate.value?.eligible_at ?? ''))
   : (state.value?.until_unix ?? 0) * 1000)
 
 const isActive = computed(() => {
@@ -271,7 +271,7 @@ const loadStatus = async () => {
     const result = await adminAPI.accounts.getTempUnschedulableStatus(accountID)
     if (version !== requestVersion) return
     status.value = result
-    if (isGatewayPoolRestReason(result.state?.error_message)) {
+    if (result.gateway_pool_rest || isGatewayPoolRestReason(result.state?.error_message)) {
       // Local-only snapshot: no pool listing, ticket fetch or model probe.
       try {
         const snapshot = await getGatewayPoolProgress([accountID])

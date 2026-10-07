@@ -23,7 +23,7 @@ func TestGatewayPoolCooldownEstimateIsUnclampedAndReadOnly(t *testing.T) {
 	require.Equal(t, now.Add(2*time.Hour), estimate.EligibleAt, "must not clamp to the next 10-minute recheck")
 	require.Equal(t, now, history.Seen["later"].Cooldown.UpdatedAt)
 	account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 3
-	require.True(t, store.gatewayPoolCooldownEstimate(gwpoolTestIdentity, account, history, now).EligibleAt.IsZero())
+	require.Equal(t, now.Add(2*time.Hour), store.gatewayPoolCooldownEstimate(gwpoolTestIdentity, account, history, now).EligibleAt)
 	account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 2
 	var cleared gatewayPoolCooldown
 	cleared.clearCooldown(now, 3600)

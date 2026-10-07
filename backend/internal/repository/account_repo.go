@@ -2511,7 +2511,8 @@ func (r *accountRepository) SetOverloaded(ctx context.Context, id int64, until t
 }
 
 // SetGatewayPoolRest persists the recovery latch and scheduling block as one
-// mutation. A longer unrelated block retains both its deadline and reason.
+// mutation. An active unrelated block retains both its deadline and reason;
+// local cooldown changes may shorten an existing pool-owned deadline.
 func (r *accountRepository) SetGatewayPoolRest(ctx context.Context, id int64, until time.Time, reason string, patch map[string]any) error {
 	data, err := json.Marshal(patch)
 	if err != nil {
@@ -2520,9 +2521,18 @@ func (r *accountRepository) SetGatewayPoolRest(ctx context.Context, id int64, un
 	result, err := r.sql.ExecContext(ctx, `
 		WITH updated AS (
 			UPDATE accounts
-			SET temp_unschedulable_until = GREATEST(temp_unschedulable_until, $1),
+			SET temp_unschedulable_until = CASE
+					WHEN temp_unschedulable_until > NOW()
+						AND COALESCE(temp_unschedulable_reason, '') NOT LIKE '网关候选低于% / Gateway candidates below %'
+						THEN temp_unschedulable_until
+					WHEN temp_unschedulable_reason LIKE '网关候选低于% / Gateway candidates below %' THEN $1
+					ELSE GREATEST(temp_unschedulable_until, $1) END,
 				temp_unschedulable_reason = CASE
-					WHEN temp_unschedulable_until IS NULL OR temp_unschedulable_until < $1 THEN $2
+					WHEN temp_unschedulable_until > NOW()
+						AND COALESCE(temp_unschedulable_reason, '') NOT LIKE '网关候选低于% / Gateway candidates below %'
+						THEN temp_unschedulable_reason
+					WHEN temp_unschedulable_reason LIKE '网关候选低于% / Gateway candidates below %'
+						OR temp_unschedulable_until IS NULL OR temp_unschedulable_until < $1 THEN $2
 					ELSE temp_unschedulable_reason END,
 				extra = COALESCE(extra, '{}'::jsonb) || $4::jsonb || jsonb_build_object($5::text, NOW()),
 				updated_at = NOW()
@@ -2546,7 +2556,7 @@ func (r *accountRepository) SetGatewayPoolRest(ctx context.Context, id int64, un
 	return nil
 }
 
-// The administrator's local-cooldown reset may only remove a pool-owned block.
+// Automatic expiry and the administrator's reset may only remove a pool-owned block.
 // A concurrent auth/provider block remains untouched in this atomic statement.
 func (r *accountRepository) ClearGatewayPoolRest(ctx context.Context, id int64, patch map[string]any) error {
 	data, err := json.Marshal(patch)
@@ -2593,7 +2603,8 @@ func (r *accountRepository) SetTempUnschedulable(ctx context.Context, id int64, 
 			updated_at = NOW()
 		WHERE id = $3
 			AND deleted_at IS NULL
-			AND (temp_unschedulable_until IS NULL OR temp_unschedulable_until < $1)
+			AND (temp_unschedulable_until IS NULL OR temp_unschedulable_until < $1
+				OR temp_unschedulable_reason LIKE '网关候选低于% / Gateway candidates below %')
 	`, until, reason, id, service.GatewayPoolUsageBlockedAtKey)
 	if err != nil {
 		return err

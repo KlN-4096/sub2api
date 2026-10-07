@@ -214,6 +214,11 @@ func TestGatewayPoolSelectionRoundPersistsAcrossRequestsAndRestartsAfterLastAcco
 	require.NoError(t, err)
 	require.Equal(t, a.ID, id, "the initial round keeps cooled-count priority")
 	exhaust := func(ctx context.Context, account *Account) context.Context {
+		identity := openAIGatewayPoolAccountKey(account)
+		history, _ := readOpenAIGatewayHistory(account)
+		for gateway := range history.Seen {
+			svc.codexCookies.poolUsed.Store(gatewayPoolLedgerKey(identity, gateway), time.Now())
+		}
 		fake.listGateways = []gwpoolFakeGateway{{Name: "unified-200", PairReady: true, UsedByYou: true}}
 		failure := &UpstreamFailoverError{GatewayPoolRotation: true, NextAccountAction: NextAccountStop}
 		next := svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, failure)
@@ -235,6 +240,11 @@ func TestGatewayPoolSelectionRoundPersistsAcrossRequestsAndRestartsAfterLastAcco
 		repo.accounts[i].TempUnschedulableUntil = &past
 		identity := openAIGatewayPoolAccountKey(&repo.accounts[i])
 		gatewayPoolRestDue(t, svc, repo, repo.accounts[i].ID, identity)
+		history, _ := readOpenAIGatewayHistory(&repo.accounts[i])
+		for gateway := range history.Seen {
+			svc.codexCookies.poolUsed.Store(gatewayPoolLedgerKey(identity, gateway), time.Now().Add(-2*time.Hour))
+		}
+		svc.codexCookies.poolUsed.Store(gatewayPoolLedgerKey(identity, "unified-200"), time.Now().Add(-2*time.Hour))
 	}
 	svc.codexCookies.poolRounds.mu.Lock()
 	for domain := range svc.codexCookies.poolRounds.groups[group].resting {

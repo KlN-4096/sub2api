@@ -5,12 +5,14 @@ import "time"
 type GatewayPoolRestView struct {
 	Active    bool      `json:"active"`
 	ChangedAt time.Time `json:"changed_at,omitzero"`
+	StartedAt time.Time `json:"started_at,omitzero"`
+	ResumeAt  time.Time `json:"resume_at,omitzero"`
 	NextCheck time.Time `json:"next_check,omitzero"`
 	Reason    string    `json:"reason,omitempty"`
 }
 
-// Read-only projection of the same identity-scoped latch as admission. A recheck
-// deadline is not an expiry; only a newer inactive tombstone ends this status.
+// Read-only projection of the admission latch. The local timer publishes the
+// inactive tombstone durably; the browser must not infer a successful write.
 func (s *OpenAIGatewayService) gatewayPoolRestDisplay(account *Account, identity string, peers []Account) GatewayPoolRestView {
 	tag := gatewayPoolLedgerTag(identity)
 	state := readGatewayPoolRest(account, tag)
@@ -27,7 +29,8 @@ func (s *OpenAIGatewayService) gatewayPoolRestDisplay(account *Account, identity
 			adopt(other)
 		}
 	}
-	view := GatewayPoolRestView{Active: state.Active, ChangedAt: state.ChangedAt, NextCheck: state.NextCheck}
+	view := GatewayPoolRestView{Active: state.Active, ChangedAt: state.ChangedAt, StartedAt: state.StartedAt,
+		ResumeAt: state.ResumeAt, NextCheck: state.NextCheck}
 	if view.Active {
 		view.Reason = gatewayPoolRestReason(account)
 	}
