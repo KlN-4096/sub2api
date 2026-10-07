@@ -757,10 +757,15 @@ export default {
         gwpoolWarmTickets: 'Pairs tried per warm-up',
         gwpoolWarmTicketsDesc:
           'How many pairs one business request may take and check before giving up. Default 5 (hit rate is roughly one in three, so 5 pairs is about 82% cumulative), capped at 8, blank uses the default. ' +
-          'This is a supply knob, not a performance knob: every pair burns one (upstream account x gateway) unit, and that unit regenerates at somewhere between a handful and a few dozen per hour (the number is not settled - counting by gateway name it is known-gateways / a 4-hour cooldown, but several gateway names in one region may be a single unit as far as one consumer is concerned). Overspending does not make things slow - the pool starts answering all_cooling for this account and every request during the back-off returns 503 instantly.',
+          'This is a supply knob, not a performance knob: every pair burns one (upstream account x gateway) unit, and that unit regenerates at roughly known-gateways / slot-cooldown (99 gateways over a 4-hour cooldown is about 25 per hour in production). Overspending does not make things slow - the pool starts answering all_cooling for this account and every request during the back-off returns 503 instantly. Count your gateways before raising it.',
         gwpoolSteering: 'Pick the landing gateway myself',
         gwpoolSteeringDesc:
           'On (default): list the gateways first and name one this account has not burnt in the ledger window. Off: let the pool schedule it.',
+        gwpoolPrewarm: 'Background prewarm (off by default)',
+        gwpoolPrewarmDesc:
+          'When on, a candidate pair is taken and verified in the background as the current pair nears the end of its full-strength window, and swapped in only once it verifies full strength - so the next client request does not wait on verification. The current pair keeps serving throughout (no gap at all), and nothing changes if no candidate verifies. ' +
+          'The start point is not hardcoded: once 100 full-strength-window samples have accumulated, it uses their p95 and starts when the ticket age reaches p95 minus 15 seconds; the first 100 do not prewarm. One round per account at a time. ' +
+          'The cost is pairs: up to "pairs tried per warm-up" extra pairs per window, burned while no client is waiting. On an account whose supply is already exhausted this only reaches all_cooling faster (every request during the pool back-off returns 503 instantly). Watch gwpool_prewarm_start / _ready / _degraded / _no_ticket / _exhausted in the log.',
         gwpoolGuard: 'Degradation guard (no switch - always on once the pool is enabled)',
         // The check discipline and the cost paragraph are both unconditional now, so both stay on screen.
         gwpoolGuardDesc:
@@ -807,15 +812,10 @@ export default {
           // Full-strength minutes forecast for the next hour, deliberately a LOWER bound.
           // "at least" is required: "at most" would get read as a quota.
           forecast: 'at least {minutes} min full-strength in the next hour',
-          forecastUntouched: '(this row has {count} regions it never touched, so possibly more)',
           forecastHint:
-            'Counted per (account × region): {units} regions are in the ledger and come out of cooldown within the hour, each worth about {window}s of full strength.\n' +
-            'This is a **lower bound**: only units with positive evidence are counted. Regions this row never touched are left out (another row on the same credential may have burned them, or the record may have been pruned), and landings still inside the window with no region are subtracted.\n' +
+            'Counted per (account × gateway): {units} gateways are in the ledger and come out of cooldown within the hour, each worth about {window}s of full strength. One gateway name is one unit — different gateways in the same region have separate full-strength windows, so do not collapse by region (region is only the grouping for the grid above).\n' +
+            'This is a **lower bound**: only units with positive evidence are counted. Gateways this row never touched are left out, so possibly more — no number is given because this row cannot work it out: it does not know how many gateways the pool has, and "this row never touched it" may well mean another row on the same credential burned it, or the record was pruned.\n' +
             'One thing still optimistic: the 4h cooldown itself is not pinned down (resting 30 minutes vs 4 hours gave a constant full-strength rate, zero correlation), so if real recovery takes longer this number is still too high.',
-          forecastUntouchedHint:
-            '{count} regions have no record in this row\'s ledger. They are **not counted** above: this ledger only sees what this row sent, so "this row never touched it" may well mean "another row burned it" or "the record was pruned".',
-          forecastBlindHint:
-            '{count} landings are still inside the window but have no region (the pool\'s older renewal mints did not report one — fixed since, but old records do not backfill) ⇒ they did burn some region\'s unit, so they have been subtracted from the available count.',
           // state-echo verdict (backend openai_gwpool_state_echo.go).
           verdicts: {
             full: 'last verdict: full strength',

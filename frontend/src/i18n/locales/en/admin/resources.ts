@@ -531,7 +531,7 @@ export default {
       routePairCopy: 'Copy the full __cflb/__oailb pair',
       routePairOverriddenShort: 'POOL',
       routePairOverridden:
-        'The outbound __cflb/__oailb pair came from the gateway pool instead of this account cookie jar, and the request landed on the gateway the pool promised',
+        'The outbound __cflb/__oailb pair came from the gateway pool instead of this account cookie jar. The upstream sent back no new __oailb, so the real landing was **never observed** and is booked against the gateway the pool promised: "no new oailb means the gateway did not change" always holds and cannot be falsified, so it is not a confirmation. The only row where a landing really is observed is the re-dispatched one',
       routePairPoolVersion: 'Pool ticket id',
       routePairReroutedShort: 'REROUTED',
       routePairRerouted:

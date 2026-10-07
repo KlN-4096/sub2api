@@ -47,6 +47,8 @@ describe('gateway pool locale keys', () => {
       'gwpoolWarmTicketsDesc',
       'gwpoolSteering',
       'gwpoolSteeringDesc',
+      'gwpoolPrewarm',
+      'gwpoolPrewarmDesc',
       'gwpoolGuard'
     ]) {
       expect(typeof openai[key], key).toBe('string')
@@ -83,19 +85,28 @@ describe('gateway pool locale keys', () => {
     expect(openai.gatewayHistory.forecast).toMatch(/至少|at least/)
     expect(openai.gatewayHistory.forecast).not.toMatch(/最多|at most/)
     expect(openai.gatewayHistory.forecastHint).toMatch(/下界|lower bound/)
-    // tooltip 必须同时交代两个偏移方向：往大偏（没摸过的大区不计入）和仍然乐观的那一处
+    // tooltip 必须同时交代两个偏移方向：往大偏（没碰过的网关不计入）和仍然乐观的那一处
     // （冷却时长没测准）。只说一个方向的话读者会以为另一个方向不存在。
     expect(openai.gatewayHistory.forecastHint).toMatch(/没碰过|never touched/)
     expect(openai.gatewayHistory.forecastHint).toMatch(/没测准|not pinned down/)
-    expect(openai.gatewayHistory.forecastUntouchedHint).toMatch(/别的行|another row/)
-    // 预测用的插值名必须是 minutes / units / window / count —— 组件按这些名字传参，
+    // **单位是 (账号 × 网关)，不是大区。** 2026-10-03 用户纠正：「时间还是按网关来的，
+    // 相同区域不同网关同一个号还是有不同的满血期的」。第一版按大区数，把 us-west 那 20 个
+    // 网关名算成 1 个单位 ⇒ 预测值低一个数量级。这条断言钉住口径，别再被「九宫格是按大区
+    // 画的」带回去。
+    expect(openai.gatewayHistory.forecastHint).toMatch(/账号 × 网关|account × gateway/)
+    expect(openai.gatewayHistory.forecastHint).not.toMatch(/账号 × 大区|account × region/)
+    // 而且要明说「别按大区并」：那正是会被顺手改回去的那一步。
+    expect(openai.gatewayHistory.forecastHint).toMatch(/别按大区并|do not collapse by region/)
+    // 按大区的那三条键删了（上行空间改成在 tooltip 里定性说一句：这一行不知道池子一共有
+    // 多少网关，给不出数）。留着会让下一个人以为还有个数字该显示。
+    expect(openai.gatewayHistory.forecastUntouched, '按大区的上行空间文案已删').toBeUndefined()
+    expect(openai.gatewayHistory.forecastUntouchedHint, '按大区的上行空间文案已删').toBeUndefined()
+    expect(openai.gatewayHistory.forecastBlindHint, '未归类扣减文案已删').toBeUndefined()
+    // 预测用的插值名必须是 minutes / units / window —— 组件按这些名字传参，
     // 改了名字 vue-i18n 会静默渲染成字面量。
     expect(openai.gatewayHistory.forecast).toContain('{minutes}')
     expect(openai.gatewayHistory.forecastHint).toContain('{units}')
     expect(openai.gatewayHistory.forecastHint).toContain('{window}')
-    expect(openai.gatewayHistory.forecastUntouched).toContain('{count}')
-    expect(openai.gatewayHistory.forecastUntouchedHint).toContain('{count}')
-    expect(openai.gatewayHistory.forecastBlindHint).toContain('{count}')
   })
 
   // 判不出来那条路的文案在中英两边都必须说「放行」，不能说「失败」。
@@ -141,6 +152,12 @@ describe('gateway pool locale keys', () => {
     // 被改派的文案要把两个网关都点出来，否则读的人不知道比对的是什么。
     expect(usage.routePairRerouted).toContain('{promised}')
     expect(usage.routePairRerouted).toContain('{landed}')
+    // 「已覆写」那一档必须说清落点**没观测到**。它读的是我们自己发出去那张 cookie，而上游
+    // 只在改派时才下发新 __oailb ⇒「池子说的和 route_gateway 一样」恒为真、无法证伪。
+    // 第一版写的是「落点就是池子给的那个网关」，那是拿零证据当确认 —— 而「消费者回放之后
+    // 到底落在哪」恰好是 (账号 × 网关) 这个单位唯一还没实证的一环，这条文案是页面上唯一的提示。
+    expect(usage.routePairOverridden).toMatch(/没有观测到|never observed/)
+    expect(usage.routePairOverridden).not.toMatch(/落点就是|landed on the gateway/)
     // 卡片只给网关名与状态，不许把 cookie 本体写进文案。
     expect(usage.routePairOverridden).not.toContain('=')
     expect(usage.routePairRerouted).not.toContain('=')

@@ -2633,6 +2633,21 @@
                 class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
               />
             </div>
+            <!-- 后台预热：缺省即关（它在没有客户端等着的时候自己花票）。 -->
+            <div class="flex items-center justify-between gap-4">
+              <div class="min-w-0">
+                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolPrewarm') }}</label>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.accounts.openai.gwpoolPrewarmDesc') }}
+                </p>
+              </div>
+              <input
+                v-model="openAIGwpoolPrewarm"
+                data-testid="edit-openai-gwpool-prewarm"
+                type="checkbox"
+                class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+              />
+            </div>
             <!-- 降智防护**没有开关了**（2026-10-03）：接了池子就一律「业务请求只落在验过满血
                  的槽上」。原来那条三档梯子（off/cut/queue）删了，说明留着 —— 这一档会花票，
                  运营方得知道钱花在哪。 -->
@@ -4065,6 +4080,8 @@ const openAIGwpoolConsumerKey = ref('')
 const openAIGwpoolConsumerKeySaved = ref(false)
 // 缺省即开，与后端 gatewayPoolSteering 同口径（只有显式 false 才关）。
 const openAIGwpoolSteering = ref(true)
+// 后台预热缺省即关，与后端 gatewayPoolPrewarmEnabled 同口径（只有显式 true 才开）。
+const openAIGwpoolPrewarm = ref(false)
 // 降智防护**没有档位了**（2026-10-03）：三个老键 openai_gwpool_guard /
 // openai_gwpool_state_echo / openai_gwpool_degraded_retries 都不再读也不再写，页面上那个
 // select 一起删了。存量行里留着它们是无害的死键 —— 但别再接回来，后端也不读了。
@@ -4631,6 +4648,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	openAIGwpoolConsumerKey.value = ''
 	// 自己挑落点缺省即开：只有显式 false 才算关（与后端同口径）。
 	openAIGwpoolSteering.value = extra?.openai_gwpool_steering !== false
+	// 后台预热缺省即关：只有显式 true 才算开（与后端同口径）。
+	openAIGwpoolPrewarm.value = extra?.openai_gwpool_prewarm === true
 	// 续期缺省即关：只有显式 true 才算开（与后端 gatewayPoolRenew 同口径）。
 	openAIGwpoolGatewayWindow.value = readGwpoolSeconds(extra?.openai_gwpool_gateway_window_s)
 	openAIGwpoolFetchTimeout.value = readGwpoolSeconds(extra?.openai_gwpool_fetch_timeout_s)
@@ -6251,6 +6270,12 @@ const handleSubmit = async () => {
           delete newExtra.openai_gwpool_steering
         } else {
           newExtra.openai_gwpool_steering = false
+        }
+        // 后台预热缺省即关：只有开着时才落键（后端也只认显式 true）。
+        if (openAIGwpoolPrewarm.value) {
+          newExtra.openai_gwpool_prewarm = true
+        } else {
+          delete newExtra.openai_gwpool_prewarm
         }
         // 降智防护的三个档位键 2026-10-03 全删了（接了池子就一律验满血才放行），保存时顺手
         // 把残留清掉。**刻意不再「同步写一份老键」**：那是为回滚到只认老键的后端留的后路，

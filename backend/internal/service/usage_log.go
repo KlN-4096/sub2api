@@ -225,8 +225,18 @@ type UsageLog struct {
 	// 的读数（openai_codex_safety_buffering.go）。上游没带、非 Codex 上游、OAuth WS 轮次（暂不取事件里的头）为 nil。
 	SafetyBufferingEnabled     *bool
 	SafetyBufferingFasterModel *string
-	// RouteGateway / RoutePair 是这一发生效的路由对读数（openai_codex_route_cookies.go）：
+	// RouteGateway / RoutePair 是这一发**生效的**路由对读数（openai_codex_route_cookies.go）：
 	// 网关段从 __oailb 的 JWT 载荷解出，整串留着以便原样复现。两者都只作观测，不作判据。
+	//
+	// **「生效的」不等于「观测到的落点」。** 上游下发了新 __oailb 时这一列是观测值；上游什么都
+	// 不回时它读的是**我们自己发出去那张** ⇒ 只是「我们要求它去哪」。而上游恰恰只在改派时才
+	// 下发新 cookie（带着活 pair 的健康请求一个都不回），所以
+	// `RouteGateway` 与 `RoutePairPoolGateway` 相同的那些行**基本都是没观测到**，
+	// 不是「确认落在承诺的网关上」——「不回新 oailb 就是没换网关」恒为真、无法证伪
+	// （2026-10-02 作废的两条判据之一）。
+	//
+	// 后果要知道：消费者回放池子的票之后到底落在哪，现网数据答不了。想测只能靠别的手段
+	// （只送 cflb、摘掉 oailb，读回来的那张），不能靠这两列。
 	RouteGateway *string
 	RoutePair    *string
 	// RoutePairOverridden 表示这一发出站的路由对由网关池下发（openai_gwpool.go），

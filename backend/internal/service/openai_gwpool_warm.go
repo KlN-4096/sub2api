@@ -41,14 +41,16 @@ const (
 	// 5 张约 82%。往上加的边际收益掉得很快，而代价是线性的：每张票 2 发上游请求 + 烧掉一个
 	// (上游账号 × 网关) 单位。
 	//
-	// 这个数是**供给闸**。现场这条链是实测的：16:10–17:12 一小时烧了 40 张 ⇒ 池子对这个号
-	// 报 all_cooling ⇒ 退避 60 秒 ⇒ 退避期里每一发业务请求都是 0.2 秒的 503 ⇒ Codex CLI
-	// 疯狂重发（五分钟 200 发）⇒ 用户看到的是「卡死」。
+	// 这个数是**供给闸**，调它之前先看这笔账：池子的冷却是 (消费账号 × 网关) 4 小时，已知
+	// 99 个网关 ⇒ 一个消费账号的票预算 ≈ 99 ÷ 4h ≈ 25 张/小时。现场 16:10–17:12 这一小时
+	// 烧了 40 张，超支 1.6 倍 ⇒ 池子对这个号报 all_cooling ⇒ 退避 60 秒 ⇒ 退避期里每一发
+	// 业务请求都是 0.2 秒的 503 ⇒ Codex CLI 疯狂重发（五分钟 200 发）⇒ 用户看到的是「卡死」。
+	// 所以做成旋钮而不是常数：供给（托管账号数 × 区域数）在涨，合适的值跟着它走。
 	//
-	// 但「一小时能烧几张」这个数**还没定**：按网关名算是 99 ÷ 4h ≈ 25 张/小时，而消费者回放
-	// 一张票落到的是**它自己在那个大区**的网关（不是铸票号那个），真实单位可能是
-	// (消费账号 × 大区) = 9 个 —— 那样换一堆网关名其实都落在同一个烧过的单位上。池子那边正在
-	// 按后者改（消费侧账本整个交给客户端），落地后这笔账要重算。所以做成旋钮而不是常数。
+	// **按网关名算是对的**，别被「真实单位是 (消费账号 × 大区)」那个说法带走（2026-10-03 否了）：
+	// 那个推断来自续期路径的 51 发实测（落点漂移 44 次），而续期按构造**必须摘掉 `__oailb`**，
+	// 正好是唯一会漂的那条路。交付路径两件齐送 ⇒ 上游一个 cookie 都不回 ⇒ 钉住票上那个网关，
+	// 对消费号是一个全新的单元（docs/conventions/codex-full-strength-tickets.md 的 C/D/F 三发）。
 	gatewayPoolWarmMaxTickets = 5
 	// gatewayPoolWarmMaxTicketsCeiling 是那个旋钮的硬上限。
 	//
@@ -107,8 +109,16 @@ func (s *OpenAIGatewayService) gatewayPoolWarmUp(request *http.Request, proxyURL
 	// （这条省掉了绝大多数成本）。
 	//
 	// 必须同时判「验过」和 Live，**不能只判 Live**：Live 的唯一含义是取票那一刻写的
-	// `until = now + valid_for_s`（见 poolVerified 的注释列的三条路）。
+	// `until = now + valid_for_s`（见 poolVerified 的注释列的两条路）。
 	if s.codexCookies.gatewayPoolVerifiedFull(identity) {
+		// 快路上顺手看一眼「这张票是不是快到点了」：是就在后台换下一张，让客户端下一次请求
+		// 不用在这里等（openai_gwpool_prewarm.go）。到点判据很便宜（两次 map 读），而读 model
+		// 要解请求体 —— 所以先问到点、再读 model。
+		if account.gatewayPoolPrewarmEnabled() {
+			if _, due := s.codexCookies.gatewayPoolPrewarmDue(identity); due {
+				s.gatewayPoolPrewarm(request, proxyURL, account, identity, gatewayPoolWarmModel(request))
+			}
+		}
 		return nil
 	}
 	// 模型必须和业务请求一致：state 绑在 (账号 × 模型 × 这张 cflb/oailb 对) 上，拿别的模型去
@@ -370,18 +380,37 @@ func (s *openAICodexCookieStore) gatewayPoolVerifiedFull(identity string) bool {
 	if state != openAIGatewayPoolPairLive || pair.version == "" {
 		return false
 	}
-	version, _ := s.poolVerified.Load(identity)
-	got, _ := version.(string)
-	return got == pair.version
+	mark, ok := s.gatewayPoolVerifiedMarkOf(identity)
+	return ok && mark.version == pair.version
+}
+
+// gatewayPoolVerifiedMarkOf 读那一笔「验过满血」的记录（票号 + 判出来的时刻）。
+func (s *openAICodexCookieStore) gatewayPoolVerifiedMarkOf(identity string) (gatewayPoolVerifiedMark, bool) {
+	if s == nil || identity == "" {
+		return gatewayPoolVerifiedMark{}, false
+	}
+	value, loaded := s.poolVerified.Load(identity)
+	if !loaded {
+		return gatewayPoolVerifiedMark{}, false
+	}
+	mark, ok := value.(gatewayPoolVerifiedMark)
+	return mark, ok
 }
 
 // gatewayPoolMarkVerifiedFull 记「这个身份手上这张票验过满血」。票号为空（池子没报）时不记：
 // 那就认不出换没换票，宁可下一发再验一遍。
+//
+// 时刻只在**票号变了**的时候推进：同一张票被重复标（并发预热各标一次、前台验完复查那一下）
+// 不许把窗口起点往后推 —— 推了就等于每标一次都把「这张票还能满血多久」重算一遍，
+// 满血时长的样本会被系统性拉长，后台预热跟着越来越晚。
 func (s *openAICodexCookieStore) gatewayPoolMarkVerifiedFull(identity, version string) {
-	if identity == "" || version == "" {
+	if s == nil || identity == "" || version == "" {
 		return
 	}
-	s.poolVerified.Store(identity, version)
+	if mark, ok := s.gatewayPoolVerifiedMarkOf(identity); ok && mark.version == version {
+		return
+	}
+	s.poolVerified.Store(identity, gatewayPoolVerifiedMark{version: version, at: time.Now()})
 }
 
 // gatewayPoolWarmProbe 跑一组 state-echo：A 只带 cookie 拿一张 state，B 带 cookie + 那张 state

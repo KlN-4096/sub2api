@@ -32,15 +32,23 @@ type openAICodexCookieStore struct {
 	identity  openAICodexCredentialIdentity
 	poolPairs sync.Map // 凭证域身份 → openAIGatewayPoolPair
 	poolFetch singleflight.Group
-	// poolVerified 是「这个身份手上那张票**验过是满血**」（openai_gwpool_warm.go，queue 档）。
+	// poolVerified 是「这个身份手上那张票**验过是满血**」（openai_gwpool_warm.go）。
 	//
 	// 必须单独记，**不能拿 poolPairs 的 Live 当「验过」**：Live 的唯一含义是取票那一刻写的
-	// `until = now + valid_for_s`，和验没验过是两件事。三条路都会留下一张 Live 的未验票 ——
-	// 并发取票（singleflight 的 shared 对领头者也为真 ⇒ 谁都拿不到还票闭包）、同一份凭据挂在
-	// 多个账号行上（键是凭证域身份，retry 档那一行取的票 queue 档这一行照样看得见）、
-	// 以及 retry 兜底换到的那张。值存票号，换票即失效。
-	poolVerified sync.Map // 凭证域身份 → 票号（string）
-	// poolWarm 把同一张票上的并发预热判据收口成一次（openai_gwpool_warm.go，queue 档）。
+	// `until = now + valid_for_s`，和验没验过是两件事。两条路都会留下一张 Live 的未验票 ——
+	// 并发取票（singleflight 的 shared 对领头者也为真 ⇒ 谁都拿不到还票闭包），以及同一份凭据
+	// 挂在多个账号行上（键是凭证域身份，别的行取的票这一行照样看得见）。换票即失效。
+	//
+	// 值连**判出满血的时刻**一起存：满血时长的样本和后台预热的触发点都从它算
+	// （openai_gwpool_prewarm.go）。
+	poolVerified sync.Map // 凭证域身份 → gatewayPoolVerifiedMark
+	// poolPrewarm 是「这个身份正有一轮后台预热在跑」的占位，保证同时只有一轮
+	// （openai_gwpool_prewarm.go）。并发两轮就是双倍烧票换同一个窗口。
+	poolPrewarm sync.Map // 凭证域身份 → struct{}
+	// poolFullWindow 是满血时长的样本池，后台预热的开始时刻由它的 p95 决定。
+	// 刻意全局一份：窗口时长是上游的行为，不是某个账号的属性（见 gatewayPoolFullWindow）。
+	poolFullWindow gatewayPoolFullWindow
+	// poolWarm 把同一张票上的并发预热判据收口成一次（openai_gwpool_warm.go）。
 	// 取票本身已经被 poolFetch 收成一次 ⇒ 同身份的并发请求手里是**同一张票**、同一个
 	// (上游账号 × 网关) 单元、同一个满血窗口 ⇒ 结论必然相同，各自打一遍纯属白烧配额，
 	// 而供给只有个位数张/小时。键按票号分，换了票要重新验。
@@ -52,6 +60,16 @@ type openAICodexCookieStore struct {
 	// poolBackoff 是「池子让这个身份先别取票」的到点（见 gatewayPoolBackoff）。
 	// 按**上游账号**记而不是按请求：退避只对本次请求生效的话，重试环照旧每轮都去敲池子。
 	poolBackoff sync.Map // 账本身份（上游账号粒度）→ time.Time
+	// poolSpare 是批量取票剩下的备用票（/cookie?count=，见 gatewayPoolTakeBatch）。
+	//
+	// 验满血那条路的形状是「取一张 → 验 → 不满血再取一张」，每轮一个 HTTP 往返，而池子内部
+	// 可能顺带现铸（取票超时默认 25s），三轮就能把 90 秒的预热预算花光在往返上。一发拿 N 张
+	// 之后第 2..N 轮**一个往返都不用打**。
+	//
+	// 架子上这张不是浪费而是预取：它在自己的满血窗口内对**后面的**业务请求一样有效。
+	// 窗口过了还没人用才算损失，而那只发生在这个身份突然没请求的时候。
+	// 键按凭证域身份，和 poolPairs 同一个口径（同一份凭据的几个账号行共用）。
+	poolSpare sync.Map // 凭证域身份 → *gatewayPoolTicketBatch
 }
 
 // openAICodexCookieJarKey：本地行 ID + 凭证域身份。同一行重新授权成另一个 ChatGPT 身份时

@@ -527,7 +527,8 @@ export default {
       routeGateway: '路由网关',
       routePairCopy: '复制整组 __cflb/__oailb',
       routePairOverriddenShort: '已覆写',
-      routePairOverridden: '这一发出站的 __cflb/__oailb 由网关池下发（顶掉了账号罐回放），落点就是池子给的那个网关',
+      routePairOverridden:
+        '这一发出站的 __cflb/__oailb 由网关池下发，顶掉了账号罐回放。上游没有下发新的 __oailb ⇒ 实际落点**没有观测到**，只能按池子承诺的那个网关记账：「不回新 oailb 就是没换网关」这条恒为真、无法证伪，不算落点的确认。真正观测到落点的只有被改派那一格',
       routePairPoolVersion: '池子票号',
       routePairReroutedShort: '被改派',
       routePairRerouted: '池子给的是 {promised}，但上游下发的新 __oailb 把这一发改派到了 {landed}，注入被拒。落点相同的新 __oailb 不算改派（续期那一发会换一组新的，路由没变）',

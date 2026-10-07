@@ -1078,6 +1078,7 @@ describe('EditAccountModal', () => {
     expect(extra?.openai_gwpool_base_url).toBe('https://pool.0102400.xyz')
     for (const key of [
       'openai_gwpool_steering',
+      'openai_gwpool_prewarm',
       'openai_gwpool_guard',
       'openai_gwpool_state_echo',
       'openai_gwpool_degraded_retries',
@@ -1091,6 +1092,8 @@ describe('EditAccountModal', () => {
     // 改过的才落键。
     updateAccountMock.mockReset().mockResolvedValue(account)
     await wrapper.get('[data-testid="edit-openai-gwpool-steering"]').setValue(false)
+    // 后台预热缺省即关 ⇒ 打开它才落键（上面那一轮已经钉过「关着不落键」）。
+    await wrapper.get('[data-testid="edit-openai-gwpool-prewarm"]').setValue(true)
     await wrapper.get('[data-testid="edit-openai-gwpool-gateway-window"]').setValue('7200')
     await wrapper.get('[data-testid="edit-openai-gwpool-fetch-timeout"]').setValue('20')
     await wrapper.get('[data-testid="edit-openai-gwpool-list-timeout"]').setValue('5')
@@ -1098,6 +1101,7 @@ describe('EditAccountModal', () => {
 
     extra = updateAccountMock.mock.calls[0]?.[1]?.extra
     expect(extra?.openai_gwpool_steering).toBe(false)
+    expect(extra?.openai_gwpool_prewarm).toBe(true)
     expect(extra?.openai_gwpool_gateway_window_s).toBe(7200)
     expect(extra?.openai_gwpool_fetch_timeout_s).toBe(20)
     expect(extra?.openai_gwpool_list_timeout_s).toBe(5)

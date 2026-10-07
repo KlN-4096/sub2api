@@ -49,7 +49,9 @@
           <span v-else class="text-gray-300 dark:text-gray-600">-</span>
         </span>
       </div>
-      <!-- 一小时满血分钟预测。单位是 (账号 × 大区)，算法和口径见 forecastUnits。 -->
+      <!-- 一小时满血分钟预测。单位是 (账号 × 网关)，算法和口径见 forecastUnits。
+           上行空间（本行没碰过的网关）只在 tooltip 里定性说一句：这一行不知道池子一共有
+           多少网关，给不出数。 -->
       <p
         v-if="cells.length"
         class="text-[9px] leading-3 text-gray-500 dark:text-gray-400"
@@ -57,15 +59,6 @@
         data-testid="account-gateway-forecast"
       >
         {{ t('admin.accounts.openai.gatewayHistory.forecast', { minutes: forecastMinutes }) }}
-        <!-- 上行空间：本行没碰过的大区不进上面那个数（可能是别的行烧过了，也可能是记录被
-             裁过），但它确实是「可能更多」的来源，不说出来这个下界会被当成天花板。 -->
-        <span v-if="forecastUntouched" class="text-gray-400 dark:text-gray-500">
-          {{
-            t('admin.accounts.openai.gatewayHistory.forecastUntouched', {
-              count: forecastUntouched
-            })
-          }}
-        </span>
       </p>
       <!-- 图例：四种色的语义原来只写在这个文件的注释里，页面上没有任何地方说，而 tooltip
            是 title 属性、触屏摸不到。 -->
@@ -287,48 +280,39 @@ const cells = computed<RegionCell[]>(() => {
 })
 
 /**
- * 每个大区**最近**一次被碰的时刻。同一个大区下的多个网关名是**同一个**单位
- * （一个号在一个大区同一时间只有一个网关；现网 us-west 一个大区就有 20 个不同网关名，
- * 按名字数会把一个单位数 20 遍），所以取最近那次才是这个单位真正的冷却起点。
- */
-const regionLastSeen = computed(() => {
-  const latest = new Map<string, number>()
-  for (const item of items.value) {
-    // 未归类（region 为空）的落点归不到单位上，猜一个会把别的单位算重。
-    if (!item.region || !(REGION_KEYS as readonly string[]).includes(item.region)) continue
-    const ts = Date.parse(item.at)
-    if (!Number.isFinite(ts)) continue
-    const prev = latest.get(item.region)
-    if (prev === undefined || ts > prev) latest.set(item.region, ts)
-  }
-  return latest
-})
-
-/**
  * 「接下来一小时**至少**能用到几分钟满血」—— 刻意算**下界**。
  *
- * 只数有**正面证据**的单位：账本里有这个大区的记录，而且它的冷却在一小时内结束。
- * 三处刻意悲观，全是为了别让这个数偏到不能用：
+ * **单位是 (账号 × 网关)，一个网关名就是一个单位。**（2026-10-03 用户纠正：「时间还是
+ * 按网关来的，相同区域不同网关同一个号还是有不同的满血期的」。第一版按大区去重，把
+ * us-west 那 20 个网关名算成 1 个单位 ⇒ 预测值低一个数量级。大区只适合当分组展示用，
+ * 就是上面那个九宫格，不能当去重键。）
  *
- *  1. **从没碰过的大区不计入数字**，挪到 forecastUntouched 当提示。这本账只看得见
- *     **本行**发出去的那些（克隆行/影子行各看各的，见 openai_gwpool_gateway_history.go
- *     开头那段口径），而且 openAIGatewayHistoryMax 从 24 提到 201 之前写下的行被按时间
- *     裁过 ⇒「本行没碰过」完全可能是「别的行烧过了」或「记录被裁了」。把它算进数字
- *     就是拿「不知道」当「可用」，而那正是偏移最大的一项（一个刚接池子的行会凭空
- *     多出九个单位）。
- *  2. **未归类且还在窗口里的落点要扣掉**：它们确实烧掉了某个大区的单位，只是记录里
- *     没有 region（池子早先的续期型铸票不报大区）⇒ 不扣就等于白送这么多单位。
- *  3. 一个单位只按一个满血窗口算（183 秒，取的是实测 200–300 秒里最保守的那个）。
+ * items 本身已经是一行一个网关名（后端 seen 是以网关名为键的 map），所以这里不用再去重
+ * —— 加一层去重就是上面那个错。region 在这个计算里完全不参与：没带 region 的落点一样是
+ * 一个有名有姓的网关，照数。
+ *
+ * 只数有**正面证据**的单位：账本里有这个网关的记录，而且它的冷却在一小时内结束。
+ * 两处刻意悲观：
+ *
+ *  1. **从没碰过的网关不计入数字**。这本账只看得见**本行**发出去的那些（克隆行/影子行
+ *     各看各的，见 openai_gwpool_gateway_history.go 开头那段口径），而且
+ *     openAIGatewayHistoryMax 从 24 提到 201 之前写下的行被按时间裁过 ⇒「本行没碰过」
+ *     完全可能是「别的行烧过了」或「记录被裁了」。更要紧的是这里**算不出**那个上行空间：
+ *     池子一共有多少网关这一行不知道（现网 105 个，但那是服务端的事）⇒ 宁可只在 tooltip
+ *     里定性说一句，不编一个数。
+ *  2. 一个单位只按一个满血窗口算（183 秒，取的是实测 200–300 秒里最保守的那个）。
  *
  * 算在前端而不是后端：这是个随时间衰减的值，而后端那条记录有 5 分钟写节流 ——
  * 存进去的预测立刻就过期了。前端这里 now 是跟着 ticker 走的，读数永远是当下的。
  */
 const forecastUnits = computed(() => {
   let units = 0
-  for (const ts of regionLastSeen.value.values()) {
+  for (const item of items.value) {
+    const ts = Date.parse(item.at)
+    if (!Number.isFinite(ts)) continue
     if (windowMs.value - (now.value - ts) <= FORECAST_HORIZON_MS) units += 1
   }
-  return Math.max(0, units - forecastBlind.value)
+  return units
 })
 
 const forecastMinutes = computed(() =>
@@ -336,48 +320,19 @@ const forecastMinutes = computed(() =>
 )
 
 /**
- * 本行账本里没有记录的大区数 —— 下界之外的**上行空间**，只当提示不进数字。
- *
- * REGION_KEYS 末尾那个空串是「未归类」那一格，不算大区。
- */
-const forecastUntouched = computed(
-  () => REGION_KEYS.filter((key) => key !== '').length - regionLastSeen.value.size
-)
-
-/**
- * 还在窗口里、却归不到大区上的落点数，**直接从可用单位里扣掉**（见 forecastUnits 第 2 条）。
- *
- * 这些落点确实烧掉了某个大区的单位，只是记录里没有 region（池子侧续期型铸票的出口反查
- * 不出九个代表出口之一时 Pair.RegionKey 会落空，已修，但**旧记录不会自己补上**）。
- * 不扣的话它们既不占自己那个大区的格子、也不减少可用数 —— 等于白送。
- */
-const forecastBlind = computed(
-  () =>
-    items.value.filter(
-      (item) =>
-        (!item.region || !(REGION_KEYS as readonly string[]).includes(item.region)) && isHot(item.at)
-    ).length
-)
-
-/**
  * 预测的 tooltip。要交代清楚这个数是**下界**，以及它往哪两个方向偏：
  *
- *  - 往大偏（上行空间）：本行没碰过的大区不计入（forecastUntouched），实际可能更多。
+ *  - 往大偏（上行空间）：本行没碰过的网关不计入，实际可能更多。定性说，不给数 ——
+ *    这一行不知道池子一共有多少网关（见 forecastUnits 第 1 条）。
  *  - 往小偏（仍然乐观的那一处）：4 小时冷却本身**没测准**（静置 30 分钟到 4 小时，
  *    满血率恒定、零相关），真实恢复时间比它长的话这个数还是会偏大。
  */
 const forecastTitle = computed(() => {
   const base = 'admin.accounts.openai.gatewayHistory'
-  const lines = [
-    t(`${base}.forecastHint`, { units: forecastUnits.value, window: FULL_WINDOW_MS / 1000 })
-  ]
-  if (forecastUntouched.value) {
-    lines.push(t(`${base}.forecastUntouchedHint`, { count: forecastUntouched.value }))
-  }
-  if (forecastBlind.value) {
-    lines.push(t(`${base}.forecastBlindHint`, { count: forecastBlind.value }))
-  }
-  return lines.join('\n')
+  return t(`${base}.forecastHint`, {
+    units: forecastUnits.value,
+    window: FULL_WINDOW_MS / 1000
+  })
 })
 
 function within(at: string, span: number): boolean {
