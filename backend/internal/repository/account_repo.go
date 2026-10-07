@@ -69,6 +69,20 @@ var schedulerNeutralExtraKeys = map[string]struct{}{
 	"codex_referral_snapshot":    {},
 	"grok_billing_snapshot":      {},
 	"session_window_utilization": {},
+	// turn-state 自动接管的候选池是运行态数据，上游每铸出一条健康 blob 就写一次，
+	// 不参与调度决策——不放进来的话每次响应都要重建一次调度快照。
+	"openai_turn_state_pool": {},
+	// 每个模型最近一次观测到的 turn-state 形态，所有 Codex 账号的响应路径上都会写
+	// （带节流），纯展示不参与调度。
+	"openai_turn_state_observed": {},
+	// CPR 侧的出站代理端点，跟着额度探测刷新，纯展示不参与调度。
+	"cpr_outbound_proxy": {},
+	// turn-state 猎手的运行态（下次窗口 / 本小时次数 / 最近 10 次），每次探测写一次，
+	// 纯展示不参与调度。配置键 openai_turn_state_hunter 由管理员写，不在此列。
+	"openai_turn_state_hunt": {},
+	// 降智恢复探测的运行态（连胜 / 下次窗口 / 已恢复时刻），每次探测写一次，纯展示不参与调度。
+	// 配置键 openai_turn_state_recovery 由管理员写，不在此列。
+	"openai_turn_state_recovery_state": {},
 }
 
 const postgresParameterBatchSize = 50000
@@ -1396,7 +1410,8 @@ func (r *accountRepository) ListByPlatform(ctx context.Context, platform string)
 			dbaccount.PlatformEQ(platform),
 			dbaccount.StatusEQ(service.StatusActive),
 		).
-		Order(dbent.Asc(dbaccount.FieldPriority)).
+		// 次级按 ID：同 priority 的行没有次级键时顺序随堆序漂移，猎手的跨 tick 游标靠不住。
+		Order(dbent.Asc(dbaccount.FieldPriority), dbent.Asc(dbaccount.FieldID)).
 		All(ctx)
 	if err != nil {
 		return nil, err

@@ -1211,7 +1211,7 @@ export interface Account {
   opencode_go_usage?: OpenCodeGoUsageState
   // Extra fields including Codex usage, OpenAI compact capability, and model-level rate limits.
   extra?: (CodexUsageSnapshot & OpenAICompactState & {
-    model_rate_limits?: Record<string, { rate_limited_at: string; rate_limit_reset_at: string }>
+    model_rate_limits?: Record<string, { rate_limited_at: string; rate_limit_reset_at: string; reason?: string }>
     antigravity_credits_overages?: Record<string, { activated_at: string; active_until: string }>
     upstream_billing_probe_enabled?: boolean
     upstream_billing_rate_sync_enabled?: boolean
@@ -1730,7 +1730,7 @@ export interface CodexSessionImportResult {
 // ==================== Usage & Redeem Types ====================
 
 export type RedeemCodeType = 'balance' | 'concurrency' | 'subscription' | 'invitation'
-export type UsageRequestType = 'unknown' | 'sync' | 'stream' | 'ws_v2' | 'cyber' | 'live'
+export type UsageRequestType = 'unknown' | 'sync' | 'stream' | 'ws_v2' | 'cyber' | 'live' | 'probe'
 export type ImageSizeSource = 'output' | 'input' | 'default' | 'legacy'
 export type ImageSizeBreakdown = Record<string, number>
 
@@ -1815,6 +1815,14 @@ export interface AdminUsageLog extends UsageLog {
   upstream_model_mismatch?: boolean | null
   model_mapping_chain?: string | null
   upstream_request_id?: string | null
+  // Codex 回合状态：上游本次铸出的 x-codex-turn-state（不透明 Fernet 密文）
+  turn_state?: string | null
+  // 本次出站是否实际注入了 turn-state 覆写值
+  turn_state_overridden?: boolean | null
+  // 覆写来源：manual（手填）/ auto（自动接管）/ auto_stale（候选已过保鲜期但仍在用）
+  turn_state_source?: string | null
+  // 本次出站实际带的 turn-state（客户端回带的或注入的），与 turn_state（上游新铸的）分开
+  turn_state_sent?: string | null
 
   // 账号计费倍率（仅管理员可见）
   account_rate_multiplier?: number | null

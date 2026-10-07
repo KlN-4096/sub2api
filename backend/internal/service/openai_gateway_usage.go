@@ -39,10 +39,19 @@ type OpenAIRecordUsageInput struct {
 	PricingAt time.Time
 	// CyberBlocked 为 true 时把该用量行标记为 cyber（request_type=cyber），计费逻辑不变。
 	CyberBlocked bool
+	// RequestType 非零时直接写入该请求类型（猎手探测用 RequestTypeTurnStateProbe）；
+	// CyberBlocked 优先。零值保持既有行为：由 stream/ws 字段回推。
+	RequestType RequestType
 	// NativeCompactionV2 is an orthogonal semantic flag captured by the
 	// Responses handler from stream=true + compaction_trigger. It never stores
 	// the request payload and does not replace the transport request type.
 	NativeCompactionV2 bool
+	// TurnStateSource 是本次请求实际注入的 turn-state 覆写来源（manual/auto/auto_stale），
+	// 空串表示没注入。handler 侧从 gin.Context 取出（OpenAITurnStateUsageSource）：
+	// RecordUsage 是异步的，到这里已经没有 gin.Context 了。
+	TurnStateSource string
+	// TurnStateSent 是本次出站实际带的 turn-state，同样由 handler 从 gin.Context 取。
+	TurnStateSent string
 	ChannelUsageFields
 }
 
@@ -159,7 +168,8 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	if result == nil {
 		return errors.New("openai usage result is nil")
 	}
-	if s.rateLimitService != nil && input.Account != nil && input.Account.Platform == PlatformOpenAI {
+	// 探测走 hunt 代理、刻意不看账号是否停调度，它的 200 不能证明真实流量的 403 已经过去。
+	if s.rateLimitService != nil && input.Account != nil && input.Account.Platform == PlatformOpenAI && input.RequestType != RequestTypeTurnStateProbe {
 		s.rateLimitService.ResetOpenAI403Counter(ctx, input.Account.ID)
 	}
 
@@ -383,6 +393,10 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		AccountID:                account.ID,
 		RequestID:                requestID,
 		UpstreamRequestID:        usageUpstreamRequestIDPtr(account, result.UpstreamHeaders, result.OpenAIWSMode),
+		TurnState:                usageCodexTurnStatePtr(result.UpstreamHeaders),
+		TurnStateOverridden:      usageCodexTurnStateOverriddenPtr(account, input.TurnStateSource),
+		TurnStateSource:          usageCodexTurnStateSourcePtr(account, input.TurnStateSource),
+		TurnStateSent:            usageCodexTurnStateSentPtr(account, input.TurnStateSent),
 		Model:                    result.Model,
 		RequestedModel:           requestedModel,
 		UpstreamModel:            optionalTrimmedStringPtr(result.UpstreamModel),
@@ -437,6 +451,8 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	usageLog.Stream = result.Stream
 	if input.CyberBlocked {
 		usageLog.RequestType = RequestTypeCyberBlocked
+	} else if input.RequestType != RequestTypeUnknown {
+		usageLog.RequestType = input.RequestType.Normalize()
 	}
 	usageLog.OpenAIWSMode = result.OpenAIWSMode
 	usageLog.DurationMs = &durationMs
