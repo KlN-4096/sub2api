@@ -20,11 +20,14 @@ const (
 	RequestTypeWSV2         RequestType = 3
 	RequestTypeCyberBlocked RequestType = 4 // cyber_policy 命中（透传但被上游安全策略拒绝）
 	RequestTypeLive         RequestType = 5
+	// RequestTypeTurnStateProbe 是 292 猎手的探测（openai_turn_state_hunter.go）：挂在配置的
+	// API Key 下按标准路径计费，输入 token 为本地估算、输出恒 0。
+	RequestTypeTurnStateProbe RequestType = 6
 )
 
 func (t RequestType) IsValid() bool {
 	switch t {
-	case RequestTypeUnknown, RequestTypeSync, RequestTypeStream, RequestTypeWSV2, RequestTypeCyberBlocked, RequestTypeLive:
+	case RequestTypeUnknown, RequestTypeSync, RequestTypeStream, RequestTypeWSV2, RequestTypeCyberBlocked, RequestTypeLive, RequestTypeTurnStateProbe:
 		return true
 	default:
 		return false
@@ -50,6 +53,8 @@ func (t RequestType) String() string {
 		return "cyber"
 	case RequestTypeLive:
 		return "live"
+	case RequestTypeTurnStateProbe:
+		return "probe"
 	default:
 		return "unknown"
 	}
@@ -73,8 +78,10 @@ func ParseUsageRequestType(value string) (RequestType, error) {
 		return RequestTypeCyberBlocked, nil
 	case "live":
 		return RequestTypeLive, nil
+	case "probe":
+		return RequestTypeTurnStateProbe, nil
 	default:
-		return RequestTypeUnknown, fmt.Errorf("invalid request_type, allowed values: unknown, sync, stream, ws_v2, cyber, live")
+		return RequestTypeUnknown, fmt.Errorf("invalid request_type, allowed values: unknown, sync, stream, ws_v2, cyber, live, probe")
 	}
 }
 
@@ -190,6 +197,18 @@ type UsageLog struct {
 	// extra.upstream_request_id_header 指定的头；账户未指定头名、WS 轮次
 	// 与上游没有该头的路径为 nil。
 	UpstreamRequestID *string
+	// TurnState 是上游本次响应头里新铸的 x-codex-turn-state（不透明 Fernet 密文）。
+	// 非 Codex 上游、以及拿不到上游响应头的路径为 nil。
+	TurnState *string
+	// TurnStateOverridden 表示本次出站实际注入了 turn-state 覆写值。
+	// nil 表示账号类型不适用（非 Codex 上游）。
+	TurnStateOverridden *bool
+	// TurnStateSource 是覆写来源：manual（手填）/ auto（自动接管）/
+	// auto_stale（自动接管，候选已过保鲜期但仍在用）。没注入为 nil。
+	TurnStateSource *string
+	// TurnStateSent 是本次出站实际带的 turn-state（客户端回带的或注入的）。
+	// 与 TurnState（上游新铸的）分开：带了 turn-state 的请求只有 8% 会拿到新铸值。
+	TurnStateSent *string
 
 	// Cache TTL Override 标记（管理员强制替换了缓存 TTL 计费）
 	CacheTTLOverridden bool

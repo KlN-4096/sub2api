@@ -76,6 +76,60 @@ func TestClassifySelectionFailureError_RateLimitedPool(t *testing.T) {
 	require.Equal(t, fallback, classifySelectionFailureError(fmt.Errorf("no available accounts"), fallback))
 }
 
+// 降智暂停不是限流：回 429 时 Codex 按限流硬重试且吞掉正文，客户端只剩
+// "exceeded retry limit, last status: 429"，真正的原因一个字都传不出去。
+//
+// 这里用一个**可区分**的 fallback（418）：真实 fallback 恰好也是 503 + api_error，
+// 拿它当基线的话，分支被整段删掉测试照样绿。
+func TestClassifySelectionFailureError_TurnStateHoldReports503(t *testing.T) {
+	fallback := noAccountErrorClassification{Status: http.StatusTeapot, ErrType: "teapot", Message: "fallback-sentinel"}
+
+	// 生产形状：Codex 走 OpenAI 调度，summary 由 openAISelectionFilterStats 产出。
+	got := classifySelectionFailureError(
+		fmt.Errorf("no available OpenAI accounts supporting model: gpt-6-astra (pool=1, filtered: turn_state_hold=1)"),
+		fallback,
+	)
+
+	require.Equal(t, http.StatusServiceUnavailable, got.Status)
+	require.Equal(t, "api_error", got.ErrType)
+	require.Contains(t, got.Message, "x-codex-turn-state")
+	require.Contains(t, got.Message, "hunter")
+
+	// 全池都被暂停（多个账号）：仍按暂停的口径。
+	whole := classifySelectionFailureError(
+		fmt.Errorf("no available OpenAI accounts supporting model: gpt-6-astra (pool=3, filtered: turn_state_hold=3)"),
+		fallback,
+	)
+	require.Equal(t, http.StatusServiceUnavailable, whole.Status)
+	require.Contains(t, whole.Message, "x-codex-turn-state")
+
+	// 1 个暂停 + 9 个真限流：说「都被暂停了」对 9 个账号是假话，维持 429。
+	mostlyRateLimited := classifySelectionFailureError(
+		fmt.Errorf("no available OpenAI accounts supporting model: gpt-6-astra (pool=10, filtered: model_rate_limited=9 turn_state_hold=1)"),
+		fallback,
+	)
+	require.Equal(t, http.StatusTooManyRequests, mostlyRateLimited.Status)
+	require.Equal(t, "rate_limit_error", mostlyRateLimited.ErrType)
+
+	// 判据必须是「暂停占满池子」而不是「暂停 >= 限流」：池子可以被十几个别的 reason 占满，
+	// 那时 1 个暂停照样满足 held >= rateLimited(0)，于是把「9 个号周额度打满」说成「猎手在补票」。
+	for _, other := range []string{"quota_auto_pause_7d", "runtime_blocked", "capability_mismatch", "model_not_supported"} {
+		got := classifySelectionFailureError(
+			fmt.Errorf("no available OpenAI accounts supporting model: gpt-6-astra (pool=10, filtered: %s=9 turn_state_hold=1)", other),
+			fallback,
+		)
+		require.Equal(t, fallback, got, "池子主要是 %s 时不能说成降智暂停", other)
+	}
+
+	// 没有 pool= 字段（GatewayService 那份 summary）时不冒认。
+	require.Equal(t, fallback, classifySelectionFailureError(
+		fmt.Errorf("no available accounts supporting model: x (total=1 eligible=0 turn_state_hold=1)"), fallback))
+
+	// 404 model_not_found 依然压过一切。
+	notFound := noAccountErrorClassification{Status: http.StatusNotFound, ErrType: "model_not_found", Message: "nope", ModelNotFound: true}
+	require.Equal(t, notFound, classifySelectionFailureError(fmt.Errorf("turn_state_hold=1"), notFound))
+}
+
 func TestClassifyNoAccountError_NilAPIKey_Falls503(t *testing.T) {
 	c := newTestGinContextWithRequest()
 	fd := &fakeDiagnoser{resp: service.ModelAvailabilityDiagnosis{HasAccountsInPool: true, HasModelSupport: false}}
