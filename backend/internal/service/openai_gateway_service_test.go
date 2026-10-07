@@ -3252,6 +3252,11 @@ func TestOpenAIBuildUpstreamRequestOAuthMessagesBridgeUsesSessionOnly(t *testing
 	require.Empty(t, req.Header.Get("originator"))
 }
 
+// 与上游刻意不对齐：上游这组用例要求 OAuth 也保留调用方的 OpenAI-Beta（PR 理由取自
+// Responses API 文档，`responses_multi_agent` 在 codex 源码里根本不存在）。二开这条路要让
+// 出站看起来就是真 Codex，而真 Codex 在 HTTP /responses 上从不发这个头（rust-v0.156.1：
+// OPENAI_BETA_HEADER 只写在 build_websocket_headers 与 codex doctor 的 WS 探测里），
+// 所以 Codex 协议账号的断言改成「一律不出站」。api-key 账号不在那个分支里，仍按上游语义。
 func TestOpenAIBuildUpstreamRequestOAuthResponsesPreservesCallerBeta(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	makeRequest := func(betaValues ...string) *gin.Context {
@@ -3267,18 +3272,18 @@ func TestOpenAIBuildUpstreamRequestOAuthResponsesPreservesCallerBeta(t *testing.
 	oauth := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"chatgpt_account_id": "chatgpt-acc"}}
 	apiKey := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "test-api-key"}}
 
-	t.Run("preserves caller multi-agent beta", func(t *testing.T) {
+	t.Run("oauth drops caller multi-agent beta", func(t *testing.T) {
 		c := makeRequest("responses_multi_agent=v1")
 		req, err := svc.buildUpstreamRequest(c.Request.Context(), c, oauth, []byte(`{"model":"gpt-5.5","input":"hello"}`), "token", true, "", false)
 		require.NoError(t, err)
-		require.Equal(t, "responses_multi_agent=v1", req.Header.Get("OpenAI-Beta"))
+		require.Empty(t, req.Header.Values("OpenAI-Beta"))
 	})
 
-	t.Run("preserves mixed beta tokens and removes legacy token", func(t *testing.T) {
+	t.Run("oauth drops every beta token, legacy or not", func(t *testing.T) {
 		c := makeRequest("responses_multi_agent=v1, responses=experimental", "future_feature=v2")
 		req, err := svc.buildUpstreamRequest(c.Request.Context(), c, oauth, []byte(`{"model":"gpt-5.5","input":"hello"}`), "token", true, "", false)
 		require.NoError(t, err)
-		require.Equal(t, []string{"responses_multi_agent=v1", "future_feature=v2"}, req.Header.Values("OpenAI-Beta"))
+		require.Empty(t, req.Header.Values("OpenAI-Beta"))
 	})
 
 	t.Run("absent beta remains absent", func(t *testing.T) {
@@ -3295,12 +3300,12 @@ func TestOpenAIBuildUpstreamRequestOAuthResponsesPreservesCallerBeta(t *testing.
 		require.Equal(t, []string{"responses=experimental, responses_multi_agent=v1"}, req.Header.Values("OpenAI-Beta"))
 	})
 
-	t.Run("compact OAuth removes legacy token and preserves independent beta", func(t *testing.T) {
+	t.Run("compact OAuth drops beta too", func(t *testing.T) {
 		c := makeRequest("responses=experimental, future_feature=v1")
 		c.Request.URL.Path = "/v1/responses/compact"
 		req, err := svc.buildUpstreamRequest(c.Request.Context(), c, oauth, []byte(`{"model":"gpt-5.5","input":"hello"}`), "token", false, "", false)
 		require.NoError(t, err)
-		require.Equal(t, "future_feature=v1", req.Header.Get("OpenAI-Beta"))
+		require.Empty(t, req.Header.Values("OpenAI-Beta"))
 	})
 }
 

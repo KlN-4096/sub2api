@@ -28,6 +28,31 @@ func TestUsageLogFromService_IncludesOpenAIWSMode(t *testing.T) {
 	require.False(t, UsageLogFromServiceAdmin(httpLog).OpenAIWSMode)
 }
 
+func TestUsageLogFromServiceAdmin_MapsSafetyBuffering(t *testing.T) {
+	t.Parallel()
+
+	enabled := true
+	faster := "gpt-5.6-luna"
+	flagged := UsageLogFromServiceAdmin(&service.UsageLog{
+		RequestID:                  "resp_sb",
+		Model:                      "gpt-6-astra",
+		SafetyBufferingEnabled:     &enabled,
+		SafetyBufferingFasterModel: &faster,
+	})
+	require.NotNil(t, flagged.SafetyBufferingEnabled)
+	require.True(t, *flagged.SafetyBufferingEnabled)
+	require.NotNil(t, flagged.SafetyBufferingFasterModel)
+	require.Equal(t, "gpt-5.6-luna", *flagged.SafetyBufferingFasterModel)
+	raw, err := json.Marshal(flagged)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"safety_buffering_enabled":true`)
+	require.Contains(t, string(raw), `"safety_buffering_faster_model":"gpt-5.6-luna"`)
+
+	plain, err := json.Marshal(UsageLogFromServiceAdmin(&service.UsageLog{RequestID: "resp_plain", Model: "gpt-6-astra"}))
+	require.NoError(t, err)
+	require.NotContains(t, string(plain), "safety_buffering", "没有读数时不输出这两个键")
+}
+
 func TestUsageLogFromService_PreservesNativeCompactionAndStream(t *testing.T) {
 	t.Parallel()
 

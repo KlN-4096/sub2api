@@ -66,6 +66,11 @@ function mountModal(value = account()) {
   })
 }
 
+// 等「请求已落地」而不是「请求已发出」：getEligibility 被调用只意味着 loadGrokMediaEligibility
+// 进了 await，此时 loading 仍为 true、status 节点还没渲染、initialMode 也还没从响应回填。
+const settled = (wrapper: ReturnType<typeof mountModal>) =>
+  vi.waitFor(() => wrapper.get('[data-testid="grok-media-eligibility-status"]'))
+
 describe('EditAccountModal Grok media eligibility', () => {
   beforeEach(() => {
     authIsSimpleMode.value = true
@@ -82,7 +87,8 @@ describe('EditAccountModal Grok media eligibility', () => {
 
   it('shows only for Grok OAuth and fills the current decision', async () => {
     const wrapper = mountModal()
-    await vi.waitFor(() => expect(getEligibilityMock).toHaveBeenCalledWith(12))
+    await settled(wrapper)
+    expect(getEligibilityMock).toHaveBeenCalledWith(12)
     expect(wrapper.find('[data-testid="grok-media-eligibility-card"]').exists()).toBe(true)
     expect(wrapper.get('[data-testid="grok-media-eligibility-mode"]').element.value).toBe('auto')
     expect(wrapper.get('[data-testid="grok-media-eligibility-status"]').text()).toContain('billing_inconclusive')
@@ -92,7 +98,7 @@ describe('EditAccountModal Grok media eligibility', () => {
 
   it('updates the dedicated endpoint only when the mode changes', async () => {
     const wrapper = mountModal()
-    await vi.waitFor(() => expect(getEligibilityMock).toHaveBeenCalled())
+    await settled(wrapper)
     await wrapper.get('[data-testid="grok-media-eligibility-mode"]').setValue('enabled')
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
     await vi.waitFor(() => expect(updateEligibilityMock).toHaveBeenCalledWith(12, 'enabled'))
@@ -101,7 +107,7 @@ describe('EditAccountModal Grok media eligibility', () => {
   it('reports partial-save errors when the dedicated endpoint fails', async () => {
     updateEligibilityMock.mockRejectedValueOnce(new Error('eligibility failed'))
     const wrapper = mountModal()
-    await vi.waitFor(() => expect(getEligibilityMock).toHaveBeenCalled())
+    await settled(wrapper)
     await wrapper.get('[data-testid="grok-media-eligibility-mode"]').setValue('disabled')
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
     await vi.waitFor(() => expect(showErrorMock).toHaveBeenCalledWith('admin.accounts.grokMediaEligibility.partialSave'))
