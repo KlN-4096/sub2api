@@ -37,6 +37,7 @@ type gatewayPoolProgressScope struct {
 	requestStarted time.Time
 	sequence       uint64
 	closedBefore   time.Time
+	identity       string
 }
 
 type gatewayPoolProgressTracker struct {
@@ -136,7 +137,8 @@ func (p *gatewayPoolProgressTracker) snapshot(ids []int64, now time.Time, filter
 		for _, run := range p.runs[id] {
 			if len(filters) > 0 {
 				scope, ok := filters[0][id]
-				if !ok || run.scope.tag != scope.tag || !run.scope.requestStarted.After(scope.closedBefore) {
+				if !ok || run.scope.tag != scope.tag || !run.scope.requestStarted.After(scope.closedBefore) ||
+					(scope.identity != "" && run.scope.identity != "" && run.scope.identity != scope.identity) {
 					continue
 				}
 			}

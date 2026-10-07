@@ -89,6 +89,12 @@ export interface GatewayPoolProgress {
     rounds: GatewayPoolUsageRound[]
     archived: Record<string, { rounds: number; attempted: number; full: number; duration_ms: number; incomplete?: boolean; duration_incomplete?: boolean }> | null
     incomplete?: boolean
+    history?: Record<string, unknown>
+    contacts?: Record<string, unknown>
+    ledger_tag?: string
+    gateway_window_seconds?: number
+    current_concurrency?: number | null
+    concurrency_limit?: number
   }
 }
 
@@ -1174,7 +1180,13 @@ export async function refreshOpenCodeGoUsage(id: number): Promise<OpenCodeGoUsag
   return data
 }
 
+export async function retryGatewayPool(id: number): Promise<{ state: 'retained' | 'preparing' | 'blocked' }> {
+  const { data } = await apiClient.post(`/admin/accounts/${id}/gateway-pool-retry`)
+  return data
+}
+
 export const accountsAPI = {
+  retryGatewayPool,
   list,
   listWithEtag,
   getUpstreamBillingRatesWithEtag,

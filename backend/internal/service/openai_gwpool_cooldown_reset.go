@@ -21,6 +21,7 @@ type gatewayPoolCooldownResetState struct {
 	IntervalHours int       `json:"interval_hours,omitempty"`
 	StartedAt     time.Time `json:"started_at,omitzero"`
 	LastAt        time.Time `json:"last_at,omitzero"`
+	ClearedAt     time.Time `json:"cleared_at,omitzero"`
 }
 
 func gatewayPoolCooldownResetHours(raw any) (int, bool) {
@@ -56,6 +57,7 @@ func (a *Account) gatewayPoolCooldownResetHours() int {
 func (r gatewayPoolCooldownResetState) valid(now time.Time) bool {
 	return r.IntervalHours >= 0 && r.IntervalHours <= gatewayPoolCooldownResetMaxHours &&
 		!r.StartedAt.After(now.Add(gatewayPoolCooldownGrace)) &&
+		!r.ClearedAt.After(r.LastAt) &&
 		!r.LastAt.After(now.Add(gatewayPoolCooldownGrace))
 }
 
@@ -91,6 +93,9 @@ func (c *gatewayPoolCooldown) resetBackoff(at, touched time.Time, base int) bool
 		return false
 	}
 	c.ResetAt = at
+	if c.Cleared {
+		return true // a timer reset must not re-arm a manually cleared contact
+	}
 	if c.WindowSeconds == 0 && c.UpdatedAt.IsZero() {
 		return true // an unseen gateway has no cooling period to invent
 	}
@@ -151,9 +156,13 @@ func newerGatewayPoolCooldown(next, previous *gatewayPoolCooldown) bool {
 
 // Called with the account history lock, never while holding poolCooldownMu.
 func (s *openAICodexCookieStore) syncGatewayPoolCooldownResetHistory(rec *openAIGatewayHistory, identity string, base int) bool {
+	s.applyGatewayPoolCooldownClear(identity, rec.CooldownReset.ClearedAt, base)
 	s.applyGatewayPoolCooldownReset(identity, rec.CooldownReset.LastAt, base)
 	at := s.gatewayPoolCooldownResetAt(identity)
 	changed := false
+	if cleared := s.gatewayPoolCooldownClearAt(identity); cleared.After(rec.CooldownReset.ClearedAt) {
+		rec.CooldownReset.ClearedAt, changed = cleared, true
+	}
 	if at.After(rec.CooldownReset.LastAt) {
 		rec.CooldownReset.LastAt, changed = at, true
 	}
@@ -172,7 +181,8 @@ func (s *openAICodexCookieStore) syncGatewayPoolCooldownResetHistory(rec *openAI
 		if seen.At.After(touched) {
 			touched = seen.At
 		}
-		reset := cooldown.resetBackoff(at, touched, base)
+		reset := cooldown.clearCooldown(s.gatewayPoolCooldownClearAt(identity), base)
+		reset = cooldown.resetBackoff(at, touched, base) || reset
 		if reset || newerGatewayPoolCooldown(&cooldown, seen.Cooldown) {
 			seen.Cooldown = &cooldown
 			rec.Seen[gateway], changed = seen, true
@@ -299,8 +309,11 @@ func (s *OpenAIGatewayService) writeGatewayPoolCooldownReset(ctx context.Context
 		return errors.New("invalid gateway cooldown reset clock")
 	}
 	changed := false
+	if cleared := s.codexCookies.gatewayPoolCooldownClearAt(identity); cleared.After(view.CooldownReset.ClearedAt) {
+		view.CooldownReset.ClearedAt, changed = cleared, true
+	}
 	if advance {
-		changed = view.CooldownReset.advance(fresh.gatewayPoolCooldownResetHours(), now, latest)
+		changed = view.CooldownReset.advance(fresh.gatewayPoolCooldownResetHours(), now, latest) || changed
 	} else if latest.After(view.CooldownReset.LastAt) {
 		view.CooldownReset.LastAt, changed = latest, true
 	}
@@ -319,7 +332,8 @@ func (s *OpenAIGatewayService) writeGatewayPoolCooldownReset(ctx context.Context
 		if seen.At.After(touched) {
 			touched = seen.At
 		}
-		reset := next.resetBackoff(at, touched, base)
+		reset := next.clearCooldown(view.CooldownReset.ClearedAt, base)
+		reset = next.resetBackoff(at, touched, base) || reset
 		if reset || newerGatewayPoolCooldown(&next, seen.Cooldown) {
 			seen.Cooldown = &next
 			view.Seen[gateway], changed = seen, true

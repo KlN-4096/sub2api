@@ -284,7 +284,7 @@
             </div>
           </template>
           <template #cell-capacity="{ row }">
-            <AccountCapacityCell :account="row" />
+            <AccountCapacityCell :account="row" :gateway-progress="gatewayProgress[row.id]" :gateway-progress-unavailable="gatewayProgressUnavailable" />
           </template>
           <template #cell-status="{ row }">
             <div class="flex items-center gap-1.5">
@@ -334,7 +334,8 @@
             </div>
           </template>
           <template #cell-gateway="{ row }">
-            <AccountGatewayCell :account="row" :progress="gatewayProgress[row.id]" :progress-unavailable="gatewayProgressUnavailable" />
+            <AccountGatewayCell :account="row" :progress="gatewayProgress[row.id]" :progress-unavailable="gatewayProgressUnavailable"
+              :retry-pending="retryingGatewayAccounts.has(row.id)" @retry="retryGatewayPool" />
           </template>
           <template #cell-proxy="{ row }">
             <div class="flex flex-col gap-1">
@@ -567,6 +568,19 @@ import type { Account, AccountListItem, AccountPlatform, AccountSchedulerGroupSc
 
 const { t } = useI18n()
 const appStore = useAppStore()
+const retryingGatewayAccounts = ref(new Set<number>())
+async function retryGatewayPool(id: number) {
+  if (retryingGatewayAccounts.value.has(id)) return
+  retryingGatewayAccounts.value.add(id)
+  try {
+    const result = await adminAPI.accounts.retryGatewayPool(id)
+    appStore.showSuccess(t(`admin.accounts.openai.gwpoolManualRetryResult.${result.state}`))
+  } catch (error) {
+    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.openai.gwpoolManualRetryFailed')))
+  } finally {
+    retryingGatewayAccounts.value.delete(id)
+  }
+}
 const authStore = useAuthStore()
 
 const proxies = ref<AccountProxy[]>([])
@@ -1126,7 +1140,7 @@ const {
 })
 
 const { progress: gatewayProgress, unavailable: gatewayProgressUnavailable } = useGatewayPoolProgress(computed(() =>
-  hiddenColumns.has('gateway') ? [] : accounts.value
+  hiddenColumns.has('gateway') && hiddenColumns.has('capacity') ? [] : accounts.value
     .filter(account => account.extra?.openai_gwpool === true)
     .map(account => account.id)
 ))

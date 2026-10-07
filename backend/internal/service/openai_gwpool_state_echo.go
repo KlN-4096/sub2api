@@ -227,7 +227,7 @@ func (s *OpenAIGatewayService) dropDegradedGatewayPoolRoute(
 		openAIGatewayPoolSinkFrom(detached).noteFullHeld(applied, held)
 		// 账本记的是**实际交付的那个网关**：标 Stale 只让下一发换票，账本才是「这个上游账号
 		// 4 小时内别再点这个落点」的依据。
-		s.codexCookies.gatewayPoolMarkUsed(identity, applied.Gateway)
+		s.codexCookies.gatewayPoolMarkUsed(identity, applied.Gateway, applied.cooldownResetAt)
 		s.noteGatewayPoolCooldownVerdict(detached, account, applied, openAIGatewayVerdictDegraded)
 	} else {
 		return false

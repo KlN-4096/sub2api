@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 )
@@ -20,6 +21,7 @@ type gatewayPoolRound struct {
 	generation uint64
 	exhausted  map[string]struct{}
 	current    string
+	active     []string
 	resting    map[string]time.Time
 }
 
@@ -47,9 +49,7 @@ func (r *gatewayPoolRounds) rest(group int64, identity string, until time.Time) 
 	domain := gatewayPoolLedgerIdentity(identity)
 	state.resting[domain] = until
 	state.exhausted[domain] = struct{}{}
-	if state.current == domain {
-		state.current = ""
-	}
+	state.retire(domain)
 }
 
 func (r *gatewayPoolRounds) recovered(identity string) {
@@ -76,30 +76,11 @@ func (r *gatewayPoolRounds) exhaust(group int64, identity string, generation uin
 	if identity != "" && state.generation == generation {
 		domain := gatewayPoolLedgerIdentity(identity)
 		state.exhausted[domain] = struct{}{}
-		if state.current == domain {
-			state.current = ""
-		}
+		state.retire(domain)
 	}
 }
 
-// Keep the selected credential across independent sessions. Unavailable or
-// request-incompatible credentials do not prevent a healthy replacement.
-func (r *gatewayPoolRounds) current(group int64, domains map[int64]string, complete bool) string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	state := r.groupLocked(group)
-	for _, domain := range domains {
-		if domain == state.current {
-			return state.current
-		}
-	}
-	if complete {
-		state.current = ""
-	}
-	return state.current
-}
-
-func (r *gatewayPoolRounds) claim(group int64, identity string) bool {
+func (r *gatewayPoolRounds) claim(group int64, identity string, limits ...int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	state := r.groupLocked(group)
@@ -107,10 +88,25 @@ func (r *gatewayPoolRounds) claim(group int64, identity string) bool {
 	if _, exhausted := state.exhausted[domain]; exhausted {
 		return false
 	}
-	if state.current == "" {
-		state.current = domain
+	limit := gatewayPoolActiveAccountsDefault
+	if len(limits) > 0 {
+		limit = normalizeGatewayPoolActiveAccounts(limits[0])
 	}
-	return state.current == domain
+	if len(state.active) == 0 && state.current != "" {
+		state.active = []string{state.current}
+	}
+	if len(state.active) > limit {
+		state.active = state.active[:limit]
+	}
+	if slices.Contains(state.active, domain) {
+		return true
+	}
+	if len(state.active) >= limit {
+		return false
+	}
+	state.active = append(state.active, domain)
+	state.current = state.active[0]
+	return true
 }
 
 func (r *gatewayPoolRounds) touch(identity string, at time.Time) {
@@ -157,6 +153,7 @@ func (r *gatewayPoolRounds) snapshot(group int64, domains map[int64]string, comp
 		state.generation++
 		state.exhausted = map[string]struct{}{}
 		state.current = ""
+		state.active = nil
 		for domain := range state.resting {
 			state.exhausted[domain] = struct{}{}
 		}
@@ -216,14 +213,15 @@ func (s *OpenAIGatewayService) gatewayPoolRoundSelectionAllowed(ctx context.Cont
 	if err != nil || s.codexCookies.poolRounds.blocked(*group, identity) {
 		return false
 	}
+	boundID, _ := ctx.Value(gatewayPoolExistingBindingKey{}).(int64)
+	bound := boundID == account.ID
 	if s.codexCookies.gatewayPoolVerifiedFull(identity) {
-		s.codexCookies.poolRounds.claim(*group, identity)
-		return true // don't evict an already running session's verified window
+		return bound || s.codexCookies.poolRounds.claim(*group, identity, s.gatewayPoolActiveAccountLimit(ctx))
 	}
 	if s.gatewayPoolNoRemainingRoutes(ctx, account) {
 		s.codexCookies.poolRounds.exhaust(*group, identity, s.codexCookies.poolRounds.generation(*group))
 		s.restGatewayPoolAccount(ctx, account, identity, *group)
 		return false
 	}
-	return s.codexCookies.poolRounds.claim(*group, identity)
+	return bound || s.codexCookies.poolRounds.claim(*group, identity, s.gatewayPoolActiveAccountLimit(ctx))
 }

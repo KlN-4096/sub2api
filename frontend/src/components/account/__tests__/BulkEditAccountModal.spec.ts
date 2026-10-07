@@ -88,15 +88,15 @@ describe('BulkEditAccountModal', () => {
     for (const key of ['guard_enabled', 'probe_model', 'rotation']) {
       expect(wrapper.find(`[data-testid="bulk-gwpool-apply-openai_gwpool_${key}"]`).exists()).toBe(false)
     }
-    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_warm_tickets"]').setValue(true)
-    await wrapper.get('[data-testid="bulk-gwpool-value-openai_gwpool_warm_tickets"]').setValue(3)
+    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_prepare_retries"]').setValue(true)
+    await wrapper.get('[data-testid="bulk-gwpool-value-openai_gwpool_prepare_retries"]').setValue(0)
     await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_rotation_min_gateways"]').setValue(true)
     await wrapper.get('[data-testid="bulk-gwpool-value-openai_gwpool_rotation_min_gateways"]').setValue(4)
     await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_consumer_key"]').setValue(true)
     await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
     await flushPromises()
     expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], expect.objectContaining({
-      extra: { openai_gwpool_warm_tickets: 3, openai_gwpool_rotation_min_gateways: 4,
+      extra: { openai_gwpool_prepare_retries: 0, openai_gwpool_rotation_min_gateways: 4,
         openai_gwpool_guard_enabled: true, openai_gwpool_probe_model: 'gpt-6-luna' }
     }))
     wrapper.unmount()

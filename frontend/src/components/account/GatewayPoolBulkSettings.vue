@@ -2,7 +2,8 @@
   <section class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600" data-testid="bulk-gwpool">
     <h3 class="font-medium">{{ t('admin.accounts.openai.gwpool') }}</h3>
     <p class="input-hint">{{ t('admin.accounts.openai.gwpoolBulkHint') }}</p>
-    <div v-for="field in fields" :key="field.key" class="grid grid-cols-[auto_1fr] items-start gap-3">
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+    <div v-for="field in fields" :key="field.key" class="grid grid-cols-[auto_1fr] items-start gap-3" :class="{ 'sm:col-span-2': field.wide }">
       <input
         type="checkbox"
         :data-testid="`bulk-gwpool-apply-${field.key}`"
@@ -36,7 +37,9 @@
           autocomplete="off"
           @input="input(field, ($event.target as HTMLInputElement).value)"
         />
+        <p v-if="field.hint" class="input-hint">{{ t(`admin.accounts.openai.${field.hint}`) }}</p>
       </label>
+    </div>
     </div>
   </section>
 </template>
@@ -45,24 +48,26 @@
 import { useI18n } from 'vue-i18n'
 
 type Value = string | number | boolean | null
-type Field = { key: string; label: string; type: string; default: Value; min?: number; max?: number }
+type Field = { key: string; label: string; type: string; default: Value; min?: number; max?: number; wide?: boolean; hint?: string }
 const props = defineProps<{ modelValue: Record<string, Value> }>()
 const emit = defineEmits<{ 'update:modelValue': [Record<string, Value>] }>()
 const { t } = useI18n()
 const cooldownResetMaxHours = 365 * 24
 const fields: Field[] = [
-  { key: 'openai_gwpool', label: 'gwpool', type: 'boolean', default: true },
-  { key: 'openai_gwpool_base_url', label: 'gwpoolBaseUrl', type: 'url', default: '' },
-  { key: 'openai_gwpool_consumer_key', label: 'gwpoolConsumerKey', type: 'password', default: '' },
+  { key: 'openai_gwpool', label: 'gwpool', type: 'boolean', default: true, wide: true },
+  { key: 'openai_gwpool_base_url', label: 'gwpoolBaseUrl', type: 'url', default: '', wide: true },
+  { key: 'openai_gwpool_consumer_key', label: 'gwpoolConsumerKey', type: 'password', default: '', wide: true },
+  { key: 'openai_gwpool_max_wait_s', label: 'gwpoolMaxWait', hint: 'gwpoolMaxWaitDesc', type: 'number', default: 120, max: 3600 },
+  { key: 'openai_gwpool_prepare_retries', label: 'gwpoolPrepareRetries', hint: 'gwpoolPrepareRetriesDesc', type: 'number', default: 1, min: 0, max: 10 },
+  { key: 'openai_gwpool_rotation_min_gateways', label: 'gwpoolRotationMinGateways', hint: 'gwpoolRotationMinGatewaysDesc', type: 'number', default: 1, max: 512 },
+  { key: 'openai_gwpool_resume_gateways', label: 'gwpoolResumeGateways', hint: 'gwpoolResumeGatewaysDesc', type: 'number', default: 50, max: 512 },
   { key: 'openai_gwpool_gateway_window_s', label: 'gwpoolGatewayWindow', type: 'number', default: 3600, max: 86400 },
-  { key: 'openai_gwpool_cooldown_reset_hours', label: 'gwpoolCooldownResetHours', type: 'number', default: 24, min: 0, max: cooldownResetMaxHours },
-  { key: 'openai_gwpool_warm_tickets', label: 'gwpoolWarmTickets', type: 'number', default: 5, max: 8 },
+  { key: 'openai_gwpool_cooldown_reset_hours', label: 'gwpoolCooldownResetHours', hint: 'gwpoolCooldownResetDesc', type: 'number', default: 24, min: 0, max: cooldownResetMaxHours },
+  { key: 'openai_gwpool_member_isolation', label: 'gwpoolMemberIsolation', hint: 'gwpoolMemberIsolationDesc', type: 'boolean', default: false, wide: true },
+  { key: 'openai_gwpool_early_probe_enabled', label: 'gwpoolEarlyProbe', hint: 'gwpoolEarlyProbeDesc', type: 'boolean', default: false, wide: true },
+  { key: 'openai_gwpool_use_recommended_cooldown', label: 'gwpoolUseRecommendation', hint: 'gwpoolUseRecommendationDesc', type: 'boolean', default: false, wide: true },
   { key: 'openai_gwpool_fetch_timeout_s', label: 'gwpoolFetchTimeout', type: 'number', default: 25, max: 86400 },
-  { key: 'openai_gwpool_list_timeout_s', label: 'gwpoolListTimeout', type: 'number', default: 2, max: 86400 },
-  { key: 'openai_gwpool_rotation_min_gateways', label: 'gwpoolRotationMinGateways', type: 'number', default: 1, max: 512 },
-  { key: 'openai_gwpool_resume_gateways', label: 'gwpoolResumeGateways', type: 'number', default: 50, max: 512 },
-  { key: 'openai_gwpool_auto_wait', label: 'gwpoolAutoWait', type: 'boolean', default: false },
-  { key: 'openai_gwpool_max_wait_s', label: 'gwpoolMaxWait', type: 'number', default: 120, max: 3600 }
+  { key: 'openai_gwpool_list_timeout_s', label: 'gwpoolListTimeout', type: 'number', default: 2, max: 86400 }
 ]
 const selected = (key: string) => Object.prototype.hasOwnProperty.call(props.modelValue, key)
 function set(key: string, value: Value) {

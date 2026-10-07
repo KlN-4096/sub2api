@@ -631,11 +631,12 @@ export default {
       },
       // OpenAI specific hints
       openai: {
-        gwpoolMemberIsolation: 'Partition gateway records by workspace + member (experimental)',
+        gwpoolMemberIsolation: 'Separate Team member records',
         gwpoolUseRecommendation: 'Use pool-recommended cooldown (off by default)',
         gwpoolUseRecommendationDesc: 'When off, use local configuration and learned backoff only. Recommendations may add waiting but never erase a failure lower bound; fixed cooldowns take priority. Legacy mixed records keep their existing period until a real new cycle.',
-        gwpoolMemberIsolationDesc: 'Off by default. Partition only sub2api gateway records and the gwpool consumer reference by the access-token workspace/user pair. Upstream workspace headers and session identity stay unchanged; undecodable tokens use the previous policy. This does not prove independent upstream cooldowns.',
+        gwpoolMemberIsolationDesc: 'For separate cooldown records of members in one Team workspace; off by default. Changes local records and pool consumer identity only, not outbound identity. Does not prove independent upstream cooldowns.',
         gatewayRuntime: {
+          durationHours: '{hours}h {minutes}m {seconds}s',
           live: 'Verified · {gateway} · probe models: {models}',
           unverified: 'not verified',
           counts: 'Round verified / attempted {full} / {attempted} tickets',
@@ -643,7 +644,7 @@ export default {
           duration: '{minutes}m {seconds}s',
           history: 'Usage history',
           ended: '{full}/{attempted} tickets · full-strength use {duration} · ended {end}',
-          archived: '{count} archived rounds · {full}/{attempted} tickets · full-strength use {duration}',
+          archived: 'Full-use archive {duration} / {count} rounds',
           legacy: 'Legacy · {model} · {full}/{attempted} tickets',
           legacyArchived: 'Legacy archive · {model} · {count} rounds · {full}/{attempted} tickets',
           durationIncomplete: ' (some duration unobserved)',
@@ -652,12 +653,13 @@ export default {
         gatewayProgress: {
           run: 'Verification run #{id}',
           idle: 'No active verification',
-          count: 'Tickets tried {attempt} / {limit} · {seconds}s',
+          count: 'Tried {attempt} tickets · {seconds}s',
           lastCount: 'Last observation: {attempt} / {limit} tickets · {seconds}s',
           waiting: 'Waiting to retry verification',
           fetching: 'Fetching a candidate ticket',
           verifying: 'Verifying a candidate ticket',
-          ready: '✓ Verified ticket found',
+          ready: 'Verified · queue paused',
+          recentReady: 'Last verified',
           exhausted: 'Verification ended · no usable ticket',
           unknown: 'Verification ended · incomplete (supply, timeout or error)',
           cancelled: 'Verification ended · request cancelled',
@@ -666,18 +668,21 @@ export default {
           unavailable: 'Live verification progress unavailable'
         },
         gwpoolRotation: 'Rotate accounts when gateway candidates are low',
-        gwpoolRotationMinGateways: 'Rotate below this many available gateways',
-        gwpoolRotationMinGatewaysDesc: '1–512; blank defaults to 1 (rotate at zero). Counts deliverable, non-cooling candidates, not verified full-strength tickets. Keep a live verified ticket; a failed listing is not zero.',
-        gwpoolResumeGateways: 'Candidates required to resume after rest',
-        gwpoolResumeGatewaysDesc: '1–512; blank defaults to 50, never below the stop threshold. Rest expiry only triggers a recheck; resume at this count. Failed listings keep the account resting. Candidates are not verified full-strength tickets.',
+        gwpoolRotationMinGateways: 'Rest threshold',
+        gwpoolRotationMinGatewaysDesc: 'Rest below this count; finish live verified tickets first. Default 1.',
+        gwpoolResumeGateways: 'Resume threshold',
+        gwpoolResumeGatewaysDesc: 'Resume at this count, never below the rest threshold. Default 50.',
+        gwpoolCandidatesHint: 'Candidates are deliverable gateways outside local cooldown, not verified tickets. A failed listing is not zero.',
         gwpoolBulkHint: 'Only checked fields change; others keep each account’s own value. Clear a number for its default. An empty Key keeps the existing key. Runtime statistics are not copied.',
         gwpoolBulkApply: 'Change: {field}',
         gwpoolAutoWait: 'Wait for tickets or recoverable preflight failures (off by default)',
-        gwpoolEarlyProbe: 'Limited early probe when out of tickets (experimental, off by default)',
-        gwpoolEarlyProbeDesc: 'Observes state-echo contact during cooldown. With a waiting business request, zero normal candidates and a deliverable locally cooling ticket, reserve at most one Luna A/B per credential domain every 30 minutes. Use success immediately; never prewarm inventory. Logs skip reasons, prior cooldown and actual outcomes. Cancellation or acquisition failure does not refund the reservation; unwaited failures do not raise the tier. Authentication and rate limits remain enforced. One observation does not prove upstream cooldown behavior.',
+        gwpoolEarlyProbe: 'Early probe (experimental)',
+        gwpoolEarlyProbeDesc: 'For waiting traffic with no normal candidates. At most once every 30 minutes, verify one deliverable gateway still in local cooldown and use a success immediately. Off by default; no background stockpiling or bypass of authentication and rate limits.',
         gwpoolAutoWaitDesc: 'Bounded backoff before business transmission for missing tickets, cooling or recoverable verification transport failures. Never replays sent business requests. Caller cancellation, exhausted verification time/attempts, authentication and rate limits stop this retry. Rotation still requires confirmed exhaustion.',
-        gwpoolMaxWait: 'Cumulative wait per request (seconds)',
-        gwpoolMaxWaitDesc: '1–3600 seconds, default 120 when empty; cumulative for this request, not reset each round. Client, reverse-proxy and first-output deadlines still apply, so a long connection is not guaranteed. Waiting does not increase the candidate count or active verification budget.',
+        gwpoolMaxWait: 'Per-request ticket wait (seconds)',
+        gwpoolMaxWaitDesc: 'Default 120 seconds. Each request independently counts fetching, verification and recovery waits. Does not limit successful inference or clear the shared candidate queue. Earlier client deadlines still apply.',
+        gwpoolPrepareRetries: 'Recovery attempts',
+        gwpoolPrepareRetriesDesc: 'One extra attempt by default; 0 disables. Shared recovery only for retryable ticket-fetch or verification failures before business dispatch. Never replays business requests.',
         gwpoolProbeModel: 'State-echo probe model (experimental)',
         gwpoolProbeModelDefault: 'Default: Luna (gpt-6-luna)',
         gwpoolProbeModelBusiness: 'Follow the business model',
@@ -788,6 +793,15 @@ export default {
         codexImageToolBadgeDisabled: 'No hosted injection',
         codexImageToolBadgeBlock: 'Client image tools stripped',
         gwpool: 'Use the gateway pool for Codex routing',
+        gwpoolManualRetry: 'Clear cooldowns',
+        gwpoolManualRetryPending: 'Processing…',
+        gwpoolManualRetryHint: 'Clear cooldowns and backoff. Keep live tickets and history; prepare again if no live ticket remains. Authentication and upstream rate limits remain.',
+        gwpoolManualRetryFailed: 'Failed to clear cooldowns or start preparation',
+        gwpoolManualRetryResult: {
+          retained: 'Cooldowns cleared; current live ticket retained.',
+          preparing: 'Cooldowns cleared; shared gateway preparation is running.',
+          blocked: 'Cooldowns cleared; other account blocks still prevent verification.'
+        },
         gwpoolDesc:
           'Fetch route tickets from the pool and reuse them while their cache lease is valid. If no usable ticket is available, this account’s request fails instead of falling back to the old route. Upstream requests that would use WebSocket use HTTP/SSE instead.',
         gwpoolBaseUrl: 'Gateway pool URL',
@@ -798,10 +812,10 @@ export default {
         gwpoolConsumerKeyKeep: 'Saved — leave blank to keep it',
         gwpoolConsumerKeyDesc:
           'Authorizes ticket requests to the pool; this is not a ChatGPT access token. It is not displayed after saving. Leave blank to keep a saved key.',
-        gwpoolAdvanced: 'Cooldown and wait limits (blank = default)',
+        gwpoolAdvanced: 'Advanced: single-operation timeouts',
         gwpoolGatewayWindow: 'Initial cooldown (s)',
-        gwpoolCooldownResetHours: 'Reset backoff every (hours, 0 disables)',
-        gwpoolCooldownResetDesc: 'Enabled every 24 hours by default; range 1–8760, 0 disables, and blank restores the 24-hour default. Checked every minute. Clears learned local backoff and fixed tiers, returning to the initial cooldown (1 hour by default). Remaining rest is measured from the latest contact, not from reset time; recent contacts are not immediately released. Keeps history, statistics and live verified tickets. The schedule survives upgrades. Disabling stops execution, not the clock; re-enabling an overdue schedule catches up once. Credential clones share resets. Enabled pool recommendations, authentication and rate limits still apply.',
+        gwpoolCooldownResetHours: 'Cooldown backoff reset (hours)',
+        gwpoolCooldownResetDesc: 'Default 24 hours; 0 disables. Returns to the initial cooldown tier, not account quota. Preserves recent contact, history and live tickets; does not immediately release cooldowns.',
         gwpoolGatewayWindowDesc:
           'Default 3600 seconds (1 hour); accepts 1–24 hours. Cooldown is learned separately per account × gateway. Expiry permits another attempt; it does not guarantee recovery.',
         gwpoolFetchTimeout: 'Single pair-fetch timeout (s)',
@@ -818,15 +832,15 @@ export default {
           'When on, verification is strict: an inconclusive result or insufficient budget blocks the business request, without calling it degraded. When off, skip quality checks and degradation blocking; ticket fetching, cooldown and rate limits still apply. Verification is a routing-state signal, not a guarantee of answer quality.',
         gwpoolGuardDescs: {
           queue:
-            'When protection is on, a new ticket takes 2 short verification requests before business traffic is sent. A degraded verdict tries another ticket; reaching the foreground limit without a pass fails the request. Verified tickets are reused while their cache lease is valid.'
+            'Verify candidates one by one, then share the verified live ticket and pause verification. Resume the queue when it expires or fails. No fixed ticket-count limit; each business request has an independent ticket-wait deadline.'
         },
         gwpoolDetails: 'Cooldown, trigger conditions and troubleshooting',
         gwpoolCooldownDetails:
           'Cooldown is tracked per account × gateway. Confirmed failure backs off through 1/2/4/6/8/10/12/16/20/24 hours; confirmed recovery ends the cycle. Two successes at the same interval in independent cycles lock it; another failure unlocks it. Network errors do not train it. Anonymous recommendations inform subsequent cycles, personal locks take priority, and active cooldowns are not suddenly shortened.',
         gwpoolGuardDetails:
-          'Foreground A/B retrieves state and echoes it. When a business state is refreshed, immediately confirm the newest state up to 3 times below 90 seconds of ticket age, 2 at 90–140 seconds, or 1 at 140 seconds and above. Any HTTP 200 with the same or absent state stops confirmation and retains the original business response; all refreshes discard the route. No cross-request counting or business-body replay. Errors, rate limits and timeouts are unknown and block delivery. Confirmation adds latency and quota usage; this heuristic does not guarantee detection of all degradation.',
+          'Foreground A/B retrieves state and echoes it. Business confirmation uses up to 3 extra requests below 90 seconds of ticket age, or 1 at 90 seconds and above. HTTP 200 with the same or absent state retains the original response; all refreshes discard the route. Never replays business content. Errors, rate limits and timeouts remain unknown, without learning a degraded cooldown.',
         gwpoolWarmDetails:
-          'Foreground verification has a default 90-second budget; ticket fetching can add more waiting, as can retries on other accounts. Verification uses at most half of the remaining server first-output deadline; insufficient budget blocks the business request. Verification spends upstream quota but is not billed as business traffic. Logs: gwpool_warm_probe (verification), gwpool_warm_inconclusive (no verdict; request blocked), gwpool_warm_no_budget (insufficient budget).',
+          'One shared candidate queue per identity; fetching and individual verification have network timeouts. Each request waits independently. Only the last waiter leaving cancels network work; queue progress is retained. Verification uses upstream quota but is not billed as business traffic.',
         gwpoolErrors: {
           GWPOOL_SETTING_INVALID: 'Invalid gateway pool setting; check field types and numeric ranges.',
           GWPOOL_TARGET_INVALID: 'Bulk gateway pool settings require OpenAI OAuth or Setup Token accounts.',
@@ -886,12 +900,11 @@ export default {
           // Two independent numbers, NO subtraction: "landings" comes from this row's ledger
           // (gateway names touched over the past window), "left in pool" is the current
           // deliverable listing reconciled against that ledger. The two sets do not nest.
-          windowUsage: 'Initial cooldown {hours}h; {used} cooling; {cooled} cooled down',
+          windowUsage: 'Cooling {used} · cooled down {cooled}',
           // Without the pool listing, report only the landings: inventing a number is worse.
           poolSnapshot: 'Last inventory snapshot: {free} (not live)',
           windowUsageHint:
-            'Cooling and cooled-down counts follow each recorded gateway\'s deadline in real time. Unknown timestamps are not counted as cooled down. Cooldown expiry permits a retry, but does not guarantee an available ticket or recovered quality.\n' +
-            'The inventory snapshot counts deliverable tickets outside local cooldown at the last saved listing query. It is not a live retry count, does not update with time, and does not cover every pool-side restriction. History and inventory are different sets and must not be subtracted; no snapshot is shown if none was recorded.',
+            'Counts follow each recorded gateway\'s cooldown deadline. Unknown timestamps are not counted as cooled down. Expiry permits a retry, but does not guarantee an available ticket or recovered quality.',
           // Expiry permits a retry; it does not prove recovery.
           forecast: 'retry-eligible gateways, weighted by observed success: about {minutes} full-strength min/hour',
           forecastPending: 'One-hour forecast: awaiting comparable samples',

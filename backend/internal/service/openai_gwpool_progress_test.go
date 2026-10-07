@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,16 +35,18 @@ func TestGatewayPoolProgressWiredToActualWarmLoop(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
 	require.NoError(t, err)
-	ctx, _ := withOpenAIGatewayPoolSink(req.Context(), nil)
+	bounded, cancel := context.WithTimeout(req.Context(), time.Second)
+	defer cancel()
+	ctx, _ := withOpenAIGatewayPoolSink(bounded, nil)
 	calls := 0
 	err = svc.gatewayPoolWarmUpWith(req.WithContext(ctx), account, gwpoolTestIdentity, gwpoolWarmModel,
 		func(_ context.Context, _, state string) (int, string, error) {
 			calls++
 			progress := svc.GatewayPoolProgress([]int64{1})[1]
-			require.Equal(t, "verifying", progress.Phase)
-			require.Equal(t, min(calls-1, 1), progress.Attempt, "count only after a verified send")
-			require.Equal(t, 4, progress.Limit)
-			require.Equal(t, "unified-142", progress.Gateway)
+			assert.Equal(t, "verifying", progress.Phase)
+			assert.Equal(t, min(calls-1, 1), progress.Attempt, "count only after a verified send")
+			assert.Zero(t, progress.Limit, "the shared queue has no fixed ticket limit")
+			assert.Equal(t, "unified-142", progress.Gateway)
 			return 200, "same-state", nil
 		})
 	require.NoError(t, err)

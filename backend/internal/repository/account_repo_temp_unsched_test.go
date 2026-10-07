@@ -56,6 +56,20 @@ func TestAccountRepository_SetGatewayPoolRestMissingAccountFails(t *testing.T) {
 	require.ErrorIs(t, err, service.ErrAccountNotFound)
 }
 
+func TestAccountRepository_ClearGatewayPoolRestPreservesOtherBlocks(t *testing.T) {
+	exec := &recordingSQLExecutor{result: rowsAffectedResult(1)}
+	repo := newAccountRepositoryWithSQL(nil, exec, nil)
+	require.NoError(t, repo.ClearGatewayPoolRest(context.Background(), 42,
+		map[string]any{"openai_gwpool_rest_state": map[string]any{"active": false}}))
+	require.Len(t, exec.execQueries, 1)
+	query := normalizeSQLWhitespace(exec.execQueries[0])
+	require.Contains(t, query, "CASE WHEN temp_unschedulable_reason LIKE $3")
+	require.Contains(t, query, "ELSE temp_unschedulable_until END")
+	require.Contains(t, query, "ELSE temp_unschedulable_reason END")
+	require.NotContains(t, query, "rate_limit_reset_at")
+	require.Contains(t, query, "INSERT INTO scheduler_outbox")
+}
+
 func TestAccountRepository_ResetQuotaUsedAndClearRateLimitCooldown_NoRowsAffectedReturnsNotFoundWithoutOutbox(t *testing.T) {
 	exec := &recordingSQLExecutor{result: rowsAffectedResult(0)}
 	repo := newAccountRepositoryWithSQL(nil, exec, nil)

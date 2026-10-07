@@ -19,9 +19,9 @@ import { onUnmounted, ref } from 'vue'
  */
 export const NOW_TICKER_INTERVAL_MS = 30_000
 
-export function useNowTicker() {
+export function useNowTicker(intervalMs = NOW_TICKER_INTERVAL_MS) {
   const now = ref(Date.now())
-  const timer = setInterval(() => (now.value = Date.now()), NOW_TICKER_INTERVAL_MS)
+  const timer = setInterval(() => (now.value = Date.now()), intervalMs)
   onUnmounted(() => clearInterval(timer))
   return now
 }

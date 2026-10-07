@@ -44,7 +44,7 @@ func TestGatewayPoolRoundsRestIncludesActualProbesAndKeepsRequestCloneExclusions
 	a, b, clone := preferenceAccount(1, group, 20), preferenceAccount(2, group, 1), preferenceAccount(3, group, 20)
 	clone.Credentials = a.Credentials
 	repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*a, *b, *clone}}}
-	svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}}
+	svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}, rateLimitService: gatewayPoolSchedulerTestSettings("legacy", 2)}
 	aid, bid := openAIGatewayPoolAccountKey(a), openAIGatewayPoolAccountKey(b)
 	now := time.Now()
 	svc.codexCookies.poolRounds.touch(aid, now.Add(-time.Hour))
@@ -88,8 +88,14 @@ func TestGatewayPoolRoundsDoNotWaitForDisabledOrIncompatibleAccounts(t *testing.
 				GroupID: &group, Platform: PlatformOpenAI, RequestedModel: "gpt-6-astra",
 				RequiredTransport: OpenAIUpstreamTransportHTTPSSE,
 			})
-			require.Equal(t, uint64(1), svc.codexCookies.poolRounds.generation(group))
-			require.Empty(t, gatewayPoolRoundExclusions(ctx, nil))
+			if reason == "model" {
+				require.Equal(t, uint64(0), svc.codexCookies.poolRounds.generation(group))
+				require.Contains(t, gatewayPoolRoundExclusions(ctx, nil), a.ID,
+					"a healthy account for another model still belongs to the group-wide round")
+			} else {
+				require.Equal(t, uint64(1), svc.codexCookies.poolRounds.generation(group))
+				require.NotContains(t, gatewayPoolRoundExclusions(ctx, nil), a.ID)
+			}
 		})
 	}
 }

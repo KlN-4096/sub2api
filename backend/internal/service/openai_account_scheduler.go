@@ -44,6 +44,7 @@ const (
 )
 
 type cachedOpenAIAdvancedSchedulerSetting struct {
+	gatewayPoolActiveAccounts      int
 	lowUpstreamRatePriorityEnabled bool
 	oauthSchedulingRateMultiplier  *float64
 	enabled                        bool
@@ -55,6 +56,7 @@ type cachedOpenAIAdvancedSchedulerSetting struct {
 }
 
 type openAIAdvancedSchedulerRuntimeSettings struct {
+	gatewayPoolActiveAccounts      int
 	lowUpstreamRatePriorityEnabled bool
 	oauthSchedulingRateMultiplier  *float64
 	enabled                        bool
@@ -1057,6 +1059,9 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 	req OpenAIAccountScheduleRequest,
 	plan openAIAccountLoadPlan,
 ) []openAIAccountCandidateScore {
+	if req.StickyWeighted {
+		ctx = withGatewayPoolStickyPreference(ctx, req.StickyPreviousAccountID, req.StickyAccountID)
+	}
 	buildSelectionOrder := func(pool []openAIAccountCandidateScore) []openAIAccountCandidateScore {
 		if len(pool) == 0 || plan.topK <= 0 {
 			return nil
@@ -1486,6 +1491,11 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 			MaxConcurrency: account.EffectiveLoadFactor(),
 		})
 	}
+	filtered = gatewayPoolDedupeCandidates(ctx, filtered, req.StickyPreviousAccountID, req.StickyAccountID)
+	loadReq = loadReq[:0]
+	for _, account := range filtered {
+		loadReq = append(loadReq, AccountWithConcurrency{ID: account.ID, MaxConcurrency: account.EffectiveLoadFactor()})
+	}
 	if len(filtered) == 0 {
 		return nil, 0, 0, 0, noAvailableOpenAISelectionError(req.RequestedModel, false, filterStats.summary(""))
 	}
@@ -1901,6 +1911,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 	if cached, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting); ok && cached != nil {
 		if time.Now().UnixNano() < cached.expiresAt {
 			return openAIAdvancedSchedulerRuntimeSettings{
+				gatewayPoolActiveAccounts:      normalizeGatewayPoolActiveAccounts(cached.gatewayPoolActiveAccounts),
 				lowUpstreamRatePriorityEnabled: cached.lowUpstreamRatePriorityEnabled,
 				oauthSchedulingRateMultiplier:  cached.oauthSchedulingRateMultiplier,
 				enabled:                        cached.enabled,
@@ -1916,6 +1927,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 		if cached, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting); ok && cached != nil {
 			if time.Now().UnixNano() < cached.expiresAt {
 				return openAIAdvancedSchedulerRuntimeSettings{
+					gatewayPoolActiveAccounts:      normalizeGatewayPoolActiveAccounts(cached.gatewayPoolActiveAccounts),
 					lowUpstreamRatePriorityEnabled: cached.lowUpstreamRatePriorityEnabled,
 					oauthSchedulingRateMultiplier:  cached.oauthSchedulingRateMultiplier,
 					enabled:                        cached.enabled,
@@ -1928,6 +1940,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 		}
 
 		lowUpstreamRatePriorityEnabled := false
+		gatewayPoolActiveAccounts := gatewayPoolActiveAccountsDefault
 		oauthSchedulingRateMultiplier := parseOpenAIOAuthSchedulingRateMultiplier(nil)
 		enabled := false
 		stickyWeightedEnabled := false
@@ -1939,6 +1952,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 			defer cancel()
 
 			if values, err := repo.GetMultiple(dbCtx, openAIAdvancedSchedulerRuntimeSettingKeys()); err == nil {
+				gatewayPoolActiveAccounts = parseGatewayPoolActiveAccounts(values[SettingKeyOpenAIGatewayPoolActiveAccounts])
 				lowUpstreamRatePriorityEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeyOpenAILowUpstreamRatePriorityEnabled]), "true")
 				oauthSchedulingRateMultiplier = parseOpenAIOAuthSchedulingRateMultiplier(values)
 				enabled = strings.EqualFold(strings.TrimSpace(values[openAIAdvancedSchedulerSettingKey]), "true")
@@ -1957,6 +1971,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 					}
 				}
 				lowUpstreamRatePriorityEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAILowUpstreamRatePriorityEnabled]), "true")
+				gatewayPoolActiveAccounts = parseGatewayPoolActiveAccounts(fallbackValues[SettingKeyOpenAIGatewayPoolActiveAccounts])
 				oauthSchedulingRateMultiplier = parseOpenAIOAuthSchedulingRateMultiplier(fallbackValues)
 				enabled = strings.EqualFold(strings.TrimSpace(fallbackValues[openAIAdvancedSchedulerSettingKey]), "true")
 				stickyWeightedEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled]), "true")
@@ -1967,6 +1982,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 		}
 
 		openAIAdvancedSchedulerSettingCache.Store(&cachedOpenAIAdvancedSchedulerSetting{
+			gatewayPoolActiveAccounts:      gatewayPoolActiveAccounts,
 			lowUpstreamRatePriorityEnabled: lowUpstreamRatePriorityEnabled,
 			oauthSchedulingRateMultiplier:  oauthSchedulingRateMultiplier,
 			enabled:                        enabled,
@@ -1977,6 +1993,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 			expiresAt:                      time.Now().Add(openAIAdvancedSchedulerSettingCacheTTL).UnixNano(),
 		})
 		return openAIAdvancedSchedulerRuntimeSettings{
+			gatewayPoolActiveAccounts:      gatewayPoolActiveAccounts,
 			lowUpstreamRatePriorityEnabled: lowUpstreamRatePriorityEnabled,
 			oauthSchedulingRateMultiplier:  oauthSchedulingRateMultiplier,
 			enabled:                        enabled,
@@ -2016,6 +2033,7 @@ func (s *OpenAIGatewayService) isOpenAIAdvancedSchedulerSubscriptionPriorityEnab
 
 func openAIAdvancedSchedulerRuntimeSettingKeys() []string {
 	keys := []string{
+		SettingKeyOpenAIGatewayPoolActiveAccounts,
 		SettingKeyOpenAILowUpstreamRatePriorityEnabled,
 		SettingKeyOpenAIOAuthSchedulingRateMultiplier,
 		openAIAdvancedSchedulerSettingKey,
@@ -2189,6 +2207,11 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	previousResponseCanMove bool,
 	useUpstreamTokenCost bool,
 ) (selection *AccountSelectionResult, decision OpenAIAccountScheduleDecision, err error) {
+	if sessionHash != "" && s.cache != nil {
+		if bound, bindErr := s.getStickySessionAccountID(ctx, groupID, sessionHash); bindErr == nil && bound > 0 {
+			ctx = context.WithValue(ctx, gatewayPoolExistingBindingKey{}, bound)
+		}
+	}
 	var rotationAllowed map[int64]struct{}
 	excludedIDs, rotationAllowed, err = gatewayPoolRotationExclusions(ctx, s.accountRepo, groupID, excludedIDs)
 	if err != nil {
@@ -2220,6 +2243,11 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 		}
 		if requiredImageCapability != "" || strongBinding {
 			allowed, restErr := s.gatewayPoolResumeAllowed(ctx, selection.Account, true)
+			boundID, _ := ctx.Value(gatewayPoolExistingBindingKey{}).(int64)
+			if restErr == nil && allowed && !strongBinding && selection.Account.ID != boundID && groupID != nil && selection.Account.UsesGatewayPool() {
+				identity, identityErr := s.codexCookies.gatewayPoolIdentity(ctx, selection.Account)
+				allowed = identityErr == nil && s.codexCookies.poolRounds.claim(*groupID, identity, s.gatewayPoolActiveAccountLimit(ctx))
+			}
 			if restErr == nil && allowed {
 				return selection, decision, nil
 			}
@@ -2385,17 +2413,18 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	// 仍须装门。其余媒体路径通过 WithOpenAIProfitControlSuppressed 显式跳过。
 	if requiredImageCapability == "" {
 		ctx = s.withOpenAIProfitControlGate(ctx, groupID)
-		strongBinding := (strings.TrimSpace(previousResponseID) != "" && !previousResponseCanMove) ||
-			s.resolveOpenAIGuardianParentAccountID(ctx, groupID) > 0
-		if !strongBinding {
-			ctx = s.withGatewayPoolAccountPreferences(ctx, OpenAIAccountScheduleRequest{
-				GroupID: groupID, Platform: platform, RequestedModel: requestedModel,
-				ExcludedIDs: excludedIDs, RequiredTransport: requiredTransport,
-				RequiredCapability: requiredCapability, RequireCompact: requireCompact,
-				RequirePrivacySet: s.openAIGroupRequiresPrivacySet(ctx, groupID),
-			})
-			excludedIDs = gatewayPoolRoundExclusions(ctx, excludedIDs)
-		}
+	}
+	strongBinding := (strings.TrimSpace(previousResponseID) != "" && !previousResponseCanMove) ||
+		s.resolveOpenAIGuardianParentAccountID(ctx, groupID) > 0
+	if !strongBinding {
+		ctx = s.withGatewayPoolAccountPreferences(ctx, OpenAIAccountScheduleRequest{
+			GroupID: groupID, Platform: platform, RequestedModel: requestedModel,
+			SessionHash: sessionHash,
+			ExcludedIDs: excludedIDs, RequiredTransport: requiredTransport,
+			RequiredCapability: requiredCapability, RequiredImageCapability: requiredImageCapability, RequireCompact: requireCompact,
+			RequirePrivacySet: s.openAIGroupRequiresPrivacySet(ctx, groupID),
+		})
+		excludedIDs = gatewayPoolRoundExclusions(ctx, excludedIDs)
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	decision := OpenAIAccountScheduleDecision{}

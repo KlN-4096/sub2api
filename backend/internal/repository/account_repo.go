@@ -2546,6 +2546,42 @@ func (r *accountRepository) SetGatewayPoolRest(ctx context.Context, id int64, un
 	return nil
 }
 
+// The administrator's local-cooldown reset may only remove a pool-owned block.
+// A concurrent auth/provider block remains untouched in this atomic statement.
+func (r *accountRepository) ClearGatewayPoolRest(ctx context.Context, id int64, patch map[string]any) error {
+	data, err := json.Marshal(patch)
+	if err != nil {
+		return err
+	}
+	result, err := r.sql.ExecContext(ctx, `
+		WITH updated AS (
+			UPDATE accounts
+			SET temp_unschedulable_until = CASE WHEN temp_unschedulable_reason LIKE $3
+					THEN NULL ELSE temp_unschedulable_until END,
+				temp_unschedulable_reason = CASE WHEN temp_unschedulable_reason LIKE $3
+					THEN NULL ELSE temp_unschedulable_reason END,
+				extra = COALESCE(extra, '{}'::jsonb) || $2::jsonb,
+				updated_at = NOW()
+			WHERE id = $1 AND deleted_at IS NULL
+			RETURNING id
+		)
+		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+		SELECT $4, updated.id, NULL, NULL FROM updated
+	`, id, string(data), "网关候选低于% / Gateway candidates below %", service.SchedulerOutboxEventAccountChanged)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return service.ErrAccountNotFound
+	}
+	r.syncSchedulerAccountSnapshot(ctx, id)
+	return nil
+}
+
 func (r *accountRepository) SetTempUnschedulable(ctx context.Context, id int64, until time.Time, reason string) error {
 	result, err := r.sql.ExecContext(ctx, `
 		UPDATE accounts
