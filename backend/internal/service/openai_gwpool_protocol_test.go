@@ -24,6 +24,30 @@ func gwpoolBackoffLeft(store *openAICodexCookieStore) time.Duration {
 	return left
 }
 
+func TestGatewayPoolProbeModelOverrideIsExplicitAndWhitelisted(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	require.Equal(t, "gpt-6-luna", account.gatewayPoolProbeModel("gpt-6-astra"))
+	account.Extra[openAIGatewayPoolProbeModelExtraKey] = "gpt-6-luna"
+	require.Equal(t, "gpt-6-luna", account.gatewayPoolProbeModel("gpt-6-astra"))
+	account.Extra[openAIGatewayPoolProbeModelExtraKey] = "gpt-99-test"
+	require.Equal(t, "gpt-6-luna", account.gatewayPoolProbeModel("gpt-6-astra"),
+		"invalid persisted values fall back to the default probe model")
+	require.Error(t, validateOpenAIGatewayPoolAccountExtra(account, map[string]any{
+		openAIGatewayPoolExtraKey:            true,
+		openAIGatewayPoolBaseURLExtraKey:     "https://pool.example.test",
+		OpenAIGatewayPoolConsumerKeyExtraKey: "key",
+		openAIGatewayPoolProbeModelExtraKey:  "gpt-99-test",
+	}))
+	account.Extra[openAIGatewayPoolProbeModelExtraKey] = gatewayPoolProbeModelBusiness
+	require.Equal(t, "gpt-6-astra", account.gatewayPoolProbeModel("gpt-6-astra"))
+	for _, model := range []string{gatewayPoolProbeModelAstra, gatewayPoolProbeModelSol, gatewayPoolProbeModelLuna, gatewayPoolProbeModelBusiness} {
+		require.NoError(t, validateOpenAIGatewayPoolAccountExtra(account, map[string]any{
+			openAIGatewayPoolExtraKey: true, openAIGatewayPoolBaseURLExtraKey: "https://pool.example.test",
+			OpenAIGatewayPoolConsumerKeyExtraKey: "key", openAIGatewayPoolProbeModelExtraKey: model,
+		}))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 1. 本地账本当 exclude 带上去
 // ---------------------------------------------------------------------------
@@ -320,14 +344,20 @@ func TestGatewayPoolExcludesStaleTicketVersion(t *testing.T) {
 
 // gwpoolRunOnce 跑**预热下面那一层**。
 //
-// 预热 2026-10-03 起无条件跑在 doOpenAIUpstream 里（档位删了），而这一组用例验的是取票/注入/
+// 这一组用例关闭质量防护，只验取票/注入/
 // 还票协议：走上层的话每个用例都要先把判据那两发也配出来，而且它们的请求体里没有 model ⇒
 // 预热会先 fail closed（errOpenAIGatewayPoolWarmNoModel），一张票都取不到，测不到任何东西。
 //
 // 靶子选这一层是对的，不是绕过：还票判据本身就住在 doOpenAIUpstreamOnce 里
 // （gatewayPoolReleasesUnsent 的调用点）。预热与转发的组合由 openai_gwpool_warm_test.go 盯。
 func gwpoolRunOnce(svc *OpenAIGatewayService, req *http.Request, acct *Account) (*http.Response, error) {
-	resp, _, err := svc.doOpenAIUpstreamOnce(req, "", acct)
+	transportOnly := *acct
+	transportOnly.Extra = make(map[string]any, len(acct.Extra)+1)
+	for key, value := range acct.Extra {
+		transportOnly.Extra[key] = value
+	}
+	transportOnly.Extra[openAIGatewayPoolGuardEnabledExtraKey] = false
+	resp, _, err := svc.doOpenAIUpstreamOnce(req, "", &transportOnly)
 	return resp, err
 }
 
@@ -406,14 +436,14 @@ func TestGatewayPoolReleasesNearExpiryTicketFromCacheToo(t *testing.T) {
 	require.Equal(t, openAIGatewayPoolPairNone, state, "还掉的票不许留在缓存里继续出站")
 }
 
-// 客户端在取票之后、发送之前就走了 ⇒ 同样还票，而且**一个上游请求都不发**。
-func TestGatewayPoolReleasesTicketWhenClientVanishedBeforeSend(t *testing.T) {
+// 客户端在共享取票完成前离开：调用者及时退出，独立取票留缓存供下一发使用，不发送业务。
+func TestGatewayPoolKeepsPendingTicketWhenClientVanishedBeforeSend(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 	upstream := &gwpoolErrorUpstream{}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	acct := fake.account(1)
 
-	// ctx 在 AttachRoute 取到票之后被取消：用一个「取完票就自己取消」的 ctx 复现。
+	// 池子收到 /cookie 时取消调用者，响应此时尚未回到 AttachRoute。
 	ctx, cancel := context.WithCancel(context.Background())
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 	require.NoError(t, err)
@@ -423,7 +453,11 @@ func TestGatewayPoolReleasesTicketWhenClientVanishedBeforeSend(t *testing.T) {
 	_, err = gwpoolRunOnce(svc, req, acct)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Zero(t, upstream.calls, "客户端已经走了就不该再打上游")
-	require.Equal(t, `{"cookie_version":"tkt-1"}`, fake.nextRelease(t))
+	require.Eventually(t, func() bool {
+		_, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
+		return state == openAIGatewayPoolPairLive
+	}, time.Second, time.Millisecond)
+	require.Zero(t, fake.releaseHits.Load(), "共享取票可能已被其它调用者接用，不异步还票")
 }
 
 // 对照组一：请求真发出去了（拿到响应）⇒ 绝不还票。满血窗口是**首次接触**就烧掉的。

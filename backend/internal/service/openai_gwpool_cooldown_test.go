@@ -20,7 +20,7 @@ func TestGatewayPoolCooldownBackoffResetAndLock(t *testing.T) {
 	sample, _ := c.observe(now, openAIGatewayVerdictDegraded, base)
 	require.Nil(t, sample, "第一次接触失败没有冷却样本，不能直接升到 2 小时")
 	require.Equal(t, 3600, c.WindowSeconds)
-	for _, want := range []int{7200, 14400, 21600, 28800, 36000, 36000} {
+	for _, want := range []int{7200, 14400, 21600, 28800, 36000, 43200, 57600, 72000, 86400, 86400} {
 		now = c.Until
 		require.True(t, c.begin(now, time.Time{}, base))
 		sample, changed := c.observe(now, openAIGatewayVerdictDegraded, base)
@@ -101,10 +101,10 @@ func TestGatewayPoolCooldownRejectsInvalidPersistedState(t *testing.T) {
 }
 
 func TestGatewayPoolCooldownCannotBeBypassedByBareTakeOrSpares(t *testing.T) {
-	t.Run("steering disabled and pool ignores exclude", func(t *testing.T) {
+	t.Run("legacy steering opt-out and pool ignores exclude", func(t *testing.T) {
 		fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 		account := fake.account(1)
-		account.Extra[openAIGatewayPoolSteeringExtraKey] = false
+		account.Extra["openai_gwpool_steering"] = false
 		store := &openAICodexCookieStore{}
 		store.gatewayPoolMarkUsed(gwpoolTestIdentity, "unified-142")
 		headers := http.Header{}

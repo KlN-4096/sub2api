@@ -194,6 +194,10 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 	// 与 classifyUpstreamTransportError 对 gwpool.ErrPool 的豁免同一个道理。
 	if msg := gatewayPoolClientMessage(err); msg != "" {
 		out.Reason = OpenAIGatewayPoolReason
+		out.GatewayPoolRotation = gatewayPoolRotationFailure(err)
+		// Pool-specific rotation is opt-in for both ends. Only the handler,
+		// after checking replay safety and fresh source settings, can reopen it.
+		out.NextAccountAction = NextAccountStop
 		out.ClientMessage = msg
 		out.ClientStatusCode = http.StatusServiceUnavailable
 		// 带上 Retry-After：handler 的 copyFailoverRetryAfter 从 ResponseHeaders 里取它。

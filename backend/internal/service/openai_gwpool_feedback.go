@@ -1,15 +1,10 @@
 package service
 
 import (
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
-	"log/slog"
-	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
@@ -18,8 +13,6 @@ import (
 const (
 	gatewayPoolReportTimeout     = 3 * time.Second
 	gatewayPoolRecommendationTTL = time.Hour
-	gatewayPoolReportAttempts    = 3
-	gatewayPoolReportRetryDelay  = 250 * time.Millisecond
 )
 
 type gatewayPoolRecommendation struct {
@@ -78,10 +71,6 @@ func (s *OpenAIGatewayService) reportGatewayPoolCooldown(account *Account, ident
 	if sample == nil || tag == "" {
 		return
 	}
-	pool, err := s.codexCookies.poolClient(account)
-	if err != nil {
-		return
-	}
 	result := "degraded"
 	if sample.Full {
 		result = "full"
@@ -91,41 +80,7 @@ func (s *OpenAIGatewayService) reportGatewayPoolCooldown(account *Account, ident
 	report := gwpool.CooldownReport{
 		ID: hex.EncodeToString(sum[:]), AccountTag: tag, Gateway: sample.Gateway,
 		WindowSeconds: sample.WindowSeconds, ElapsedSeconds: sample.ElapsedSeconds, Result: result,
+		ObservedAt: sample.AttemptAt.UTC(),
 	}
-	accountID := account.ID
-	go func() {
-		recommendation, err := sendGatewayPoolCooldownReport(pool, report)
-		if err != nil {
-			slog.Warn("gwpool_cooldown_report_failed", "account_id", accountID, "gateway", report.Gateway, "error", err)
-			return
-		}
-		s.codexCookies.noteGatewayPoolRecommendation(identity, report.Gateway, recommendation)
-	}()
-}
-
-// 同一事件有界重试临时失败；400/401/409 等永久错误不重放。进程退出不承诺可靠投递。
-func sendGatewayPoolCooldownReport(pool *gwpool.Client, report gwpool.CooldownReport) (*gwpool.CooldownRecommendation, error) {
-	var err error
-	for attempt := 0; attempt < gatewayPoolReportAttempts; attempt++ {
-		if attempt > 0 {
-			time.Sleep(gatewayPoolReportRetryDelay * time.Duration(attempt))
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), gatewayPoolReportTimeout)
-		var recommendation *gwpool.CooldownRecommendation
-		recommendation, err = pool.ReportCooldown(ctx, report)
-		cancel()
-		if err == nil {
-			return recommendation, nil
-		}
-		var refused *gwpool.PoolError
-		var transport *url.Error
-		if errors.As(err, &refused) {
-			if refused.Status != http.StatusTooManyRequests && refused.Status < http.StatusInternalServerError {
-				break
-			}
-		} else if !errors.As(err, &transport) {
-			break
-		}
-	}
-	return nil, err
+	s.enqueueGatewayPoolReport(account, report)
 }

@@ -1032,6 +1032,25 @@ describe('EditAccountModal', () => {
   })
 
   // 四个旋钮：留空 = 用后端默认值，所以默认形态下一个键都不该落（避免 extra 堆默认项）。
+  it('defaults protection on and saves an explicit off switch without enabling background probes', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.extra = { openai_gwpool: true, openai_gwpool_base_url: 'https://pool.0102400.xyz' }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    const guard = wrapper.get<HTMLInputElement>('[data-testid="edit-openai-gwpool-guard-enabled"]')
+    expect(guard.element.checked).toBe(true)
+    await guard.setValue(false)
+    expect(wrapper.get('[data-testid="edit-openai-gwpool-prewarm"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_gwpool_guard_enabled).toBe(false)
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    await guard.setValue(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_gwpool_guard_enabled')
+  })
+
   it('writes the gateway pool knobs only when they differ from the defaults', async () => {
     const account = buildAccount()
     account.type = 'oauth'
@@ -1046,9 +1065,7 @@ describe('EditAccountModal', () => {
     expect(wrapper.get('[data-testid="edit-openai-gwpool-base-url-hint"]').text()).toBe(
       'admin.accounts.openai.gwpoolBaseUrlDesc'
     )
-    expect(
-      (wrapper.get('[data-testid="edit-openai-gwpool-steering"]').element as HTMLInputElement).checked
-    ).toBe(true)
+    expect(wrapper.find('[data-testid="edit-openai-gwpool-steering"]').exists()).toBe(false)
     // 三个「秒」旋钮都要有上限：后端的 time.Duration 在 1e10 秒量级会乘溢出成负数，
     // 本地账本会整体静默失效（与「窗口越大越严」正好相反），取票超时同量级则全量取不到票。
     for (const testid of [
@@ -1058,7 +1075,7 @@ describe('EditAccountModal', () => {
     ]) {
       const input = wrapper.get<HTMLInputElement>(`[data-testid="${testid}"]`)
       expect(input.attributes('min')).toBe(testid === 'edit-openai-gwpool-gateway-window' ? '3600' : '1')
-      expect(input.attributes('max')).toBe(testid === 'edit-openai-gwpool-gateway-window' ? '36000' : '86400')
+      expect(input.attributes('max')).toBe('86400')
     }
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
 
@@ -1073,6 +1090,13 @@ describe('EditAccountModal', () => {
     expect(wrapper.get('[data-testid="edit-openai-gwpool-guard-hint"]').text()).toBe(
       'admin.accounts.openai.gwpoolGuardDescs.queue'
     )
+    const details = wrapper.get<HTMLDetailsElement>('[data-testid="edit-openai-gwpool-details"]')
+    expect(details.element.open).toBe(false)
+    expect(details.get('summary').text()).toBe('admin.accounts.openai.gwpoolDetails')
+    for (const key of ['gwpoolGatewayWindowDesc', 'gwpoolFetchTimeoutDesc', 'gwpoolListTimeoutDesc', 'gwpoolWarmTicketsDesc']) {
+      expect(wrapper.get('[data-testid="edit-openai-gwpool-section"]').text()).toContain(`admin.accounts.openai.${key}`)
+    }
+    expect(wrapper.get('[data-testid="edit-openai-gwpool-section"]').text()).toContain('admin.accounts.openai.gwpoolGuardDesc')
 
     let extra = updateAccountMock.mock.calls[0]?.[1]?.extra
     expect(extra?.openai_gwpool_base_url).toBe('https://pool.0102400.xyz')
@@ -1091,7 +1115,6 @@ describe('EditAccountModal', () => {
 
     // 改过的才落键。
     updateAccountMock.mockReset().mockResolvedValue(account)
-    await wrapper.get('[data-testid="edit-openai-gwpool-steering"]').setValue(false)
     // 后台预热缺省即关 ⇒ 打开它才落键（上面那一轮已经钉过「关着不落键」）。
     await wrapper.get('[data-testid="edit-openai-gwpool-prewarm"]').setValue(true)
     await wrapper.get('[data-testid="edit-openai-gwpool-gateway-window"]').setValue('7200')
@@ -1100,11 +1123,94 @@ describe('EditAccountModal', () => {
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
 
     extra = updateAccountMock.mock.calls[0]?.[1]?.extra
-    expect(extra?.openai_gwpool_steering).toBe(false)
+    expect(extra).not.toHaveProperty('openai_gwpool_steering')
     expect(extra?.openai_gwpool_prewarm).toBe(true)
     expect(extra?.openai_gwpool_gateway_window_s).toBe(7200)
     expect(extra?.openai_gwpool_fetch_timeout_s).toBe(20)
     expect(extra?.openai_gwpool_list_timeout_s).toBe(5)
+  })
+
+  it('loads and saves account-level gateway exhaustion rotation, defaulting off', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.extra = { openai_gwpool: true, openai_gwpool_base_url: 'https://pool.example.test' }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    const rotation = wrapper.get<HTMLInputElement>('[data-testid="edit-openai-gwpool-rotation"]')
+    expect(rotation.element.checked).toBe(false)
+    await rotation.setValue(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_gwpool_rotation).toBe(true)
+    const saved = mountModal({ ...account, extra: { ...account.extra, openai_gwpool_rotation: true } })
+    expect(saved.get<HTMLInputElement>('[data-testid="edit-openai-gwpool-rotation"]').element.checked).toBe(true)
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    await saved.get('[data-testid="edit-openai-gwpool-enabled"]').setValue(false)
+    await saved.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_gwpool_rotation')
+  })
+
+  it('defaults ticket waiting off and saves an editable bounded maximum', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.extra = { openai_gwpool: true, openai_gwpool_base_url: 'https://pool.example.test' }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    const toggle = wrapper.get<HTMLInputElement>('[data-testid="edit-openai-gwpool-auto-wait"]')
+    expect(toggle.element.checked).toBe(false)
+    expect(wrapper.find('[data-testid="edit-openai-gwpool-max-wait"]').exists()).toBe(false)
+    await toggle.setValue(true)
+    const seconds = wrapper.get<HTMLInputElement>('[data-testid="edit-openai-gwpool-max-wait"]')
+    expect(seconds.attributes('min')).toBe('1')
+    expect(seconds.attributes('max')).toBe('3600')
+    await seconds.setValue('')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_gwpool_max_wait_s')
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    await seconds.setValue('600')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    const savedExtra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(savedExtra?.openai_gwpool_auto_wait).toBe(true)
+    expect(savedExtra?.openai_gwpool_max_wait_s).toBe(600)
+    const loaded = mountModal({ ...account, extra: savedExtra })
+    expect(loaded.get<HTMLInputElement>('[data-testid="edit-openai-gwpool-max-wait"]').element.value).toBe('600')
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    await loaded.get('[data-testid="edit-openai-gwpool-auto-wait"]').setValue(false)
+    await loaded.get('form#edit-account-form').trigger('submit.prevent')
+    const disabled = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(disabled).not.toHaveProperty('openai_gwpool_auto_wait')
+    expect(disabled).not.toHaveProperty('openai_gwpool_max_wait_s')
+  })
+
+  it('loads and saves the explicit experimental state-echo probe model', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.extra = { openai_gwpool: true, openai_gwpool_base_url: 'https://pool.example.test' }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    const select = wrapper.get<HTMLSelectElement>('[data-testid="edit-openai-gwpool-probe-model"]')
+    expect(select.element.value).toBe('')
+    expect(select.text()).toContain('gwpoolProbeModelDefault')
+    await select.setValue('gpt-6-luna')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_gwpool_probe_model).toBe('gpt-6-luna')
+    const loaded = mountModal({ ...account, extra: { ...account.extra, openai_gwpool_probe_model: 'gpt-6-luna' } })
+    expect(loaded.get<HTMLSelectElement>('[data-testid="edit-openai-gwpool-probe-model"]').element.value).toBe('gpt-6-luna')
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    await loaded.get('[data-testid="edit-openai-gwpool-probe-model"]').setValue('')
+    await loaded.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_gwpool_probe_model')
+    await loaded.get('[data-testid="edit-openai-gwpool-probe-model"]').setValue('business')
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    await loaded.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_gwpool_probe_model).toBe('business')
+    await loaded.get('[data-testid="edit-openai-gwpool-probe-model"]').setValue('gpt-6-sol')
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    await loaded.get('[data-testid="edit-openai-gwpool-enabled"]').setValue(false)
+    await loaded.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_gwpool_probe_model')
   })
 
   // 已存的旋钮要回显；清空输入框 = 回到默认值 = 把键删掉。
@@ -1132,9 +1238,7 @@ describe('EditAccountModal', () => {
     for (const testid of ['edit-openai-gwpool-all-models', 'edit-openai-gwpool-renew']) {
       expect(wrapper.find(`[data-testid="${testid}"]`).exists(), testid).toBe(false)
     }
-    expect(
-      (wrapper.get('[data-testid="edit-openai-gwpool-steering"]').element as HTMLInputElement).checked
-    ).toBe(false)
+    expect(wrapper.find('[data-testid="edit-openai-gwpool-steering"]').exists()).toBe(false)
     expect(
       (wrapper.get('[data-testid="edit-openai-gwpool-gateway-window"]').element as HTMLInputElement).value
     ).toBe('3600')
@@ -1163,7 +1267,8 @@ describe('EditAccountModal', () => {
     for (const key of [
       'openai_gwpool_guard',
       'openai_gwpool_state_echo',
-      'openai_gwpool_degraded_retries'
+      'openai_gwpool_degraded_retries',
+      'openai_gwpool_steering'
     ]) {
       expect(extra, key).not.toHaveProperty(key)
     }

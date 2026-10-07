@@ -8,12 +8,12 @@ import (
 	"math"
 	"sync"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 )
 
 const (
-	gatewayPoolCooldownCeiling = 10 * time.Hour
-	gatewayPoolCooldownKnee    = 4 * time.Hour
-	gatewayPoolCooldownStep    = 2 * time.Hour
+	gatewayPoolCooldownCeiling = time.Duration(gwpool.CooldownMaxSeconds) * time.Second
 	// 调度/取票有毫秒级延迟，不能因此把准时的 1 小时观察归到 2 小时档。
 	gatewayPoolCooldownGrace   = time.Minute
 	gatewayPoolCooldownLocks   = 2
@@ -55,19 +55,7 @@ func gatewayPoolCooldownBase(window time.Duration) int {
 }
 
 func nextGatewayPoolCooldown(seconds int) int {
-	window := time.Duration(seconds) * time.Second
-	if window < gatewayPoolCooldownKnee {
-		window *= 2
-		if window > gatewayPoolCooldownKnee {
-			window = gatewayPoolCooldownKnee
-		}
-	} else {
-		window += gatewayPoolCooldownStep
-	}
-	if window > gatewayPoolCooldownCeiling {
-		window = gatewayPoolCooldownCeiling
-	}
-	return int(window.Seconds())
+	return gwpool.NextCooldownSeconds(seconds)
 }
 
 func successfulGatewayPoolCooldown(planned, elapsed int) int {
@@ -210,11 +198,7 @@ func validGatewayPoolCooldown(c *gatewayPoolCooldown, now time.Time, base int) b
 			step = next
 		}
 		// 账号改过初始值时，原先标准档的学习仍然合法。
-		switch seconds {
-		case 3600, 7200, 14400, 21600, 28800, 36000:
-			return true
-		}
-		return false
+		return gwpool.IsCooldownStep(seconds)
 	}
 	if c == nil || c.UpdatedAt.IsZero() || c.UpdatedAt.After(now.Add(gatewayPoolCooldownGrace)) ||
 		!validStep(c.WindowSeconds) || c.Until.After(c.UpdatedAt.Add(time.Duration(c.WindowSeconds)*time.Second+gatewayPoolCooldownGrace)) ||
@@ -356,7 +340,10 @@ func (s *openAICodexCookieStore) freshGatewayPoolAccount(ctx context.Context, ac
 
 func (s *openAICodexCookieStore) gatewayPoolHistoryLock(id int64) func() {
 	lock, _ := s.poolHistoryLocks.LoadOrStore(id, &sync.Mutex{})
-	mu := lock.(*sync.Mutex)
+	mu, ok := lock.(*sync.Mutex)
+	if !ok {
+		panic("gwpool history lock has an invalid type")
+	}
 	mu.Lock()
 	return mu.Unlock
 }

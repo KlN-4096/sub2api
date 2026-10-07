@@ -49,11 +49,10 @@
           <span v-else class="text-gray-300 dark:text-gray-600">-</span>
         </span>
       </div>
-      <!-- 一小时满血分钟预测。单位是 (账号 × 网关)，算法和口径见 forecastUnits。
+      <!-- 一小时满血分钟预测。单位是 (账号 × 网关)，算法和口径见 forecastGatewayMinutes。
            上行空间（本行没碰过的网关）只在 tooltip 里定性说一句：这一行不知道池子一共有
            多少网关，给不出数。 -->
-      <!-- 窗口用量：这一条回答「现在手上还有几个落点能用」，和下面那条「能打多少分钟」
-           分开两行 —— 合成一句的话「0 个落点」和「0 分钟」会被读成同一件事。 -->
+      <!-- 本地冷却随时钟更新；库存是旧查询快照，两者分行避免把快照读成实时余额。 -->
       <p
         v-if="usesPool && cells.length"
         class="text-[9px] leading-3 text-gray-500 dark:text-gray-400"
@@ -61,17 +60,20 @@
         data-testid="account-gateway-window-usage"
       >
         {{
-          windowUsage.measured
-            ? t('admin.accounts.openai.gatewayHistory.windowUsage', {
-                hours: windowHours,
-                used: windowUsage.used,
-                free: windowUsage.free
-              })
-            : t('admin.accounts.openai.gatewayHistory.windowUsageUsedOnly', {
-                hours: windowHours,
-                used: windowUsage.used
-              })
+          t('admin.accounts.openai.gatewayHistory.windowUsage', {
+            hours: windowHours,
+            used: windowUsage.used,
+            cooled: windowUsage.cooled
+          })
         }}
+      </p>
+      <p
+        v-if="usesPool && cells.length && windowUsage.measured"
+        class="text-[9px] leading-3 text-gray-400"
+        :title="t('admin.accounts.openai.gatewayHistory.windowUsageHint')"
+        data-testid="account-gateway-pool-snapshot"
+      >
+        {{ t('admin.accounts.openai.gatewayHistory.poolSnapshot', { free: windowUsage.free }) }}
       </p>
       <p
         v-if="usesPool && cells.length"
@@ -80,9 +82,11 @@
         data-testid="account-gateway-forecast"
       >
         {{
-          forecastMinutes > 0
-            ? t('admin.accounts.openai.gatewayHistory.forecast', { minutes: forecastMinutes })
-            : t('admin.accounts.openai.gatewayHistory.forecastNone')
+          forecast.minutes === null
+            ? t('admin.accounts.openai.gatewayHistory.forecastPending')
+            : forecast.units
+              ? t('admin.accounts.openai.gatewayHistory.forecast', { minutes: forecast.minutes })
+              : t('admin.accounts.openai.gatewayHistory.forecastNone')
         }}
       </p>
       <!-- 图例：四种色的语义原来只写在这个文件的注释里，页面上没有任何地方说，而 tooltip
@@ -119,31 +123,25 @@ import type { Account } from '@/types'
 import { targetsCodexUpstream } from '@/utils/turnState'
 import { formatRelativeTime } from '@/utils/format'
 import { useNowTicker } from '@/composables/useNowTicker'
+import { GATEWAY_REGION_KEYS, gatewayRegionDisplayKey } from '@/utils/gatewayRegionDisplay'
+import {
+  CONTACT_MIN_RESULTS, CONTACT_MIN_WINDOWS,
+  readGatewayContacts, forecastGatewayMinutes
+} from '@/utils/gatewayContactStats'
 
 /**
  * 九个大区，顺序照 gwpool 的 types.Regions（页面之间对着看的时候格子位置要一致）。
  * 最后那格 `''` 是「未归类」：老记录没带大区，以及被上游改派走的那些发（池子说的大区
  * 讲的是另一个网关的事，后端刻意不记）。
  */
-const REGION_KEYS = [
-  'us-east',
-  'us-west',
-  'south-america',
-  'west-europe',
-  'europe',
-  'east-asia',
-  'oceania',
-  'south-asia',
-  'middle-east',
-  ''
-] as const
+const REGION_KEYS = GATEWAY_REGION_KEYS
 
 /** 一个大区里列几个网关名，超出的折成 +N。正常情况恒为 1（网关 = 大区 × 账号）。 */
 const MAX_PER_REGION = 1
 
 /** 初始冷却默认 1 小时；有学习状态时优先使用每个网关自己的截止时间。 */
 const DEFAULT_WINDOW_MS = 60 * 60 * 1000
-const MAX_WINDOW_MS = 10 * 60 * 60 * 1000
+const MAX_WINDOW_MS = 24 * 60 * 60 * 1000
 
 /**
  * 满血窗口 183 秒，**必须和后端 openAIGatewayFullWindow 同值**（跨语言，只能靠这条注释）。
@@ -162,9 +160,6 @@ const MAX_WINDOW_MS = 10 * 60 * 60 * 1000
  * 183 秒刷新一次，否则格子会在写节流（5 分钟）的空档里掉成琥珀。
  */
 const FULL_WINDOW_MS = 183 * 1000
-
-/** 满血分钟预测往前看多久。一小时同时是预测值的天花板：一小时里最多只能用一小时的满血。 */
-const FORECAST_HORIZON_MS = 60 * 60 * 1000
 
 const props = defineProps<{ account: Account }>()
 const { t } = useI18n()
@@ -247,6 +242,11 @@ const history = computed<GatewayHistory>(() => {
   return raw && typeof raw === 'object' ? (raw as GatewayHistory) : {}
 })
 
+const contacts = computed(() => readGatewayContacts(
+  extra.value.openai_gwpool_contacts, extra.value.openai_gwpool_ledger_tag, now.value
+))
+const contactSource = (value: string) => t(`admin.accounts.openai.gatewayHistory.contactSources.${value}`)
+
 /**
  * 判「还烧着」的窗口。账号自己配了本地账本窗口就按它 —— 后端拿同一个数判「这个网关
  * 最近烧过没有」，页面按另一个数会和它对不上。
@@ -321,12 +321,13 @@ const cells = computed<RegionCell[]>(() => {
   if (!items.value.length) return []
   const byRegion = new Map<string, GatewayItem[]>()
   for (const item of items.value) {
-    const key = (REGION_KEYS as readonly string[]).includes(item.region) ? item.region : ''
+    const key = gatewayRegionDisplayKey(item.region)
     const bucket = byRegion.get(key)
     if (bucket) bucket.push(item)
     else byRegion.set(key, [item])
   }
-  return REGION_KEYS.filter((key) => key !== '' || byRegion.has(''))
+  return REGION_KEYS
+    .filter((key) => key !== '' || byRegion.has(key))
     .map((key) => {
       const bucket = byRegion.get(key) ?? []
       const shown = bucket.slice(0, MAX_PER_REGION)
@@ -349,48 +350,14 @@ const cells = computed<RegionCell[]>(() => {
     })
 })
 
-/**
- * 「接下来一小时**至少**能用到几分钟满血」—— 刻意算**下界**。
- *
- * **单位是 (账号 × 网关)，一个网关名就是一个单位。**（2026-10-03 用户纠正：「时间还是
- * 按网关来的，相同区域不同网关同一个号还是有不同的满血期的」。第一版按大区去重，把
- * us-west 那 20 个网关名算成 1 个单位 ⇒ 预测值低一个数量级。大区只适合当分组展示用，
- * 就是上面那个九宫格，不能当去重键。）
- *
- * items 本身已经是一行一个网关名（后端 seen 是以网关名为键的 map），所以这里不用再去重
- * —— 加一层去重就是上面那个错。region 在这个计算里完全不参与：没带 region 的落点一样是
- * 一个有名有姓的网关，照数。
- *
- * 只数有**正面证据**的单位：账本里有这个网关的记录，而且它的冷却在一小时内结束。
- * 两处刻意悲观：
- *
- *  1. **从没碰过的网关不计入数字**。这本账只看得见**本行**发出去的那些（克隆行/影子行
- *     各看各的，见 openai_gwpool_gateway_history.go 开头那段口径），而且
- *     openAIGatewayHistoryMax 从 24 提到 201 之前写下的行被按时间裁过 ⇒「本行没碰过」
- *     完全可能是「别的行烧过了」或「记录被裁了」。更要紧的是这里**算不出**那个上行空间：
- *     池子一共有多少网关这一行不知道（现网 105 个，但那是服务端的事）⇒ 宁可只在 tooltip
- *     里定性说一句，不编一个数。
- *  2. 一个单位只按一个满血窗口算（183 秒，取的是实测 200–300 秒里最保守的那个）。
- *
- * 算在前端而不是后端：这是个随时间衰减的值，而后端那条记录有 5 分钟写节流 ——
- * 存进去的预测立刻就过期了。前端这里 now 是跟着 ticker 走的，读数永远是当下的。
- */
-const forecastUnits = computed(() => {
-  let units = 0
-  for (const item of items.value) {
-    const until = cooldownDeadline(item)
-    if (!Number.isFinite(until)) continue
-    if (until - now.value <= FORECAST_HORIZON_MS) units += 1
-  }
-  return units
-})
-
-const forecastMinutes = computed(() =>
-  Math.round(Math.min(forecastUnits.value * FULL_WINDOW_MS, FORECAST_HORIZON_MS) / 60_000)
-)
+// Each gateway is a separate unit. Model/source/criterion and actual resting
+// interval must match observed repeat contacts; no fallback to a fixed lifetime.
+const forecast = computed(() => forecastGatewayMinutes(
+  contacts.value, items.value.map((item) => ({ name: item.name, retryAt: cooldownDeadline(item) })), now.value
+))
 
 /**
- * 窗口用量：本地账本窗口里烧掉了几个落点，以及池子此刻能交付几个、其中还有几个没烧过。
+ * 本地冷却实时计数；池子数字只是最近一次成功保存的查询快照，不随本地到期递增。
  *
  * **free 直接读后端的 pool_free，不在这里减。** 2026-10-03 第一版写的是
  * `pool_live - used`：账本装的是过去一个窗口里碰过的网关名（票早过期的也在里面），而
@@ -401,15 +368,18 @@ const forecastMinutes = computed(() =>
  * pool_live=0 = 没问到清单（关了 steering、或者清单一直打不开）⇒ 只报已用，不编分母。
  * pool_live>0 时 pool_free=0 是**真的 0**（可交付的全烧过了），照报。
  *
- * 和 forecast 分开一行：这条回答「现在还有几个落点能用」，forecast 回答「接下来一小时能
- * 打多少分钟」。合成一句的话「0 个落点」和「0 分钟」会被读成同一件事。
+ * 冷却到期不保证仍有票，也不保证已恢复满血。
  */
 const windowHours = computed(() => +(windowMs.value / 3_600_000).toFixed(1))
 
 const windowUsage = computed(() => {
   let used = 0
+  let cooled = 0
   for (const item of items.value) {
-    if (isHot(item)) used += 1
+    const deadline = cooldownDeadline(item)
+    if (!Number.isFinite(deadline)) continue
+    if (deadline > now.value) used += 1
+    else cooled += 1
   }
   const live = typeof history.value.pool_live === 'number' ? history.value.pool_live : 0
   const free = history.value.pool_free
@@ -418,22 +388,15 @@ const windowUsage = computed(() => {
   // 的那句假话，换了个来源。后端那边 pool_free 刻意不带 omitempty，所以真的 0 会出现在
   // JSON 里，缺席只可能是老记录。
   const measured = live > 0 && typeof free === 'number'
-  return { used, live, free: measured ? (free as number) : 0, measured }
+  return { used, cooled, live, free: measured ? (free as number) : 0, measured }
 })
 
-/**
- * 预测的 tooltip。要交代清楚这个数是**下界**，以及它往哪两个方向偏：
- *
- *  - 往大偏（上行空间）：本行没碰过的网关不计入，实际可能更多。定性说，不给数 ——
- *    这一行不知道池子一共有多少网关（见 forecastUnits 第 1 条）。
- *  - 往小偏（仍然乐观的那一处）：4 小时冷却本身**没测准**（静置 30 分钟到 4 小时，
- *    满血率恒定、零相关），真实恢复时间比它长的话这个数还是会偏大。
- */
 const forecastTitle = computed(() => {
   const base = 'admin.accounts.openai.gatewayHistory'
   return t(`${base}.forecastHint`, {
-    units: forecastUnits.value,
-    window: FULL_WINDOW_MS / 1000
+    units: forecast.value.units, model: forecast.value.model || '—',
+    source: forecast.value.source ? contactSource(forecast.value.source) : '—',
+    results: CONTACT_MIN_RESULTS, windows: CONTACT_MIN_WINDOWS
   })
 })
 
@@ -485,7 +448,7 @@ function shortName(name: string): string {
 }
 
 function regionLabel(key: string): string {
-  return t(`admin.accounts.openai.gatewayHistory.regions.${key || 'unknown'}`)
+  return t(`admin.accounts.openai.gatewayHistory.regions.${gatewayRegionDisplayKey(key) || 'unknown'}`)
 }
 
 /**
@@ -540,11 +503,14 @@ function cooldownOf(item: GatewayItem): string {
 function titleOf(item: GatewayItem): string {
   const base = 'admin.accounts.openai.gatewayHistory'
   const state = cooldownOf(item)
-  const verdict = item.verdict
+  const verdict = item.verdict === 'full' && !within(item.fullAt, FULL_WINDOW_MS)
+    ? t(`${base}.verdicts.fullExpired`)
+    : item.verdict
     ? t(`${base}.verdicts.${item.verdict}`)
     : t(`${base}.verdicts.none`)
-  return [regionLabel(item.region), shortName(item.name), fullHeldOf(item), state, verdict].join(
+  const summary = [regionLabel(item.region), shortName(item.name), fullHeldOf(item), state, verdict].join(
     TITLE_SEP
   )
+  return gatewayRegionDisplayKey(item.region) === item.region ? summary : `${summary} · ${item.region || '—'}`
 }
 </script>

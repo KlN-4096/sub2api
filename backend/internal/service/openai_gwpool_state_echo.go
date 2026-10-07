@@ -17,8 +17,8 @@ package service
 //     反向同理：429/5xx 带回一张新票**不算**降智证据 —— 那是限流/故障，不是路由质量。
 //  2. **有假阴性、无假阳性。** 满血号偶尔也会下发新票（用户 2026-10-01 确认）⇒ 判「满血」可信，
 //     判「降智」可能偏严。所以这个判据会偶尔白换一次网关、白烧一个槽位，而供给是个位数张/小时。
-//     误判的代价由票龄分档吸收（gatewayPoolEchoStrikes），**不再有开关**：2026-10-03 删掉了
-//     档位（见下面那段）—— 接了网关池就是为了满血，「把降智交给客户端」没有意义。
+//     误判的代价由票龄分档吸收（gatewayPoolEchoStrikes）。防护默认开启，
+//     openai_gwpool_guard_enabled 显式为 false 时跳过预检与业务判据。
 //
 // 判到降智之后做两件事，都刻意不碰别的子系统：
 //
@@ -84,13 +84,18 @@ var errOpenAIGatewayPoolRouteDegraded = fmt.Errorf("%s: %w", gatewayPoolDegraded
 // 客户端（turn-metadata 头里不补 model）。文案要直接说出该怎么办。
 const gatewayPoolWarmNoModelClientMsg = "读不出本轮模型，无法在请求前验满血（降智防护为「只用验过满血的槽」档）。" +
 	"已知成因：账号开了 device 指纹收敛（出站请求体被压缩）而客户端是 Codex 0.156 之前的版本。" +
-	"升级客户端，或把降智防护换到「判到降智就截断」档" +
+	"请升级客户端，或在接受未经验证路由的前提下关闭降智防护" +
 	" / Cannot read this turn's model, so the route cannot be verified before the request " +
 	"(degradation guard is set to verified-full slots only). Known cause: this account runs the device " +
 	"fingerprint profile (compressed outbound body) with a pre-0.156 Codex client. Upgrade the client, " +
-	"or switch the guard to cut-on-degraded"
+	"or disable the guard only if you accept an unverified route"
 
 var errOpenAIGatewayPoolWarmNoModel = fmt.Errorf("%s: %w", gatewayPoolWarmNoModelClientMsg, gwpool.ErrPool)
+
+const gatewayPoolWarmUnverifiedClientMsg = "无法完成网关质量验证（预算不足、上游异常或路由已更换），严格防护已阻止业务请求，请稍后重试" +
+	" / Gateway verification could not complete (insufficient budget, upstream error or a changed route); strict protection blocked the business request. Retry later."
+
+var errOpenAIGatewayPoolWarmUnverified = fmt.Errorf("%s: %w", gatewayPoolWarmUnverifiedClientMsg, gwpool.ErrPool)
 
 // gatewayPoolWarmExhaustedClientMsg 是 queue 档取满上限张票、一张都没验出满血时那条。
 //
@@ -119,7 +124,7 @@ func (s *OpenAIGatewayService) gatewayPoolRouteDegraded(
 	resp *http.Response,
 	account *Account,
 ) bool {
-	if s == nil || request == nil || resp == nil {
+	if s == nil || request == nil || resp == nil || !account.gatewayPoolGuardEnabled() {
 		return false
 	}
 	applied := openAIGatewayPoolSinkFrom(request.Context()).snapshot()
@@ -210,17 +215,22 @@ func (s *OpenAIGatewayService) gatewayPoolEchoStrike(
 	identity, err := s.codexCookies.gatewayPoolIdentity(request.Context(), account)
 	if err != nil {
 		slog.Warn("gwpool_echo_identity_failed", "account_id", account.ID,
-			"gateway", applied.Gateway, "fallback", "judge degraded on the first refresh")
+			"gateway", applied.Gateway, "age_s", -1, "misses", 1, "need", 1, "reason", "identity_unavailable",
+			"fallback", "judge degraded on the first refresh")
 		return true
 	}
 	misses, age := s.codexCookies.gatewayPoolNoteEcho(identity, applied.Version, applied.Gateway, true)
 	if misses == 0 {
 		// 缓存里已经是另一张票了（并发换过、还过）⇒ 这一发的读数无处可归。
 		// 按最严办：这一发确实带着活票收到了一张新的。
+		slog.Warn("gwpool_echo_discard", "account_id", account.ID, "gateway", applied.Gateway,
+			"age_s", -1, "misses", 0, "need", 1, "reason", "ticket_association_changed")
 		return true
 	}
 	need := gatewayPoolEchoStrikes(age)
 	if misses >= need {
+		slog.Info("gwpool_echo_discard", "account_id", account.ID, "gateway", applied.Gateway,
+			"age_s", int(age.Seconds()), "misses", misses, "need", need, "reason", "consecutive_refresh_threshold")
 		return true
 	}
 	slog.Info("gwpool_echo_strike",
@@ -305,7 +315,7 @@ func (s *openAICodexCookieStore) gatewayPoolNoteEcho(
 		if cached.version != version && (gateway == "" || cached.gateway != gateway) {
 			return 0, 0
 		}
-		age := time.Since(cached.since)
+		age := time.Since(cached.firstSent)
 		next := cached
 		next.echoMisses = 0
 		if refreshed {
@@ -348,6 +358,7 @@ func (s *OpenAIGatewayService) dropDegradedGatewayPoolRoute(
 		// 标 Stale 顺手量到这张票的满血时长 ⇒ 记进 sink，由用量侧落到这个网关的账本上。
 		held := s.codexCookies.gatewayPoolMarkStale(identity, applied.Version, applied.Gateway)
 		applied.FullHeldMs = held.Milliseconds()
+		s.finishGatewayPoolContact(detached, account, identity, applied, held)
 		openAIGatewayPoolSinkFrom(detached).noteFullHeld(applied, held)
 		// 账本记的是**实际交付的那个网关**：标 Stale 只让下一发换票，账本才是「这个上游账号
 		// 4 小时内别再点这个落点」的依据。

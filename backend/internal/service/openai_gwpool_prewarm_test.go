@@ -38,41 +38,39 @@ func gwpoolSeedVerifiedAge(store *openAICodexCookieStore, version string, age ti
 	return pair
 }
 
-// 攒满 100 个样本之前**一发都不预热**（用户拍板：0–100 发不预热）。
-//
-// 样本不足时 p95 由个别极值决定，而两个方向猜错都要花钱：猜早了在手里那张还满血时就换票
-// （白烧一个 (上游账号 × 网关) 单位），猜晚了等于没预热。
-func TestPrewarmWaitsForOneHundredSamples(t *testing.T) {
-	store := &openAICodexCookieStore{}
-	// 票龄远超任何可能的窗口 ⇒ 唯一能挡住它的只有样本数这一条。
-	gwpoolSeedVerifiedAge(store, "tkt-1", time.Hour)
-
-	gwpoolSeedWindow(store, gatewayPoolPrewarmMinSamples-1, 200*time.Second)
-	_, due := store.gatewayPoolPrewarmDue(gwpoolTestIdentity)
-	require.False(t, due, "99 个样本还不够")
-
-	gwpoolSeedWindow(store, 1, 200*time.Second)
-	_, due = store.gatewayPoolPrewarmDue(gwpoolTestIdentity)
-	require.True(t, due, "第 100 个样本到位就该开始算 p95")
+// 交付租约只有 150s；不能等 p95=200s 的窗口快结束才准备，也不必等历史样本攒齐。
+func TestPrewarmUsesTheLiveLeaseBeforeTheHistoricalWindow(t *testing.T) {
+	for _, samples := range []int{0, gatewayPoolPrewarmMinSamples} {
+		store := &openAICodexCookieStore{}
+		gwpoolSeedWindow(store, samples, 200*time.Second)
+		pair := gwpoolSeedVerifiedAge(store, "tkt-1", 120*time.Second)
+		pair.until = time.Now().Add(30 * time.Second)
+		store.poolPairs.Store(gwpoolTestIdentity, pair)
+		_, due := store.gatewayPoolPrewarmDue(gwpoolTestIdentity, gwpoolTestAccount(1))
+		require.True(t, due, "剩 30s 的 150s 租约应提前准备，历史样本=%d", samples)
+	}
 }
 
-// 开始预热的票龄 = p95 − 15 秒（用户拍板）。
-func TestPrewarmTriggersAtTheP95WindowMinusTheLead(t *testing.T) {
+// 历史窗口更短时，用验证耗时、取票/清单等待和余量决定提前量。
+func TestPrewarmUsesHistoryAndVerificationDuration(t *testing.T) {
 	const window = 200 * time.Second
 	for _, tc := range []struct {
-		name string
-		age  time.Duration
-		due  bool
+		name     string
+		age      time.Duration
+		duration time.Duration
+		due      bool
 	}{
-		{"差一点到点", window - gatewayPoolPrewarmLead - 2*time.Second, false},
-		{"刚到点", window - gatewayPoolPrewarmLead + time.Second, true},
-		{"早就过点", window + time.Minute, true},
+		{"还没到点", 150 * time.Second, 0, false},
+		{"正常验证到点", 155 * time.Second, 0, true},
+		{"慢验证提前准备", 130 * time.Second, 45 * time.Second, true},
+		{"早就过点", window + time.Minute, 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &openAICodexCookieStore{}
 			gwpoolSeedWindow(store, gatewayPoolPrewarmMinSamples, window)
 			gwpoolSeedVerifiedAge(store, "tkt-1", tc.age)
-			_, due := store.gatewayPoolPrewarmDue(gwpoolTestIdentity)
+			store.poolWarmDuration.Store(gwpoolTestIdentity, tc.duration)
+			_, due := store.gatewayPoolPrewarmDue(gwpoolTestIdentity, gwpoolTestAccount(1))
 			require.Equal(t, tc.due, due)
 		})
 	}
@@ -86,7 +84,7 @@ func TestPrewarmNeedsAVerifiedPair(t *testing.T) {
 	store.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
 		version: "tkt-1", until: now.Add(time.Hour), since: now.Add(-time.Hour),
 	})
-	_, due := store.gatewayPoolPrewarmDue(gwpoolTestIdentity)
+	_, due := store.gatewayPoolPrewarmDue(gwpoolTestIdentity, gwpoolTestAccount(1))
 	require.False(t, due)
 }
 
@@ -168,7 +166,34 @@ func TestPrewarmKeepsTheLivePairWhenEveryCandidateIsDegraded(t *testing.T) {
 	require.Equal(t, openAIGatewayPoolPairLive, state, "一轮没验出满血不许动手里那张")
 	require.Equal(t, current.version, pair.version)
 	require.True(t, svc.codexCookies.gatewayPoolVerifiedFull(gwpoolTestIdentity))
-	require.Len(t, shooter.shots, 4, "两张票各两发垫话")
+	require.Len(t, shooter.shots, 2, "后台只试一个候选，不能沿用前台的张数上限")
+	require.EqualValues(t, 1, fake.hits.Load(), "判降级后连第二张票都不该取")
+}
+
+func TestPrewarmDoesNotInstallAnExpiredOrCancelledCandidate(t *testing.T) {
+	for _, reason := range []string{"expired", "too_short", "cancelled"} {
+		t.Run(reason, func(t *testing.T) {
+			svc := &OpenAIGatewayService{}
+			current := gwpoolSeedVerifiedAge(&svc.codexCookies, "tkt-old", time.Minute)
+			candidate := current
+			candidate.version = "tkt-new"
+			switch reason {
+			case "expired":
+				candidate.until = time.Now().Add(-time.Second)
+			case "too_short":
+				candidate.until = time.Now().Add(30 * time.Second)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if reason == "cancelled" {
+				cancel()
+			}
+			svc.installPrewarmedPair(ctx, gwpoolTestAccount(1), gwpoolTestIdentity,
+				current, candidate, 1)
+			got, _ := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
+			require.Equal(t, current, got)
+		})
+	}
 }
 
 // 预热期间手里那张被业务请求换掉了 ⇒ 候选票作废，**绝不硬塞**。
@@ -179,14 +204,19 @@ func TestPrewarmDropsTheCandidateWhenTheCachedPairMovedOn(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	acct := fake.account(1)
 	current := gwpoolSeedVerifiedAge(&svc.codexCookies, "tkt-old", 190*time.Second)
-	// 这一轮开始之后、换上去之前，别人换了票。
-	moved := gwpoolSeedVerifiedAge(&svc.codexCookies, "tkt-newer", time.Second)
-
+	var moved openAIGatewayPoolPair
 	shooter := &gwpoolWarmShooter{}
 	svc.gatewayPoolPrewarmRound(context.Background(), acct, gwpoolTestIdentity,
-		current, 190*time.Second, shooter.shoot)
+		current, 190*time.Second, func(ctx context.Context, cookie, state string) (int, string, error) {
+			result, minted, err := shooter.shoot(ctx, cookie, state)
+			if len(shooter.shots) == 2 {
+				moved = gwpoolSeedVerifiedAge(&svc.codexCookies, "tkt-newer", time.Second)
+			}
+			return result, minted, err
+		})
 
 	pair, _ := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
+	require.Len(t, shooter.shots, 2, "确实在验证中换票，而不是验证前提前返回")
 	require.Equal(t, moved.version, pair.version, "别人换上去的那张不许被顶掉")
 }
 
@@ -199,7 +229,7 @@ func TestPrewarmRunsOneRoundPerIdentity(t *testing.T) {
 	gwpoolSeedWindow(&svc.codexCookies, gatewayPoolPrewarmMinSamples, 200*time.Second)
 	gwpoolSeedVerifiedAge(&svc.codexCookies, "tkt-old", 190*time.Second)
 	// 占位已经被另一轮拿着 ⇒ 这一发什么都不该做。
-	svc.codexCookies.poolPrewarm.Store(gwpoolTestIdentity, struct{}{})
+	svc.codexCookies.poolPrewarm.Store(gwpoolTestIdentity, gatewayPoolPrewarmMark{running: true})
 
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
 	require.NoError(t, err)
@@ -208,6 +238,100 @@ func TestPrewarmRunsOneRoundPerIdentity(t *testing.T) {
 	svc.gatewayPoolPrewarm(req.WithContext(ctx), "", acct, gwpoolTestIdentity, gwpoolWarmModel)
 
 	require.Zero(t, fake.hits.Load(), "已经有一轮在跑就不许再取票")
+}
+
+func TestPrewarmAttemptIsSharedAndRetainedForTheCurrentWindow(t *testing.T) {
+	store := &openAICodexCookieStore{}
+	current := gwpoolSeedVerifiedAge(store, "tkt-old", time.Minute)
+	var wg sync.WaitGroup
+	winners := make(chan bool, 16)
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			winners <- store.gatewayPoolBeginPrewarm(gwpoolTestIdentity, current)
+		}()
+	}
+	wg.Wait()
+	close(winners)
+	count := 0
+	for won := range winners {
+		if won {
+			count++
+		}
+	}
+	require.Equal(t, 1, count)
+	store.gatewayPoolFinishPrewarm(gwpoolTestIdentity, current)
+	require.False(t, store.gatewayPoolBeginPrewarm(gwpoolTestIdentity, current), "结束后不重开同一窗口")
+	renewed := current
+	renewed.version = "tkt-renewed"
+	renewed.echoMisses++
+	require.False(t, store.gatewayPoolBeginPrewarm(gwpoolTestIdentity, renewed), "续票/响应计数不是新窗口")
+	next := current
+	next.since = time.Now()
+	require.True(t, store.gatewayPoolBeginPrewarm(gwpoolTestIdentity, next))
+	store.gatewayPoolFinishPrewarm(gwpoolTestIdentity, current)
+	require.False(t, store.gatewayPoolBeginPrewarm(gwpoolTestIdentity, current), "旧轮结束不能解开新轮的锁")
+}
+
+func TestPrewarmFailedRoundDoesNotRetryOnTheNextBusinessRequest(t *testing.T) {
+	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	fake.forceStatus = http.StatusServiceUnavailable
+	svc := &OpenAIGatewayService{}
+	acct := fake.account(1)
+	acct.Extra[openAIGatewayPoolPrewarmExtraKey] = true
+	current := gwpoolSeedVerifiedAge(&svc.codexCookies, "tkt-old", time.Minute)
+	current.until = time.Now().Add(30 * time.Second)
+	svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, current)
+	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
+	require.NoError(t, err)
+	startAndWait := func() {
+		svc.gatewayPoolPrewarm(req, "", acct, gwpoolTestIdentity, gwpoolWarmModel)
+		require.Eventually(t, func() bool {
+			value, ok := svc.codexCookies.poolPrewarm.Load(gwpoolTestIdentity)
+			mark, valid := value.(gatewayPoolPrewarmMark)
+			return ok && valid && !mark.running
+		}, time.Second, time.Millisecond)
+	}
+	startAndWait()
+	require.EqualValues(t, 1, fake.hits.Load())
+	svc.codexCookies.poolBackoff.Delete(gatewayPoolLedgerIdentity(gwpoolTestIdentity))
+	startAndWait()
+	require.EqualValues(t, 1, fake.hits.Load(), "不依赖池子退避挡住本窗口的第二轮")
+	require.Empty(t, svc.codexCookies.poolCooldown, "缺票不能学习冷却")
+}
+
+func TestPrewarmInconclusiveDoesNotTrainCooldown(t *testing.T) {
+	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	svc := &OpenAIGatewayService{}
+	acct := fake.account(1)
+	current := gwpoolSeedVerifiedAge(&svc.codexCookies, "tkt-old", time.Minute)
+	shooter := &gwpoolWarmShooter{replies: []gwpoolWarmReply{{status: http.StatusTooManyRequests}}}
+	svc.gatewayPoolPrewarmRound(context.Background(), acct, gwpoolTestIdentity, current, time.Minute, shooter.shoot)
+	got, _ := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
+	require.Equal(t, current, got)
+	state := svc.codexCookies.poolCooldown[gatewayPoolLedgerKey(gwpoolTestIdentity, "unified-142")]
+	require.Equal(t, 3600, state.WindowSeconds)
+	require.Empty(t, state.Outcome)
+	require.Empty(t, state.Successes)
+	require.Len(t, shooter.shots, 1)
+	require.EqualValues(t, 1, fake.hits.Load())
+}
+
+func TestPrewarmRejectsAShortCandidateWithoutProbing(t *testing.T) {
+	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 65)
+	svc := &OpenAIGatewayService{}
+	current := gwpoolSeedVerifiedAge(&svc.codexCookies, "tkt-old", time.Minute)
+	shooter := &gwpoolWarmShooter{}
+	svc.gatewayPoolPrewarmRound(context.Background(), fake.account(1), gwpoolTestIdentity, current, time.Minute, shooter.shoot)
+	got, _ := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
+	require.Equal(t, current, got)
+	require.Empty(t, shooter.shots)
+	require.False(t, svc.codexCookies.gatewayPoolUsedRecently(gwpoolTestIdentity, "unified-142", time.Hour),
+		"验证前丢弃的短票不能启动本地冷却")
+	require.Empty(t, svc.codexCookies.poolCooldown)
+	require.Eventually(t, func() bool { return fake.releaseHits.Load() == 1 }, time.Second, time.Millisecond)
+	require.Contains(t, <-fake.queries, "min_remaining=75", "取票应预留验证耗时和交付余量")
 }
 
 // 满血时长的样本**只认验过满血的票**。

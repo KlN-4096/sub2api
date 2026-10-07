@@ -56,10 +56,11 @@ const (
 
 // gwpoolFakeGateway 是假池子 /gateways 里的一项，字段名与池子契约一致。
 type gwpoolFakeGateway struct {
-	Name       string `json:"name"`
-	PairReady  bool   `json:"pair_ready"`
-	UsedByYou  bool   `json:"used_by_you"`
-	LastUsedAt string `json:"last_used_at,omitempty"`
+	Name       string                `json:"name"`
+	PairReady  bool                  `json:"pair_ready"`
+	UsedByYou  bool                  `json:"used_by_you"`
+	LastUsedAt string                `json:"last_used_at,omitempty"`
+	Contacts   []gwpool.ContactStats `json:"contacts,omitempty"`
 }
 
 // gwpoolFakePool 是假池子：记 /cookie 与 /gateways 的次数、/cookie 的查询串，以及**这两个之外**
@@ -75,11 +76,13 @@ type gwpoolFakePool struct {
 	gateway      string
 	validForS    int
 	forceCookie  string
+	cookieForHit func(int64) string // 固定回调，为连续验证提供互不相同的网关，不修改共享 fixture。
 	forceStatus  int
 	listHits     atomic.Int64
 	listQueries  chan string
 	listGateways []gwpoolFakeGateway // 空 = 空列表，消费端挑不出来
 	listStatus   int                 // 非 0 时 /gateways 直接回这个状态码
+	onList       func()              // fixed callback for concurrent inventory regressions
 	// refuseStatus / refuseCode / refuseRetryAfter 让 /cookie 回结构化拒绝（2026-10-02 契约）。
 	refuseStatus     int
 	refuseCode       string
@@ -138,6 +141,9 @@ func newGwpoolFakePool(t *testing.T, cookie string, validForS int) *gwpoolFakePo
 			if forced && fake.forceCookie != "" {
 				cookie = fake.forceCookie
 			}
+			if fake.cookieForHit != nil {
+				cookie = fake.cookieForHit(hits)
+			}
 			if want, _ := strconv.Atoi(r.URL.Query().Get("count")); want > 1 && len(fake.batchGateways) > 0 {
 				tickets := make([]string, 0, want)
 				for i, name := range fake.batchGateways {
@@ -179,6 +185,9 @@ func newGwpoolFakePool(t *testing.T, cookie string, validForS int) *gwpoolFakePo
 			}
 		case "/gateways":
 			fake.listHits.Add(1)
+			if fake.onList != nil {
+				fake.onList()
+			}
 			select {
 			case fake.listQueries <- r.URL.RawQuery:
 			default:
@@ -691,7 +700,7 @@ func TestOpenAIWSIngressBridgesGatewayPoolAccountToHTTP(t *testing.T) {
 				"\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\ndata: [DONE]\n\n")),
 	}}
 	svc.httpUpstream = upstream
-	svc.accountRepo = &stubQuotaAccountRepo{accounts: map[int64]*Account{account.ID: account}}
+	svc.accountRepo = &gatewayRuntimeRepo{account: *account}
 	poolCookie := gwpoolTestPairCookie(t, "unified-142")
 	fake := newGwpoolFakePool(t, poolCookie, 150)
 	fake.configure(account)
@@ -968,7 +977,11 @@ func TestGatewayPoolFetchSurvivesCallerCancel(t *testing.T) {
 	<-arrived // 请求已到池子 ⇒ 取 pair 确实在飞
 	cancel()  // 客户端断开
 	close(release)
-	require.NoError(t, <-done, "取 pair 不该跟随业务 ctx 的取消")
+	require.ErrorIs(t, <-done, context.Canceled, "调用者退出，但共享取票不被取消")
+	require.Eventually(t, func() bool {
+		_, state := store.cachedPoolPair(gwpoolTestIdentity)
+		return state == openAIGatewayPoolPairLive
+	}, time.Second, time.Millisecond)
 	require.EqualValues(t, 1, hits.Load())
 }
 
@@ -1632,7 +1645,6 @@ func TestGatewayPoolAccountKnobDefaults(t *testing.T) {
 	require.Equal(t, openAIGatewayPoolFetchTimeout, bare.gatewayPoolFetchTimeout())
 	require.Equal(t, openAIGatewayPoolListTimeout, bare.gatewayPoolListTimeout())
 	require.Equal(t, openAIGatewayPoolGatewayWindow, bare.gatewayPoolGatewayWindow())
-	require.True(t, bare.gatewayPoolSteering(), "自己挑落点缺省即开")
 
 	// 超大值也算配坏：time.Duration 是纳秒级 int64，秒数到 1e10 就乘溢出成**负数** ⇒
 	// 本地账本整体静默失效（gatewayPoolUsedRecently 恒 false），与「窗口越大越严」正好相反；
@@ -1655,35 +1667,30 @@ func TestGatewayPoolAccountKnobDefaults(t *testing.T) {
 		openAIGatewayPoolFetchTimeoutExtraKey:  20,
 		openAIGatewayPoolListTimeoutExtraKey:   float64(5), // jsonb 解出来是 float64
 		openAIGatewayPoolGatewayWindowExtraKey: 7200,
-		openAIGatewayPoolSteeringExtraKey:      false,
 	}}
 	require.Equal(t, 20*time.Second, tuned.gatewayPoolFetchTimeout())
 	require.Equal(t, 5*time.Second, tuned.gatewayPoolListTimeout())
 	require.Equal(t, 2*time.Hour, tuned.gatewayPoolGatewayWindow())
-	// 自适应冷却上限 10 小时，其他超时旋钮的上限仍为 1 天。
+	// 自适应冷却上限 24 小时，初始默认仍为 1 小时。
 	atCap := &Account{ID: 1, Extra: map[string]any{
-		openAIGatewayPoolGatewayWindowExtraKey: 36000,
+		openAIGatewayPoolGatewayWindowExtraKey: 86400,
 	}}
-	require.Equal(t, 10*time.Hour, atCap.gatewayPoolGatewayWindow())
-	require.False(t, tuned.gatewayPoolSteering())
-
-	// 只有显式 false 才关掉「自己挑落点」：写错类型不能把它关掉（那会静默改变调度行为）。
-	require.True(t, (&Account{Extra: map[string]any{openAIGatewayPoolSteeringExtraKey: "false"}}).gatewayPoolSteering())
+	require.Equal(t, 24*time.Hour, atCap.gatewayPoolGatewayWindow())
 }
 
-// steering 关掉 ⇒ 一次 /gateways 都不发，由池子自己挑；票照样取到。
-func TestGatewayPoolSteeringOffSkipsGatewayListing(t *testing.T) {
+// 旧关闭值不再生效，冷却完毕的网关始终优先。
+func TestGatewayPoolSteeringAlwaysListsDespiteLegacyOptOut(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 	fake.listGateways = []gwpoolFakeGateway{{Name: "unified-84", PairReady: true}}
 	store := &openAICodexCookieStore{}
 	acct := fake.account(1)
-	acct.Extra[openAIGatewayPoolSteeringExtraKey] = false
+	acct.Extra["openai_gwpool_steering"] = false
 
 	headers := http.Header{}
 	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, headers))
 	require.Equal(t, int64(1), fake.hits.Load())
-	require.Zero(t, fake.listHits.Load(), "关掉自己挑落点就不该列网关")
-	require.NotContains(t, fake.nextQuery(t), "gateway=", "不许点名")
+	require.Equal(t, int64(1), fake.listHits.Load())
+	require.Contains(t, fake.nextQuery(t), "gateway=unified-84")
 }
 
 // 2026-10-02 现场：池子回 consumer_rejected（"需要本账号的 key"，owner 一拆 key 就换了），

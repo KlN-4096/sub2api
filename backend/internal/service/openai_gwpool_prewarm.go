@@ -1,56 +1,28 @@
 package service
 
-// 后台预热：在手里那张票的满血窗口**到点之前**，另取一张候选票在后台验满血，验出来才换上去。
-//
-// 要它解决的是 queue 那条路唯一剩下的疼点：预热跑在客户端的请求里，客户端在那整段时间里一个
-// 字节都收不到（平均约 6 发垫话，最坏约两分钟）。把这件事挪到两次客户端请求**之间**，客户端
-// 就只在「刚好撞上换票」时才等。
-//
-// 三条设计约束，每条都对应一个真实的坑：
-//
-//  1. **候选票绝不进缓存，除非验出满血。** 走 gatewayPoolPair 取票会把新票写进 (身份 → pair)
-//     缓存，于是紧接着那一发业务请求会落在一张**没验过**的票上 —— 正是预热要消灭的那一格。
-//     所以这里走 gatewayPoolTakeFresh（不碰缓存），验出满血才 CAS 换上去。
-//     手里那张在整个预热期间照常服务业务请求，一秒空档都没有。
-//
-//  2. **什么时候开始，由实测的满血时长决定，不是写死的常数。** 用户拍的规则：攒满 100 个满血
-//     时长样本之后算 p95，p95 − 15s 就是开始预热的票龄；0–100 发不预热。早了白烧供给（手里那张
-//     还好着），晚了客户端还是要等。
-//
-//  3. **同一身份同时只有一轮。** 预热是「花票换时间」，并发两轮就是双倍烧票换同一个窗口。
-//
-// 刻意不做的事：不起常驻 goroutine / 定时器。触发点挂在业务请求的预热快路上
-// （gatewayPoolWarmUp 判出「手里那张还验过满血」的那一刻）—— 没有请求的身份不需要热票，
-// 而起了常驻循环就会给闲着的账号也烧供给。
+// 提前准备下一个网关：业务触发、当前窗口最多一个候选，不运行空闲账号的定时探测。
+// 按缓存租约、历史窗口和验证耗时决定开始时间。候选不进业务缓存，直到验证通过且寿命足够；
+// 缺票、失败或异常均结束本轮，同一窗口不再重开。前台验证仍是兜底，不承诺无等待切换。
 
 import (
 	"context"
 	"log/slog"
 	"net/http"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	// gatewayPoolPrewarmLead 是提前量：票龄到 p95 − 这个数就开始预热（用户拍板 15 秒）。
-	gatewayPoolPrewarmLead = 15 * time.Second
-	// gatewayPoolPrewarmMinSamples 是开始预热所需的样本数（用户拍板 100）。
-	//
-	// 攒够之前**一发都不预热**：样本不足时 p95 由个别极值决定，而猜错的两个方向都要花钱 ——
-	// 猜早了在手里那张还满血时就换票（白烧一个 (上游账号 × 网关) 单位），猜晚了等于没预热。
+	gatewayPoolPrewarmMargin = 5 * time.Second
+	// 历史仅作补充，样本不足仍可按真实缓存租约触发。
 	gatewayPoolPrewarmMinSamples = 100
 	// gatewayPoolPrewarmSampleCap 是环形样本池的容量。
 	//
 	// 只留最近这些：满血窗口的时长是上游的行为，会变（现场测过 150s 和 ~200s 两种口径）。
 	// 留太久的样本会让 p95 被几小时前的上游行为钉住。
 	gatewayPoolPrewarmSampleCap = 512
-	// gatewayPoolPrewarmBudget 是一轮后台预热自己的墙上时间上限。
-	//
-	// 比客户端那条路的 gatewayPoolWarmBudget(90s) 宽：这一轮没有客户端在等，可以把票试满。
-	// 但仍然要有上限 —— 它持有「这个身份正在预热」的占位，卡住就等于永远不再预热。
-	gatewayPoolPrewarmBudget = 4 * time.Minute
+	gatewayPoolPrewarmBudget    = 90 * time.Second
 )
 
 // gatewayPoolVerifiedMark 是「这个身份手上那张票验过满血」的那一笔，连**判出来的时刻**一起记。
@@ -95,7 +67,7 @@ func (w *gatewayPoolFullWindow) observe(d time.Duration) {
 	w.total++
 }
 
-// p95 报告样本的 95 分位，以及「样本够不够」。不够时第二个返回值为 false，调用方不许预热。
+// p95 报告样本的 95 分位，以及是否足够作为历史参考。
 func (w *gatewayPoolFullWindow) p95() (time.Duration, bool) {
 	if w == nil {
 		return 0, false
@@ -141,32 +113,78 @@ func (s *openAICodexCookieStore) gatewayPoolNoteFullWindow(identity, version str
 	return held
 }
 
-// gatewayPoolPrewarmDue 报告「手里这张票该开始预热换下一张了吗」。
-//
-// 不够样本、票没验过满血、或者票龄还没到 p95 − 提前量，都回 false。
-func (s *openAICodexCookieStore) gatewayPoolPrewarmDue(identity string) (time.Duration, bool) {
-	if s == nil {
+func (s *openAICodexCookieStore) gatewayPoolVerificationTime(identity string) time.Duration {
+	if value, ok := s.poolWarmDuration.Load(identity); ok {
+		if d, ok := value.(time.Duration); ok && d > gatewayPoolWarmMinBudget {
+			if d > 2*gatewayPoolWarmShotTimeout {
+				return 2 * gatewayPoolWarmShotTimeout
+			}
+			return d
+		}
+	}
+	return gatewayPoolWarmMinBudget
+}
+
+// 租约与历史窗口取较早者；准备时间含列清单、取票、最近验证耗时与少量余量。
+func (s *openAICodexCookieStore) gatewayPoolPrewarmDue(identity string, account *Account) (time.Duration, bool) {
+	if s == nil || account == nil {
 		return 0, false
 	}
-	window, ok := s.poolFullWindow.p95()
-	if !ok {
+	current, state := s.cachedPoolPair(identity)
+	if state != openAIGatewayPoolPairLive || current.version == "" {
 		return 0, false
 	}
 	mark, ok := s.gatewayPoolVerifiedMarkOf(identity)
-	if !ok || mark.at.IsZero() {
+	if !ok || mark.at.IsZero() || mark.version != current.version {
 		return 0, false
 	}
-	// 提前量比 p95 还长（上游窗口短到 15 秒以内）⇒ 一验出满血就该预热，lead 失去意义但不出错。
-	if age := time.Since(mark.at); age >= window-gatewayPoolPrewarmLead {
-		return age, true
+	deadline := current.until
+	if window, ok := s.poolFullWindow.p95(); ok && mark.at.Add(window).Before(deadline) {
+		deadline = mark.at.Add(window)
 	}
-	return 0, false
+	lead := s.gatewayPoolVerificationTime(identity) + account.gatewayPoolFetchTimeout() +
+		account.gatewayPoolListTimeout() + gatewayPoolPrewarmMargin
+	if lead > gatewayPoolPrewarmBudget {
+		lead = gatewayPoolPrewarmBudget
+	}
+	return time.Since(mark.at), time.Until(deadline) <= lead
+}
+
+type gatewayPoolPrewarmMark struct {
+	window  time.Time // since 不随票号续期或业务响应计数变化，才是同一个当前窗口。
+	running bool
+}
+
+func (s *openAICodexCookieStore) gatewayPoolBeginPrewarm(identity string, current openAIGatewayPoolPair) bool {
+	if identity == "" || current.since.IsZero() {
+		return false
+	}
+	mark := gatewayPoolPrewarmMark{window: current.since, running: true}
+	for {
+		prev, loaded := s.poolPrewarm.LoadOrStore(identity, mark)
+		if !loaded {
+			return true
+		}
+		old, ok := prev.(gatewayPoolPrewarmMark)
+		if !ok || old.running || old.window.Equal(current.since) {
+			return false
+		}
+		if s.poolPrewarm.CompareAndSwap(identity, old, mark) {
+			return true
+		}
+	}
+}
+
+func (s *openAICodexCookieStore) gatewayPoolFinishPrewarm(identity string, current openAIGatewayPoolPair) {
+	s.poolPrewarm.CompareAndSwap(identity,
+		gatewayPoolPrewarmMark{window: current.since, running: true},
+		gatewayPoolPrewarmMark{window: current.since})
 }
 
 // gatewayPoolPrewarm 在手里那张票快到点时，后台另取一张候选票验满血，验出来才换上去。
 //
 // 立刻返回：真正的活在一个脱离请求的 goroutine 里跑（它要活过这一发客户端请求）。
-// 没到点、样本不够、已经有一轮在跑，都是直接返回、什么都不做。
+// 没到点、该窗口已试过或已有一轮在跑，都不做任何请求。
 //
 // model 必须由调用方在**请求还活着的时候**读出来传进来（gatewayPoolWarmModel 要读请求体）：
 // state 绑在 (账号 × 模型 × 这张 cflb/oailb 对) 上，拿别的模型去验等于验了另一件事。
@@ -175,27 +193,30 @@ func (s *OpenAIGatewayService) gatewayPoolPrewarm(
 ) {
 	// 开关判在这里而不是只判在调用方：这是唯一会自己花票的入口，闸就该和动作在一起。
 	// 调用方那一处 gatewayPoolPrewarmEnabled 只是为了省掉「读 model 要解一遍请求体」。
-	if s == nil || model == "" || !account.gatewayPoolPrewarmEnabled() {
+	if s == nil || request == nil || model == "" || !account.gatewayPoolPrewarmEnabled() {
 		return
 	}
-	age, due := s.codexCookies.gatewayPoolPrewarmDue(identity)
+	age, due := s.codexCookies.gatewayPoolPrewarmDue(identity, account)
 	if !due {
 		return
 	}
 	current, state := s.codexCookies.cachedPoolPair(identity)
-	if state != openAIGatewayPoolPairLive {
+	if state != openAIGatewayPoolPairLive || !s.codexCookies.gatewayPoolVerifiedFull(identity) {
 		return // 手里那张已经不 Live 了 ⇒ 下一发业务请求自己会走前台预热，不用这条路
 	}
-	// 同一身份同时只许一轮：LoadOrStore 做占位，拿不到就说明已经有人在跑。
-	if _, running := s.codexCookies.poolPrewarm.LoadOrStore(identity, struct{}{}); running {
+	if !s.codexCookies.gatewayPoolBeginPrewarm(identity, current) {
 		return
 	}
-	// ctx 刻意脱离这一发请求：预热要活过它（客户端的响应早就写完了）。自己带预算上限。
-	ctx, cancel := context.WithTimeout(
-		context.WithoutCancel(request.Context()), gatewayPoolPrewarmBudget)
+	// 活过触发它的业务请求，但不活过当前租约，避免无效的后台长跑。
+	deadline := time.Now().Add(gatewayPoolPrewarmBudget)
+	if current.until.Before(deadline) {
+		deadline = current.until
+	}
+	ctx, cancel := context.WithDeadline(context.WithoutCancel(request.Context()), deadline)
+	ctx = context.WithValue(ctx, gatewayPoolProbeModelKey{}, model)
 	go func() {
 		defer cancel()
-		defer s.codexCookies.poolPrewarm.Delete(identity)
+		defer s.codexCookies.gatewayPoolFinishPrewarm(identity, current)
 		s.gatewayPoolPrewarmRound(ctx, account, identity, current, age,
 			func(ctx context.Context, cookie, state string) (int, string, error) {
 				return s.gatewayPoolWarmShot(ctx, account, proxyURL, cookie, model, state)
@@ -203,7 +224,7 @@ func (s *OpenAIGatewayService) gatewayPoolPrewarm(
 	}()
 }
 
-// gatewayPoolPrewarmRound 跑一轮后台预热：一张张试，验出满血的第一张换上去。
+// gatewayPoolPrewarmRound 只取一个候选，任何失败都结束，不沿用前台张数配置。
 //
 // shoot 抽成参数的理由和前台那条路一样（见 gatewayPoolWarmShooter）：让这一轮在**不碰真实
 // 出站构造链**的情况下被测到。生产路径只有一个实现。
@@ -215,69 +236,55 @@ func (s *OpenAIGatewayService) gatewayPoolPrewarmRound(
 	age time.Duration,
 	shoot gatewayPoolWarmShooter,
 ) {
+	ctx = context.WithValue(ctx, gatewayPoolProbeSourceKey{}, "background")
+	if ctx.Err() != nil {
+		return
+	}
+	if cached, state := s.codexCookies.cachedPoolPair(identity); state != openAIGatewayPoolPairLive || cached != current {
+		return
+	}
 	pool, err := s.codexCookies.poolClient(account)
 	if err != nil {
 		slog.Warn("gwpool_prewarm_no_pool", "account_id", account.ID,
 			"error", gatewayPoolWarmErrorText(err))
 		return
 	}
-	tickets := account.gatewayPoolWarmTickets()
 	slog.Info("gwpool_prewarm_start", "account_id", account.ID,
-		"gateway", current.gateway, "age_s", int(age.Seconds()), "tickets", tickets)
-	// burned 只为那条终态日志能一行答完「这一轮试了哪几个网关」。
-	burned := make([]string, 0, tickets)
-	for attempt := 1; attempt <= tickets; attempt++ {
-		if ctx.Err() != nil {
-			break
-		}
-		// force + exclude_versions：要一张**不同的**网关，而且绝不要手里这一张。
-		candidate, err := s.codexCookies.gatewayPoolTakeFresh(
-			ctx, pool, account, identity, true, []string{current.version})
-		if err != nil {
-			// 供给见底是常态（池子一个网关一周期只出一张），不是故障：手里那张还在服务，
-			// 下一发业务请求到点时会再触发一轮。所以只记一条，不退避、不重试。
-			slog.Info("gwpool_prewarm_no_ticket", "account_id", account.ID,
-				"attempt", attempt, "error", gatewayPoolWarmErrorText(err))
-			return
-		}
-		applied := OpenAIGatewayPoolApplied{
-			AccountID: account.ID,
-			Cookie:    candidate.cookie,
-			Gateway:   candidate.gateway,
-			Region:    candidate.region,
-			Version:   candidate.version,
-		}
-		full, conclusive, _, perr := s.codexCookies.gatewayPoolWarmVerdict(
-			ctx, account, identity, applied, candidate.cookie, attempt, shoot)
-		switch {
-		case !conclusive:
-			// 下不了结论（非 200、限流、传输失败）⇒ 不把这个落点判死，也不继续试。
-			// **刻意不像前台那条路那样「放行」**：这里没有业务请求要放行，而继续试下去是在
-			// 上游正不正常都不知道的时候接着烧票。手里那张还在服务，下一发再来。
-			slog.Warn("gwpool_prewarm_inconclusive", "account_id", account.ID,
-				"gateway", candidate.gateway, "attempt", attempt,
-				"error", gatewayPoolWarmErrorText(perr))
-			// 这张候选票确证碰过上游（或连都没连上），窗口按已烧算：本地账本在
-			// gatewayPoolTakeFresh 里已经记过，这里只补一笔没有判定的接触进落点卡。
-			s.notePrewarmVerdict(ctx, account, applied, "", false)
-			return
-		case full:
-			s.installPrewarmedPair(ctx, account, identity, current, candidate, applied, attempt)
-			return
-		default:
-			// 判成降智：候选票丢掉（**不还给池子** —— 它真的打出去了，窗口真的烧了），
-			// 记进落点卡但不推进 `Current`（没有业务请求落在它上面）。
-			burned = append(burned, candidate.gateway)
-			slog.Info("gwpool_prewarm_degraded", "account_id", account.ID,
-				"gateway", candidate.gateway, "attempt", attempt)
-			s.notePrewarmVerdict(ctx, account, applied, openAIGatewayVerdictDegraded, false)
-		}
+		"gateway", current.gateway, "age_s", int(age.Seconds()), "tickets", 1)
+	candidate, err := s.codexCookies.gatewayPoolTakeFresh(
+		ctx, pool, account, identity, true, []string{current.version},
+		openAIGatewayPoolMinRemaining+s.codexCookies.gatewayPoolVerificationTime(identity))
+	if err != nil {
+		slog.Info("gwpool_prewarm_no_ticket", "account_id", account.ID,
+			"error", gatewayPoolWarmErrorText(err))
+		return
 	}
-	// 一轮都没验出满血。**不是错误**：手里那张还在服务业务请求，客户端什么都没感觉到。
-	// 下一发业务请求到点时会再触发一轮 —— 真的到那时手里那张已经降智了，前台预热会接手。
-	slog.Info("gwpool_prewarm_exhausted", "account_id", account.ID,
-		"tickets", len(burned), "gateways", strings.Join(burned, ","),
-		"budget_exhausted", ctx.Err() != nil)
+	applied := OpenAIGatewayPoolApplied{
+		AccountID: account.ID, Cookie: candidate.cookie, Gateway: candidate.gateway,
+		Region: candidate.region, Version: candidate.version,
+		RoundID: candidate.roundID,
+	}
+	probeCtx, cancel := context.WithDeadline(ctx, candidate.until.Add(-openAIGatewayPoolMinRemaining))
+	defer cancel()
+	full, conclusive, _, firstSent, perr := s.codexCookies.gatewayPoolWarmVerdict(
+		probeCtx, account, identity, applied, candidate.cookie, 1, shoot)
+	candidate.firstSent = firstSent
+	if probeCtx.Err() != nil {
+		conclusive, perr = false, probeCtx.Err()
+	}
+	switch {
+	case !conclusive:
+		slog.Warn("gwpool_prewarm_inconclusive", "account_id", account.ID,
+			"gateway", candidate.gateway, "error", gatewayPoolWarmErrorText(perr))
+		s.notePrewarmVerdict(ctx, account, applied, "", false)
+	case full:
+		installed := s.installPrewarmedPair(ctx, account, identity, current, candidate, 1)
+		// 已验证但被业务换票抢先的候选也要记结论，只是不推进当前网关。
+		s.notePrewarmVerdict(ctx, account, applied, openAIGatewayVerdictFull, installed)
+	default:
+		slog.Info("gwpool_prewarm_degraded", "account_id", account.ID, "gateway", candidate.gateway)
+		s.notePrewarmVerdict(ctx, account, applied, openAIGatewayVerdictDegraded, false)
+	}
 }
 
 // installPrewarmedPair 把验出满血的候选票换到缓存里。
@@ -290,29 +297,29 @@ func (s *OpenAIGatewayService) installPrewarmedPair(
 	account *Account,
 	identity string,
 	current, candidate openAIGatewayPoolPair,
-	applied OpenAIGatewayPoolApplied,
 	attempt int,
-) {
+) bool {
+	if ctx.Err() != nil || candidate.version == "" || time.Until(candidate.until) < openAIGatewayPoolMinRemaining {
+		slog.Info("gwpool_prewarm_expired", "account_id", account.ID, "gateway", candidate.gateway)
+		return false
+	}
 	if !s.codexCookies.poolPairs.CompareAndSwap(identity, current, candidate) {
 		slog.Info("gwpool_prewarm_superseded", "account_id", account.ID,
 			"gateway", candidate.gateway, "attempt", attempt,
 			"reason", "the cached pair changed while this round was verifying")
-		return
+		return false
 	}
 	// 顺序是承重的：先换票再标验过。反过来的话中间那一瞬「缓存里是旧票、验过的是新票号」⇒
 	// gatewayPoolVerifiedFull 比对票号失败 ⇒ 并发的业务请求会以为手里这张没验过，白跑一轮前台预热。
 	s.codexCookies.gatewayPoolMarkVerifiedFull(identity, candidate.version)
 	slog.Info("gwpool_prewarm_ready", "account_id", account.ID,
 		"gateway", candidate.gateway, "region", candidate.region, "tickets", attempt)
-	// 满血这条连 `Current` 一起推进：它就是接下来的业务请求要落的那个网关。
-	s.notePrewarmVerdict(ctx, account, applied, openAIGatewayVerdictFull, true)
+	return true
 }
 
 // notePrewarmVerdict 把这一轮的判定写进账号的落点记录。
 //
-// 和前台那条路（noteWarmVerdict）分开只因为 ctx 的来路不同：这里的 ctx 已经脱离了请求、
-// 自带预算，不需要再 WithoutCancel 一次；写库那一下仍然要有自己的小超时，别让一个慢库把
-// 「这个身份正在预热」的占位挂住几分钟。
+// 证据落账用独立短预算，后台验证刚好超时也不能丢掉已经启动的冷却记录。
 func (s *OpenAIGatewayService) notePrewarmVerdict(
 	ctx context.Context,
 	account *Account,
@@ -320,7 +327,7 @@ func (s *OpenAIGatewayService) notePrewarmVerdict(
 	verdict string,
 	advanceCurrent bool,
 ) {
-	noteCtx, cancel := context.WithTimeout(ctx, gatewayPoolWarmNoteTimeout)
+	noteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gatewayPoolWarmNoteTimeout)
 	defer cancel()
 	s.noteGatewayPoolCooldownVerdict(noteCtx, account, applied, verdict)
 	s.noteOpenAIGatewayUse(noteCtx, account, applied.Gateway, applied.Region, verdict, advanceCurrent,

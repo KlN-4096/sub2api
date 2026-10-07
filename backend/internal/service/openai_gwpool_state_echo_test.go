@@ -458,7 +458,7 @@ func TestNoteEchoCountsConsecutiveRefreshesAndResets(t *testing.T) {
 	store := &openAICodexCookieStore{}
 	store.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
 		cookie: "__cflb=a", gateway: "unified-142", version: "tkt-1",
-		until: time.Now().Add(time.Minute), since: time.Now(),
+		until: time.Now().Add(time.Minute), since: time.Now(), firstSent: time.Now(),
 	})
 
 	misses, age := store.gatewayPoolNoteEcho(gwpoolTestIdentity, "tkt-1", "unified-142", true)

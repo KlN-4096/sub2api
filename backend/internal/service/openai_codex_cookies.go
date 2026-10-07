@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/chatgptcookies"
 	"golang.org/x/sync/singleflight"
@@ -43,11 +44,16 @@ type openAICodexCookieStore struct {
 	// 值连**判出满血的时刻**一起存：满血时长的样本和后台预热的触发点都从它算
 	// （openai_gwpool_prewarm.go）。
 	poolVerified sync.Map // 凭证域身份 → gatewayPoolVerifiedMark
-	// poolPrewarm 是「这个身份正有一轮后台预热在跑」的占位，保证同时只有一轮
-	// （openai_gwpool_prewarm.go）。并发两轮就是双倍烧票换同一个窗口。
-	poolPrewarm sync.Map // 凭证域身份 → struct{}
-	// poolFullWindow 是满血时长的样本池，后台预热的开始时刻由它的 p95 决定。
-	// 刻意全局一份：窗口时长是上游的行为，不是某个账号的属性（见 gatewayPoolFullWindow）。
+	// 结束后保留当前窗口标记：失败不能在下一条业务请求上重新烧一轮。
+	poolPrewarm             sync.Map // 凭证域身份 → gatewayPoolPrewarmMark
+	poolWarmDuration        sync.Map // 凭证域身份 → 最近一次有结论的验证耗时
+	poolProbeObserved       func(context.Context, *Account, gatewayPoolProbeObservation)
+	poolContactLocks        sync.Map // 凭证域摘要 -> *sync.Mutex；只协调本进程。
+	poolContactPicks        sync.Map // 凭证域摘要 -> *atomic.Uint64；每五次保留一次原顺序探索。
+	poolFeedbackPolicies    sync.Map // binding+gateway -> latest reporting-policy observation
+	poolFeedbackPolicyPrune atomic.Int64
+	poolRounds              gatewayPoolRounds
+	// 历史样本仅辅助提前准备，不能代替当前缓存的实际租约。
 	poolFullWindow gatewayPoolFullWindow
 	// poolWarm 把同一张票上的并发预热判据收口成一次（openai_gwpool_warm.go）。
 	// 取票本身已经被 poolFetch 收成一次 ⇒ 同身份的并发请求手里是**同一张票**、同一个
@@ -77,7 +83,8 @@ type openAICodexCookieStore struct {
 	// 架子上这张不是浪费而是预取：它在自己的满血窗口内对**后面的**业务请求一样有效。
 	// 窗口过了还没人用才算损失，而那只发生在这个身份突然没请求的时候。
 	// 键按凭证域身份，和 poolPairs 同一个口径（同一份凭据的几个账号行共用）。
-	poolSpare sync.Map // 凭证域身份 → *gatewayPoolTicketBatch
+	poolSpare     sync.Map // 凭证域身份 → *gatewayPoolTicketBatch
+	poolInventory sync.Map // 凭证域身份 → *gatewayPoolInventoryState
 }
 
 // openAICodexCookieJarKey：本地行 ID + 凭证域身份。同一行重新授权成另一个 ChatGPT 身份时

@@ -309,6 +309,7 @@ type Gateway struct {
 	// LastUsedAt 是池子记的「你上次碰它」的时刻。零值 = 没碰过，也是最优候选。
 	LastUsedAt time.Time
 	Cooldown   *CooldownRecommendation
+	Contacts   []ContactStats
 }
 
 // Client 是一个池子实例的客户端。并发安全。
@@ -611,6 +612,7 @@ func (c *Client) Gateways(ctx context.Context, account string, accountTag ...str
 	if len(accountTag) > 0 && validCooldownTag(accountTag[0]) {
 		req.Header.Set(cooldownAccountHeader, accountTag[0])
 	}
+	req.Header.Set(cooldownMaxHeader, strconv.Itoa(CooldownMaxSeconds))
 	resp, err := c.do(req)
 	if err != nil {
 		return nil, err
@@ -633,6 +635,7 @@ func (c *Client) Gateways(ctx context.Context, account string, accountTag ...str
 			// time.Time 会连带让**整份列表**解码失败，而这个字段只用来排序。
 			LastUsedAt string                  `json:"last_used_at"`
 			Cooldown   *CooldownRecommendation `json:"cooldown"`
+			Contacts   []ContactStats          `json:"contacts"`
 		} `json:"gateways"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxListBytes)).Decode(&payload); err != nil {
@@ -654,9 +657,16 @@ func (c *Client) Gateways(ctx context.Context, account string, accountTag ...str
 		if item.Cooldown != nil && !item.Cooldown.Valid() {
 			item.Cooldown = nil
 		}
+		contacts := make([]ContactStats, 0, len(item.Contacts))
+		for _, row := range item.Contacts {
+			if row.Gateway == name && row.Valid() {
+				contacts = append(contacts, row)
+			}
+		}
 		gateways = append(gateways, Gateway{
 			Name: name, PairReady: item.PairReady,
 			UsedByYou: item.UsedByYou, LastUsedAt: lastUsedAt, Cooldown: item.Cooldown,
+			Contacts: contacts,
 		})
 	}
 	return gateways, nil

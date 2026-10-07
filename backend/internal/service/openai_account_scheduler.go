@@ -452,7 +452,8 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		}
 	}
 
-	if !req.StickyWeighted {
+	if (!req.StickyWeighted || gatewayPoolPreferences(ctx)[req.StickyAccountID].verified) &&
+		!gatewayPoolPreferAlternative(ctx, req.StickyAccountID) {
 		selection, escapedSticky, err := s.selectBySessionHash(ctx, req)
 		if err != nil {
 			return nil, decision, err
@@ -903,7 +904,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 		candidateCount:            len(candidates),
 	}
 	if len(candidates) == 0 {
-		plan.selectionOrder = s.buildOpenAISelectionOrder(req, plan)
+		plan.selectionOrder = s.buildOpenAISelectionOrder(ctx, req, plan)
 		return plan
 	}
 
@@ -1047,11 +1048,12 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 		plan.topK = 1
 	}
 
-	plan.selectionOrder = s.buildOpenAISelectionOrder(req, plan)
+	plan.selectionOrder = s.buildOpenAISelectionOrder(ctx, req, plan)
 	return plan
 }
 
 func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
+	ctx context.Context,
 	req OpenAIAccountScheduleRequest,
 	plan openAIAccountLoadPlan,
 ) []openAIAccountCandidateScore {
@@ -1064,6 +1066,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 			groupTopK = len(pool)
 		}
 		ranked := selectTopKOpenAICandidates(pool, groupTopK)
+		ranked = gatewayPoolTopCandidates(ctx, pool, ranked)
 		var primary []openAIAccountCandidateScore
 		if req.StickyWeighted {
 			for _, stickyID := range []int64{req.StickyPreviousAccountID, req.StickyAccountID} {
@@ -1085,6 +1088,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 		if len(primary) == 0 {
 			primary = buildOpenAIWeightedSelectionOrder(ranked, req)
 		}
+		gatewayPoolOrder(ctx, primary, func(candidate openAIAccountCandidateScore) *Account { return candidate.account })
 		if !plan.includeOverflowFallback || groupTopK >= len(pool) {
 			return primary
 		}
@@ -2184,24 +2188,50 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	platform string,
 	previousResponseCanMove bool,
 	useUpstreamTokenCost bool,
-) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
-	selection, decision, err := s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
-	if err == nil || openAIProxyStreamQuarantineBypassed(ctx) {
-		return selection, decision, err
+) (selection *AccountSelectionResult, decision OpenAIAccountScheduleDecision, err error) {
+	var rotationAllowed map[int64]struct{}
+	excludedIDs, rotationAllowed, err = gatewayPoolRotationExclusions(ctx, s.accountRepo, groupID, excludedIDs)
+	if err != nil {
+		return nil, decision, err
 	}
-	if !errors.Is(err, ErrNoAvailableAccounts) && !errors.Is(err, ErrNoAvailableCompactAccounts) {
-		return selection, decision, err
+	strongBinding := (strings.TrimSpace(previousResponseID) != "" && !previousResponseCanMove) ||
+		s.resolveOpenAIGuardianParentAccountID(ctx, groupID) > 0
+	for range gatewayPoolSelectionRechecks {
+		selection, decision, err = s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+		if err != nil && !openAIProxyStreamQuarantineBypassed(ctx) &&
+			(errors.Is(err, ErrNoAvailableAccounts) || errors.Is(err, ErrNoAvailableCompactAccounts)) &&
+			NormalizeOpenAICompatiblePlatform(platform) == PlatformOpenAI {
+			if blocked := s.getOpenAIProxyStreamCircuit().activeBlockCount(time.Now()); blocked > 0 {
+				s.logOpenAIProxyStreamQuarantineFailOpen(requestedModel, blocked)
+				ctx = withOpenAIProxyStreamQuarantineBypass(ctx)
+				selection, decision, err = s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+			}
+		}
+		if err != nil {
+			return selection, decision, err
+		}
+		if !gatewayPoolRotationRecheck(ctx, s.accountRepo, rotationAllowed, selection) {
+			if selection != nil && selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			return nil, decision, ErrNoAvailableAccounts
+		}
+		if requiredImageCapability != "" || strongBinding || s.gatewayPoolRoundSelectionAllowed(ctx, groupID, selection) {
+			return selection, decision, nil
+		}
+		// A concurrent request exhausted the chosen credential after our snapshot.
+		// Release its slot and refresh selection, without sending or increasing the
+		// handler's bounded failover budget. Never retry the rejected row here.
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+		excludedIDs = cloneExcludedAccountIDs(excludedIDs)
+		if excludedIDs == nil {
+			excludedIDs = map[int64]struct{}{}
+		}
+		excludedIDs[selection.Account.ID] = struct{}{}
 	}
-	// The circuit only ever quarantines PlatformOpenAI accounts.
-	if NormalizeOpenAICompatiblePlatform(platform) != PlatformOpenAI {
-		return selection, decision, err
-	}
-	blocked := s.getOpenAIProxyStreamCircuit().activeBlockCount(time.Now())
-	if blocked == 0 {
-		return selection, decision, err
-	}
-	s.logOpenAIProxyStreamQuarantineFailOpen(requestedModel, blocked)
-	return s.selectAccountWithSchedulerOnce(withOpenAIProxyStreamQuarantineBypass(ctx), groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+	return nil, decision, ErrNoAvailableAccounts
 }
 
 type openAIGroupPrivacyRequirementContextKey struct{}
@@ -2330,6 +2360,17 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	// 仍须装门。其余媒体路径通过 WithOpenAIProfitControlSuppressed 显式跳过。
 	if requiredImageCapability == "" {
 		ctx = s.withOpenAIProfitControlGate(ctx, groupID)
+		strongBinding := (strings.TrimSpace(previousResponseID) != "" && !previousResponseCanMove) ||
+			s.resolveOpenAIGuardianParentAccountID(ctx, groupID) > 0
+		if !strongBinding {
+			ctx = s.withGatewayPoolAccountPreferences(ctx, OpenAIAccountScheduleRequest{
+				GroupID: groupID, Platform: platform, RequestedModel: requestedModel,
+				ExcludedIDs: excludedIDs, RequiredTransport: requiredTransport,
+				RequiredCapability: requiredCapability, RequireCompact: requireCompact,
+				RequirePrivacySet: s.openAIGroupRequiresPrivacySet(ctx, groupID),
+			})
+			excludedIDs = gatewayPoolRoundExclusions(ctx, excludedIDs)
+		}
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	decision := OpenAIAccountScheduleDecision{}
