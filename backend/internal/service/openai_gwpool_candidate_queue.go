@@ -7,8 +7,9 @@ import (
 )
 
 // Only names are queued, never a stockpile of live route credentials. Each pick
-// reconciles a fresh catalog + local cooldown projection. Returning candidates
-// join the tail; a cancelled caller does not reset the other candidates' order.
+// reconciles a fresh catalog + local cooldown projection. The FIFO remains the
+// exploration/fallback baseline; measured candidates may exchange positions for
+// this pick only. A cancelled caller does not reset the baseline order.
 type gatewayPoolCandidateQueue struct {
 	mu    sync.Mutex
 	names []string
@@ -23,7 +24,7 @@ func (s *openAICodexCookieStore) gatewayPoolCandidateQueue(identity string) *gat
 	return queue
 }
 
-func (q *gatewayPoolCandidateQueue) pick(eligible []gwpool.Gateway) string {
+func (q *gatewayPoolCandidateQueue) pick(eligible []gwpool.Gateway, adaptive ...map[string]float64) string {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	ready := make(map[string]bool, len(eligible))
@@ -50,7 +51,21 @@ func (q *gatewayPoolCandidateQueue) pick(eligible []gwpool.Gateway) string {
 		return ""
 	}
 	selected := names[0]
-	q.names = append(q.names[1:], selected)
+	if len(adaptive) > 0 && len(adaptive[0]) >= 2 {
+		ordered := make([]gwpool.Gateway, 0, len(names))
+		for _, name := range names {
+			ordered = append(ordered, gwpool.Gateway{Name: name})
+		}
+		selected = rankGatewayPoolAdaptive(ordered, adaptive[0])[0].Name
+	}
+	// Rotate in the untouched FIFO, not the score order: baseline exploration
+	// can still reach a lower-scoring or unmeasured candidate.
+	for i, name := range q.names {
+		if name == selected {
+			q.names = append(append(q.names[:i], q.names[i+1:]...), selected)
+			break
+		}
+	}
 	return selected
 }
 

@@ -1070,8 +1070,8 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 		// Baseline remains least recently used. Only comparable measured candidates
 		// may exchange positions, and every fifth pick retains this baseline.
 		sort.SliceStable(eligible, func(i, j int) bool { return eligible[i].LastUsedAt.Before(eligible[j].LastUsedAt) })
-		eligible = s.gatewayPoolRankContacts(ctx, account, identity, eligible)
-		return s.gatewayPoolCandidateQueue(identity).pick(eligible)
+		ranking := s.gatewayPoolRankCandidates(ctx, account, identity, eligible)
+		return s.gatewayPoolCandidateQueue(identity).pick(ranking.candidates, ranking.adaptive)
 	}
 	s.gatewayPoolCandidateQueue(identity).pick(nil)
 	// 冷却期是硬闸，不再强行轮到最旧那个。裸取也必须经过 next 的同一道本地闸。

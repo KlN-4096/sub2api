@@ -61,10 +61,20 @@ func rankGatewayPoolContacts(candidates []gwpool.Gateway, seen map[string]gatewa
 	return out
 }
 
+type gatewayPoolCandidateRanking struct {
+	candidates []gwpool.Gateway
+	adaptive   map[string]float64
+}
+
 func (s *openAICodexCookieStore) gatewayPoolRankContacts(ctx context.Context, account *Account, identity string, candidates []gwpool.Gateway) []gwpool.Gateway {
+	ranking := s.gatewayPoolRankCandidates(ctx, account, identity, candidates)
+	return rankGatewayPoolAdaptive(ranking.candidates, ranking.adaptive)
+}
+
+func (s *openAICodexCookieStore) gatewayPoolRankCandidates(ctx context.Context, account *Account, identity string, candidates []gwpool.Gateway) gatewayPoolCandidateRanking {
 	model, _ := ctx.Value(gatewayPoolProbeModelKey{}).(string)
 	if len(candidates) < 2 {
-		return candidates
+		return gatewayPoolCandidateRanking{candidates: candidates}
 	}
 	available, global := false, false
 	for _, candidate := range candidates {
@@ -74,20 +84,25 @@ func (s *openAICodexCookieStore) gatewayPoolRankContacts(ctx context.Context, ac
 		global = global || candidate.Priority.Valid(model)
 	}
 	state := gatewayPoolContacts{}
+	freshComplete := false
 	fresh, err := s.freshGatewayPoolAccount(ctx, account)
 	if err == nil && fresh != nil {
 		tag := gatewayPoolLedgerTag(identity)
 		state = readGatewayPoolContacts(fresh, tag)
+		freshComplete = s.accountByID != nil && s.historyByTag != nil && ctx.Err() == nil
 		if s.historyByTag != nil {
 			peers, err := s.historyByTag(ctx, tag)
 			if err == nil {
 				for i := range peers {
 					mergeGatewayPoolContacts(&state, readGatewayPoolContacts(&peers[i], tag))
 				}
+			} else {
+				freshComplete = false
 			}
 		}
 	}
 	out := append([]gwpool.Gateway(nil), candidates...)
+	optimize := false
 	if model != "" && (available || global) {
 		value, _ := s.poolContactPicks.LoadOrStore(gatewayPoolLedgerTag(identity), &atomic.Uint64{})
 		counter, ok := value.(*atomic.Uint64)
@@ -95,6 +110,7 @@ func (s *openAICodexCookieStore) gatewayPoolRankContacts(ctx context.Context, ac
 			panic("gwpool contact pick counter has an invalid type")
 		}
 		if counter.Add(1)%gatewayPoolContactExploreEvery != 0 {
+			optimize = true
 			if global {
 				// Shrink only comparable same-model evidence toward this
 				// eligible cohort's pooled rate. Unknown candidates retain the
@@ -123,12 +139,29 @@ func (s *openAICodexCookieStore) gatewayPoolRankContacts(ctx context.Context, ac
 			}
 		}
 	}
+	var adaptive map[string]float64
+	if optimize && freshComplete {
+		current, identityErr := s.gatewayPoolIdentity(ctx, fresh)
+		if identityErr == nil && gatewayPoolLedgerTag(current) == gatewayPoolLedgerTag(identity) {
+			adaptive = gatewayPoolAdaptiveScores(out, state, model, gatewayPoolProbeSource(ctx), time.Now(),
+				func(gateway string) time.Duration {
+					if cooldown, ok := s.cooldownEntry(identity, gateway); ok {
+						return time.Duration(cooldown.WindowSeconds) * time.Second
+					}
+					base, _ := s.gatewayPoolInitialCooldown(identity, gateway, fresh.gatewayPoolGatewayWindow(),
+						fresh.gatewayPoolUseRecommendation())
+					return time.Duration(base) * time.Second
+				})
+		}
+	}
 	if gatewayPoolUSBackoffActive(state.LastUSAt, time.Now()) {
 		sort.SliceStable(out, func(i, j int) bool {
 			return out[i].DatacenterCountry != "US" && out[j].DatacenterCountry == "US"
 		})
 	}
-	return out
+	// Queue admission must receive the untouched fallback order. Applying the
+	// adaptive order here would permanently bias first admission and re-entry.
+	return gatewayPoolCandidateRanking{candidates: out, adaptive: adaptive}
 }
 
 const gatewayPoolUSSoftBackoff = 4 * time.Hour
