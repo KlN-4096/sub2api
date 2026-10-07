@@ -396,6 +396,7 @@ func TestGatewayPoolStrictGuardReusesResolvedShadowIdentityForSentMark(t *testin
 	svc.codexCookies.gatewayPoolMarkVerifiedFull(gwpoolTestIdentity, "v", "gpt-6-luna")
 	request, err := http.NewRequest(http.MethodPost, gwpoolTestURL, nil)
 	require.NoError(t, err)
+	request.Header.Set(openAICodexTurnStateHeader, "business-state")
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ctx, _ := withOpenAIGatewayPoolSink(request.Context(), ginCtx)
 	response, _, err := svc.doOpenAIUpstreamOnce(request.WithContext(ctx), "", account)

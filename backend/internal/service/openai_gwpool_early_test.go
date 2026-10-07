@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -120,10 +121,10 @@ func TestGatewayPoolEarlyDifferentUsersShareOneAtomicLedgerBudget(t *testing.T) 
 	}
 }
 
-func TestGatewayPoolEarlyProductionPathUsesBusinessModelAndSamePair(t *testing.T) {
+func TestGatewayPoolEarlyProductionPathUsesLunaAndSamePair(t *testing.T) {
 	cookie := gwpoolTestPairCookie(t, "unified-142")
 	fake := newGwpoolFakePool(t, cookie, 150)
-	fake.listGateways = []gwpoolFakeGateway{{Name: "unified-142", PairReady: true}}
+	fake.listGateways = []gwpoolFakeGateway{{Name: "unified-142", PairReady: true, UsedByYou: true}}
 	account := rotationAccount(1, 7)
 	account.Extra[openAIGatewayPoolEarlyEnabledKey] = true
 	account.Credentials["access_token"] = "offline-test-token"
@@ -137,16 +138,17 @@ func TestGatewayPoolEarlyProductionPathUsesBusinessModelAndSamePair(t *testing.T
 	svc.httpUpstream = upstream
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
 	require.NoError(t, err)
+	req.Header.Set(openAICodexTurnStateHeader, "business-state")
 	ctx, _ := withOpenAIGatewayPoolSink(req.Context(), nil)
 	resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", account)
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 	require.Len(t, upstream.sentBodies, 3, "exactly A/B then waiting business, no extra confirmation")
-	for _, body := range upstream.sentBodies {
-		require.Equal(t, "gpt-6-astra", gjson.Get(body, "model").String(), "default Luna must not substitute for early Astra")
+	for _, body := range upstream.sentBodies[:2] {
+		require.Equal(t, "gpt-6-luna", gjson.Get(body, "model").String(), "both experimental probes use Luna")
 	}
 	require.Equal(t, gwpoolEchoBody1, upstream.sentBodies[2])
-	require.Equal(t, []string{"", "probe-state", ""}, upstream.sentState)
+	require.Equal(t, []string{"", "probe-state", "business-state"}, upstream.sentState)
 	require.Equal(t, []string{cookie, cookie, cookie}, upstream.sentCookies)
 	pair, _ := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
 	require.Equal(t, cookie, pair.cookie)
@@ -155,6 +157,28 @@ func TestGatewayPoolEarlyProductionPathUsesBusinessModelAndSamePair(t *testing.T
 	require.EqualValues(t, 1, fake.hits.Load())
 	fresh, _ := repo.GetByID(ctx, account.ID)
 	require.False(t, readGatewayPoolEarlyState(fresh, gwpoolTestIdentity).IsZero())
+}
+
+func TestGatewayPoolEarlyUnknownRetiresOneShotWithoutLearning(t *testing.T) {
+	store := &openAICodexCookieStore{}
+	early := newGatewayPoolEarlyAttempt("g", gatewayPoolProbeModelLuna)
+	store.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
+		cookie: "offline", gateway: "g", version: "v", early: early, until: time.Now().Add(time.Hour),
+	})
+	cooldown := *resetTestCooldown(time.Now().UTC())
+	store.poolCooldown = map[string]gatewayPoolCooldown{gatewayPoolLedgerKey(gwpoolTestIdentity, "g"): cooldown}
+	ctx := context.WithValue(context.Background(), gatewayPoolProbeModelKey{}, early.model)
+	full, conclusive, _, _, err := store.gatewayPoolWarmVerdict(ctx, gwpoolTestAccount(1), gwpoolTestIdentity,
+		OpenAIGatewayPoolApplied{Gateway: "g", Version: "v", early: early}, "offline", 1,
+		func(context.Context, string, string) (int, string, error) {
+			return http.StatusBadGateway, "", errors.New("offline transport error")
+		})
+	require.Error(t, err)
+	require.False(t, full || conclusive)
+	_, state := store.cachedPoolPair(gwpoolTestIdentity)
+	require.Equal(t, openAIGatewayPoolPairStale, state, "a completed one-shot unknown cannot remain a permanently retryable candidate")
+	after, _ := store.cooldownEntry(gwpoolTestIdentity, "g")
+	require.Equal(t, cooldown, after, "retiring an unusable attempt is not a degraded quality verdict")
 }
 
 func TestGatewayPoolEarlyStaleTicketDoesNotBlockNormalDifferentModel(t *testing.T) {
@@ -167,12 +191,13 @@ func TestGatewayPoolEarlyStaleTicketDoesNotBlockNormalDifferentModel(t *testing.
 	}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
-		cookie: "old-cookie", gateway: "unified-142", version: "old-v", until: time.Now().Add(-time.Second),
+		cookie: "old-cookie", gateway: "unified-142", version: "old-v", routeExpiresAt: time.Now().Add(-time.Second),
 		early: newGatewayPoolEarlyAttempt("unified-142", "gpt-6-astra"),
 	})
 	body := `{"model":"gpt-6-sol","input":"x"}`
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(body))
 	require.NoError(t, err)
+	req.Header.Set(openAICodexTurnStateHeader, "business-state")
 	ctx, _ := withOpenAIGatewayPoolSink(req.Context(), nil)
 	resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", account)
 	require.NoError(t, err)
@@ -241,7 +266,7 @@ func TestGatewayPoolEarlyOnlyLocalCoolingAndSingleTicket(t *testing.T) {
 	}{
 		{"local cooling", false, false, true, true, true},
 		{"normal supply remains", true, false, true, true, false},
-		{"pool already used", false, true, true, true, false},
+		{"historical pool use does not block early", false, true, true, true, true},
 		{"nonready", false, false, false, true, false},
 		{"disabled", false, false, true, false, false},
 	} {
@@ -325,7 +350,7 @@ func TestGatewayPoolEarlyVerdictOnlyOneABAndModelBound(t *testing.T) {
 		require.True(t, full && known)
 	}
 	require.Equal(t, 2, shots)
-	require.False(t, store.gatewayPoolEarlyModelMatches(gwpoolTestIdentity, "gpt-5.6-luna"))
+	require.True(t, store.gatewayPoolEarlyModelMatches(gwpoolTestIdentity, "gpt-5.6-luna"), "verified early tickets share eligibility")
 	require.True(t, store.gatewayPoolEarlyModelMatches(gwpoolTestIdentity, "gpt-6-astra"))
 	store.gatewayPoolMarkStale(gwpoolTestIdentity, "v", early.gateway)
 	require.True(t, store.gatewayPoolEarlyModelMatches(gwpoolTestIdentity, "gpt-6-sol"),

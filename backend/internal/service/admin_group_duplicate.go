@@ -149,6 +149,7 @@ func cloneGroupForDuplicate(source *Group, operationID string) *Group {
 		ForceOpenAIFast:                 source.ForceOpenAIFast,
 		ForceOpenAIUltrafast:            source.ForceOpenAIUltrafast,
 		FreeOpenAIFast:                  source.FreeOpenAIFast,
+		OpenAIGatewayPoolActiveAccounts: source.GatewayPoolActiveAccountLimit(),
 		RequireOAuthOnly:                source.RequireOAuthOnly,
 		RequirePrivacySet:               source.RequirePrivacySet,
 		DefaultMappedModel:              source.DefaultMappedModel,
