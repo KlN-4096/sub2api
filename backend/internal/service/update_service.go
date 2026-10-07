@@ -30,7 +30,10 @@ var (
 const (
 	updateCacheKey = "update_check_cache"
 	updateCacheTTL = 1200 // 20 minutes
-	githubRepo     = "Wei-Shaw/sub2api"
+	// klno: 一键升级与回滚只认二开的发布；上游只做「有没有新版」的监测，绝不从上游下载——
+	// 否则上游一发新版，点更新就会把二开换成上游二进制。
+	githubRepo   = "KlN-4096/sub2api"
+	upstreamRepo = "Wei-Shaw/sub2api"
 
 	// Security: allowed download domains for updates
 	allowedDownloadHost = "github.com"
@@ -86,6 +89,18 @@ type UpdateInfo struct {
 	Cached         bool         `json:"cached"`
 	Warning        string       `json:"warning,omitempty"`
 	BuildType      string       `json:"build_type"` // "source" or "release"
+	// Upstream 是上游仓库的只读监测结果；上面的字段都是二开自己的。
+	Upstream *UpstreamUpdateInfo `json:"upstream,omitempty"`
+}
+
+// UpstreamUpdateInfo 上游版本监测：只提示，不提供升级。
+type UpstreamUpdateInfo struct {
+	CurrentVersion string `json:"current_version"` // 二开所基于的上游版本（去掉 -klno.N）
+	LatestVersion  string `json:"latest_version"`
+	HasUpdate      bool   `json:"has_update"`
+	HTMLURL        string `json:"html_url,omitempty"`
+	PublishedAt    string `json:"published_at,omitempty"`
+	Warning        string `json:"warning,omitempty"`
 }
 
 // ReleaseInfo contains GitHub release details
@@ -154,10 +169,32 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 			BuildType:      s.buildType,
 		}, nil
 	}
+	info.Upstream = s.fetchUpstreamInfo(ctx)
 
 	// Cache result
 	s.saveToCache(ctx, info)
 	return info, nil
+}
+
+// fetchUpstreamInfo 查上游最新版本。失败只记 warning，不影响二开自己的检查结果。
+func (s *UpdateService) fetchUpstreamInfo(ctx context.Context) *UpstreamUpdateInfo {
+	current := upstreamBaseVersion(s.currentVersion)
+	release, err := s.githubClient.FetchLatestRelease(ctx, upstreamRepo)
+	if err != nil {
+		return &UpstreamUpdateInfo{CurrentVersion: current, LatestVersion: current, Warning: err.Error()}
+	}
+	return s.upstreamInfo(upstreamBaseVersion(release.TagName), release.HTMLURL, release.PublishedAt)
+}
+
+func (s *UpdateService) upstreamInfo(latest, htmlURL, publishedAt string) *UpstreamUpdateInfo {
+	current := upstreamBaseVersion(s.currentVersion)
+	return &UpstreamUpdateInfo{
+		CurrentVersion: current,
+		LatestVersion:  latest,
+		HasUpdate:      compareVersions(current, latest) < 0,
+		HTMLURL:        htmlURL,
+		PublishedAt:    publishedAt,
+	}
 }
 
 // PerformUpdate downloads and applies the update
@@ -599,11 +636,7 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 		return nil, err
 	}
 
-	var cached struct {
-		Latest      string       `json:"latest"`
-		ReleaseInfo *ReleaseInfo `json:"release_info"`
-		Timestamp   int64        `json:"timestamp"`
-	}
+	var cached updateCacheData
 	if err := json.Unmarshal([]byte(data), &cached); err != nil {
 		return nil, err
 	}
@@ -612,24 +645,34 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 		return nil, fmt.Errorf("cache expired")
 	}
 
-	return &UpdateInfo{
+	info := &UpdateInfo{
 		CurrentVersion: s.currentVersion,
 		LatestVersion:  cached.Latest,
 		HasUpdate:      compareVersions(s.currentVersion, cached.Latest) < 0,
 		ReleaseInfo:    cached.ReleaseInfo,
 		Cached:         true,
 		BuildType:      s.buildType,
-	}, nil
+	}
+	// 当前版本可能在缓存期内变了（升级后重启），has_update 按当前版本重算。
+	if u := cached.Upstream; u != nil {
+		info.Upstream = s.upstreamInfo(u.LatestVersion, u.HTMLURL, u.PublishedAt)
+		info.Upstream.Warning = u.Warning
+	}
+	return info, nil
+}
+
+type updateCacheData struct {
+	Latest      string              `json:"latest"`
+	ReleaseInfo *ReleaseInfo        `json:"release_info"`
+	Upstream    *UpstreamUpdateInfo `json:"upstream,omitempty"`
+	Timestamp   int64               `json:"timestamp"`
 }
 
 func (s *UpdateService) saveToCache(ctx context.Context, info *UpdateInfo) {
-	cacheData := struct {
-		Latest      string       `json:"latest"`
-		ReleaseInfo *ReleaseInfo `json:"release_info"`
-		Timestamp   int64        `json:"timestamp"`
-	}{
+	cacheData := updateCacheData{
 		Latest:      info.LatestVersion,
 		ReleaseInfo: info.ReleaseInfo,
+		Upstream:    info.Upstream,
 		Timestamp:   time.Now().Unix(),
 	}
 
@@ -637,12 +680,13 @@ func (s *UpdateService) saveToCache(ctx context.Context, info *UpdateInfo) {
 	_ = s.cache.SetUpdateInfo(ctx, string(data), time.Duration(updateCacheTTL)*time.Second)
 }
 
-// compareVersions compares two semantic versions
+// compareVersions 比较 X.Y.Z[-klno.N]：先比 X.Y.Z，再比二开序号 N（无后缀按 0）。
+// 其它后缀（如 -rc1）照旧忽略。
 func compareVersions(current, latest string) int {
 	currentParts := parseVersion(current)
 	latestParts := parseVersion(latest)
 
-	for i := 0; i < 3; i++ {
+	for i := range currentParts {
 		if currentParts[i] < latestParts[i] {
 			return -1
 		}
@@ -653,17 +697,25 @@ func compareVersions(current, latest string) int {
 	return 0
 }
 
-func parseVersion(v string) [3]int {
-	v = strings.TrimPrefix(v, "v")
-	if idx := strings.IndexByte(v, '-'); idx != -1 {
-		v = v[:idx]
-	}
-	parts := strings.Split(v, ".")
-	result := [3]int{0, 0, 0}
+func parseVersion(v string) [4]int {
+	base, suffix, _ := strings.Cut(strings.TrimPrefix(v, "v"), "-")
+	var result [4]int
+	parts := strings.Split(base, ".")
 	for i := 0; i < len(parts) && i < 3; i++ {
 		if parsed, err := strconv.Atoi(parts[i]); err == nil {
 			result[i] = parsed
 		}
 	}
+	if n, ok := strings.CutPrefix(suffix, "klno."); ok {
+		if parsed, err := strconv.Atoi(n); err == nil {
+			result[3] = parsed
+		}
+	}
 	return result
+}
+
+// upstreamBaseVersion 去掉二开后缀，得到所基于的上游版本号。
+func upstreamBaseVersion(v string) string {
+	base, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimSpace(v), "v"), "-")
+	return base
 }
