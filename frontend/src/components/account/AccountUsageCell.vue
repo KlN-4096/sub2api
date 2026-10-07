@@ -123,7 +123,7 @@
     </template>
 
     <!-- OpenAI OAuth accounts: single source from /usage API -->
-    <template v-else-if="account.platform === 'openai' && account.type === 'oauth'">
+    <template v-else-if="isOpenAICodexUsageAccount">
       <div v-if="hasOpenAIUsageFallback" class="space-y-1">
         <UsageProgressBar
           v-if="usageInfo?.five_hour"
@@ -146,35 +146,36 @@
         />
         <!--
           Upstream codex /wham/usage quota query + reset. The local active-sampling
-          refresh button is rendered via the pre-actions slot so the user sees a
-          single row of related buttons instead of two stacked rows.
+          refresh button is a sibling (not a #pre-actions slot child) because
+          OpenAIQuotaResetCell's root carries v-if="oauth only" — putting the
+          button inside would make it vanish for cpr accounts along with the
+          reset UI. The shared flex row keeps them on a single line for OAuth.
         -->
-        <OpenAIQuotaResetCell :account="account" @account-updated="handleQuotaResetAccountUpdated">
-          <template #pre-actions>
-            <button
-              type="button"
-              class="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/30 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-              :disabled="activeQueryLoading"
-              @click="loadActiveUsage"
+        <div class="flex flex-wrap items-start gap-1.5">
+          <button
+            type="button"
+            class="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/30 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="activeQueryLoading"
+            @click="loadActiveUsage"
+          >
+            <svg
+              class="h-2.5 w-2.5"
+              :class="{ 'animate-spin': activeQueryLoading }"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
             >
-              <svg
-                class="h-2.5 w-2.5"
-                :class="{ 'animate-spin': activeQueryLoading }"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                />
-              </svg>
-              {{ t('admin.accounts.usageWindow.activeQuery') }}
-            </button>
-          </template>
-        </OpenAIQuotaResetCell>
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+              />
+            </svg>
+            {{ t('admin.accounts.usageWindow.activeQuery') }}
+          </button>
+          <OpenAIQuotaResetCell :account="account" @account-updated="handleQuotaResetAccountUpdated" />
+        </div>
       </div>
       <div v-else-if="loading" class="space-y-1.5">
         <div class="flex items-center gap-1">
@@ -190,12 +191,33 @@
       </div>
       <div v-else>
         <div class="text-xs text-gray-400">-</div>
-        <!-- Always allow on-demand upstream quota query, even before local data exists. -->
-        <OpenAIQuotaResetCell
-          :account="account"
-          class="mt-1"
-          @account-updated="handleQuotaResetAccountUpdated"
-        />
+        <!-- Always allow on-demand query, even before local data exists. Same sibling
+             layout as the data branch so cpr keeps a refresh entry point. -->
+        <div class="mt-1 flex flex-wrap items-start gap-1.5">
+          <button
+            type="button"
+            class="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/30 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="activeQueryLoading"
+            @click="loadActiveUsage"
+          >
+            <svg
+              class="h-2.5 w-2.5"
+              :class="{ 'animate-spin': activeQueryLoading }"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+              />
+            </svg>
+            {{ t('admin.accounts.usageWindow.activeQuery') }}
+          </button>
+          <OpenAIQuotaResetCell :account="account" @account-updated="handleQuotaResetAccountUpdated" />
+        </div>
       </div>
     </template>
 
@@ -678,7 +700,7 @@ import { ref, computed, onMounted, onBeforeUnmount, onUnmounted, watch } from 'v
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type { Account, AccountUsageInfo, GeminiCredentials, WindowStats } from '@/types'
-import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
+import { buildOpenAIUsageRefreshKey, isOpenAICodexUsageAccount as isOpenAICodexUsageAccountType } from '@/utils/accountUsageRefresh'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import { formatCompactNumber } from '@/utils/format'
 import UsageProgressBar from './UsageProgressBar.vue'
@@ -748,6 +770,10 @@ let desktopViewportMediaQuery: MediaQueryList | null = null
 let desktopViewportListener: ((event: MediaQueryListEvent) => void) | null = null
 let visibilityObserver: IntersectionObserver | null = null
 
+// 判定见 @/utils/accountUsageRefresh：AccountsView 的批量取数白名单与刷新 key
+// 共用同一个断言，避免三处各写一遍再漏改其中一处（cpr 接入时就漏了两处）。
+const isOpenAICodexUsageAccount = computed(() => isOpenAICodexUsageAccountType(props.account))
+
 // Show usage windows for OAuth and Setup Token accounts
 const showUsageWindows = computed(() => {
   // Gemini: we can always compute local usage windows from DB logs (simulated quotas).
@@ -761,6 +787,9 @@ const showUsageWindows = computed(() => {
     props.account.platform === 'minimax' ||
     props.account.platform === 'opencode_go'
   ) {
+    return true
+  }
+  if (isOpenAICodexUsageAccount.value) {
     return true
   }
   return props.account.type === 'oauth' || props.account.type === 'setup-token'
@@ -780,7 +809,7 @@ const shouldFetchUsage = computed(() => {
     return props.account.type === 'oauth'
   }
   if (props.account.platform === 'openai') {
-    return props.account.type === 'oauth'
+    return isOpenAICodexUsageAccount.value
   }
   return false
 })
@@ -812,7 +841,7 @@ const geminiUsageAvailable = computed(() => {
 })
 
 const hasOpenAIUsageFallback = computed(() => {
-  if (props.account.platform !== 'openai' || props.account.type !== 'oauth') return false
+  if (!isOpenAICodexUsageAccount.value) return false
   return !!usageInfo.value?.five_hour || !!usageInfo.value?.seven_day
 })
 
@@ -1675,7 +1704,7 @@ watch(
 
 watch(openAIUsageRefreshKey, (nextKey, prevKey) => {
   if (!prevKey || nextKey === prevKey) return
-  if (props.account.platform !== 'openai' || props.account.type !== 'oauth') return
+  if (!isOpenAICodexUsageAccount.value) return
 
   if (isBatchManaged.value) {
     requestParentBatchUsage({ force: true })

@@ -182,7 +182,15 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 	// same-account retry budget. Recording the generic account+model transient
 	// cooldown here would block the next approved retry before that budget is used.
 	poolModeRetryable := account.IsPoolMode() && account.IsPoolModeRetryableStatus(statusCode)
-	if !shouldDisable && account.Platform == PlatformOpenAI && account.Type == AccountTypeAPIKey &&
+	// cpr 在这里按 apikey 而非 oauth 对齐，这是本函数里唯一一处刻意的类型分叉：
+	// 该冷却是「账号+模型」级的，只有当上游端点按账号各不相同时才有意义。
+	// oauth 全部打同一个 chatgpt.com，一个账号 503 时其余账号也 503，冷却单个
+	// 账号毫无用处；而 cpr 和 apikey 一样，base_url 是每个账号自己的——cpr 指向
+	// 的自建 codex-proxy-rs 网关重启/抖动时返回 502/503 正是账号独有故障。
+	// 不加的后果：网关一挂，调度器反复选中同一个 cpr 账号，每次都 502，
+	// 把 failover 预算烧光后向客户端返回 502。
+	if !shouldDisable && account.Platform == PlatformOpenAI &&
+		(account.Type == AccountTypeAPIKey || account.Type == AccountTypeCPR) &&
 		shouldCooldownOpenAITransientUpstreamError(statusCode, responseBody) && !poolModeRetryable {
 		model := ""
 		if len(canonicalModel) > 0 {
@@ -214,7 +222,7 @@ func shouldCooldownOpenAITransientUpstreamError(statusCode int, responseBody []b
 }
 
 func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimited(ctx context.Context, account *Account, headers http.Header, responseBody []byte) {
-	if s == nil || !isOpenAIOAuthAccount(account) {
+	if s == nil || !account.TargetsChatGPTCodexUpstream() {
 		return
 	}
 	// Spark 影子：不按 /responses 429 的 global x-codex-* 信号做内存运行时熔断(同 handle429,外审第8轮 P1)。
@@ -249,7 +257,7 @@ func (s *OpenAIGatewayService) shouldRetryOpenAIOAuth429OnSameAccount(account *A
 }
 
 func (s *OpenAIGatewayService) shouldRetryOpenAIOAuth429OnSameAccountWithResponse(account *Account, statusCode int, shouldDisable bool, headers http.Header, responseBody []byte) bool {
-	if shouldDisable || statusCode != http.StatusTooManyRequests || !isOpenAIOAuthAccount(account) || account.IsShadow() {
+	if shouldDisable || statusCode != http.StatusTooManyRequests || !account.TargetsChatGPTCodexUpstream() || account.IsShadow() {
 		return false
 	}
 	disposition, _ := classifyOpenAIOAuth429(headers, responseBody)
@@ -267,7 +275,7 @@ func (s *OpenAIGatewayService) shouldRetryOpenAIOAuth429OnSameAccountWithRespons
 // ShouldRetryOpenAIOAuth429 lets RateLimitService defer persistent account
 // cooldown until the gateway's same-account retry window is exhausted.
 func (s *OpenAIGatewayService) ShouldRetryOpenAIOAuth429(account *Account, headers http.Header, responseBody []byte) bool {
-	if s == nil || !isOpenAIOAuthAccount(account) || account.IsShadow() || s.isOpenAIAccountRuntimeBlocked(account) {
+	if s == nil || !account.TargetsChatGPTCodexUpstream() || account.IsShadow() || s.isOpenAIAccountRuntimeBlocked(account) {
 		return false
 	}
 	disposition, _ := classifyOpenAIOAuth429(headers, responseBody)
@@ -278,7 +286,7 @@ func (s *OpenAIGatewayService) ShouldRetryOpenAIOAuth429(account *Account, heade
 }
 
 func (s *OpenAIGatewayService) openAIOAuth429RetryWindowActive(account *Account) bool {
-	if s == nil || !isOpenAIOAuthAccount(account) || account.IsShadow() {
+	if s == nil || !account.TargetsChatGPTCodexUpstream() || account.IsShadow() {
 		return false
 	}
 	now := time.Now()
@@ -292,7 +300,7 @@ func (s *OpenAIGatewayService) openAIOAuth429RetryWindowActive(account *Account)
 }
 
 func (s *OpenAIGatewayService) openAIOAuth429RetryDeadline(account *Account) time.Time {
-	if s == nil || !isOpenAIOAuthAccount(account) || account.IsShadow() {
+	if s == nil || !account.TargetsChatGPTCodexUpstream() || account.IsShadow() {
 		return time.Time{}
 	}
 	value, ok := s.openaiOAuth429RetryStartedAt.Load(account.ID)
@@ -603,7 +611,7 @@ func (s *OpenAIGatewayService) ShouldStopOpenAIOAuth429Failover(account *Account
 		}
 		return false
 	}
-	if statusCode != http.StatusTooManyRequests || !isOpenAIOAuthAccount(account) {
+	if statusCode != http.StatusTooManyRequests || !account.TargetsChatGPTCodexUpstream() {
 		return false
 	}
 	// Each OpenAI OAuth candidate has already consumed its full same-account
