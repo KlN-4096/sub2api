@@ -35,6 +35,10 @@ const (
 type PrereadBody struct {
 	body   []byte
 	reader *bytes.Reader
+	// wire 是本包首读时记下的线上原文（解压前），wireEncoding 是它的 Content-Encoding。
+	// 原样中继靠它按原字节出站；请求体被改成别的内容后就不再可得（见 NewPrereadBodyFrom）。
+	wire         []byte
+	wireEncoding string
 }
 
 // NewPrereadBody 包装一段已读取的请求体。
@@ -61,6 +65,23 @@ func (p *PrereadBody) Bytes() []byte {
 	return p.body
 }
 
+// Wire 返回请求在线上的原始字节与 Content-Encoding；ok=false 表示原文已不可得。
+func (p *PrereadBody) Wire() (wire []byte, encoding string, ok bool) {
+	if p == nil || p.wire == nil {
+		return nil, "", false
+	}
+	return p.wire, p.wireEncoding, true
+}
+
+// NewPrereadBodyFrom 回填请求体；内容与 prev 相同时沿用 prev 记下的线上原文。
+func NewPrereadBodyFrom(prev io.Reader, body []byte) *PrereadBody {
+	next := NewPrereadBody(body)
+	if p, ok := prev.(*PrereadBody); ok && p.wire != nil && bytes.Equal(p.body, body) {
+		next.wire, next.wireEncoding = p.wire, p.wireEncoding
+	}
+	return next
+}
+
 // ReadRequestBodyWithPrealloc reads request body with preallocated buffer based
 // on content length, transparently decoding any Content-Encoding the upstream
 // client used to compress the body (zstd, gzip, deflate).
@@ -68,6 +89,9 @@ func (p *PrereadBody) Bytes() []byte {
 // reader 是否已被消费——见 PrereadBody 的文档说明。
 func ReadRequestBodyWithPrealloc(req *http.Request) ([]byte, error) {
 	body, err := readRequestBodyWithBudget(req)
+	if err == nil {
+		body.refill(req)
+	}
 	return body.data, err
 }
 
@@ -75,8 +99,19 @@ func ReadRequestBodyWithPrealloc(req *http.Request) ([]byte, error) {
 // Borrowed input (notably PrereadBody) has no charge to release: its original
 // owner may still retain it even if normalization creates a replacement.
 type requestBodyBuffer struct {
-	data    []byte
-	charged int64
+	data         []byte
+	charged      int64
+	wire         []byte
+	wireEncoding string
+}
+
+func (b requestBodyBuffer) refill(req *http.Request) {
+	if req == nil || req.Body == nil {
+		return
+	}
+	if _, borrowed := req.Body.(*PrereadBody); !borrowed {
+		req.Body = &PrereadBody{body: b.data, reader: bytes.NewReader(b.data), wire: b.wire, wireEncoding: b.wireEncoding}
+	}
 }
 
 func (b *requestBodyBuffer) release(ctx context.Context) {
@@ -120,18 +155,23 @@ func readRequestBodyWithBudget(req *http.Request) (requestBodyBuffer, error) {
 
 	enc := strings.ToLower(strings.TrimSpace(req.Header.Get("Content-Encoding")))
 	if enc == "" || enc == "identity" {
+		raw.wire = raw.data
 		return raw, nil
 	}
 
-	defer raw.release(req.Context())
 	decoded, err := decompressRequestBodyWithBudget(req.Context(), enc, raw.data)
 	if err != nil {
+		raw.release(req.Context())
 		return requestBodyBuffer{}, fmt.Errorf("decode Content-Encoding %q: %w", enc, err)
 	}
 
 	req.Header.Del("Content-Encoding")
 	req.Header.Del("Content-Length")
 	req.ContentLength = int64(len(decoded.data))
+	// CPR may relay the compressed bytes unchanged. Both representations
+	// remain live in PrereadBody, so keep both charged until handler cleanup.
+	decoded.wire, decoded.wireEncoding = raw.data, enc
+	decoded.charged += raw.charged
 
 	return decoded, nil
 }
@@ -219,8 +259,12 @@ func ReadLenientJSONRequestBodyWithPrealloc(req *http.Request, maxNormalizedByte
 		return nil, err
 	}
 	normalized, err := normalizeLenientJSONRequestBody(req.Context(), body.data, maxNormalizedBytes)
-	if err != nil || normalized.charged > 0 {
+	if err != nil {
 		body.release(req.Context())
+	} else {
+		// The raw relay needs the original bytes even when the normalizer
+		// allocated a separate representation for validation.
+		body.refill(req)
 	}
 	return normalized.data, err
 }

@@ -79,6 +79,7 @@ type RelayOptions struct {
 	FirstMessageType                coderws.MessageType
 	FirstMessageSent                bool
 	StartClientAfterFirstDownstream bool
+	BareErrorEndsTurn bool
 	OnUsageParseFailure             func(eventType string, usageRaw string)
 	OnTurnComplete                  func(turn RelayTurnResult)
 	BeforeWriteClient               func(msgType coderws.MessageType, payload []byte, wroteDownstream bool) error
@@ -120,6 +121,7 @@ type relayState struct {
 	activeTurn              *relayTurnTiming
 	pendingBareError        *observedUpstreamEvent
 	isFirstTokenEvent       func(eventType string, message []byte) bool
+	bareErrorEndsTurn       bool
 }
 
 type relayExitSignal struct {
@@ -185,7 +187,7 @@ func Relay(
 		firstMessageType = coderws.MessageText
 	}
 	startAt := nowFn()
-	state := &relayState{requestModel: result.RequestModel, isFirstTokenEvent: options.IsFirstTokenEvent}
+	state := &relayState{requestModel: result.RequestModel, isFirstTokenEvent: options.IsFirstTokenEvent, bareErrorEndsTurn: options.BareErrorEndsTurn}
 	if isClientResponseCreateFrame(firstMessageType, firstClientMessage) {
 		firstTurnStartedAt := options.FirstTurnStartedAt
 		if firstTurnStartedAt.IsZero() {
@@ -811,9 +813,11 @@ func observeUpstreamMessage(
 		if observed.responseID == "" {
 			observed.responseID = openAIWSRelayActiveTurnID(state)
 		}
-		pending := observed
-		state.pendingBareError = &pending
-		return observed
+		if !state.bareErrorEndsTurn {
+			pending := observed
+			state.pendingBareError = &pending
+			return observed
+		}
 	}
 	state.pendingBareError = nil
 	return finalizeObservedRelayTerminal(state, observed, now)

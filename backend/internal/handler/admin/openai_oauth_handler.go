@@ -216,14 +216,21 @@ func (h *OpenAIOAuthHandler) RefreshToken(c *gin.Context) {
 
 	var proxyURL string
 	if req.ProxyID != nil {
+		// 绑了代理却查不到就失败，不退回直连（与 PAT 导入同口径）。
 		proxy, err := h.adminService.GetProxy(c.Request.Context(), *req.ProxyID)
 		if scoped && (err != nil || proxy == nil || !proxy.IsActive() || proxy.IsExpired(time.Now())) {
 			response.BadRequest(c, "代理不可用")
 			return
 		}
-		if err == nil && proxy != nil {
-			proxyURL = proxy.URL()
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
 		}
+		if proxy == nil {
+			response.BadRequest(c, "代理不可用")
+			return
+		}
+		proxyURL = proxy.URL()
 	}
 
 	// 未指定 client_id 时，根据请求路径平台自动设置默认值，避免 repository 层盲猜
