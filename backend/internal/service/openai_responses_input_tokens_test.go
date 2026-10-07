@@ -66,6 +66,27 @@ func TestForwardResponsesInputTokensGrokOAuthUsesLocalEstimate(t *testing.T) {
 	require.Nil(t, upstream.lastReq)
 }
 
+func TestForwardResponsesInputTokensCodexOAuthUsesLocalEstimate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, accountType := range []string{AccountTypeOAuth, AccountTypeSetupToken} {
+		t.Run(accountType, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/input_tokens", nil)
+			upstream := &httpUpstreamRecorder{}
+			svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+			account := &Account{ID: 161, Platform: PlatformOpenAI, Type: accountType, Credentials: map[string]any{"access_token": "oauth-token"}}
+
+			err := svc.ForwardResponsesInputTokens(context.Background(), c, account, []byte(`{"model":"gpt-5.4","input":"hello world"}`))
+
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, recorder.Code)
+			require.Positive(t, gjson.Get(recorder.Body.String(), "input_tokens").Int())
+			require.Nil(t, upstream.lastReq, "ChatGPT token must not be sent to api.openai.com")
+		})
+	}
+}
+
 func TestForwardResponsesInputTokensUpstream404FallsBackLocally(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

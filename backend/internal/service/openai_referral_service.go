@@ -105,6 +105,8 @@ func (s *OpenAIQuotaService) referralCall(ctx context.Context, id int64, program
 	if err != nil {
 		return OpenAIReferralCall{}, infraerrors.New(http.StatusBadGateway, "OPENAI_REFERRAL_AUTH_ERROR", "failed to authenticate referral request")
 	}
+	// 邀请走 Firefox 伪装客户端，Accept 用浏览器自己的；额度面给双开账号补的 */* 不带过去。
+	delete(headers, "accept")
 	return OpenAIReferralCall{ProxyURL: call.proxyURL, Headers: headers, ProgramID: program}, nil
 }
 

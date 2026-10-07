@@ -241,7 +241,11 @@ func TestCodexDeviceWireProfileWSIngressTurnState(t *testing.T) {
 						requireCodexWSStreamRequestStart(t, second, "")
 						require.NotEqual(t, "123456", gjson.GetBytes(second, "client_metadata."+codexWSStreamRequestStartKey).String(),
 							"发送边界无条件重盖（client.rs:2105-2111 insert）：%s", second)
+						requireCodexGuardianCreditsRequested(t, sent, true)
+						requireCodexGuardianCreditsRequested(t, second, true)
 					} else {
+						requireCodexGuardianCreditsRequested(t, sent, false)
+						requireCodexGuardianCreditsRequested(t, second, false)
 						require.Equal(t, "turn-state-1", headers[0].Get(openAICodexTurnStateHeader), "未开投影维持握手承载")
 						require.Equal(t, own, got, "未开投影不往帧里补")
 						require.Equal(t, "client_metadata", topLevelKeys(t, sent)[0], "未开投影不重排帧：%s", sent)
