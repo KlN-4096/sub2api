@@ -10,19 +10,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
-
-// headerValuesFold 忽略 casing 收集同名头：覆写按 wire casing 直接写 map，
-// 未知头名原样保持小写（resolveWireCasing），http.Header.Get 按 canonical key 查会漏掉。
-func headerValuesFold(h http.Header, name string) []string {
-	var out []string
-	for key, values := range h {
-		if strings.EqualFold(key, name) {
-			out = append(out, values...)
-		}
-	}
-	return out
-}
 
 // 账号级请求头覆写不得伪造 content-encoding：双开的体是网关压出来的 zstd，
 // 静态覆写必然与实际字节不符。OpenAI 平台只有 api_key 账号能开覆写，用它构造。
@@ -64,6 +53,7 @@ func TestCodexDeviceWireProfilePATAlphaSearchFallbackAppliesWireProfile(t *testi
 			body := []byte(`{"id":"search-session","model":"gpt-5.4","commands":{"search_query":[{"q":"news"}]}}`)
 			c := newConvTestContext(t, body)
 			c.Request.URL.Path = "/v1/alpha/search"
+			c.Request.Header.Set(openAIWSTurnMetadataHeader, `{"session_id":"search-session","turn_id":"t","model":"client-model"}`)
 			account := wireProfileTestAccount(enabled)
 			account.Credentials["auth_mode"] = OpenAIAuthModePersonalAccessToken
 			account.Credentials["access_token"] = "at-offline-token"
@@ -79,12 +69,16 @@ func TestCodexDeviceWireProfilePATAlphaSearchFallbackAppliesWireProfile(t *testi
 			require.NoError(t, err)
 			require.NotNil(t, up.lastReq)
 			require.Equal(t, chatgptCodexURL, up.lastReq.URL.String())
+			headerModel := gjson.Get(up.lastReq.Header.Get(openAIWSTurnMetadataHeader), "model").String()
 			if enabled {
 				require.Empty(t, up.lastReq.Header.Get("OpenAI-Beta"),
 					"双开出站不带旧的 responses=experimental")
+				require.Equal(t, gjson.GetBytes(up.lastBody, "model").String(), headerModel,
+					"兜底打的是 /responses：turn-metadata 的 model 跟随出站体")
 			} else {
 				require.Equal(t, "responses=experimental", up.lastReq.Header.Get("OpenAI-Beta"),
 					"非双开维持既有行为")
+				require.Equal(t, "client-model", headerModel, "非双开维持既有行为")
 			}
 		})
 	}

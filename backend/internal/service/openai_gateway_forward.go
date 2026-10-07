@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
@@ -21,6 +22,9 @@ import (
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
+	if account.UsesOpenAIRawRelay() {
+		return s.forwardOpenAIRawRelay(ctx, c, account, body)
+	}
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
 		SetActualOpenAIUpstreamEndpoint(c, "/v1/chat/completions")
 	}
@@ -387,10 +391,32 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			upstreamModel = compactModel
 		}
 	}
+	// 真实 Codex Lite 不发 instructions，基础提示在 input 的 developer 消息里，补一份就和真客户端分家。
+	// 只对双开账号上的官方客户端，且渠道与账号都没改写模型（真客户端只为自己请求的模型选 Lite；
+	// 映射后的上游是否接受无 instructions 的 Lite 体离线无法核实；handler 在渠道映射前把原模型记在
+	// ctxkey.Model）。以下照旧补：出站会摘掉 Lite 头的（OAuth 落到 gpt-5.5，见
+	// applyMappedGPT55LiteCompatibility；image-only 模型会被改写成主模型）；/responses/compact。
+	// 原生 v2 压缩回合与普通 Lite 轮次同形，首发不补（会话形态不切换、前缀缓存不断）；它失败后换
+	// 兜底模型重试（兜底默认 gpt-5.5，出站摘 Lite 头），重试体用 liteFallbackInstructions 补回。
+	deviceWireProfile := codexDeviceWireProfileEnabled(c, account)
+	clientModel, _ := c.Request.Context().Value(ctxkey.Model).(string)
+	realCodexLite := isCodexCLI && deviceWireProfile &&
+		isOpenAIResponsesLiteHeader(c.GetHeader(responsesLiteHeader)) &&
+		gjson.GetBytes(body, "input.0.type").String() == "additional_tools" &&
+		(clientModel == "" || clientModel == requestedModel) &&
+		upstreamModel == requestedModel &&
+		(!account.IsOpenAIOAuthLike() || upstreamModel != "gpt-5.5") &&
+		!isOpenAIImageGenerationModel(upstreamModel) &&
+		!isCompactRequest
 	instructions := gjson.GetBytes(body, "instructions")
 	instructionsEmpty := !instructions.Exists() || instructions.Type != gjson.String || strings.TrimSpace(instructions.String()) == ""
+	liteFallbackInstructions := ""
 	if instructionsEmpty && account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses {
-		markPatchSet("instructions", defaultCodexSynthInstructions(upstreamModel))
+		if realCodexLite {
+			liteFallbackInstructions = defaultCodexSynthInstructions(upstreamModel)
+		} else {
+			markPatchSet("instructions", defaultCodexSynthInstructions(upstreamModel))
+		}
 	}
 	if billingModel != requestedModel {
 		logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Model mapping applied: %s -> %s (account: %s, isCodexCLI: %v)", requestedModel, billingModel, account.Name, isCodexCLI)
@@ -525,6 +551,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			codexResult = applyCodexOAuthTransformWithOptions(decoded, codexOAuthTransformOptions{
 				IsCodexCLI:                          isCodexCLI,
 				IsCompact:                           isCompactRequest,
+				SkipDefaultInstructions:             realCodexLite,
+				PreserveUpstreamCallIDs:             isCodexCLI && deviceWireProfile,
 				OmitPromotedSystemMessagesFromInput: omitPromotedSystemMessages,
 				ResponsesLite:                       responsesLite,
 			})
@@ -1146,6 +1174,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 				c, account, requestedModel, body, resp.StatusCode, upstreamMsg, respBody, compactModelFallbackRetried,
 			); retry {
+				if retryBody, err = withCompactFallbackInstructions(retryBody, liteFallbackInstructions); err != nil {
+					return nil, fmt.Errorf("set compact fallback instructions: %w", err)
+				}
 				s.appendOpenAICompactFallbackRetryOps(c, account, resp, respBody, upstreamMsg, false)
 				fromModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
 				body = retryBody
@@ -1224,6 +1255,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 						c, account, requestedModel, body, http.StatusBadRequest, signal.message, signal.payload, compactModelFallbackRetried,
 					); retry {
+						if retryBody, err = withCompactFallbackInstructions(retryBody, liteFallbackInstructions); err != nil {
+							return nil, fmt.Errorf("set compact fallback instructions: %w", err)
+						}
 						s.appendOpenAICompactFallbackRetryOps(c, account, resp, signal.payload, signal.message, false)
 						body = retryBody
 						requestView = newOpenAIRequestView(body)
@@ -1271,6 +1305,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 						c, account, requestedModel, body, http.StatusBadRequest, signal.message, signal.payload, compactModelFallbackRetried,
 					); retry {
+						if retryBody, err = withCompactFallbackInstructions(retryBody, liteFallbackInstructions); err != nil {
+							return nil, fmt.Errorf("set compact fallback instructions: %w", err)
+						}
 						s.appendOpenAICompactFallbackRetryOps(c, account, resp, signal.payload, signal.message, false)
 						body = retryBody
 						requestView = newOpenAIRequestView(body)
@@ -1426,6 +1463,10 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 		return nil, fmt.Errorf("filter compact access programs: %w", err)
 	}
 
+	// codex 0.156 的两处体内形态：guardian 计费标记、turn-metadata 的 model 跟随出站体。
+	body = applyCodexGuardianCreditsRequested(c, account, wireTargetURL, body)
+	body = alignCodexTurnMetadataExecutionBody(c, account, wireTargetURL, body)
+
 	// 顶层键序：只重排，不改任何值（下面的时区改写与压缩仍会动体）。
 	body = applyCodexBodyFieldOrder(c, account, wireTargetURL, body)
 
@@ -1499,11 +1540,20 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 		req.Header.Del("conversation_id")
 		req.Header.Del("session_id")
 
+		// 真 Codex 在 HTTP /responses 上从不发 OpenAI-Beta：rust-v0.156.1 里 OPENAI_BETA_HEADER 只写在
+		// client.rs:1320 的 build_websocket_headers（WS 握手）和 doctor.rs:2332（codex doctor 的 WS 探测），
+		// HTTP 与 WS 共用的 build_responses_headers 只写 x-codex-beta-features / x-codex-turn-state。
+		// 所以这条路整条删掉，不是只剥 legacy 值：openai-beta 进了非透传入站白名单之后，客户端给的任何
+		// 非 legacy 值（`responses_websockets=…`、`responses_multi_agent=…`）都会跟着出站，成为一条真
+		// 客户端不存在的指纹。api-key 账号不在这个分支里，调用方可控的语义保持不变。
+		//
+		// 范围只到这条路：`ensureCodexIdentityHeaders` 仍然无条件 `Set` 回 `responses=experimental`，
+		// 但它的调用方是 /v1/messages 兼容桥、live 探测与插件目录 —— 都不是 HTTP /responses，
+		// 而前者本来就不是真 Codex 客户端形态。别把这行读成「全站不再发这个头」。
+		req.Header.Del("OpenAI-Beta")
 		if compatMessagesBridge {
-			req.Header.Del("OpenAI-Beta")
 			req.Header.Del("originator")
 		} else {
-			stripOpenAILegacyResponsesBeta(req.Header)
 			req.Header.Set("originator", resolveOpenAIUpstreamOriginator(c, isCodexCLI))
 		}
 		apiKeyID := getAPIKeyIDFromContext(c)
@@ -1575,6 +1625,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	applyOpenAICodexBetaFeatures(c, account, req.Header)
 	setOpenAICodexRoutingHintFromBody(req.Header, account, body)
 	applyCodexDeviceWireProfile(c, account, req.Header, false)
+	alignCodexTurnMetadataExecutionHeader(c, account, wireTargetURL, req.Header, body)
 	logOpenAIRoutingDiagnosticsFromBody(ctx, account, "http", req.Header, body, "not_applicable")
 
 	if err := applyMappedGPT55LiteCompatibility(req, account, body); err != nil {

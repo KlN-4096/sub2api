@@ -29,8 +29,8 @@ func newOpenAIAstraProRetryContext(body []byte) (*gin.Context, *httptest.Respons
 // when the Codex OAuth upstream rejects an Astra pro+max request with a
 // deterministic HTTP 400 on error.param=reasoning.mode, the gateway passes the
 // client error through unchanged (upstream type/code/param/message, code not
-// treated as official), makes exactly one upstream call, keeps reasoning.mode=pro
-// and reasoning.effort=max in the sent body, and does not replay without mode.
+// treated as official), makes exactly one upstream call, and sends effort=max
+// without reasoning.mode (the real Codex client never sends it).
 func TestOpenAIGatewayService_OAuthAstraProModeRejectionPassesThrough(t *testing.T) {
 	body := []byte(`{"model":"gpt-6-astra","reasoning":{"mode":"pro","effort":"max"},"input":"hello"}`)
 	upstream := &httpUpstreamRecorder{resp: newOpenAIRejectedFieldTestResponse(
@@ -49,7 +49,7 @@ func TestOpenAIGatewayService_OAuthAstraProModeRejectionPassesThrough(t *testing
 
 	sent := upstream.bodies[0]
 	require.Equal(t, "gpt-6-astra", gjson.GetBytes(sent, "model").String())
-	require.Equal(t, "pro", gjson.GetBytes(sent, "reasoning.mode").String())
+	require.False(t, gjson.GetBytes(sent, "reasoning.mode").Exists())
 	require.Equal(t, "max", gjson.GetBytes(sent, "reasoning.effort").String())
 
 	respJSON := recorder.Body.String()
@@ -59,13 +59,13 @@ func TestOpenAIGatewayService_OAuthAstraProModeRejectionPassesThrough(t *testing
 	require.Equal(t, "reasoning.mode is not supported for this model", gjson.Get(respJSON, "error.message").String())
 }
 
-// TestOpenAIGatewayService_OAuthAstraProModeKeptAcrossRejectedFieldRetry reuses
+// TestOpenAIGatewayService_OAuthAstraProModeDroppedAcrossRejectedFieldRetry reuses
 // the existing OAuth rejected-field retry fixture (input[0].status is rejected,
-// stripped, then replayed to success) to confirm Astra pro+max reasoning is kept
-// across every in-service retry: each captured Codex URL request body still
-// carries reasoning.mode=pro and reasoning.effort=max with model=gpt-6-astra,
-// and only the second attempt drops the rejected status field.
-func TestOpenAIGatewayService_OAuthAstraProModeKeptAcrossRejectedFieldRetry(t *testing.T) {
+// stripped, then replayed to success) to confirm Astra pro+max reasoning stays
+// aligned with the real Codex client across every in-service retry: each captured
+// Codex URL request body carries reasoning.effort=max without reasoning.mode with
+// model=gpt-6-astra, and only the second attempt drops the rejected status field.
+func TestOpenAIGatewayService_OAuthAstraProModeDroppedAcrossRejectedFieldRetry(t *testing.T) {
 	body := []byte(`{"model":"gpt-6-astra","stream":true,"instructions":"test","reasoning":{"mode":"pro","effort":"max"},"input":[{"type":"message","role":"user","status":"completed","content":"hello"}]}`)
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
 		newOpenAIRejectedFieldTestResponse(http.StatusBadRequest, `{"error":{"code":"unknown_parameter","message":"Unknown parameter: 'input[0].status'.","param":"input[0].status"}}`),
@@ -84,7 +84,7 @@ func TestOpenAIGatewayService_OAuthAstraProModeKeptAcrossRejectedFieldRetry(t *t
 		require.Equal(t, openAICodexResponsesTestURL, upstream.requests[i].URL.String(), "attempt %d URL", i)
 		sent := upstream.bodies[i]
 		require.Equal(t, "gpt-6-astra", gjson.GetBytes(sent, "model").String(), "attempt %d model", i)
-		require.Equal(t, "pro", gjson.GetBytes(sent, "reasoning.mode").String(), "attempt %d reasoning.mode", i)
+		require.False(t, gjson.GetBytes(sent, "reasoning.mode").Exists(), "attempt %d reasoning.mode", i)
 		require.Equal(t, "max", gjson.GetBytes(sent, "reasoning.effort").String(), "attempt %d reasoning.effort", i)
 	}
 	require.Equal(t, "completed", gjson.GetBytes(upstream.bodies[0], "input.0.status").String())

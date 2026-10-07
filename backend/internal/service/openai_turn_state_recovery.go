@@ -8,28 +8,36 @@ import (
 	"math/rand/v2"
 	"strings"
 	"time"
+	"unicode"
+
+	"github.com/tidwall/gjson"
 )
 
-// 已废弃（2026-09-23）：判据是「连续 N 次铸出 292」，292 已不能说明服务正常（上游还出现了判不了
-// 的 780），后续版本移除。
+// 降智恢复探测：用账号**自己的常驻出口**隔一段不固定的时间发一道糖果题并读完回答；最近
+// streak_target（总次数）次探测里答对（"21"）够 success_target（成功次数）次就判定「账号恢复了」，
+// 写下标记（用户 2026-09-19 定：只标记、写日志，不自动改任何配置——判错了也不会让账号裸奔）。
+// 连续 streak_target 次失败就进 cooldown_hours 冷却并清掉这一批结果：降智是账号权重的事，
+// 静置几十小时才见恢复，中间反复探只是白付额度。
 //
-// 降智恢复探测：用账号**自己的常驻出口**隔一段不固定的时间发一条探测，连续 streak_target 次
-// 铸出 292 就判定「账号权重回来了」，写下标记（用户 2026-09-19 定：只标记、写日志，不自动改
-// 任何配置——判错了也不会让账号裸奔）。连续同样多次失败就进 cooldown_hours 冷却：降智是账号
-// 权重的事，静置几十小时才见恢复，中间反复探只是白付额度。
+// 判据为什么是做题（2026-09-25 从「连续 N 次 292」换过来）：09-23 起上游的模型标签与 turn-state
+// 长度都不再反映实际服务模型（标 astra 实为 luna 水平、票全员 780），只剩做题能判——降智账号
+// 答 29 / 36 / 空，健康账号稳定答 21。默认探 gpt-5.6-sol@medium（用户在正常 Codex 里多次实测恒 21）。
 //
 // 与猎手的分工：猎手换出口，回答「现在哪个 IP 能铸 292」；恢复探测固定走账号自己的出口，
 // 回答「不换 IP 的话这个号还降不降智」。所以它是**独立开关**，猎手关着也照跑。
 //
-// 判定恢复后就停止探测，直到真实流量又自然铸出 312（resetOpenAITurnStateRecovery 清标记）
-// 才从头攒——这也是标记能一直挂着的前提。
+// 判定恢复后就停止探测；关掉开关即清空运行态（含标记），再开从头攒。真实流量自然铸出 312
+// 也清（resetOpenAITurnStateRecovery；780 时代基本不再触发，留着无害）。
 const (
 	// openAITurnStateRecoveryExtraKey 是管理员写的配置。
 	openAITurnStateRecoveryExtraKey = "openai_turn_state_recovery"
 	// openAITurnStateRecoveryStateExtraKey 是探测写的运行态。调度中性键。
 	openAITurnStateRecoveryStateExtraKey = "openai_turn_state_recovery_state"
 
-	defaultOpenAITurnStateRecoveryStreak        = 5
+	defaultOpenAITurnStateRecoveryModel         = "gpt-5.6-sol"
+	defaultOpenAITurnStateRecoveryEffort        = "medium"
+	defaultOpenAITurnStateRecoveryStreak        = 5 // 总次数 = 判定窗口
+	defaultOpenAITurnStateRecoverySuccess       = 4 // 窗口内答对次数
 	defaultOpenAITurnStateRecoveryMinMinutes    = 30
 	defaultOpenAITurnStateRecoveryMaxMinutes    = 90
 	defaultOpenAITurnStateRecoveryCooldownHours = 16
@@ -38,18 +46,33 @@ const (
 	openAITurnStateRecoveryMaxMinutes       = 1440
 	openAITurnStateRecoveryMaxCooldownHours = 168
 	openAITurnStateRecoveryLastKeep         = 5
-	// openAITurnStateRecoveryTrafficWindow 是「最近有流量的模型」往回看的窗口（配置没填模型时）。
-	openAITurnStateRecoveryTrafficWindow = 24 * time.Hour
+	// openAITurnStateRecoveryProbeTimeout 要等整个回答：sol@medium 做糖果题实测 20–60s，留 3 分钟。
+	openAITurnStateRecoveryProbeTimeout = 3 * time.Minute
+	openAITurnStateRecoveryReadLimit    = 2 << 20
+	openAITurnStateRecoveryAnswerKeep   = 200
+	// openAITurnStateRecoveryDiagKeep 是「没有正文 / 没有终态」那两段现场说明的长度上限：
+	// 它们进账号页 tooltip，要短（用户要求）。段内的错误信息与部分正文另有更小的上限。
+	openAITurnStateRecoveryDiagKeep = 120
+	// openAITurnStateRecoveryExpectedAnswer 是糖果题的正确答案；降智账号典型答 29 / 36 / 空。
+	// 判「答对」只看整段回答里是否含它（用户 2026-09-25 定：误判概率极低，别让「答案是 21 颗」被判错）。
+	openAITurnStateRecoveryExpectedAnswer = "21"
 )
+
+// openAITurnStateRecoveryPrompt 与人工核验用的是同一道题（G:/temp/Claude_temp/hdrcheck.py）。
+const openAITurnStateRecoveryPrompt = "在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。数量统计如下：\n" +
+	"          苹果味  桃子味  西瓜味\n圆形        7       9       8\n五角星形    7       6       4\n" +
+	"参赛者需要在活动前决定摸出的糖果数目。最少取出多少个糖果，才能保证手中同时拥有不同形状的苹果味和桃子味的糖？" +
+	"（手中有圆形苹果味搭配五角星桃子味，或圆形桃子味搭配五角星苹果味，都算满足）\n只输出一个数字，不要任何解释。"
 
 // openAITurnStateRecoveryConfig 是 extra.openai_turn_state_recovery 的形态。
 type openAITurnStateRecoveryConfig struct {
 	Enabled bool `json:"enabled,omitempty"`
-	// Model 探哪个模型。留空 = 最近有真实流量的那个，再没有就用最近一次形态观测的模型。
-	// 降智是账号级的（312 = 请求被顶到别的模型上），探一个模型就够。
+	// Model 探哪个模型。留空 = gpt-5.6-sol（用户实测该模型在正常 Codex 里恒答 21）。
 	Model string `json:"model,omitempty"`
-	// StreakTarget 连续多少次 292 算恢复；连续同样多次失败进冷却。
+	// StreakTarget 是总次数：判定窗口的大小，也是连续失败进冷却的门槛。
 	StreakTarget int `json:"streak_target,omitempty"`
+	// SuccessTarget 是成功次数：最近 StreakTarget 次里答对够这么多次就判恢复（成功率 = 成功次数/总次数）。
+	SuccessTarget int `json:"success_target,omitempty"`
 	// MinMinutes / MaxMinutes 是两次探测之间的随机间隔，用户口径「模拟正常人使用」。
 	MinMinutes int `json:"min_minutes,omitempty"`
 	MaxMinutes int `json:"max_minutes,omitempty"`
@@ -64,6 +87,8 @@ type openAITurnStateRecoveryConfig struct {
 // applyDefaults 补默认值并压上限，与猎手配置同一套取舍（extra 可能绕过 handler 校验落库）。
 func (cfg *openAITurnStateRecoveryConfig) applyDefaults() {
 	cfg.StreakTarget = openAITurnStateHuntBound(cfg.StreakTarget, defaultOpenAITurnStateRecoveryStreak, openAITurnStateRecoveryMaxStreak)
+	// 默认 4 也不能超过总次数，否则永远判不了恢复。
+	cfg.SuccessTarget = min(openAITurnStateHuntBound(cfg.SuccessTarget, defaultOpenAITurnStateRecoverySuccess, cfg.StreakTarget), cfg.StreakTarget)
 	cfg.MinMinutes = openAITurnStateHuntBound(cfg.MinMinutes, defaultOpenAITurnStateRecoveryMinMinutes, openAITurnStateRecoveryMaxMinutes)
 	cfg.MaxMinutes = openAITurnStateHuntBound(cfg.MaxMinutes, defaultOpenAITurnStateRecoveryMaxMinutes, openAITurnStateRecoveryMaxMinutes)
 	if cfg.MaxMinutes < cfg.MinMinutes {
@@ -71,9 +96,12 @@ func (cfg *openAITurnStateRecoveryConfig) applyDefaults() {
 	}
 	cfg.CooldownHours = openAITurnStateHuntBound(cfg.CooldownHours, defaultOpenAITurnStateRecoveryCooldownHours, openAITurnStateRecoveryMaxCooldownHours)
 	cfg.Model = strings.TrimSpace(cfg.Model)
+	if cfg.Model == "" {
+		cfg.Model = defaultOpenAITurnStateRecoveryModel
+	}
 	effort := strings.TrimSpace(cfg.ReasoningEffort)
 	if _, known := openAITurnStateHuntReasoningEfforts[effort]; !known {
-		effort = defaultOpenAITurnStateHuntReasoningEffort
+		effort = defaultOpenAITurnStateRecoveryEffort
 	}
 	cfg.ReasoningEffort = effort
 }
@@ -82,7 +110,7 @@ func (cfg openAITurnStateRecoveryConfig) cooldown() time.Duration {
 	return time.Duration(cfg.CooldownHours) * time.Hour
 }
 
-// interval 取一个随机间隔：用户要求 5 次探测的间隔不固定，像真人偶尔开一次对话。
+// interval 取一个随机间隔：用户要求探测的间隔不固定，像真人偶尔开一次对话。
 func (cfg openAITurnStateRecoveryConfig) interval() time.Duration {
 	lo := time.Duration(cfg.MinMinutes) * time.Minute
 	hi := time.Duration(cfg.MaxMinutes) * time.Minute
@@ -115,9 +143,9 @@ func readOpenAITurnStateRecoveryConfig(a *Account) (openAITurnStateRecoveryConfi
 
 // openAITurnStateRecoveryState 是 extra.openai_turn_state_recovery_state 的形态。
 type openAITurnStateRecoveryState struct {
-	// Streak 连续铸出 292 的次数；FailStreak 连续失败（312 / 非 200 / 传输错误）的次数。
-	// 两者互斥：一次成功清零失败计数，反之亦然。
-	Streak     int `json:"streak,omitempty"`
+	// Results 是判定窗口：最近至多 streak_target 次探测的成败，新的在前。冷却时清空。
+	Results []bool `json:"results,omitempty"`
+	// FailStreak 连续失败（答错 / 非 200 / 传输错误）的次数，一次成功清零；够总次数进冷却。
 	FailStreak int `json:"fail_streak,omitempty"`
 	// NextAt 下一次探测时刻。冷却也写在这里（冷却与随机间隔对调用方是同一件事：等到点）。
 	NextAt time.Time `json:"next_at"`
@@ -161,6 +189,31 @@ func (st *openAITurnStateRecoveryState) push(attempt openAITurnStateHuntAttempt)
 	st.LastError = attempt.Error
 }
 
+// pushResult 把一次成败推进判定窗口，窗口只留最近 window 次。
+func (st *openAITurnStateRecoveryState) pushResult(ok bool, window int) {
+	st.Results = append([]bool{ok}, st.Results...)
+	if window > 0 && len(st.Results) > window {
+		st.Results = st.Results[:window]
+	}
+}
+
+// successes 是窗口内答对的次数。
+func (st openAITurnStateRecoveryState) successes() int {
+	n := 0
+	for _, ok := range st.Results {
+		if ok {
+			n++
+		}
+	}
+	return n
+}
+
+// dirty 表示运行态里还有东西（关掉开关时要清一次）。
+func (st openAITurnStateRecoveryState) dirty() bool {
+	return len(st.Results) > 0 || st.FailStreak > 0 || !st.RecoveredAt.IsZero() ||
+		!st.CoolingUntil.IsZero() || len(st.Last) > 0 || st.LastError != ""
+}
+
 // probeRecovery 是恢复探测的一次判定 + 至多一次探测。挂在猎手的 ticker 上，但**不看猎手开关**。
 // 返回是否真的探了：调用方据此把每个 tick 的恢复探测限制在一个账号（见 runOnce）。
 func (s *OpenAITurnStateHunterService) probeRecovery(ctx context.Context, account *Account, deadline time.Time) bool {
@@ -170,52 +223,49 @@ func (s *OpenAITurnStateHunterService) probeRecovery(ctx context.Context, accoun
 	if account.Status != StatusActive || !account.IsOpenAIOAuthLike() {
 		return false
 	}
-	cfg, ok := readOpenAITurnStateRecoveryConfig(account)
-	if !ok || !cfg.Enabled {
-		return false
-	}
 	now := s.now()
 	st := readOpenAITurnStateRecoveryState(account)
+	cfg, ok := readOpenAITurnStateRecoveryConfig(account)
+	if !ok || !cfg.Enabled {
+		// 关掉开关即清空运行态（含「已恢复」标记），再开从头攒。只在还有东西时写一次库。
+		if st.dirty() {
+			s.persistRecovery(ctx, account, openAITurnStateRecoveryState{UpdatedAt: now})
+		}
+		return false
+	}
+	// 旧判据（连续 292）打下的标记没有判定窗口，随它永久停探等于把老行钉死：清掉重新攒。
+	// 新代码判恢复时 Results 至少有 SuccessTarget 条，清标记与关开关都连窗口一起清，撞不到这条。
+	if !st.RecoveredAt.IsZero() && len(st.Results) == 0 {
+		st.RecoveredAt = time.Time{}
+		st.UpdatedAt = now
+		s.persistRecovery(ctx, account, st) // 立刻落库：别让页面在下次探测前还写着「已恢复」
+	}
 	// 判定恢复后不再探：结论已经有了，继续探只是白付额度。
 	if !st.RecoveredAt.IsZero() || now.Before(st.NextAt) || now.After(deadline) {
 		return false
 	}
-	model := s.recoveryModel(account, cfg, now)
-	if model == "" {
-		// 不知道该探哪个模型（进程内没流量记录、也没观测过）：等下一窗，别瞎探一个上游不认的名字。
-		// 也按一次失败记：配错了的账号最多写 streak_target 次就进冷却，不会每 30–90 分钟白写一次库。
-		st.LastError = "no model to probe"
-		st.Streak, st.FailStreak = 0, st.FailStreak+1
-		if st.FailStreak >= cfg.StreakTarget {
-			st.FailStreak = 0
-			st.CoolingUntil = now.Add(cfg.cooldown())
-			st.NextAt = st.CoolingUntil
-		} else {
-			st.NextAt = now.Add(cfg.interval())
-		}
-		st.UpdatedAt = now
-		s.persistRecovery(ctx, account, st)
-		return false
-	}
-	attempt := s.probeOwnExit(ctx, account, model, cfg)
+	attempt := s.probeOwnExit(ctx, account, cfg)
 	st.push(attempt)
+	st.pushResult(attempt.Healthy, cfg.StreakTarget)
 	st.CoolingUntil = time.Time{}
 	if attempt.Healthy {
-		st.FailStreak, st.Streak = 0, st.Streak+1
+		st.FailStreak = 0
 		st.NextAt = now.Add(cfg.interval())
-		if st.Streak >= cfg.StreakTarget {
+		if st.successes() >= cfg.SuccessTarget {
 			st.RecoveredAt = s.now()
-			slog.Info("openai_turn_state_recovered", "account_id", account.ID, "model", model, "streak", st.Streak)
+			slog.Info("openai_turn_state_recovered", "account_id", account.ID, "model", cfg.Model,
+				"successes", st.successes(), "window", len(st.Results))
 		}
 	} else {
-		// 312、非 200、传输错误都算一次失败：这个计数只决定「要不要歇会儿再探」，
+		// 答错、非 200、传输错误都算一次失败：这个计数只决定「要不要歇会儿再探」，
 		// 把它们分开只会多一条路径，省下的额度是同一笔。
-		st.Streak, st.FailStreak = 0, st.FailStreak+1
+		st.FailStreak++
 		if st.FailStreak >= cfg.StreakTarget {
 			st.FailStreak = 0 // 冷却结束后重新数，不要一醒来就又满
+			st.Results = nil  // 这一批作废，醒来从头攒
 			st.CoolingUntil = now.Add(cfg.cooldown())
 			st.NextAt = st.CoolingUntil
-			slog.Info("openai_turn_state_recovery_cooldown", "account_id", account.ID, "model", model,
+			slog.Info("openai_turn_state_recovery_cooldown", "account_id", account.ID, "model", cfg.Model,
 				"until", st.CoolingUntil.UTC().Format(time.RFC3339))
 		} else {
 			st.NextAt = now.Add(cfg.interval())
@@ -224,37 +274,18 @@ func (s *OpenAITurnStateHunterService) probeRecovery(ctx context.Context, accoun
 	st.UpdatedAt = s.now()
 	s.persistRecovery(ctx, account, st)
 	slog.Info("openai_turn_state_recovery_attempt",
-		"account_id", account.ID, "model", model, "proxy_id", attempt.ProxyID, "status", attempt.Status,
-		"chars", attempt.Chars, "healthy", attempt.Healthy, "error", attempt.Error,
-		"streak", st.Streak, "fail_streak", st.FailStreak)
+		"account_id", account.ID, "model", cfg.Model, "proxy_id", attempt.ProxyID, "status", attempt.Status,
+		"answer", attempt.Answer, "healthy", attempt.Healthy, "error", attempt.Error,
+		"successes", st.successes(), "window", len(st.Results), "fail_streak", st.FailStreak)
 	return true
-}
-
-// recoveryModel 决定探哪个模型：配置 → 窗口内**最近**一次真实流量的 → 最近一次形态观测的。
-// 取最近而不是字母序第一个（openAITurnStateTrafficModels 排过序）：文案写的就是「最近有流量的模型」，
-// 字母序会让 astra/luna 混用的号永远探 luna（第一轮评审 S2）。
-// 画图模型一律排除：它们结构上就铸 312，探它等于每轮必然 5 连败进冷却（S1）。
-func (s *OpenAITurnStateHunterService) recoveryModel(account *Account, cfg openAITurnStateRecoveryConfig, now time.Time) string {
-	if cfg.Model != "" {
-		return cfg.Model
-	}
-	if model := s.gateway.openAITurnStateLatestTrafficModel(account, now.Add(-openAITurnStateRecoveryTrafficWindow)); model != "" {
-		return model
-	}
-	if obs, ok := readOpenAITurnStateObservation(account); ok {
-		if model := strings.TrimSpace(obs.Model); model != "" && !openAITurnStateImageModel(model) {
-			return model
-		}
-	}
-	return ""
 }
 
 // probeOwnExit 走账号自己的出口探一次。与猎手探测的两处刻意不同：
 //   - 不换代理：这条探测问的就是「常驻出口上还降不降智」。
 //   - 不设 req.Close：猎手靠关连接逼出新出口，这里出口是固定的；而连接池按「账号 × 代理 URL」
 //     缓存，关连接会把真实流量正在用的那条 HTTP/2 隧道一起带走。复用连接也更像真人。
-func (s *OpenAITurnStateHunterService) probeOwnExit(ctx context.Context, account *Account, model string, cfg openAITurnStateRecoveryConfig) openAITurnStateHuntAttempt {
-	attempt := openAITurnStateHuntAttempt{At: s.now(), Model: model}
+func (s *OpenAITurnStateHunterService) probeOwnExit(ctx context.Context, account *Account, cfg openAITurnStateRecoveryConfig) openAITurnStateHuntAttempt {
+	attempt := openAITurnStateHuntAttempt{At: s.now(), Model: cfg.Model}
 	egress := *account
 	if account.ProxyID != nil {
 		attempt.ProxyID = *account.ProxyID
@@ -274,9 +305,133 @@ func (s *OpenAITurnStateHunterService) probeOwnExit(ctx context.Context, account
 		hunter, _ := readOpenAITurnStateHunterConfig(account)
 		usageKeyID = hunter.UsageAPIKeyID
 	}
-	s.doProbe(ctx, account, &egress, proxyURL, false, model,
-		openAITurnStateHunterConfig{ReasoningEffort: cfg.ReasoningEffort, UsageAPIKeyID: usageKeyID}, &attempt)
+	s.doProbe(ctx, account, &egress, proxyURL, false, cfg.Model,
+		openAITurnStateHunterConfig{ReasoningEffort: cfg.ReasoningEffort, UsageAPIKeyID: usageKeyID},
+		openAITurnStateRecoveryPrompt, true, &attempt)
 	return attempt
+}
+
+// openAITurnStateRecoveryAnswer 从探测的 SSE 体里取模型回答与真实用量。终态用网关同一个提取器
+// （response.completed / response.done）；Codex 后端的 completed 里 output 是 []（2026-09-18 实抓，
+// 09-25 首次线上探测也因此把回答记成了空），正文只在 output_item.done / output_text.delta 里，
+// 所以 output 为空时用网关的 reconstructResponseOutputFromSSE 从事件流重建再取 message 的
+// output_text。healthy = 整段回答里含 "21"（在截断之前判，长篇解释也算）。模型确实什么都没答时
+// 回答写成「∅ status=… output=[…]」的形态说明，不留空——页面与日志要写明模型答了什么。没有终态
+// 事件（流被截断、response.failed）返回 ok=false；终态里没带 usage 时 usage 为 nil，记账退回输入估算。
+func openAITurnStateRecoveryAnswer(raw []byte) (answer string, healthy bool, usage *OpenAIUsage, ok bool) {
+	body := string(raw)
+	final, ok := extractCodexFinalResponse(body)
+	if !ok {
+		return "", false, nil, false
+	}
+	output := gjson.GetBytes(final, "output")
+	if len(output.Array()) == 0 {
+		if rebuilt, ok := reconstructResponseOutputFromSSE(body); ok {
+			output = gjson.ParseBytes(rebuilt)
+		}
+	}
+	if got, ok := extractOpenAIUsageFromJSONBytes(final); ok {
+		usage = &got
+	}
+	full := openAITurnStateRecoveryOutputText(output)
+	healthy = strings.Contains(full, openAITurnStateRecoveryExpectedAnswer)
+	answer = normalizeOpenAITurnStateRecoveryAnswer(full)
+	if answer == "" {
+		answer = openAITurnStateRecoveryEmptyAnswer(final, output)
+	}
+	return answer, healthy, usage, true
+}
+
+// openAITurnStateRecoveryOutputText 把 output 里所有 message 项的 output_text 拼成整段回答。
+func openAITurnStateRecoveryOutputText(output gjson.Result) string {
+	var text strings.Builder
+	output.ForEach(func(_, item gjson.Result) bool {
+		if item.Get("type").String() != "message" {
+			return true
+		}
+		item.Get("content").ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "output_text" {
+				_, _ = text.WriteString(part.Get("text").String())
+			}
+			return true
+		})
+		return true
+	})
+	return text.String()
+}
+
+// openAITurnStateRecoveryStreamDiagnostic 在流里没有 completed/done 终态时，用一小段写出流里到底有什么：
+// 最后一个事件类型、incomplete 的原因、failed/error 事件的错误信息、已经吐出来的部分正文。
+// 2026-09-26 01:26 pro1 一次探测 200 却没有终态，只留下一句 "no completed response"，是被拒、被截还是
+// 流被掐断全都查不了——这一段就是给那种情况留的现场。它会进页面 tooltip，所以要短（用户要求）：
+// 错误信息截 60 字节、部分正文截 40 字节、整串截 120 字节。
+func openAITurnStateRecoveryStreamDiagnostic(body string) string {
+	last := ""
+	var detail []string
+	forEachOpenAISSEFrame(body, func(eventType string, data []byte) {
+		last = eventType
+		switch eventType {
+		case "response.failed", "response.incomplete":
+			if reason := strings.TrimSpace(gjson.GetBytes(data, "response.incomplete_details.reason").String()); reason != "" {
+				detail = append(detail, "reason="+reason)
+			}
+			if msg := strings.TrimSpace(gjson.GetBytes(data, "response.error.message").String()); msg != "" {
+				detail = append(detail, "error="+truncateUTF8(sanitizeUpstreamErrorMessage(msg), 60))
+			}
+		case "error":
+			msg := gjson.GetBytes(data, "message").String()
+			if msg == "" {
+				msg = gjson.GetBytes(data, "error.message").String()
+			}
+			if msg = strings.TrimSpace(msg); msg != "" {
+				detail = append(detail, "error="+truncateUTF8(sanitizeUpstreamErrorMessage(msg), 60))
+			}
+		}
+	})
+	if last == "" {
+		return "no sse frames"
+	}
+	parts := append([]string{"last=" + last}, detail...)
+	if rebuilt, ok := reconstructResponseOutputFromSSE(body); ok {
+		if partial := normalizeOpenAITurnStateRecoveryAnswer(openAITurnStateRecoveryOutputText(gjson.ParseBytes(rebuilt))); partial != "" {
+			parts = append(parts, "partial="+truncateUTF8(partial, 40))
+		}
+	}
+	return truncateUTF8(strings.Join(parts, " "), openAITurnStateRecoveryDiagKeep)
+}
+
+// openAITurnStateRecoveryEmptyAnswer 把「没有正文」写成能看懂的形态：终态 status、未完成原因、
+// output 各项类型，message 里若有 refusal 也带上。降智账号确实会交白卷（用户实测 29/36/空三种），
+// 页面和日志上要能区分「答错」与「没答」，也要能看出是被拒还是截断。
+func openAITurnStateRecoveryEmptyAnswer(final []byte, output gjson.Result) string {
+	parts := []string{"∅"}
+	// 终态是 completed 时不必写 status（有 completed 才走到这里是常态），别的状态才值得一提。
+	if status := gjson.GetBytes(final, "status").String(); status != "" && status != "completed" {
+		parts = append(parts, "status="+status)
+	}
+	if reason := gjson.GetBytes(final, "incomplete_details.reason").String(); reason != "" {
+		parts = append(parts, "reason="+reason)
+	}
+	var types []string
+	output.ForEach(func(_, item gjson.Result) bool {
+		types = append(types, item.Get("type").String())
+		item.Get("content").ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "refusal" {
+				parts = append(parts, "refusal="+truncateUTF8(strings.TrimSpace(part.Get("refusal").String()), 60))
+			}
+			return true
+		})
+		return true
+	})
+	parts = append(parts, "output=["+strings.Join(types, ",")+"]")
+	return truncateUTF8(strings.Join(parts, " "), openAITurnStateRecoveryDiagKeep)
+}
+
+// normalizeOpenAITurnStateRecoveryAnswer 去掉首尾的空白、标点与符号：题目要求「只输出一个数字」，
+// 但模型偶尔会写成 "21。"、"**21**" 或 "「21」"，那仍是答对。只削两头，"21.5"、"210" 照样判错。
+func normalizeOpenAITurnStateRecoveryAnswer(s string) string {
+	s = strings.TrimFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r) })
+	return truncateUTF8(s, openAITurnStateRecoveryAnswerKeep)
 }
 
 // accountExitProxyURL 解析账号自己的出口。没绑代理就是直连（空 URL，httpUpstream 照发）。
@@ -321,17 +476,17 @@ func (s *OpenAITurnStateHunterService) persistRecovery(ctx context.Context, acco
 	}
 }
 
-// resetOpenAITurnStateRecovery 在账号又自然铸出 312 时清掉「已恢复」标记与连胜，从头攒。
-// 只有标记挂着时才写库：这是响应热路径，判定恢复之后每条 312 都写一次就太贵了。
+// resetOpenAITurnStateRecovery 在账号又自然铸出 312 时清掉「已恢复」标记与判定窗口，从头攒。
+// 只有标记或窗口非空时才写库：这是响应热路径，判定恢复之后每条 312 都写一次就太贵了。
 func (s *OpenAIGatewayService) resetOpenAITurnStateRecovery(ctx context.Context, account *Account) {
 	if s == nil || s.accountRepo == nil || account == nil {
 		return
 	}
 	st := readOpenAITurnStateRecoveryState(account)
-	if st.RecoveredAt.IsZero() && st.Streak == 0 {
+	if st.RecoveredAt.IsZero() && len(st.Results) == 0 {
 		return
 	}
-	st.RecoveredAt, st.Streak = time.Time{}, 0
+	st.RecoveredAt, st.Results = time.Time{}, nil
 	st.UpdatedAt = time.Now().UTC()
 	encoded, err := json.Marshal(st)
 	if err != nil {
@@ -377,7 +532,7 @@ func validateOpenAITurnStateRecoveryExtra(extra map[string]any) error {
 			return fmt.Errorf("%s.model must be a string", openAITurnStateRecoveryExtraKey)
 		}
 	}
-	for _, key := range []string{"streak_target", "min_minutes", "max_minutes", "cooldown_hours", "usage_api_key_id"} {
+	for _, key := range []string{"streak_target", "success_target", "min_minutes", "max_minutes", "cooldown_hours", "usage_api_key_id"} {
 		v, ok := table[key]
 		if !ok || v == nil {
 			continue
@@ -385,6 +540,16 @@ func validateOpenAITurnStateRecoveryExtra(extra map[string]any) error {
 		n, ok := v.(float64)
 		if !ok || n != float64(int(n)) || n < 1 {
 			return fmt.Errorf("%s.%s must be a positive integer", openAITurnStateRecoveryExtraKey, key)
+		}
+	}
+	// 成功次数超过总次数永远判不了恢复；applyDefaults 会压顶，但管理员填错要当场知道。
+	if success, ok := table["success_target"].(float64); ok {
+		window := float64(defaultOpenAITurnStateRecoveryStreak)
+		if v, ok := table["streak_target"].(float64); ok {
+			window = v
+		}
+		if success > window {
+			return fmt.Errorf("%s.success_target must not exceed streak_target", openAITurnStateRecoveryExtraKey)
 		}
 	}
 	if v, ok := table["reasoning_effort"]; ok && v != nil {

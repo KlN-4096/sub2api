@@ -970,6 +970,33 @@ describe('EditAccountModal', () => {
     )
   })
 
+  it('toggles the API-key-only raw relay switch in extra', async () => {
+    const account = buildAccount()
+    account.type = 'apikey'
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    await wrapper.get('[data-testid="edit-openai-raw-relay-toggle"]').trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_raw_relay).toBe(true)
+
+    account.extra = { openai_raw_relay: true }
+    updateAccountMock.mockReset()
+    updateAccountMock.mockResolvedValue(account)
+    const enabled = mountModal(account)
+    // 关闭后删键，不写 false
+    await enabled.get('[data-testid="edit-openai-raw-relay-toggle"]').trigger('click')
+    await enabled.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_raw_relay')
+
+    const oauth = buildAccount()
+    oauth.type = 'oauth'
+    expect(mountModal(oauth).find('[data-testid="edit-openai-raw-relay-toggle"]').exists()).toBe(false)
+  })
+
   it('writes the upstream request id header into extra only when it changes', async () => {
     const account = buildAccount()
     account.extra = { openai_compact_mode: 'force_on' }
@@ -2268,9 +2295,11 @@ describe('EditAccountModal 292 猎手', () => {
     wrapper.unmount()
   })
 
-  it('cpr 账号不显示猎手：出口由 codex-proxy-rs 决定', () => {
+  it('cpr 账号不显示 turn-state 替换设置：原样中继，只观测不替换', () => {
     const wrapper = mountModal({ ...buildCodexAccount({ openai_turn_state_auto: true }), type: 'cpr' })
     expect(wrapper.find('[data-testid="edit-openai-turn-state-hunter-section"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="edit-openai-turn-state-auto"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="edit-openai-turn-state-deprecated"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -2338,6 +2367,59 @@ describe('EditAccountModal 292 猎手', () => {
       retry_minutes: 30
     })
     wrapper.unmount()
+  })
+
+  // pair 模式（实验性）：勾上写 pair_mode: true，票有效期输入框才出现；不勾不写键。
+  it('勾选 pair 模式写入 pair_mode 与票有效期', async () => {
+    const wrapper = mountModal(
+      buildCodexAccount({
+        openai_turn_state_auto: true,
+        openai_turn_state_hunter: { enabled: true, models: ['gpt-6-astra'], proxy_ids: [20] }
+      })
+    )
+    await flushPromises()
+    expect(wrapper.find('[data-testid="edit-openai-turn-state-hunter-ticket-ttl"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="edit-openai-turn-state-hunter-pair"]').setValue(true)
+    // pair 票寿命比默认的「到期前开窗 10 分钟」短，所以开窗提前量必须一起改小，否则后端拒。
+    await wrapper.get('[data-testid="edit-openai-turn-state-hunter-ticket-ttl"]').setValue('300')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_turn_state_hunter).toEqual({
+      enabled: true,
+      models: ['gpt-6-astra'],
+      proxy_ids: [20],
+      ticket_ttl_seconds: 300,
+      pair_mode: true
+    })
+    wrapper.unmount()
+
+    const kept = mountModal(
+      buildCodexAccount({
+        openai_turn_state_auto: true,
+        openai_turn_state_hunter: {
+          enabled: true,
+          models: ['gpt-6-astra'],
+          proxy_ids: [20],
+          pair_mode: true,
+          ticket_ttl_seconds: 300,
+          lead_minutes: 1
+        }
+      })
+    )
+    await flushPromises()
+    expect((kept.get('[data-testid="edit-openai-turn-state-hunter-pair"]').element as HTMLInputElement).checked).toBe(true)
+    expect((kept.get('[data-testid="edit-openai-turn-state-hunter-ticket-ttl"]').element as HTMLInputElement).value).toBe('300')
+    await kept.get('[data-testid="edit-openai-turn-state-hunter-max"]').setValue('40')
+    await kept.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[1]?.[1]?.extra?.openai_turn_state_hunter).toEqual({
+      enabled: true,
+      models: ['gpt-6-astra'],
+      proxy_ids: [20],
+      max_per_hour: 40,
+      lead_minutes: 1,
+      ticket_ttl_seconds: 300,
+      pair_mode: true
+    })
+    kept.unmount()
   })
 
   // 降智暂停是猎手区块里的一个开关：勾上写 hold_when_degraded: true；没勾不写键（后端零值同义）。

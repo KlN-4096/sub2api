@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/chatgptcookies"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
 
@@ -15,11 +16,21 @@ import (
 
 // reqClientOptions 定义 req 客户端的构建参数
 type reqClientOptions struct {
-	ProxyURL    string        // 代理 URL（支持 http/https/socks5）
-	Timeout     time.Duration // 请求超时时间
-	Impersonate bool          // 是否模拟浏览器指纹（当前为 Firefox，Chrome 伪装会被 chatgpt.com 的 Cloudflare 质询）
-	ForceHTTP2  bool          // 是否强制使用 HTTP/2
+	ProxyURL    string          // 代理 URL（支持 http/https/socks5）
+	Timeout     time.Duration   // 请求超时时间
+	Impersonate bool            // 是否模拟浏览器指纹（当前为 Firefox，Chrome 伪装会被 chatgpt.com 的 Cloudflare 质询）
+	ForceHTTP2  bool            // 是否强制使用 HTTP/2
+	Cookies     reqCookiePolicy // cookie jar 策略；零值维持 req 默认的内存 jar
 }
+
+// reqCookiePolicy：客户端按代理共享，req 默认的内存 jar 会让同一代理下的账号互相带上对方的 cookie。
+type reqCookiePolicy int
+
+const (
+	reqCookiesDefault           reqCookiePolicy = iota
+	reqCookiesNone                              // 不存不发
+	reqCookiesChatGPTCloudflare                 // 照真实 Codex：只在 ChatGPT 主机上存取 Cloudflare 类 cookie
+)
 
 // sharedReqClients 存储按配置参数缓存的 req 客户端实例
 //
@@ -57,6 +68,12 @@ func getSharedReqClient(opts reqClientOptions) (*req.Client, error) {
 		// 在同一出口 IP 下稳定通过，故改用 Firefox 指纹。
 		client = client.ImpersonateFirefox()
 	}
+	switch opts.Cookies {
+	case reqCookiesNone:
+		client.SetCookieJar(nil)
+	case reqCookiesChatGPTCloudflare:
+		client.SetCookieJar(newChatGPTCloudflareCookieJar())
+	}
 	trimmed, _, err := proxyurl.Parse(opts.ProxyURL)
 	if err != nil {
 		return nil, err
@@ -85,22 +102,38 @@ func instrumentReqClient(client *req.Client) *req.Client {
 }
 
 func buildReqClientKey(opts reqClientOptions) string {
-	return fmt.Sprintf("%s|%s|%t|%t",
+	key := fmt.Sprintf("%s|%s|%t|%t",
 		strings.TrimSpace(opts.ProxyURL),
 		opts.Timeout.String(),
 		opts.Impersonate,
 		opts.ForceHTTP2,
 	)
+	if opts.Cookies != reqCookiesDefault {
+		key += fmt.Sprintf("|cookies=%d", opts.Cookies)
+	}
+	return key
+}
+
+// newChatGPTCloudflareCookieJar 照真实 Codex：只在 https 的 ChatGPT 主机上存取 Cloudflare 类与
+// __oailb 路由 cookie，其余一律不存不发。过滤逻辑与推理面共用（internal/pkg/chatgptcookies）。
+func newChatGPTCloudflareCookieJar() http.CookieJar {
+	return chatgptcookies.NewJar()
 }
 
 // CreatePrivacyReqClient creates an HTTP client for OpenAI privacy settings API
 // This is exported for use by OpenAIPrivacyService
-// Uses Chrome TLS fingerprint impersonation to bypass Cloudflare checks
+// Uses Firefox TLS fingerprint impersonation to bypass Cloudflare checks.
+//
+// Cookie 罐与额度面同一套白名单：req 默认的内存罐会把 accounts/check、subscriptions、
+// 隐私设置这些 backend-api 响应里的全部 cookie 都存下并在同代理的账号间互带；只留
+// Cloudflare 类 cookie 即可维持 Cloudflare 放行（cf_clearance / __cf_bm 都在白名单里），
+// 其它登录态 cookie 对 Bearer 鉴权的调用本就没有用处。
 func CreatePrivacyReqClient(proxyURL string) (*req.Client, error) {
 	return getSharedReqClient(reqClientOptions{
 		ProxyURL:    proxyURL,
 		Timeout:     30 * time.Second,
 		Impersonate: true, // Enable browser TLS fingerprint impersonation (Firefox, see getSharedReqClient)
+		Cookies:     reqCookiesChatGPTCloudflare,
 	})
 }
 
@@ -120,5 +153,6 @@ func CreateCodexBackendReqClient(proxyURL string) (*req.Client, error) {
 	return getSharedReqClient(reqClientOptions{
 		ProxyURL: proxyURL,
 		Timeout:  30 * time.Second,
+		Cookies:  reqCookiesChatGPTCloudflare,
 	})
 }
