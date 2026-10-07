@@ -2662,7 +2662,32 @@
               />
               <p class="input-hint">{{ t('admin.accounts.openai.gwpoolMaxWaitDesc') }}</p>
             </div>
+            <div class="flex items-center justify-between gap-4">
+              <div class="min-w-0">
+                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolEarlyProbe') }}</label>
+                <p class="input-hint">{{ t('admin.accounts.openai.gwpoolEarlyProbeDesc') }}</p>
+              </div>
+              <input v-model="openAIGwpoolEarlyProbe" :disabled="!openAIGwpoolGuardEnabled"
+                data-testid="edit-openai-gwpool-early-probe" type="checkbox"
+                class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500" />
+            </div>
+            <div class="flex items-center justify-between gap-4">
+              <div class="min-w-0">
+                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolMemberIsolation') }}</label>
+                <p class="input-hint">{{ t('admin.accounts.openai.gwpoolMemberIsolationDesc') }}</p>
+              </div>
+              <input v-model="openAIGwpoolMemberIsolation" data-testid="edit-openai-gwpool-member-isolation"
+                type="checkbox" class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500" />
+            </div>
             <!-- 账号耗尽轮转与缺票等待各自默认关闭。 -->
+            <div class="flex items-center justify-between gap-4">
+              <div class="min-w-0">
+                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolUseRecommendation') }}</label>
+                <p class="input-hint">{{ t('admin.accounts.openai.gwpoolUseRecommendationDesc') }}</p>
+              </div>
+              <input v-model="openAIGwpoolUseRecommendation" data-testid="edit-openai-gwpool-use-recommendation"
+                type="checkbox" class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500" />
+            </div>
             <div class="flex items-center justify-between gap-4">
               <div class="min-w-0">
                 <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolRotation') }}</label>
@@ -2868,6 +2893,21 @@
             />
           </button>
         </div>
+      </div>
+
+      <div v-if="account?.platform === 'openai'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <label class="flex items-center gap-2">
+          <input
+            v-model="openAIUpstreamRecordingEnabled"
+            type="checkbox"
+            class="checkbox"
+            data-testid="openai-upstream-recording-enabled"
+          />
+          <span class="input-label mb-0">{{ t('admin.accounts.upstreamRecordingTitle') }}</span>
+        </label>
+        <p class="input-hint mt-2 text-amber-700 dark:text-amber-400">
+          {{ t('admin.accounts.upstreamRecordingHint') }}
+        </p>
       </div>
 
       <div
@@ -3785,6 +3825,7 @@ interface TempUnschedRuleForm {
 
 // State
 const submitting = ref(false)
+const openAIUpstreamRecordingEnabled = ref(false)
 const editBaseUrl = ref('https://api.anthropic.com')
 const editApiKey = ref('')
 // CPR 中继：两把密钥留空表示保持不变，不回显明文。
@@ -4170,6 +4211,9 @@ const openAIGwpoolConsumerKeySaved = ref(false)
 const openAIGwpoolRotation = ref(false)
 const openAIGwpoolRotationMinGateways = ref<number | ''>('')
 const openAIGwpoolAutoWait = ref(false)
+const openAIGwpoolEarlyProbe = ref(false)
+const openAIGwpoolMemberIsolation = ref(false)
+const openAIGwpoolUseRecommendation = ref(false)
 const openAIGwpoolMaxWait = ref<number | ''>('')
 const openAIGwpoolGuardEnabled = ref(true)
 const gatewayPoolProbeModels = ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'] as const
@@ -4729,6 +4773,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	upstreamRequestIdHeader.value = readUpstreamRequestIdHeader(extra)
 	openAITurnStateRecovery.value = readOpenAITurnStateRecovery(extra)
 	openAIGwpoolEnabled.value = extra?.openai_gwpool === true
+	openAIUpstreamRecordingEnabled.value = newAccount.platform === 'openai' && extra?.openai_upstream_recording_enabled === true
 	openAIGwpoolBaseURL.value = typeof extra?.openai_gwpool_base_url === 'string' ? extra.openai_gwpool_base_url : ''
 	// 后端脱敏成 true = 配过；原值不会下发，所以输入框一律从空开始。
 	openAIGwpoolConsumerKeySaved.value = extra?.openai_gwpool_consumer_key === true
@@ -4737,6 +4782,9 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	openAIGwpoolRotation.value = extra?.openai_gwpool_rotation === true
 	openAIGwpoolRotationMinGateways.value = typeof extra?.openai_gwpool_rotation_min_gateways === 'number' ? extra.openai_gwpool_rotation_min_gateways : ''
 	openAIGwpoolAutoWait.value = extra?.openai_gwpool_auto_wait === true
+	openAIGwpoolEarlyProbe.value = extra?.openai_gwpool_early_probe_enabled === true
+	openAIGwpoolMemberIsolation.value = extra?.openai_gwpool_member_isolation === true
+	openAIGwpoolUseRecommendation.value = extra?.openai_gwpool_use_recommended_cooldown === true
 	openAIGwpoolMaxWait.value = typeof extra?.openai_gwpool_max_wait_s === 'number' ? extra.openai_gwpool_max_wait_s : ''
 	openAIGwpoolGuardEnabled.value = extra?.openai_gwpool_guard_enabled !== false
 	openAIGwpoolProbeModel.value = typeof extra?.openai_gwpool_probe_model === 'string' &&
@@ -6369,6 +6417,21 @@ const handleSubmit = async () => {
           delete newExtra.openai_gwpool_auto_wait
           delete newExtra.openai_gwpool_max_wait_s
         }
+        if (openAIGwpoolEnabled.value && openAIGwpoolUseRecommendation.value) {
+          newExtra.openai_gwpool_use_recommended_cooldown = true
+        } else {
+          delete newExtra.openai_gwpool_use_recommended_cooldown
+        }
+        if (openAIGwpoolEnabled.value && openAIGwpoolMemberIsolation.value) {
+          newExtra.openai_gwpool_member_isolation = true
+        } else {
+          delete newExtra.openai_gwpool_member_isolation
+        }
+        if (openAIGwpoolEnabled.value && openAIGwpoolGuardEnabled.value && openAIGwpoolEarlyProbe.value) {
+          newExtra.openai_gwpool_early_probe_enabled = true
+        } else {
+          delete newExtra.openai_gwpool_early_probe_enabled
+        }
         // 后台预热已移除，保存时清理旧键。
         delete newExtra.openai_gwpool_prewarm
         if (openAIGwpoolEnabled.value && openAIGwpoolRotation.value) {
@@ -6412,6 +6475,7 @@ const handleSubmit = async () => {
           }
         }
       }
+      newExtra.openai_upstream_recording_enabled = openAIUpstreamRecordingEnabled.value
       if (isSparkShadow.value) {
         delete newExtra.openai_long_context_billing_enabled
       } else {

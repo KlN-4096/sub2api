@@ -1042,6 +1042,25 @@ describe('EditAccountModal', () => {
   })
 
   // 网关池：配置全在账号级（池子的 consumer key 是按账号发的）。
+  it('keeps member isolation and pool recommendations off by default and saves each opt-in', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.extra = { openai_gwpool: true, openai_gwpool_base_url: 'http://127.0.0.1:8099', openai_gwpool_consumer_key: 'offline' }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    for (const name of ['member-isolation', 'use-recommendation']) {
+      const input = wrapper.get(`[data-testid="edit-openai-gwpool-${name}"]`)
+      expect((input.element as HTMLInputElement).checked).toBe(false)
+      await input.setValue(true)
+    }
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).toMatchObject({
+      openai_gwpool_member_isolation: true, openai_gwpool_use_recommended_cooldown: true
+    })
+    wrapper.unmount()
+  })
+
   it('writes the account-level gateway pool config into extra', async () => {
     const account = buildAccount()
     account.type = 'oauth'
@@ -1230,6 +1249,25 @@ describe('EditAccountModal', () => {
     expect(extra?.openai_gwpool_gateway_window_s).toBe(7200)
     expect(extra?.openai_gwpool_fetch_timeout_s).toBe(20)
     expect(extra?.openai_gwpool_list_timeout_s).toBe(5)
+  })
+
+  it('defaults early probing off and only saves it with quality protection enabled', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.extra = { openai_gwpool: true, openai_gwpool_base_url: 'https://pool.example.test' }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    const early = wrapper.get<HTMLInputElement>('[data-testid="edit-openai-gwpool-early-probe"]')
+    expect(early.element.checked).toBe(false)
+    await early.setValue(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_gwpool_early_probe_enabled).toBe(true)
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    await wrapper.get('[data-testid="edit-openai-gwpool-guard-enabled"]').setValue(false)
+    expect(early.element.disabled).toBe(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_gwpool_early_probe_enabled')
   })
 
   it('loads and saves account-level gateway exhaustion rotation, defaulting off', async () => {
@@ -1534,6 +1572,49 @@ describe('EditAccountModal', () => {
 
     expect(updateAccountMock).toHaveBeenCalledTimes(1)
     expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_long_context_billing_enabled).toBe(false)
+  })
+
+  it.each([undefined, false, 'true', 1])('keeps upstream recording off for non-true opt-in %s', async (value) => {
+    const account = buildAccount()
+    account.extra = { openai_upstream_recording_enabled: value }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="openai-upstream-recording-enabled"]').element.checked).toBe(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_upstream_recording_enabled).toBe(false)
+  })
+
+  it('submits independent upstream recording without enabling the gateway pool', async () => {
+    const account = buildAccount()
+    account.extra = {}
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    await wrapper.get('[data-testid="openai-upstream-recording-enabled"]').setValue(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_upstream_recording_enabled).toBe(true)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_gwpool).not.toBe(true)
+  })
+
+  it('loads enabled upstream recording and allows explicit disable', async () => {
+    const account = buildOpenAIOAuthParentAccount()
+    account.extra = { openai_upstream_recording_enabled: true }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="openai-upstream-recording-enabled"]').element.checked).toBe(true)
+    await wrapper.get('[data-testid="openai-upstream-recording-enabled"]').setValue(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_upstream_recording_enabled).toBe(false)
+  })
+
+  it('does not offer OpenAI upstream recording for other providers', () => {
+    const wrapper = mountModal(buildGrokOAuthAccount())
+    expect(wrapper.find('[data-testid="openai-upstream-recording-enabled"]').exists()).toBe(false)
   })
 
   it('fails closed for malformed OpenAI long-context billing values', async () => {

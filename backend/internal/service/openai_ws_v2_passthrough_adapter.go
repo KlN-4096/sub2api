@@ -894,7 +894,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			return fmt.Errorf("attach ws route cookies: %w", err)
 		}
 		dialCtx, cancelDial := context.WithTimeout(ctx, s.openAIWSDialTimeout())
-		upstreamConn, statusCode, handshakeHeaders, err = dialer.Dial(dialCtx, wsURL, headers, proxyURL)
+		upstreamConn, statusCode, handshakeHeaders, err = s.dialRecordedOpenAIWS(dialCtx, account, wsURL, headers, proxyURL, dialer)
 		cancelDial()
 		// 握手成败都收 Set-Cookie（与连接池、doOpenAIUpstream 同口径：Cloudflare 在 4xx/5xx 上同样下发）。
 		s.codexCookies.Store(account, wsURL, handshakeHeaders)

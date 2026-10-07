@@ -910,7 +910,8 @@ type openAIWSConnPool struct {
 	clientDialer openAIWSClientDialer
 	// cookies 让连接池在握手前回放、握手后收取该账号的 ChatGPT cookie（openai_codex_cookies.go；
 	// 真实客户端的 WSS 握手与 HTTP 共用一只罐）。nil 表示不回放（直接 new 出来的测试池）。
-	cookies *openAICodexCookieStore
+	cookies          *openAICodexCookieStore
+	recordingGateway *OpenAIGatewayService
 
 	accounts sync.Map // key: int64(accountID), value: *openAIWSAccountPool
 	seq      atomic.Uint64
@@ -1189,6 +1190,9 @@ func (p *openAIWSConnPool) Acquire(ctx context.Context, req openAIWSAcquireReque
 		now := time.Now()
 		lease.idleBefore = lease.conn.idleDuration(now)
 		lease.ageBefore = lease.conn.age(now)
+		if p.recordingGateway != nil {
+			p.recordingGateway.recordOpenAIWSLease(ctx, req.Account, req.WSURL, req.Headers, lease.conn)
+		}
 	}
 	return lease, err
 }
@@ -2200,7 +2204,14 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 			return nil, err
 		}
 	}
-	conn, status, handshakeHeaders, err := p.clientDialer.Dial(ctx, req.WSURL, headers, req.ProxyURL)
+	var conn openAIWSClientConn
+	var status int
+	var handshakeHeaders http.Header
+	if p.recordingGateway != nil {
+		conn, status, handshakeHeaders, err = p.recordingGateway.dialRecordedOpenAIWS(ctx, req.Account, req.WSURL, headers, req.ProxyURL, p.clientDialer)
+	} else {
+		conn, status, handshakeHeaders, err = p.clientDialer.Dial(ctx, req.WSURL, headers, req.ProxyURL)
+	}
 	if p.cookies != nil {
 		// 握手响应的 Set-Cookie 不论成败都收：Cloudflare 在 4xx/5xx 上同样下发 __cf_bm / __cflb。
 		p.cookies.Store(req.Account, req.WSURL, handshakeHeaders)

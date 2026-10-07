@@ -217,6 +217,12 @@ security:
 # 网关配置
 # =============================================================================
 gateway:
+  # 独立的账号级 OpenAI/Codex 上游交互记录：账号默认关闭、不推荐启用。
+  # 仅配置存储；此处不会替任何账号打开开关。每个实例独占目录，不共用。
+  openai_recording:
+    directory: "" # 空值：$DATA_DIR/openai-recordings（DATA_DIR 空则 ./data）
+    key_file: "" # 空值：$DATA_DIR/openai-recording.key，必须在归档目录之外，单独备份
+    max_bytes: 2147483648 # 2 GiB；满额停止并告警，不删除/覆盖旧记录；重启重新计数
   # Timeout for waiting upstream response headers (seconds)
   # 等待上游响应头超时时间（秒）
   response_header_timeout: 600
