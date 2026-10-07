@@ -495,6 +495,13 @@ func (s *OpenAIGatewayService) buildInputTokensUpstreamRequest(
 		}
 	}
 
+	// 上面那段会把客户端自报的 User-Agent 原样拷出去（实测 claude-cli/1.0.60 直达
+	// api.openai.com，2026-09-20 审计）。OAuth / setup-token 账号在别的出站面都收口成
+	// 规范 Codex 身份，这一条不该是例外——accept-language 保留不动。
+	if account.UsesOpenAICodexProtocol() {
+		enforceCodexIdentityHeadersWithUA(req.Header, account.GetOpenAIUserAgent())
+	}
+
 	// 账号级请求头覆写（仅 openai api_key 账号启用时生效；OAuth 路径 no-op）
 	account.ApplyHeaderOverrides(req.Header)
 
