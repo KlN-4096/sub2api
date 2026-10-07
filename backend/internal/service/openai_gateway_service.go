@@ -34,14 +34,20 @@ const (
 	openaiPlatformAPIInputTokensURL = "https://api.openai.com/v1/responses/input_tokens"
 	openaiStickySessionTTL          = time.Hour // 粘性会话TTL
 	// 与真实 Codex TUI 的 User-Agent 结构对齐：
-	// {originator}/{version} ({OS} {OS_version}; {arch}) {terminal}
+	// {originator}/{version} ({OS} {OS_version}; {arch}) {terminal} ({client}; {version})
 	// 缺少 OS/架构/终端后缀的形态易被上游指纹识别为非官方客户端。
 	// 该后缀是 UA 形态的唯一定义处，buildCodexCLIUserAgent 按运行时版本号复用它。
 	codexCLIUserAgentSuffix = " (Ubuntu 22.4.0; x86_64) xterm-256color"
 	// codexCLIUserAgent 是编译期兜底 UA；运行时优先使用由后台版本号拼出的规范 UA。
 	// 版本段必须来自 codexCLIVersion：UA 与 version 头是同一个版本声明的两个出口，
 	// 各自硬编码会漂移成互相矛盾的身份。
-	codexCLIUserAgent = openai.CodexDefaultOriginator + "/" + codexCLIVersion + codexCLIUserAgentSuffix
+	//
+	// 尾部 `({client}; {version})` 是 codex-rs 的 USER_AGENT_SUFFIX
+	// （login/src/auth/default_client.rs 的 get_codex_user_agent）。生产 7 天
+	// 10 万条真实 codex 形态入站里 99.95% 都带它，不带的只有网关自己发出的那几条——
+	// 也就是说「没有尾部组」在真实流量里等价于「不是真客户端」。
+	codexCLIUserAgent = openai.CodexDefaultOriginator + "/" + codexCLIVersion + codexCLIUserAgentSuffix +
+		" (" + openai.CodexDefaultOriginator + "; " + codexCLIVersion + ")"
 	// codex_cli_only 拒绝时单个请求头日志长度上限（字符）
 	codexCLIOnlyHeaderValueMaxBytes = 256
 
@@ -84,26 +90,34 @@ var openaiAllowedHeaders = map[string]bool{
 	"x-codex-turn-state":      true,
 	"x-codex-turn-metadata":   true,
 	"x-codex-window-id":       true,
-	responsesLiteHeaderKey:    true,
+	// 真实客户端在这两处也发（codex-rs core/src/client.rs 的
+	// build_responses_compatibility_headers 与 responses WS 头构造）：
+	// 前者标记记忆整合子会话，后者是计时指标开关。剥掉会让上游看到一个
+	// 「从不做记忆整合、从不开计时」的客户端。
+	"x-openai-memgen-request":               true,
+	"x-responsesapi-include-timing-metrics": true,
+	responsesLiteHeaderKey:                  true,
 }
 
 // OpenAI passthrough allowed headers whitelist.
 // 透传模式下仅放行这些低风险请求头，避免将非标准/环境噪声头传给上游触发风控。
 var openaiPassthroughAllowedHeaders = map[string]bool{
-	"accept":                  true,
-	"accept-language":         true,
-	"content-type":            true,
-	"conversation_id":         true,
-	"openai-beta":             true,
-	"user-agent":              true,
-	"originator":              true,
-	"session_id":              true,
-	"x-codex-beta-features":   true,
-	"x-codex-installation-id": true,
-	"x-codex-turn-state":      true,
-	"x-codex-turn-metadata":   true,
-	"x-codex-window-id":       true,
-	responsesLiteHeaderKey:    true,
+	"accept":                                true,
+	"accept-language":                       true,
+	"content-type":                          true,
+	"conversation_id":                       true,
+	"openai-beta":                           true,
+	"user-agent":                            true,
+	"originator":                            true,
+	"session_id":                            true,
+	"x-codex-beta-features":                 true,
+	"x-codex-installation-id":               true,
+	"x-codex-turn-state":                    true,
+	"x-codex-turn-metadata":                 true,
+	"x-codex-window-id":                     true,
+	"x-openai-memgen-request":               true,
+	"x-responsesapi-include-timing-metrics": true,
+	responsesLiteHeaderKey:                  true,
 }
 
 // codex_cli_only 拒绝时记录的请求头白名单（仅用于诊断日志，不参与上游透传）
@@ -502,12 +516,16 @@ type OpenAIGatewayService struct {
 	codexSnapshotThrottle               *accountWriteThrottle
 	openAIModelsCache                   openAIModelsCache
 	openaiCompatSessionResponses        sync.Map
+	// openaiCompatBridgeSessions：双开兼容桥会话键 → openAICompatBridgeSession（会话/上下文窗口 v7）
+	openaiCompatBridgeSessions          sync.Map
 	openaiCompatAnthropicDigestSessions sync.Map
-	// openaiCodexTurnStateOrigins: 下游会话 seed → openAICodexTurnStateOrigin，
-	// 记录最近一次向该会话下发 x-codex-turn-state 的铸造账号，供出站守卫
-	// 剥离跨账号回带（openai_codex_turn_state.go）。
+	// openaiCodexTurnStateOrigins: x-codex-turn-state blob 的哈希 → openAICodexTurnStateOrigin
+	// （铸造者 = 凭证域身份），供出站守卫剥离跨账号回带（设计见 openai_codex_turn_state.go）。
 	openaiCodexTurnStateOrigins sync.Map
 	openaiCodexTurnStateWrites  atomic.Uint64
+	// codexSideCalls：双开账号侧信道 GET 的去重窗口（openai_codex_side_calls.go）。
+	// 由构造器初始化；裸结构体（单元测试）里为 nil，侧信道整体停用。
+	codexSideCalls *codexSideCallState
 }
 
 // NewOpenAIGatewayService creates a new OpenAIGatewayService
@@ -585,6 +603,7 @@ func NewOpenAIGatewayService(
 		openAITokenProvider.SetAccountRuntimeBlocker(svc)
 	}
 	svc.logOpenAIWSModeBootstrap()
+	svc.codexSideCalls = newCodexSideCallState()
 	return svc
 }
 
