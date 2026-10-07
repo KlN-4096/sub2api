@@ -218,7 +218,8 @@ func (s *OpenAIGatewayService) gatewayPoolRoundSelectionAllowed(ctx context.Cont
 	if s.codexCookies.gatewayPoolVerifiedFull(identity) {
 		return bound || s.codexCookies.poolRounds.claim(*group, identity, s.gatewayPoolActiveAccountLimit(ctx, group))
 	}
-	if s.gatewayPoolNoRemainingRoutes(ctx, account) {
+	if s.gatewayPoolNoRemainingRoutes(ctx, account) &&
+		s.codexCookies.gatewayPoolLocalResumeAt(identity, account).After(time.Now()) {
 		s.codexCookies.poolRounds.exhaust(*group, identity, s.codexCookies.poolRounds.generation(*group))
 		s.restGatewayPoolAccount(ctx, account, identity, *group)
 		return false
