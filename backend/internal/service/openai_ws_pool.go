@@ -908,6 +908,9 @@ type openAIWSConnPool struct {
 	cfg *config.Config
 	// 通过接口解耦底层 WS 客户端实现，默认使用 coder/websocket。
 	clientDialer openAIWSClientDialer
+	// cookies 让连接池在握手前回放、握手后收取该账号的 ChatGPT cookie（openai_codex_cookies.go；
+	// 真实客户端的 WSS 握手与 HTTP 共用一只罐）。nil 表示不回放（直接 new 出来的测试池）。
+	cookies *openAICodexCookieStore
 
 	accounts sync.Map // key: int64(accountID), value: *openAIWSAccountPool
 	seq      atomic.Uint64
@@ -2187,7 +2190,17 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 			return nil, err
 		}
 	}
+	if p.cookies != nil {
+		if headers == nil {
+			headers = http.Header{}
+		}
+		p.cookies.Attach(req.Account, req.WSURL, headers)
+	}
 	conn, status, handshakeHeaders, err := p.clientDialer.Dial(ctx, req.WSURL, headers, req.ProxyURL)
+	if p.cookies != nil {
+		// 握手响应的 Set-Cookie 不论成败都收：Cloudflare 在 4xx/5xx 上同样下发 __cf_bm / __cflb。
+		p.cookies.Store(req.Account, req.WSURL, handshakeHeaders)
+	}
 	if err != nil {
 		var handshakeErr *openAIWSHandshakeError
 		var responseBody []byte

@@ -976,4 +976,25 @@ describe('admin UsageTable deleted-user badge', () => {
     expect(wrapper.text()).not.toContain('Deleted')
     expect(wrapper.text()).toContain('active@test.com')
   })
+
+  // safety_buffering_* 两列只落库不展示（用户 2026-09-25 定）：faster-model 是客户端「换更快模型重试」
+  // 的备选，不是路由结果，显示出来会被读成错误路由。
+  it('does not render the upstream safety-buffering headers under the model cell', () => {
+    const wrapper = mount(UsageTable, {
+      props: {
+        data: [{
+          request_id: 'req-safety-buffering',
+          model: 'gpt-6-astra',
+          safety_buffering_enabled: true,
+          safety_buffering_faster_model: 'gpt-5.6-luna',
+        }],
+        loading: false,
+        columns: [],
+      },
+      global: { stubs: { DataTable: DataTableStub, EmptyState: true, Icon: true, Teleport: true } },
+    })
+    expect(wrapper.find('[data-testid="safety-buffering-marker"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('gpt-5.6-luna')
+    expect(wrapper.text()).not.toContain('enabled=')
+  })
 })

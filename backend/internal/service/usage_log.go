@@ -209,6 +209,14 @@ type UsageLog struct {
 	// TurnStateSent 是本次出站实际带的 turn-state（客户端回带的或注入的）。
 	// 与 TurnState（上游新铸的）分开：带了 turn-state 的请求只有 8% 会拿到新铸值。
 	TurnStateSent *string
+	// SafetyBufferingEnabled / SafetyBufferingFasterModel 是上游响应头 x-codex-safety-buffering-*
+	// 的读数（openai_codex_safety_buffering.go）。上游没带、非 Codex 上游、OAuth WS 轮次（暂不取事件里的头）为 nil。
+	SafetyBufferingEnabled     *bool
+	SafetyBufferingFasterModel *string
+	// RouteGateway / RoutePair 是这一发生效的路由对读数（openai_codex_route_cookies.go）：
+	// 网关段从 __oailb 的 JWT 载荷解出，整串留着以便原样复现。两者都只作观测，不作判据。
+	RouteGateway *string
+	RoutePair    *string
 
 	// Cache TTL Override 标记（管理员强制替换了缓存 TTL 计费）
 	CacheTTLOverridden bool
