@@ -15,7 +15,7 @@ type gatewayPoolInventoryState struct {
 }
 
 func (s *openAICodexCookieStore) gatewayPoolInventory(identity string) *gatewayPoolInventoryState {
-	value, _ := s.poolInventory.LoadOrStore(identity, &gatewayPoolInventoryState{})
+	value, _ := s.poolInventory.LoadOrStore(gatewayPoolLedgerIdentity(identity), &gatewayPoolInventoryState{})
 	state, _ := value.(*gatewayPoolInventoryState)
 	return state
 }
@@ -50,20 +50,32 @@ func (s *openAICodexCookieStore) gatewayPoolInventoryCandidates(identity string,
 	if state.active > 0 {
 		return state.generation, true, candidates
 	}
-	if pair, live := s.cachedPoolPair(identity); live == openAIGatewayPoolPairLive {
-		candidates[pair.gateway] = struct{}{} // verified OR not yet conclusively tested
-	}
-	if value, ok := s.poolSpare.Load(identity); ok {
+	domain := gatewayPoolLedgerIdentity(identity)
+	s.poolPairs.Range(func(key, _ any) bool {
+		other, ok := key.(string)
+		if ok && gatewayPoolLedgerIdentity(other) == domain {
+			if pair, live := s.cachedPoolPair(other); live == openAIGatewayPoolPairLive {
+				candidates[pair.gateway] = struct{}{}
+			}
+		}
+		return true
+	})
+	s.poolSpare.Range(func(key, value any) bool {
+		other, ok := key.(string)
+		if !ok || gatewayPoolLedgerIdentity(other) != domain {
+			return true
+		}
 		if batch, valid := value.(*gatewayPoolTicketBatch); valid {
 			for _, pair := range batch.pairs[batch.idx:] {
 				if pair.cookie == "" || time.Until(pair.until) < openAIGatewayPoolMinRemaining {
 					continue
 				}
-				if _, cooling := s.gatewayPoolUsedAt(identity, pair.gateway, account.gatewayPoolGatewayWindow()); !cooling {
+				if _, cooling := s.gatewayPoolUsedAt(identity, pair.gateway, account.gatewayPoolGatewayWindow(), account.gatewayPoolUseRecommendation()); !cooling {
 					candidates[pair.gateway] = struct{}{}
 				}
 			}
 		}
-	}
+		return true
+	})
 	return state.generation, false, candidates
 }

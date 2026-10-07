@@ -2,6 +2,7 @@
 
 VERSION ?= $(shell ./scripts/resolve-version.sh)
 LDFLAGS ?= -s -w -X main.Version=$(VERSION)
+PYTHON ?= python3
 
 build:
 	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -trimpath -o bin/server ./cmd/server
@@ -15,7 +16,7 @@ test:
 	golangci-lint run ./...
 
 test-unit:
-	go test -tags=unit ./...
+	$(PYTHON) ../tools/test-backend-unit.py
 
 test-integration:
 	go test -tags=integration ./...

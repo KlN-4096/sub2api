@@ -131,17 +131,15 @@ func TestWarmUpSpendsNothingOnAVerifiedLivePair(t *testing.T) {
 	// 第二发走**生产那条快路**（gatewayPoolWarmUp，不是注入 shooter 的那个）：票验过 + 还 Live
 	// ⇒ 一发都不打、也不再问池子。
 	//
-	// 请求体刻意用**读不出模型**的那种（zstd 字节）：快路在读模型**之前**。有快路 ⇒ nil；
-	// 删掉快路 ⇒ 立刻掉进 errOpenAIGatewayPoolWarmNoModel。少了这一手，断言恒真 ——
-	// 真 shooter 进 buildOpenAITurnStateProbe 后 GetAccessToken 就会失败（测试账号没有
-	// access_token、没有 tokenProvider），一个字节都到不了 httpUpstream，而那条错误又会被
-	// 「不下结论就放行」吃成 nil。
+	// 压缩请求从 sink 读取模型；快路必须匹配验证模型，不能沿用其它模型的判据。
 	before := fake.hits.Load()
+	acct.Extra[openAIGatewayPoolProbeModelExtraKey] = gwpoolWarmModel
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("\x28\xb5\x2f\xfd not json"))
 	require.NoError(t, err)
-	ctx, _ := withOpenAIGatewayPoolSink(req.Context(), nil)
+	ctx, sink := withOpenAIGatewayPoolSink(req.Context(), nil)
+	sink.noteModel(gwpoolWarmModel)
 	require.NoError(t, svc.gatewayPoolWarmUp(req.WithContext(ctx), "", acct),
-		"验过 + Live ⇒ 快路直接放行，连模型都不读")
+		"同模型验过 + Live ⇒ 快路直接放行")
 	require.Empty(t, upstream.sentBodies, "窗口内不许再验")
 	require.Equal(t, before, fake.hits.Load(), "窗口内不许再取票")
 }
@@ -372,7 +370,11 @@ func TestWarmProbeVerdicts(t *testing.T) {
 			shooter := &gwpoolWarmShooter{replies: tc.replies}
 			full, conclusive, sent, err := gatewayPoolWarmProbe(
 				context.Background(), 1, "unified-142", 1, "ck", shooter.shoot)
-			require.NoError(t, err)
+			if tc.conclusive {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err, "retain the failure category for bounded preflight waiting")
+			}
 			require.Equal(t, tc.conclusive, conclusive)
 			require.Equal(t, tc.full, full)
 			require.True(t, sent, "拿到过状态码就是确证送达")

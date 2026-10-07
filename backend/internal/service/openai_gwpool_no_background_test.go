@@ -22,6 +22,7 @@ func TestGatewayPoolVerifiedTicketNeverStartsBackgroundPreparation(t *testing.T)
 	})
 	svc.codexCookies.poolVerified.Store(gwpoolTestIdentity, gatewayPoolVerifiedMark{
 		version: "live", at: now.Add(-110 * time.Second),
+		models: &map[string]time.Time{"gpt-6-luna": now.Add(-110 * time.Second)},
 	})
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL,
 		strings.NewReader(`{"model":"gpt-6-luna","input":"business"}`))
