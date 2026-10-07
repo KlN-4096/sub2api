@@ -132,8 +132,9 @@ func TestPrepareUsageLogInsert_UpstreamRequestIDArgWiring(t *testing.T) {
 	// 尾部顺序：upstream_request_id, session_id, native_compaction_v2,
 	// turn_state, turn_state_overridden, turn_state_source, turn_state_sent,
 	// safety_buffering_enabled, safety_buffering_faster_model,
-	// route_gateway, route_pair, created_at
-	idx := len(prepared.args) - 12
+	// route_gateway, route_pair, route_pair_overridden, route_pair_pool_gateway,
+	// route_pair_pool_version, created_at
+	idx := len(prepared.args) - 15
 	arg, ok := prepared.args[idx].(sql.NullString)
 	require.True(t, ok, "upstream_request_id arg should be sql.NullString, got %T", prepared.args[idx])
 	require.True(t, arg.Valid)
@@ -173,33 +174,34 @@ func TestPrepareUsageLogInsert_TurnStateArgWiring(t *testing.T) {
 	require.Len(t, prepared.args, len(usageLogInsertArgTypes))
 
 	n := len(prepared.args)
-	// 尾部顺序：... native_compaction_v2, turn_state, turn_state_overridden,
-	// turn_state_source, turn_state_sent, safety_buffering_enabled, safety_buffering_faster_model, created_at
-	require.Equal(t, "boolean", usageLogInsertArgTypes[n-10], "native_compaction_v2 必须仍在倒数第 10")
+	// 尾部顺序：... native_compaction_v2, turn_state, turn_state_overridden, turn_state_source,
+	// turn_state_sent, safety_buffering ×2, route_gateway, route_pair, route_pair_overridden,
+	// route_pair_pool_gateway, route_pair_pool_version, created_at
+	require.Equal(t, "boolean", usageLogInsertArgTypes[n-13], "native_compaction_v2 必须仍在倒数第 13")
 
-	tsArg, ok := prepared.args[n-9].(sql.NullString)
-	require.True(t, ok, "turn_state 应是 sql.NullString，实际 %T", prepared.args[n-9])
+	tsArg, ok := prepared.args[n-12].(sql.NullString)
+	require.True(t, ok, "turn_state 应是 sql.NullString，实际 %T", prepared.args[n-12])
 	require.True(t, tsArg.Valid)
 	require.Equal(t, turnState, tsArg.String)
-	require.Equal(t, "text", usageLogInsertArgTypes[n-9])
+	require.Equal(t, "text", usageLogInsertArgTypes[n-12])
 
-	ovArg, ok := prepared.args[n-8].(sql.NullBool)
-	require.True(t, ok, "turn_state_overridden 应是 sql.NullBool，实际 %T", prepared.args[n-8])
+	ovArg, ok := prepared.args[n-11].(sql.NullBool)
+	require.True(t, ok, "turn_state_overridden 应是 sql.NullBool，实际 %T", prepared.args[n-11])
 	require.True(t, ovArg.Valid)
 	require.True(t, ovArg.Bool)
-	require.Equal(t, "boolean", usageLogInsertArgTypes[n-8])
+	require.Equal(t, "boolean", usageLogInsertArgTypes[n-11])
 
-	srcArg, ok := prepared.args[n-7].(sql.NullString)
-	require.True(t, ok, "turn_state_source 应是 sql.NullString，实际 %T", prepared.args[n-7])
+	srcArg, ok := prepared.args[n-10].(sql.NullString)
+	require.True(t, ok, "turn_state_source 应是 sql.NullString，实际 %T", prepared.args[n-10])
 	require.True(t, srcArg.Valid)
 	require.Equal(t, source, srcArg.String)
-	require.Equal(t, "text", usageLogInsertArgTypes[n-7])
+	require.Equal(t, "text", usageLogInsertArgTypes[n-10])
 
-	sentArg, ok := prepared.args[n-6].(sql.NullString)
-	require.True(t, ok, "turn_state_sent 应是 sql.NullString，实际 %T", prepared.args[n-6])
+	sentArg, ok := prepared.args[n-9].(sql.NullString)
+	require.True(t, ok, "turn_state_sent 应是 sql.NullString，实际 %T", prepared.args[n-9])
 	require.True(t, sentArg.Valid)
 	require.Equal(t, sent, sentArg.String)
-	require.Equal(t, "text", usageLogInsertArgTypes[n-6])
+	require.Equal(t, "text", usageLogInsertArgTypes[n-9])
 
 	_, ok = prepared.args[n-1].(time.Time)
 	require.True(t, ok, "created_at 必须仍在末位，实际 %T", prepared.args[n-1])
@@ -210,16 +212,16 @@ func TestPrepareUsageLogInsert_TurnStateArgWiring(t *testing.T) {
 		UserID: 1, APIKeyID: 2, RequestID: "client:turn-state-absent", Model: "gpt-5",
 		CreatedAt: time.Now().UTC(),
 	})
-	nullTS, ok := absent.args[n-9].(sql.NullString)
+	nullTS, ok := absent.args[n-12].(sql.NullString)
 	require.True(t, ok)
 	require.False(t, nullTS.Valid, "没有 turn_state 时必须写 NULL")
-	nullOV, ok := absent.args[n-8].(sql.NullBool)
+	nullOV, ok := absent.args[n-11].(sql.NullBool)
 	require.True(t, ok)
 	require.False(t, nullOV.Valid, "不适用的账号类型必须写 NULL，而不是 false")
-	nullSrc, ok := absent.args[n-7].(sql.NullString)
+	nullSrc, ok := absent.args[n-10].(sql.NullString)
 	require.True(t, ok)
 	require.False(t, nullSrc.Valid, "没注入覆写时来源必须写 NULL")
-	nullSent, ok := absent.args[n-6].(sql.NullString)
+	nullSent, ok := absent.args[n-9].(sql.NullString)
 	require.True(t, ok)
 	require.False(t, nullSent.Valid, "没带 turn-state 时出站值必须写 NULL")
 

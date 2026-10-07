@@ -408,6 +408,7 @@ export default {
     cyber: 'Cyber',
     live: 'Live',
     probe: 'Hunter probe',
+    gwpoolDegraded: 'Degraded (dropped)',
     unknown: 'Unknown',
     in: 'In',
     out: 'Out',
