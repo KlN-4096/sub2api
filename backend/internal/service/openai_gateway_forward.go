@@ -27,7 +27,7 @@ func (s *OpenAIGatewayService) Forward(
 ) (result *OpenAIForwardResult, err error) {
 	// 网关池的 per-request 标记（openai_gwpool.go）：AttachRoute 往 sink 写，这里 publish 到结果上。
 	// 新增一条能打到 chatgpt.com 的转发入口时要照抄这两行。
-	ctx, gwpoolSink := withOpenAIGatewayPoolSink(ctx)
+	ctx, gwpoolSink := withOpenAIGatewayPoolSink(ctx, c)
 	defer func() { gwpoolSink.publish(result) }()
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)

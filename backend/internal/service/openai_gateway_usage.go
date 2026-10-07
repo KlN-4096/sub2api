@@ -12,10 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
-	"go.uber.org/zap"
 )
 
 // OpenAIRecordUsageInput input for recording usage
@@ -117,6 +119,71 @@ func (s *OpenAIGatewayService) RecordCyberPolicyUsageLog(ctx context.Context, in
 		NativeCompactionV2: in.NativeCompactionV2,
 	}); err != nil {
 		logger.LegacyPrintf("service.openai_gateway", "cyber usage record failed: request_id=%s err=%v", in.RequestID, err)
+	}
+}
+
+// RecordGatewayPoolDiscardedUsageLogs 给本次请求里被 state-echo 判成降智、整发丢掉的那些上游
+// 尝试各落一条用量行（openai_gwpool_state_echo.go）。
+//
+// 为什么非落不可：那几发**真的到了上游、上游真的跑了模型**，只是我们没把结果交给客户端。
+// 不落行的话，一个判据频繁误判的时段在用量表上完全看不见，而它正在消耗真实配额。
+//
+// **为什么恒为 0 token / 0 金额**：判定点在「响应头到手、响应体一个字节都没读」的时刻，而本仓库
+// 的输入与输出 token **都**来自上游 response.completed 事件里的 usage（RecordUsage 里的
+// result.Usage 全部由响应体解析得来，见 extractOpenAIUsageFromJSONBytes）⇒ 这一刻两边都观测不到。
+// 刻意不估算、不拿重试那一发的数去填、不拿历史均值去填：编出来的数字进了计费表，事后没人分得清
+// 哪条是真的。行本身是审计凭据（request_type=gwpool_degraded + 网关名），不是账单。
+//
+// 读数**取走即清**（takeDiscardedOpenAIGatewayPoolAttempts）：这个钩子在转发成功与失败两条路上
+// 都会被调到，每条丢弃行只该落一次。
+func (s *OpenAIGatewayService) RecordGatewayPoolDiscardedUsageLogs(ctx context.Context, c *gin.Context, in CyberPolicyUsageInput) {
+	attempts := takeDiscardedOpenAIGatewayPoolAttempts(c)
+	if s == nil || len(attempts) == 0 || in.APIKey == nil || in.APIKey.User == nil ||
+		in.Account == nil || strings.TrimSpace(in.Model) == "" {
+		return
+	}
+	// 计费幂等键必须**自己定**，不能用这一发的上游 request id，也不能用 uuid：
+	//
+	//   - 用上游 id 或 uuid 都落不到 isForcedUsageBillingRequestID 的闭集里 ⇒
+	//     resolveUsageBillingRequestID 会拿 ctx 里的 client/local id 把它整个盖掉 ⇒
+	//     丢弃行和重试成功那一行算出同一个键 ⇒ 丢弃行先落库抢占 usage_billing_dedup ⇒
+	//     成功那一发不计费、连 usage_logs 都被 ON CONFLICT 吃掉（2026-10-02 审计实证）。
+	//   - uuid 另有一害：同一次请求重放会生成新行，而且和池子日志对不上账。
+	//
+	// 所以键 = 固定前缀（进 forced 闭集，压过 ctx）+ 本次客户端请求的 id（可对账）
+	// + attempt 序号（同一次请求里换票重试了几发就有几条，互不相撞）。
+	base := "gwpool_degraded:" + resolveUsageBillingRequestID(ctx, "")
+	for i, attempt := range attempts {
+		requestID := base + ":" + strconv.Itoa(i)
+		result := &OpenAIForwardResult{
+			RequestID: requestID,
+			Model:     in.Model,
+			Stream:    in.Stream,
+			// 原样带上那一发的注入读数 ⇒ 路由对卡片按既有逻辑渲染出被判死的那个网关与票号
+			// （routePairInUse）。UpstreamHeaders 留空是对的：那一发的 Set-Cookie 没有被采纳。
+			GatewayPoolApplied: attempt.Applied,
+		}
+		if err := s.RecordUsage(ctx, &OpenAIRecordUsageInput{
+			Result:             result,
+			APIKey:             in.APIKey,
+			User:               in.APIKey.User,
+			Account:            in.Account,
+			Subscription:       in.Subscription,
+			InboundEndpoint:    in.InboundEndpoint,
+			UpstreamEndpoint:   in.UpstreamEndpoint,
+			UserAgent:          in.UserAgent,
+			IPAddress:          in.IPAddress,
+			SessionID:          in.SessionID,
+			RequestPayloadHash: in.RequestPayloadHash,
+			APIKeyService:      in.APIKeyService,
+			ChannelUsageFields: in.ChannelUsageFields,
+			NativeCompactionV2: in.NativeCompactionV2,
+			RequestType:        RequestTypeGatewayPoolDegraded,
+		}); err != nil {
+			logger.LegacyPrintf("service.openai_gateway",
+				"gwpool degraded usage record failed: request_id=%s gateway=%s err=%v",
+				requestID, attempt.Applied.Gateway, err)
+		}
 	}
 }
 
@@ -434,6 +501,13 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	usageLog.RoutePairOverridden = usageCodexRoutePairOverriddenPtr(account, routePairFromPool)
 	usageLog.RoutePairPoolGateway = usageCodexRoutePairPoolGatewayPtr(routePairPoolGateway)
 	usageLog.RoutePairPoolVersion = usageCodexRoutePairPoolVersionPtr(routePairPoolVersion)
+	// 顺手把落点记进账号 extra：用量行是按请求的，答不了「这个号碰过哪些网关、现在在哪个」。
+	// 用 RouteGateway（实际落点）而不是池子说的那个：注入被改派时，这张卡该显示真正打到的。
+	if usageLog.RouteGateway != nil {
+		s.noteOpenAIGatewayUse(ctx, account, *usageLog.RouteGateway,
+			usageCodexRouteRegion(routePairPoolGateway, *usageLog.RouteGateway,
+				result.GatewayPoolApplied.Region))
+	}
 	isVideoUsage := isGrokVideoUsageResult(result, billingModels)
 	if isVideoUsage {
 		usageLog.VideoCount = result.VideoCount

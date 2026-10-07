@@ -1730,7 +1730,17 @@ export interface CodexSessionImportResult {
 // ==================== Usage & Redeem Types ====================
 
 export type RedeemCodeType = 'balance' | 'concurrency' | 'subscription' | 'invitation'
-export type UsageRequestType = 'unknown' | 'sync' | 'stream' | 'ws_v2' | 'cyber' | 'live' | 'probe'
+export type UsageRequestType =
+  | 'unknown'
+  | 'sync'
+  | 'stream'
+  | 'ws_v2'
+  | 'cyber'
+  | 'live'
+  | 'probe'
+  // gwpool_degraded: state-echo 判定路由降智后整发丢掉的那次上游尝试。它真的到了上游，
+  // 但判定点在响应体一个字节都没读的时刻 ⇒ token 与金额恒为 0，是审计行不是账单行。
+  | 'gwpool_degraded'
 export type ImageSizeSource = 'output' | 'input' | 'default' | 'legacy'
 export type ImageSizeBreakdown = Record<string, number>
 

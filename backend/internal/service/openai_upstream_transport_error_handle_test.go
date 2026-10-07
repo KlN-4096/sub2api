@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -357,4 +358,53 @@ func TestHandleOpenAIAccountUpstreamError_RecordsOllamaActivityOnly(t *testing.T
 	require.True(t, ok, "Ollama Cloud non-2xx must schedule last_used activity")
 	_, ok = deferred.lastUsedUpdates.Load(int64(505))
 	require.False(t, ok, "non-Ollama non-2xx must not schedule Ollama activity")
+}
+
+// 池子侧的失败必须把那三条双语说明交到客户端手里，而不是一句通用的
+// "Upstream request failed"——「没票，等会儿再试」「池子配错了，去改配置」「判了降智」
+// 这三件事使用者要做的动作完全相反，长成一个样等于什么都没说。
+//
+// 同时 Reason 要让这个账号不进调度器的错误率：池子挂了不是它的凭据的错。
+func TestHandleOpenAIUpstreamTransportError_GatewayPoolCarriesClientMessage(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"没有满血槽位", gatewayPoolClientError(fmt.Errorf("take: %w", gwpool.ErrNoSlot)), gatewayPoolNoSlotClientMsg},
+		{"池子不可用或配错", gatewayPoolClientError(fmt.Errorf("dial: %w", gwpool.ErrPool)), gatewayPoolUnavailableClientMsg},
+		{"判了降智", errOpenAIGatewayPoolRouteDegraded, gatewayPoolDegradedClientMsg},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &OpenAIGatewayService{accountRepo: &openaiTransportAccountRepoStub{}}
+			account := &Account{ID: 91, Name: "pooled", Platform: PlatformOpenAI}
+			c, _ := newOpenAITransportErrTestContext()
+
+			err := svc.handleOpenAIUpstreamTransportError(context.Background(), c, account, tc.err, false)
+
+			var fo *UpstreamFailoverError
+			require.True(t, errors.As(err, &fo))
+			require.Equal(t, OpenAIGatewayPoolReason, fo.Reason)
+			require.Equal(t, tc.want, fo.ClientMessage, "客户端要看到的是这一条，不是 Upstream request failed")
+			require.Equal(t, http.StatusServiceUnavailable, fo.ClientStatusCode)
+			require.False(t, fo.ShouldReportAccountScheduleFailure(),
+				"池子的问题不许记到这个账号的健康度上")
+		})
+	}
+}
+
+// 非池子的传输失败不许被这条路认领：填了 ClientMessage 就等于把代理故障说成池子故障。
+func TestHandleOpenAIUpstreamTransportError_NonPoolErrorKeepsGenericBody(t *testing.T) {
+	svc := &OpenAIGatewayService{accountRepo: &openaiTransportAccountRepoStub{}}
+	account := &Account{ID: 92, Name: "plain", Platform: PlatformOpenAI}
+	c, _ := newOpenAITransportErrTestContext()
+
+	err := svc.handleOpenAIUpstreamTransportError(context.Background(), c, account,
+		errors.New("proxyconnect tcp: i/o timeout"), false)
+
+	var fo *UpstreamFailoverError
+	require.True(t, errors.As(err, &fo))
+	require.Empty(t, fo.ClientMessage)
+	require.NotEqual(t, OpenAIGatewayPoolReason, fo.Reason)
 }

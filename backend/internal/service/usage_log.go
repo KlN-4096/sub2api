@@ -23,11 +23,18 @@ const (
 	// RequestTypeTurnStateProbe 是 292 猎手的探测（openai_turn_state_hunter.go）：挂在配置的
 	// API Key 下按标准路径计费，输入 token 为本地估算、输出恒 0。
 	RequestTypeTurnStateProbe RequestType = 6
+	// RequestTypeGatewayPoolDegraded 是被 state-echo 判成降智后整发丢掉的那次上游尝试
+	// （openai_gwpool_state_echo.go）。它真的到了上游、上游真的跑了，所以要落行；但判定点在
+	// 「响应头到手、响应体一个字节都没读」的时刻，**输入与输出 token 都观测不到**
+	// （两者都来自上游 response.completed 事件里的 usage）⇒ 这种行恒为 0 token / 0 金额。
+	// 刻意不估算：编出来的数字进了计费表，事后没人分得清哪条是真的。
+	RequestTypeGatewayPoolDegraded RequestType = 7
 )
 
 func (t RequestType) IsValid() bool {
 	switch t {
-	case RequestTypeUnknown, RequestTypeSync, RequestTypeStream, RequestTypeWSV2, RequestTypeCyberBlocked, RequestTypeLive, RequestTypeTurnStateProbe:
+	case RequestTypeUnknown, RequestTypeSync, RequestTypeStream, RequestTypeWSV2, RequestTypeCyberBlocked, RequestTypeLive,
+		RequestTypeTurnStateProbe, RequestTypeGatewayPoolDegraded:
 		return true
 	default:
 		return false
@@ -55,6 +62,8 @@ func (t RequestType) String() string {
 		return "live"
 	case RequestTypeTurnStateProbe:
 		return "probe"
+	case RequestTypeGatewayPoolDegraded:
+		return "gwpool_degraded"
 	default:
 		return "unknown"
 	}
@@ -80,8 +89,11 @@ func ParseUsageRequestType(value string) (RequestType, error) {
 		return RequestTypeLive, nil
 	case "probe":
 		return RequestTypeTurnStateProbe, nil
+	case "gwpool_degraded":
+		return RequestTypeGatewayPoolDegraded, nil
 	default:
-		return RequestTypeUnknown, fmt.Errorf("invalid request_type, allowed values: unknown, sync, stream, ws_v2, cyber, live, probe")
+		return RequestTypeUnknown, fmt.Errorf(
+			"invalid request_type, allowed values: unknown, sync, stream, ws_v2, cyber, live, probe, gwpool_degraded")
 	}
 }
 

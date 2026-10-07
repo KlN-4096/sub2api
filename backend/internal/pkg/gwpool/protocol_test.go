@@ -390,103 +390,29 @@ func TestCookieReadsPairRemaining(t *testing.T) {
 	}
 }
 
-// POST /pair/renew：回传的是**事实**（一串 cookie）+ 这张票的票号，一个判断字段都没有。
-// 认证与 /cookie 同一把 consumer key。
-func TestRenewPostsNewPair(t *testing.T) {
-	var hits int
-	var gotPath, gotAuth, gotBody, gotContentType string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
-		gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
-		gotContentType = r.Header.Get("Content-Type")
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<10))
-		gotBody = string(body)
-		// 真池子回的票号是 sha256(cookie) 的前 12 位（契约里确定性可复算）。
-		// **写死字面量**：两边都调 cookieVersionOf 的话，那个相等在它的任何实现下都成立
-		// （把前缀改成 16 位本包照样全绿）—— 算法本身就没人钉了。
-		// echo -n '__cflb=new-lb; __oailb=new-jwt' | sha256sum ⇒ ec9d5e27e35f…
-		_, _ = io.WriteString(w, `{"ok":true,"cookie_version":"ec9d5e27e35f","valid_for_s":3600}`)
-	}))
-	defer srv.Close()
-
-	client := New(srv.URL, "ck-secret-value", 0)
-	next, err := client.Renew(context.Background(), "tkt-7", "__cflb=new-lb; __oailb=new-jwt")
-	if err != nil {
-		t.Fatalf("续期应成功: %v", err)
-	}
-	if next != "ec9d5e27e35f" {
-		t.Fatalf("新票号没收上来: %q", next)
-	}
-	if gotPath != "/pair/renew" {
-		t.Fatalf("path=%q", gotPath)
-	}
-	if gotAuth == "" {
-		t.Fatal("续期的认证必须与 /cookie 一致（带 consumer key）")
-	}
-	if gotContentType != "application/json" {
-		t.Fatalf("content-type=%q", gotContentType)
-	}
-	// 字段只有这两个：带任何满血/降智/质量字段都是越界（/touch 10-01 就是因此被删的）。
-	if gotBody != `{"cookie":"__cflb=new-lb; __oailb=new-jwt","cookie_version":"tkt-7"}` {
-		t.Fatalf("body=%q", gotBody)
-	}
-
-	// 票号或 cookie 缺一个就不发请求（没什么可指认 / 没什么可续），且不算错误。
-	for _, tc := range [][2]string{{"", "__cflb=a"}, {"tkt-7", "   "}} {
-		if next, err := client.Renew(context.Background(), tc[0], tc[1]); err != nil || next != "" {
-			t.Fatalf("Renew(%q,%q) 应是空操作: %q %v", tc[0], tc[1], next, err)
+// region 是消费端把落点按大区归档的唯一来源（账号卡片那九个格子）。缺失必须是空串而不是
+// 猜一个：老版本池子不报它，猜出来的大区会让卡片把一个还能用的大区标成已烧过。
+// 它和网关名一样进账号 extra 和前端 ⇒ 同样要过 sanitizeOpaque。
+func TestCookieReadsRegion(t *testing.T) {
+	for _, tc := range []struct{ field, want string }{
+		{`,"region":"east-asia"`, "east-asia"},
+		{``, ""},
+		{`,"region":""`, ""},
+		// 过长判废而不是截断 —— 这一格同时证明 region 真的过了 sanitizeOpaque
+		//（控制字符那一支由 TestCookieSanitizesGateway 盯着，两者同一个函数）。
+		{`,"region":"` + strings.Repeat("r", maxGatewayLen+1) + `"`, ""},
+	} {
+		body := `{"gateway":"unified-1","cookie":"__cflb=a; __oailb=b","valid_for_s":150` + tc.field + `}`
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{})
+		srv.Close()
+		if err != nil {
+			t.Fatalf("%s: %v", tc.field, err)
 		}
-	}
-	if hits != 1 {
-		t.Fatalf("空参数不该发请求，实际打了 %d 次", hits)
-	}
-}
-
-// 200 但 ok=false 是池子明说「没续上」⇒ 当失败，不能把一个没生效的续期记成成功（那会让本地
-// 以为这张票的寿命已经拉满、不再有人去救它）。非 200 走统一错误体 ⇒ *PoolError + 闭集码。
-func TestRenewRefusalShapes(t *testing.T) {
-	var reply func(w http.ResponseWriter)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		reply(w)
-	}))
-	defer srv.Close()
-	client := New(srv.URL, "k", 0)
-
-	reply = func(w http.ResponseWriter) {
-		_, _ = io.WriteString(w, `{"ok":false}`)
-	}
-	if _, err := client.Renew(context.Background(), "tkt-7", "__cflb=a; __oailb=b"); !errors.Is(err, ErrPool) {
-		t.Fatalf("ok=false 应是失败: %v", err)
-	}
-
-	// 票号是**信任边界**：它是之后还票 / 弃票用的身份，池子回一个属于别人那张在用票的票号，
-	// 两个动作就全打在别人头上。复算 sha256(cookie)[:12] 对不上 ⇒ 当池子没换票号（留用旧的），
-	// 不是整次失败（续期本身已经生效了）。
-	reply = func(w http.ResponseWriter) {
-		_, _ = io.WriteString(w, `{"ok":true,"cookie_version":"deadbeef1234"}`)
-	}
-	next, err := client.Renew(context.Background(), "tkt-7", "__cflb=a; __oailb=b")
-	if err != nil || next != "" {
-		t.Fatalf("票号对不上应当当没换（空串、不报错），实际 %q %v", next, err)
-	}
-	// 大小写不敏感：同一串十六进制。字面量同样写死（sha256('__cflb=a; __oailb=b') 前 12 位）。
-	reply = func(w http.ResponseWriter) {
-		_, _ = io.WriteString(w, `{"ok":true,"cookie_version":"`+strings.ToUpper("f4b7fc260a1f")+`"}`)
-	}
-	if next, err = client.Renew(context.Background(), "tkt-7", "__cflb=a; __oailb=b"); err != nil || next == "" {
-		t.Fatalf("大写的同一串应当认下来，实际 %q %v", next, err)
-	}
-
-	reply = func(w http.ResponseWriter) {
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = io.WriteString(w, `{"error":{"code":"consumer_rejected","retry_after_seconds":300}}`)
-	}
-	_, err = client.Renew(context.Background(), "tkt-7", "__cflb=a; __oailb=b")
-	var poolErr *PoolError
-	if !errors.As(err, &poolErr) {
-		t.Fatalf("非 200 应是 *PoolError: %v", err)
-	}
-	if poolErr.Code != CodeConsumerRejected || poolErr.RetryAfter != 300*time.Second {
-		t.Fatalf("错误码/退避没收上来: %+v", poolErr)
+		if pair.Region != tc.want {
+			t.Fatalf("%s: region = %q，应为 %q", tc.field, pair.Region, tc.want)
+		}
 	}
 }

@@ -567,6 +567,7 @@ const getRequestTypeLabel = (log: AdminUsageLog): string => {
   if (requestType === 'cyber') return t('usage.cyber')
   if (requestType === 'live') return t('usage.live')
   if (requestType === 'probe') return t('usage.probe')
+  if (requestType === 'gwpool_degraded') return t('usage.gwpoolDegraded')
   if (requestType === 'ws_v2') return t('usage.ws')
   if (requestType === 'stream') return t('usage.stream')
   if (requestType === 'sync') return t('usage.sync')

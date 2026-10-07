@@ -326,7 +326,7 @@ func attachRouteApplied(
 	headers http.Header,
 ) OpenAIGatewayPoolApplied {
 	t.Helper()
-	ctx, sink := withOpenAIGatewayPoolSink(context.Background())
+	ctx, sink := withOpenAIGatewayPoolSink(context.Background(), nil)
 	_, err := store.AttachRoute(ctx, account, rawURL, headers)
 	require.NoError(t, err)
 	result := &OpenAIForwardResult{}
@@ -1417,10 +1417,9 @@ func TestGatewayPoolInferencePathMatchesCodexURL(t *testing.T) {
 		"chatgptCodexURL=%s", chatgptCodexURL)
 }
 
-// 默认只给 Codex 推理面覆写：侧信道（装饰性 GET）、/codex/alpha/search 这些也打在 chatgpt.com
-// 上，给它们取票等于白烧一个 (上游账号 × 网关) 单位。开 openai_gwpool_all_models 回到
-// 「所有 chatgpt.com 请求都覆写」。
-func TestAttachRouteOnlyOverridesInferenceFaceByDefault(t *testing.T) {
+// **只给 Codex 推理面覆写，没有开关**：侧信道（装饰性 GET）、/codex/alpha/search 这些也打在
+// chatgpt.com 上，给它们取票等于白烧一个 (上游账号 × 网关) 单位，而供给是个位数张/小时。
+func TestAttachRouteOnlyOverridesInferenceFace(t *testing.T) {
 	poolCookie := gwpoolTestPairCookie(t, "unified-142")
 	fake := newGwpoolFakePool(t, poolCookie, 150)
 	store := &openAICodexCookieStore{}
@@ -1446,13 +1445,13 @@ func TestAttachRouteOnlyOverridesInferenceFaceByDefault(t *testing.T) {
 	require.Contains(t, headers.Get("Cookie"), poolCookie)
 	require.Equal(t, int64(1), fake.hits.Load())
 
-	// 开关打开：非推理面也覆写（接这个开关之前的行为）。
-	acct.Extra[openAIGatewayPoolAllModelsExtraKey] = true
+	// 取过票之后再打非推理面：缓存里有票也不许用，照样落回罐。
 	headers = http.Header{}
 	require.NoError(t, attachRoute(context.Background(), store, acct,
 		"https://chatgpt.com/backend-api/codex/alpha/search", headers))
-	require.Contains(t, headers.Get("Cookie"), poolCookie)
-	require.Equal(t, int64(1), fake.hits.Load(), "窗口内复用同一张，不该再取一次")
+	require.Contains(t, headers.Get("Cookie"), "__oailb=jwt-1")
+	require.NotContains(t, headers.Get("Cookie"), poolCookie)
+	require.Equal(t, int64(1), fake.hits.Load(), "非推理面一张票都不许取")
 }
 
 // 四个旋钮的默认值必须等于接它们之前的写死值；配坏了（0 / 负数 / 非数字）也回默认，
@@ -1463,7 +1462,6 @@ func TestGatewayPoolAccountKnobDefaults(t *testing.T) {
 	require.Equal(t, openAIGatewayPoolListTimeout, bare.gatewayPoolListTimeout())
 	require.Equal(t, openAIGatewayPoolGatewayWindow, bare.gatewayPoolGatewayWindow())
 	require.True(t, bare.gatewayPoolSteering(), "自己挑落点缺省即开")
-	require.False(t, bare.gatewayPoolAllModels())
 
 	// 超大值也算配坏：time.Duration 是纳秒级 int64，秒数到 1e10 就乘溢出成**负数** ⇒
 	// 本地账本整体静默失效（gatewayPoolUsedRecently 恒 false），与「窗口越大越严」正好相反；
@@ -1487,7 +1485,6 @@ func TestGatewayPoolAccountKnobDefaults(t *testing.T) {
 		openAIGatewayPoolListTimeoutExtraKey:   float64(5), // jsonb 解出来是 float64
 		openAIGatewayPoolGatewayWindowExtraKey: 7200,
 		openAIGatewayPoolSteeringExtraKey:      false,
-		openAIGatewayPoolAllModelsExtraKey:     true,
 	}}
 	require.Equal(t, 20*time.Second, tuned.gatewayPoolFetchTimeout())
 	require.Equal(t, 5*time.Second, tuned.gatewayPoolListTimeout())
@@ -1498,7 +1495,6 @@ func TestGatewayPoolAccountKnobDefaults(t *testing.T) {
 	}}
 	require.Equal(t, 24*time.Hour, atCap.gatewayPoolGatewayWindow())
 	require.False(t, tuned.gatewayPoolSteering())
-	require.True(t, tuned.gatewayPoolAllModels())
 
 	// 只有显式 false 才关掉「自己挑落点」：写错类型不能把它关掉（那会静默改变调度行为）。
 	require.True(t, (&Account{Extra: map[string]any{openAIGatewayPoolSteeringExtraKey: "false"}}).gatewayPoolSteering())

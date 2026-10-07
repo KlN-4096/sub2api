@@ -271,6 +271,7 @@ export default {
         todayStats: 'Today Stats',
         groups: 'Groups',
         usageWindows: 'Usage Windows',
+        gateway: 'Gateway',
         proxy: 'Proxy',
         lastUsed: 'Last Used',
         createdAt: 'Created',
@@ -283,6 +284,7 @@ export default {
         ungrouped: 'Ungrouped',
         hint: 'Displayed as "group / base score / sticky bonus". The base score is computed within the current filtered candidate set and includes priority, load, queue depth, error rate, first-token latency, reset window, quota headroom, billing rate, and related factors. The sticky bonus applies only when sticky weighting is enabled for previous_response_id or session_hash. Higher scores are preferred.'
       },
+      gatewayColumnHint: 'Landing gateways come from the route tickets delivered by the gateway pool (gwpool). The full-strength window applies to (upstream account × gateway), and a gateway is determined by (region × account), so this column is laid out by the nine regions: the first line is the current region and gateway, and each cell below is the gateway most recently landed on in that region. Amber means the gateway was used within the local ledger window (4 hours by default, adjustable in the gateway pool settings of that account) and is still cooling; grey means the window has elapsed and that region is usable again. Note that both the region and the gateway name are what the pool claimed on delivery, not the upstream landing point actually observed.',
       usageWindowsHint: '"5h / 7d" are the upstream account\'s official rolling usage windows (e.g. OpenAI ChatGPT, Claude). They are imposed by the upstream provider on the account itself — not configured by sub2api, and unrelated to the models you map. Usage resets automatically once each window rolls over, and the limit cannot be lifted from within sub2api. Purple/amber rows are the Codex turn-states currently in effect for this account (one per model); the countdown is the remainder of the one-hour validity from minting, and amber means the ticket looks degraded.',
       ollamaCloud: {
         title: 'Ollama Cloud usage',
@@ -742,21 +744,25 @@ export default {
         gwpoolConsumerKeyKeep: 'Saved — leave blank to keep it',
         gwpoolConsumerKeyDesc:
           'The pool issues one key per account, so it lives on the account rather than on the instance. Treated like an access token: it is never echoed back after saving and never returned in list or detail responses.',
-        gwpoolAllModels: 'Override every chatgpt.com request',
-        gwpoolAllModelsDesc:
-          'Scope is decided by the request path. Off (default): only the Codex inference endpoint (/backend-api/codex/responses) gets a pooled pair. Side calls and the /codex/alpha/search, /codex/realtime/calls, /codex/images/* endpoints also hit chatgpt.com but are not inference turns, and a pair spent on them burns one (account x gateway) unit for nothing. Note that alpha search has a fallback that posts to the inference endpoint itself, so that one does take a pair even while this is off - it really is one /responses call. On: every chatgpt.com request on this account is overridden.',
         gwpoolAdvanced: 'Advanced (blank = default)',
         gwpoolGatewayWindow: 'Local ledger window (s)',
         gwpoolGatewayWindowDesc:
           'How long this account treats a gateway it already touched as burnt when picking a landing spot. Default 14400 (4h). The pool keeps its own book per consumer key, which cannot see one Codex credential sitting on several account rows.',
         gwpoolFetchTimeout: 'Pair fetch timeout (s)',
-        gwpoolFetchTimeoutDesc: 'Caps one /cookie call. Default 8.',
+        gwpoolFetchTimeoutDesc:
+          'Caps one /cookie call. Default 25. It also decides how long we let the pool mint (the wait we send is this value minus 1s, capped at 30). The number has to cover everything the pool does for one delivery, not just the network round trip: with verify-before-deliver on, every gateway it tries costs a real state-echo request upstream. The old 8s did not cover it - on 2026-10-02, 301 of 458 production takes (66%) were cut off before a response was written, after the upstream call had already gone out and burned a slot for nothing. Lowering this brings that failure back.',
         gwpoolListTimeout: 'Gateway list timeout (s)',
         gwpoolListTimeoutDesc:
           'Caps the /gateways call used to pick a landing spot. Default 2 — it is an optimisation and must never eat into the fetch budget; on timeout the pool picks for you.',
         gwpoolSteering: 'Pick the landing gateway myself',
         gwpoolSteeringDesc:
           'On (default): list the gateways first and name one this account has not burnt in the ledger window. Off: let the pool schedule it.',
+        gwpoolStateEcho: 'Degradation check',
+        gwpoolStateEchoDesc:
+          'On (default): when a request carried a live turn-state and the upstream answered with a different fresh one, the route is judged degraded and the current gateway is marked for rotation. Response headers only, and only on HTTP 200 - a fresh ticket on a 429/5xx is rate limiting or a fault, not evidence of degradation. This test has false negatives but no false positives: a full-strength verdict is trustworthy, a degraded verdict is occasionally wrong, so it will sometimes rotate a gateway and burn a slot for nothing - and supply is single digits of pairs per hour. Turn it off if the rotation rate becomes too expensive; with it off the behaviour is byte-for-byte what it was before this feature.',
+        gwpoolDegradedRetry: 'Degradation retry',
+        gwpoolDegradedRetryDesc:
+          'On (default): take a fresh pair (a different gateway) and replay the same request once, so the client never notices; if the replay is judged degraded too it is not retried again and the request fails. Off: truncate only and return a clean error for the client to retry itself. The cap is hard-wired at one and cannot be raised - the test misjudges sometimes, and every retry is a real upstream request that burns one (account x gateway) unit. Both attempts get a usage row: the dropped one is tagged as degraded-dropped and its tokens and cost are always zero (nothing of the response body is read at the truncation point, so usage simply cannot be observed, and it is deliberately not estimated).',
         gwpoolErrors: {
           GWPOOL_BASE_URL_INVALID:
             'The gateway pool URL must be an absolute http(s) address, e.g. https://pool.0102400.xyz. Fill in the pool root, not the /a/xxxx page.',
@@ -778,6 +784,27 @@ export default {
         turnStateRecoveryCooldown: 'Failure cooldown (hours)',
         turnStateRecoveryMin: 'Min interval (minutes)',
         turnStateRecoveryMax: 'Max interval (minutes)',
+        gatewayHistory: {
+          empty: 'Gateway -',
+          current: 'Current',
+          seen: '{n} used',
+          lastUsed: 'last used',
+          regionHot: 'used within the window, still cooling',
+          regionCooled: 'window elapsed, usable again',
+          regionIdle: 'never used',
+          regions: {
+            'us-east': 'US-E',
+            'us-west': 'US-W',
+            'south-america': 'S.Am',
+            'west-europe': 'W.EU',
+            europe: 'EU',
+            'east-asia': 'E.Asia',
+            oceania: 'Ocea',
+            'south-asia': 'S.Asia',
+            'middle-east': 'M.East',
+            unknown: 'Unknown'
+          }
+        },
         turnStatePool: {
           empty: 'Turn-state —',
           starved: 'Turn-state: no ticket, passing through',

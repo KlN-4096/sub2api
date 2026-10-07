@@ -119,6 +119,7 @@ export default {
         todayStats: '今日统计',
         groups: '分组',
         usageWindows: '用量窗口',
+        gateway: '网关落点',
         proxy: '代理',
         lastUsed: '最近使用',
         createdAt: '创建时间',
@@ -131,6 +132,7 @@ export default {
         ungrouped: '未分组',
         hint: '显示格式为“分组名 / 基础分 / 粘性加分”。基础分按当前筛选条件限定的候选账号计算，包含优先级、负载、排队、错误率、首包延迟、重置窗口、额度余量、计费倍率等因子；粘性加分只在开启粘性加权时用于 previous_response_id 或 session_hash。分数越大越优先。'
       },
+      gatewayColumnHint: '网关落点来自网关池（gwpool）下发的路由票。满血窗口的作用单位是（上游账号 × 网关），而网关由（大区 × 账号）决定，所以这一列按九个大区摊开：第一行是当前大区与当前网关，下面每格是该大区最近一次落在哪个网关上。琥珀色表示该网关在本地账本窗口（默认 4 小时，可在账号的网关池配置里调）内打过、仍在冷却；灰色表示已过窗口，该大区可以再用。括注：大区与网关名均为网关池交付时的口径，不代表上游实际落点。',
       usageWindowsHint: '“5h / 7d”是上游账号（如 OpenAI ChatGPT、Claude）官方的滚动用量窗口限制，由上游对账号设定，并非 sub2api 配置，也与你映射的模型无关。窗口滚动到期后用量会自动重置，无法在 sub2api 端解除该限制。紫色/琥珀色的条目是该账号当前生效的 Codex Turn-State（按模型分），倒计时是这张票自铸造起 1 小时的剩余有效期；琥珀色代表这张票疑似降智。',
       ollamaCloud: {
         title: 'Ollama Cloud 用量',
@@ -849,21 +851,25 @@ export default {
         gwpoolConsumerKeyKeep: '已保存，留空不修改',
         gwpoolConsumerKeyDesc:
           '池子按账号发 key，所以它配在账号上而不是实例上。与 access_token 同级：保存后页面不再回显，列表与详情里也不返回。',
-        gwpoolAllModels: '所有 chatgpt.com 请求都覆写',
-        gwpoolAllModelsDesc:
-          '范围按**请求路径**算。关（默认）：只有 Codex 推理面（/backend-api/codex/responses）取票覆写；侧信道与 /codex/alpha/search、/codex/realtime/calls、/codex/images/* 这些端点也打在 chatgpt.com 上，但它们不是推理轮次，给它们取一张票等于白烧一个 (账号 × 网关) 单位。注意 alpha 搜索还有一条兜底是直接打推理面的，那一条开关关着也会取票 —— 它确实是一发 /responses。开：这个账号打到 chatgpt.com 的每一个请求都覆写。',
         gwpoolAdvanced: '高级（留空即默认值）',
         gwpoolGatewayWindow: '本地账本窗口（秒）',
         gwpoolGatewayWindowDesc:
           '挑落点时，这个账号把碰过的网关当作「烧过」的时长。默认 14400（4 小时）。池子按它发的 consumer key 自己记一本账，认不出「同一份 Codex 凭据挂在多个账号行上」。',
         gwpoolFetchTimeout: '取票超时（秒）',
-        gwpoolFetchTimeoutDesc: '兜住一次 /cookie 调用。默认 8。',
+        gwpoolFetchTimeoutDesc:
+          '兜住一次 /cookie 调用，**默认 25**。它同时决定愿意等池子现铸多久（送出去的 wait = 本值 − 1 秒，上限 30）。这个数要盖住池子那边一次交付的全部工作，不只是网络往返：池子开着交付前验证时，每试一个网关都要打一发真实的 state-echo。原来的 8 秒盖不住 —— 2026-10-02 线上 458 次取票里 301 次（66%）是响应还没写出来就被这条线掐断的，而那几发已经打到上游、槽位照烧、一张票都没交付。调小会把这个故障带回来。',
         gwpoolListTimeout: '网关清单超时（秒）',
         gwpoolListTimeoutDesc:
           '兜住挑落点用的那次 /gateways。默认 2——它只是优化，绝不能吃掉取票的预算；超时就退回「由池子自己挑」。',
         gwpoolSteering: '自己挑落点网关',
         gwpoolSteeringDesc:
           '开（默认）：先列网关，再点名一个本地账本窗口内没烧过的。关：交给池子按它的调度选。',
+        gwpoolStateEcho: '降智检测',
+        gwpoolStateEchoDesc:
+          '开（默认）：业务请求送出了活 turn-state、而上游在响应头里回了一张**不同的**新票 ⇒ 判这条路由已降智，把当前网关标记为要换。只读响应头、只在 HTTP 200 上下结论（429/5xx 回新票是限流或故障，不算降智证据）。**这个判据有假阴性、没有假阳性：判「满血」可信，判「降智」偶尔会误判 ⇒ 会白换一次网关、白烧一个槽位**，而供给只有个位数张/小时。换网关的频率高到吃不住时就关掉它，关掉后行为与接这个功能之前逐字节一致。',
+        gwpoolDegradedRetry: '降智重试',
+        gwpoolDegradedRetryDesc:
+          '开（默认）：当场换一张票（换一个网关）把同一个请求重发一遍，客户端无感；重试那一发若又判降智就不再试，直接按失败返回。关：只截断，回一个干净的错误，由客户端自己重发。上限写死一次，调不大 —— 判据会误判，而每一发重试都是一次真实上游请求、都会烧掉一个 (账号 × 网关) 单位。两发都会落使用记录：被丢掉那一发标成「降智丢弃」，它的 token 与金额恒为 0（截断时响应体一个字节都没读，用量根本观测不到，刻意不估算）。',
         gwpoolErrors: {
           GWPOOL_BASE_URL_INVALID:
             '网关池地址必须是绝对的 http(s) 地址，例如 https://pool.0102400.xyz。填池子的根地址，不是 /a/xxxx 个人页面。',
@@ -885,6 +891,27 @@ export default {
         turnStateRecoveryCooldown: '失败冷却（小时）',
         turnStateRecoveryMin: '间隔下限（分钟）',
         turnStateRecoveryMax: '间隔上限（分钟）',
+        gatewayHistory: {
+          empty: '网关 -',
+          current: '当前',
+          seen: '打过 {n} 个',
+          lastUsed: '最近一次',
+          regionHot: '窗口内打过，仍在冷却',
+          regionCooled: '已过窗口，可再用',
+          regionIdle: '未打过',
+          regions: {
+            'us-east': '美东',
+            'us-west': '美西',
+            'south-america': '南美',
+            'west-europe': '西欧',
+            europe: '欧洲',
+            'east-asia': '东亚',
+            oceania: '大洋',
+            'south-asia': '南亚',
+            'middle-east': '中东',
+            unknown: '未归类'
+          }
+        },
         turnStatePool: {
           empty: 'Turn-State -',
           starved: 'Turn-State 无票·裸奔中',
