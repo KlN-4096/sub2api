@@ -55,10 +55,15 @@ jobs:
           go version | grep -q 'go1.27.3'
       - name: Unit tests
         working-directory: backend
-        run: make test-unit
+        run: |
+          python3 ../tools/test_backend_unit_runner_test.py
+          make test-unit
       - name: Integration tests
         working-directory: backend
         run: make test-integration
+      - name: OpenAI recording concurrency checks
+        working-directory: backend
+        run: go test -race -tags=unit -timeout=60s -run '^Test(Recorder|OpenAIRecording)' ./internal/pkg/upstreamrecord ./internal/service
 
   frontend:
     runs-on: ubuntu-latest
