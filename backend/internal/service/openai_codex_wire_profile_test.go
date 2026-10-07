@@ -390,7 +390,7 @@ func TestCodexDeviceWireProfileAlphaMetadata(t *testing.T) {
 		"installation_id":"client","window_id":"window","window_number":2,"context_window_id":"context",
 		"agent_name":"agent","parent_turn_id":"parent-turn","root_turn_id":"root-turn",
 		"request_kind":"compaction","compaction":{"trigger":"auto"},"history_ingest_requested":true,
-		"forked_from_ordinal_exclusive":2,"tool_namespaces_info":["tool"],
+		"analytics_enabled":true,"forked_from_ordinal_exclusive":2,"tool_namespaces_info":["tool"],
 		"model":"gpt-5.5","reasoning_effort":"high","node_repl_disabled":false,"codex_version":"0.0.1"}`)
 	svc, _ := wireProfileTestService()
 	req, err := svc.buildOpenAIAlphaSearchRequest(context.Background(), c, wireProfileTestAccount(true), body, "offline-token")
@@ -402,7 +402,7 @@ func TestCodexDeviceWireProfileAlphaMetadata(t *testing.T) {
 	for _, field := range []string{
 		"installation_id", "window_id", "window_number", "context_window_id",
 		"agent_name", "parent_turn_id", "root_turn_id", "request_kind", "compaction",
-		"history_ingest_requested", "forked_from_ordinal_exclusive", "tool_namespaces_info",
+		"history_ingest_requested", "analytics_enabled", "forked_from_ordinal_exclusive", "tool_namespaces_info",
 	} {
 		require.False(t, meta.Get(field).Exists(), "MCP projection must omit %s", field)
 	}

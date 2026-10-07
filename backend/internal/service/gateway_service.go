@@ -788,6 +788,10 @@ type UpstreamFailoverError struct {
 	ClientStatusCode         int
 	ClientMessage            string
 	StreamFailedFrame        *OpenAIStreamFailedFrame // 触发本次 failover 的流内 failed/error 帧；耗尽时用于错误透传规则匹配
+	// RawRelayResponse：原样中继账号整体不可用。换号耗尽时 handler 把 StatusCode/
+	// ResponseHeaders/ResponseBody 原样写回客户端，不经错误映射与脱敏；WS 下
+	// ResponseBody 是已包好的错误帧，原样发一帧。
+	RawRelayResponse bool
 }
 
 func (e *UpstreamFailoverError) Error() string {

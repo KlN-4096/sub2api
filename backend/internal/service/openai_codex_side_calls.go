@@ -193,6 +193,7 @@ func (s *OpenAIGatewayService) dispatchCodexSideCall(
 		req.Header = refreshed
 		// 真客户端对 settings/user 显式禁缓存（backend-client/src/client.rs:486-498）。
 		req.Header.Set("cache-control", "no-cache, no-store")
+		req.Header.Set("accept", "*/*") // backend-client 不设 Accept，出站是 reqwest 默认值
 		req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
 		started = true
 		resp, err := s.doOpenAIUpstream(req, proxyURL, account)

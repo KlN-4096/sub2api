@@ -105,6 +105,7 @@ func TestCodexSideCallsFollowRealClientCadence(t *testing.T) {
 	require.Equal(t, http.MethodGet, settings.Method)
 	require.Equal(t, "no-cache, no-store", settings.Header.Get("cache-control"),
 		"真客户端这条带 no-cache, no-store（backend-client/src/client.rs:486-498）")
+	require.Equal(t, "*/*", settings.Header.Get("accept"), "backend-client 不设 Accept，出站是 reqwest 默认值")
 	require.Equal(t, "socks5://10.0.0.9:1080", <-up.proxies,
 		"侧信道必须走账号自己的代理，不能从网关 IP 直连")
 

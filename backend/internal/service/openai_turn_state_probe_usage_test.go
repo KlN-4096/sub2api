@@ -177,7 +177,7 @@ func TestOpenAITurnStateHunterProbeUsageSubscriptionGroup(t *testing.T) {
 }
 
 func TestOpenAITurnStateProbeInputTokensCountsBasePrompt(t *testing.T) {
-	n := openAITurnStateProbeInputTokens(hunterTestModel, "high")
+	n := openAITurnStateProbeInputTokens(hunterTestModel, "high", openAITurnStateHuntProbeText)
 	require.Greater(t, n, 500)
 }
 

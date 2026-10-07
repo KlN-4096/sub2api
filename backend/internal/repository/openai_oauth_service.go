@@ -123,6 +123,7 @@ func createOpenAIReqClient(proxyURL string) (*req.Client, error) {
 	return getSharedReqClient(reqClientOptions{
 		ProxyURL: proxyURL,
 		Timeout:  120 * time.Second,
+		Cookies:  reqCookiesNone, // 换/刷 token 无状态；按代理共享的 jar 会跨账号带 cookie
 	})
 }
 

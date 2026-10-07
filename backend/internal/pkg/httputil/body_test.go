@@ -141,3 +141,35 @@ func TestReadRequestBodyWithPrealloc_RespectsIdentityEncoding(t *testing.T) {
 		t.Fatalf("body mismatch: got %q", got)
 	}
 }
+
+func TestReadRequestBodyWithPrealloc_KeepsWireBytes(t *testing.T) {
+	enc, _ := zstd.NewWriter(nil)
+	compressed := enc.EncodeAll([]byte(samplePayload), nil)
+	_ = enc.Close()
+
+	req := newRequestWithBody(t, compressed, "zstd")
+	if _, err := ReadRequestBodyWithPrealloc(req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	preread, ok := req.Body.(*PrereadBody)
+	if !ok {
+		t.Fatalf("body not refilled: %T", req.Body)
+	}
+	wire, encoding, ok := preread.Wire()
+	if !ok || encoding != "zstd" || !bytes.Equal(wire, compressed) {
+		t.Fatalf("wire lost: ok=%v encoding=%q", ok, encoding)
+	}
+	again, err := ReadRequestBodyWithPrealloc(req)
+	if err != nil || string(again) != samplePayload {
+		t.Fatalf("second read changed: %q %v", again, err)
+	}
+
+	same := NewPrereadBodyFrom(req.Body, []byte(samplePayload))
+	if _, _, ok := same.Wire(); !ok {
+		t.Fatal("refill with identical content must keep wire")
+	}
+	changed := NewPrereadBodyFrom(req.Body, []byte(`{"model":"other"}`))
+	if _, _, ok := changed.Wire(); ok {
+		t.Fatal("rewritten body must drop wire")
+	}
+}
