@@ -1048,6 +1048,7 @@ export interface TempUnschedulableState {
 
 export interface TempUnschedulableStatus {
   active: boolean
+  gateway_pool_rest?: boolean
   state?: TempUnschedulableState
 }
 

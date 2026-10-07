@@ -70,6 +70,24 @@ function makeAccount(overrides: Partial<Account>): Account {
 }
 
 describe('AccountStatusIndicator', () => {
+  it('keeps real pool rest visible after recheck expiry or generic block clearing', async () => {
+    const account = makeAccount({ platform: 'openai', extra: { openai_gwpool: true },
+      temp_unschedulable_until: '2020-01-01T00:00:00Z',
+      temp_unschedulable_reason: '网关候选低于10，休息后达到40才恢复' })
+    const wrapper = mount(AccountStatusIndicator, {
+      props: { account, gatewayPoolRest: { active: true } },
+      global: { stubs: { Icon: true } }
+    })
+    expect(wrapper.text()).toContain('admin.accounts.status.tempUnschedulable')
+    await wrapper.setProps({ account: { ...account, temp_unschedulable_until: null, temp_unschedulable_reason: null } })
+    expect(wrapper.text()).toContain('admin.accounts.tempUnschedulable.poolRestPending')
+    await wrapper.setProps({ gatewayPoolRest: { active: false } })
+    expect(wrapper.text()).not.toContain('admin.accounts.status.tempUnschedulable')
+    await wrapper.setProps({ gatewayPoolRest: undefined, gatewayPoolRestPending: true })
+    expect(wrapper.text()).toContain('common.unknown')
+    expect(wrapper.text()).not.toContain('admin.accounts.status.active')
+    wrapper.unmount()
+  })
   it('Claude 5 系列模型限流时显示 Opus 和 Sonnet 的短别名', () => {
     const wrapper = mount(AccountStatusIndicator, {
       props: {

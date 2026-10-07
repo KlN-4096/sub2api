@@ -288,7 +288,10 @@
           </template>
           <template #cell-status="{ row }">
             <div class="flex items-center gap-1.5">
-              <AccountStatusIndicator :account="row" @show-temp-unsched="handleShowTempUnsched" />
+              <AccountStatusIndicator :account="row"
+                :gateway-pool-rest="gatewayProgressUnavailable ? undefined : gatewayProgress[row.id]?.runtime?.rest"
+                :gateway-pool-rest-pending="row.extra?.openai_gwpool === true && (gatewayProgressUnavailable || !gatewayProgress[row.id]?.runtime?.rest)"
+                @show-temp-unsched="handleShowTempUnsched" />
             </div>
           </template>
           <template #cell-schedulable="{ row }">
@@ -1140,7 +1143,7 @@ const {
 })
 
 const { progress: gatewayProgress, unavailable: gatewayProgressUnavailable } = useGatewayPoolProgress(computed(() =>
-  hiddenColumns.has('gateway') && hiddenColumns.has('capacity') ? [] : accounts.value
+  hiddenColumns.has('gateway') && hiddenColumns.has('capacity') && hiddenColumns.has('status') ? [] : accounts.value
     .filter(account => account.extra?.openai_gwpool === true)
     .map(account => account.id)
 ))

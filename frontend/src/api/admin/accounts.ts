@@ -96,6 +96,7 @@ export interface GatewayPoolProgress {
     current_concurrency?: number | null
     concurrency_limit?: number
     cooldown_estimate?: { resume_gateways: number; eligible_at?: string }
+    rest?: { active: boolean; changed_at?: string; next_check?: string; reason?: string }
   }
 }
 

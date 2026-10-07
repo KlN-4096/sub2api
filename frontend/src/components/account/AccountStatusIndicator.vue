@@ -182,6 +182,8 @@ const { t } = useI18n()
 
 const props = defineProps<{
   account: Account
+  gatewayPoolRest?: { active: boolean }
+  gatewayPoolRestPending?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -299,6 +301,8 @@ const isOverloaded = computed(() => {
 
 // Computed: is temp unschedulable
 const isTempUnschedulable = computed(() => {
+  if (props.gatewayPoolRest?.active) return true
+  if (props.gatewayPoolRest && isGatewayPoolRestReason(props.account.temp_unschedulable_reason)) return false
   if (!props.account.temp_unschedulable_until) return false
   return new Date(props.account.temp_unschedulable_until).getTime() > sharedNow.value
 })
@@ -334,6 +338,7 @@ const overloadCountdown = computed(() => {
 })
 
 const tempUnschedRecoveryText = computed(() => {
+  if (props.gatewayPoolRest?.active) return t('admin.accounts.tempUnschedulable.poolRestPending')
   if (!isTempUnschedulable.value || !props.account.temp_unschedulable_until) return ''
   if (isGatewayPoolRestReason(props.account.temp_unschedulable_reason)) {
     return t('admin.accounts.tempUnschedulable.poolRestPending')
@@ -360,6 +365,7 @@ const statusClass = computed(() => {
   if (!props.account.schedulable) {
     return 'badge-gray'
   }
+  if (props.gatewayPoolRestPending) return 'badge-gray'
   return 'badge-success'
 })
 
@@ -380,6 +386,7 @@ const statusText = computed(() => {
   if (!props.account.schedulable) {
     return t('admin.accounts.status.paused')
   }
+  if (props.gatewayPoolRestPending) return t('common.unknown')
   return t(`admin.accounts.status.${props.account.status}`)
 })
 

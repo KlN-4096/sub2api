@@ -24,6 +24,10 @@
         </svg>
       </div>
 
+      <div v-else-if="loadFailed" class="rounded-lg border border-gray-200 p-4 text-sm text-gray-500 dark:border-dark-600 dark:text-gray-400">
+        {{ t('admin.accounts.tempUnschedulable.failedToLoad') }}
+      </div>
+
       <div v-else-if="!isActive" class="rounded-lg border border-gray-200 p-4 text-sm text-gray-500 dark:border-dark-600 dark:text-gray-400">
         {{ t('admin.accounts.tempUnschedulable.notActive') }}
       </div>
@@ -181,19 +185,21 @@ const appStore = useAppStore()
 const now = useSharedNowTicker(1000)
 
 const loading = ref(false)
+const loadFailed = ref(false)
 const resetting = ref(false)
 const status = ref<TempUnschedulableStatus | null>(null)
 const cooldownEstimate = ref<{ resume_gateways: number; eligible_at?: string }>()
 let requestVersion = 0
 
 const state = computed(() => status.value?.state || null)
-const isPoolRest = computed(() => isGatewayPoolRestReason(state.value?.error_message))
+const isPoolRest = computed(() => status.value?.gateway_pool_rest === true || isGatewayPoolRestReason(state.value?.error_message))
 const displayUntil = computed(() => isPoolRest.value
   ? Date.parse(cooldownEstimate.value?.eligible_at ?? '')
   : (state.value?.until_unix ?? 0) * 1000)
 
 const isActive = computed(() => {
   if (!status.value?.active || !state.value) return false
+  if (status.value.gateway_pool_rest) return true
   return state.value.until_unix * 1000 > Date.now()
 })
 
@@ -258,6 +264,7 @@ const loadStatus = async () => {
   const accountID = props.account.id
   const version = ++requestVersion
   status.value = null
+  loadFailed.value = false
   cooldownEstimate.value = undefined
   loading.value = true
   try {
@@ -277,6 +284,7 @@ const loadStatus = async () => {
     if (version !== requestVersion) return
     appStore.showError(error?.message || t('admin.accounts.tempUnschedulable.failedToLoad'))
     status.value = null
+    loadFailed.value = true
   } finally {
     if (version === requestVersion) loading.value = false
   }

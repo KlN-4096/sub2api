@@ -27,6 +27,7 @@ type GatewayPoolRuntimeView struct {
 	CurrentConcurrency   *int                               `json:"current_concurrency"`
 	ConcurrencyLimit     int                                `json:"concurrency_limit"`
 	CooldownEstimate     GatewayPoolCooldownEstimate        `json:"cooldown_estimate"`
+	Rest                 GatewayPoolRestView                `json:"rest"`
 }
 
 // Read-only local snapshot. This endpoint never fetches tickets, lists gateways,
@@ -49,6 +50,7 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 		}
 	}
 	historyPeers := map[string][]Account{}
+	restPeers := map[string][]Account{}
 	displayCache := gatewayPoolDisplayCache{}
 	for _, account := range accounts {
 		if account == nil || !s.codexCookies.gatewayPoolTakeover(account) {
@@ -56,7 +58,7 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 		}
 		identity, err := s.codexCookies.gatewayPoolIdentity(ctx, account)
 		if err != nil {
-			continue
+			return nil, err // an unreadable pool identity is not evidence of recovery
 		}
 		tag := gatewayPoolLedgerTag(identity)
 		peers, loaded := historyPeers[tag]
@@ -89,6 +91,15 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 			Rounds: make([]GatewayPoolUsageRound, len(state.Rounds)), Archived: state.Archived, Incomplete: state.Incomplete}
 		runtime.History, runtime.Contacts = s.gatewayPoolDisplaySnapshot(account, identity, peers, displayCache)
 		runtime.CooldownEstimate = s.codexCookies.gatewayPoolCooldownEstimate(identity, account, runtime.History, runtime.ObservedAt)
+		restRows, loaded := restPeers[tag]
+		if !loaded {
+			restRows, err = s.gatewayPoolStatePeers(ctx, tag, "rest")
+			if err != nil {
+				return nil, err // an unavailable rest snapshot is not a recovered account
+			}
+			restPeers[tag] = restRows
+		}
+		runtime.Rest = s.gatewayPoolRestDisplay(account, identity, restRows)
 		runtime.LedgerTag, runtime.ConcurrencyLimit = tag, account.Concurrency
 		runtime.GatewayWindowSeconds = int(account.gatewayPoolGatewayWindow().Seconds())
 		if count, known := concurrency[account.ID]; known {
