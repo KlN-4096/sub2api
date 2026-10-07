@@ -426,6 +426,13 @@ func redactAccountManagedExtra(extra map[string]any) map[string]any {
 			service.OpenCodeGoUsageAutoRefreshExtraKey,
 			service.OpenCodeGoUsageSnapshotExtraKey:
 			continue
+		case service.OpenAIGatewayPoolConsumerKeyExtraKey:
+			// 网关池凭据与 access_token 同级：只回「配过没有」，原值不出响应。
+			// 页面据此把输入框显示成「已保存，留空不修改」；原样提交回来的 bool
+			// 在服务侧按「没提」处理（service.mergeOpenAIGatewayPoolConsumerKey）。
+			if raw, ok := value.(string); ok && strings.TrimSpace(raw) != "" {
+				redacted[key] = true
+			}
 		default:
 			redacted[key] = value
 		}
@@ -781,6 +788,9 @@ func UsageLogFromServiceAdmin(l *service.UsageLog) *AdminUsageLog {
 		SafetyBufferingFasterModel: l.SafetyBufferingFasterModel,
 		RouteGateway:               l.RouteGateway,
 		RoutePair:                  l.RoutePair,
+		RoutePairOverridden:        l.RoutePairOverridden,
+		RoutePairPoolGateway:       l.RoutePairPoolGateway,
+		RoutePairPoolVersion:       l.RoutePairPoolVersion,
 		BillingTier:                l.BillingTier,
 		AccountRateMultiplier:      l.AccountRateMultiplier,
 		AccountStatsCost:           l.AccountStatsCost,

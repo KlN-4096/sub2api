@@ -12,10 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
-	"go.uber.org/zap"
 )
 
 // OpenAIRecordUsageInput input for recording usage
@@ -117,6 +119,71 @@ func (s *OpenAIGatewayService) RecordCyberPolicyUsageLog(ctx context.Context, in
 		NativeCompactionV2: in.NativeCompactionV2,
 	}); err != nil {
 		logger.LegacyPrintf("service.openai_gateway", "cyber usage record failed: request_id=%s err=%v", in.RequestID, err)
+	}
+}
+
+// RecordGatewayPoolDiscardedUsageLogs 给本次请求里被 state-echo 判成降智、整发丢掉的那些上游
+// 尝试各落一条用量行（openai_gwpool_state_echo.go）。
+//
+// 为什么非落不可：那几发**真的到了上游、上游真的跑了模型**，只是我们没把结果交给客户端。
+// 不落行的话，一个判据频繁误判的时段在用量表上完全看不见，而它正在消耗真实配额。
+//
+// **为什么恒为 0 token / 0 金额**：判定点在「响应头到手、响应体一个字节都没读」的时刻，而本仓库
+// 的输入与输出 token **都**来自上游 response.completed 事件里的 usage（RecordUsage 里的
+// result.Usage 全部由响应体解析得来，见 extractOpenAIUsageFromJSONBytes）⇒ 这一刻两边都观测不到。
+// 刻意不估算、不拿重试那一发的数去填、不拿历史均值去填：编出来的数字进了计费表，事后没人分得清
+// 哪条是真的。行本身是审计凭据（request_type=gwpool_degraded + 网关名），不是账单。
+//
+// 读数**取走即清**（takeDiscardedOpenAIGatewayPoolAttempts）：这个钩子在转发成功与失败两条路上
+// 都会被调到，每条丢弃行只该落一次。
+func (s *OpenAIGatewayService) RecordGatewayPoolDiscardedUsageLogs(ctx context.Context, c *gin.Context, in CyberPolicyUsageInput) {
+	attempts := takeDiscardedOpenAIGatewayPoolAttempts(c)
+	if s == nil || len(attempts) == 0 || in.APIKey == nil || in.APIKey.User == nil ||
+		in.Account == nil || strings.TrimSpace(in.Model) == "" {
+		return
+	}
+	// 计费幂等键必须**自己定**，不能用这一发的上游 request id，也不能用 uuid：
+	//
+	//   - 用上游 id 或 uuid 都落不到 isForcedUsageBillingRequestID 的闭集里 ⇒
+	//     resolveUsageBillingRequestID 会拿 ctx 里的 client/local id 把它整个盖掉 ⇒
+	//     丢弃行和重试成功那一行算出同一个键 ⇒ 丢弃行先落库抢占 usage_billing_dedup ⇒
+	//     成功那一发不计费、连 usage_logs 都被 ON CONFLICT 吃掉（2026-10-02 审计实证）。
+	//   - uuid 另有一害：同一次请求重放会生成新行，而且和池子日志对不上账。
+	//
+	// 所以键 = 固定前缀（进 forced 闭集，压过 ctx）+ 本次客户端请求的 id（可对账）
+	// + attempt 序号（同一次请求里换票重试了几发就有几条，互不相撞）。
+	base := "gwpool_degraded:" + resolveUsageBillingRequestID(ctx, "")
+	for i, attempt := range attempts {
+		requestID := base + ":" + strconv.Itoa(i)
+		result := &OpenAIForwardResult{
+			RequestID: requestID,
+			Model:     in.Model,
+			Stream:    in.Stream,
+			// 原样带上那一发的注入读数 ⇒ 路由对卡片按既有逻辑渲染出被判死的那个网关与票号
+			// （routePairInUse）。UpstreamHeaders 留空是对的：那一发的 Set-Cookie 没有被采纳。
+			GatewayPoolApplied: attempt.Applied,
+		}
+		if err := s.RecordUsage(ctx, &OpenAIRecordUsageInput{
+			Result:             result,
+			APIKey:             in.APIKey,
+			User:               in.APIKey.User,
+			Account:            in.Account,
+			Subscription:       in.Subscription,
+			InboundEndpoint:    in.InboundEndpoint,
+			UpstreamEndpoint:   in.UpstreamEndpoint,
+			UserAgent:          in.UserAgent,
+			IPAddress:          in.IPAddress,
+			SessionID:          in.SessionID,
+			RequestPayloadHash: in.RequestPayloadHash,
+			APIKeyService:      in.APIKeyService,
+			ChannelUsageFields: in.ChannelUsageFields,
+			NativeCompactionV2: in.NativeCompactionV2,
+			RequestType:        RequestTypeGatewayPoolDegraded,
+		}); err != nil {
+			logger.LegacyPrintf("service.openai_gateway",
+				"gwpool degraded usage record failed: request_id=%s gateway=%s err=%v",
+				requestID, attempt.Applied.Gateway, err)
+		}
 	}
 }
 
@@ -427,9 +494,35 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	usageLog.SafetyBufferingFasterModel = usageCodexSafetyBufferingFasterModelPtr(result.UpstreamHeaders)
 	// 路由对读数（openai_codex_route_cookies.go）：上游新下发就记新的，否则回读罐里当前那一组。
 	// 纯观测，不参与任何判定。
-	routePair := s.routePairInUse(account, result.UpstreamHeaders)
+	routePair, routePairFromPool, routePairPoolGateway, routePairPoolVersion := s.routePairInUse(
+		account, result.UpstreamHeaders, result.GatewayPoolApplied)
 	usageLog.RoutePair = usageCodexRoutePairPtr(routePair)
 	usageLog.RouteGateway = usageCodexRouteGatewayPtr(routePair)
+	usageLog.RoutePairOverridden = usageCodexRoutePairOverriddenPtr(account, routePairFromPool)
+	usageLog.RoutePairPoolGateway = usageCodexRoutePairPoolGatewayPtr(routePairPoolGateway)
+	usageLog.RoutePairPoolVersion = usageCodexRoutePairPoolVersionPtr(routePairPoolVersion)
+	// 顺手把落点记进账号 extra：用量行是按请求的，答不了「这个号碰过哪些网关、现在在哪个」。
+	// 用 RouteGateway 而不是池子说的那个：被改派的那些发，这张卡该显示真正打到的那个。
+	//
+	// RouteGateway 只在**上游下发了新 __oailb** 时才是观测值，其余时候读的是我们自己发出去
+	// 那张（见 UsageLog.RouteGateway 的注释）。账本照记不变：它的用途是「别再用烧过的那一格」，
+	// 而没观测到时按「我们要求它去哪」记是保守方向，记空等于忘掉这一发。
+	if usageLog.RouteGateway != nil {
+		// 大区和判定共用**同一个**谓词「池子交付的落点 == 实际落点」：改派的那些发，池子说的
+		// 大区与判据问的都是另一个网关，记到实际落点上就是把读数挂到错的单位上（而降智的单位
+		// 恰好就是 (账号 × 网关)）。
+		landed := usageCodexRouteLandedOnPoolGateway(routePairPoolGateway, *usageLog.RouteGateway)
+		region, verdict := "", ""
+		if landed {
+			region = strings.TrimSpace(result.GatewayPoolApplied.Region)
+			verdict = result.GatewayPoolApplied.Verdict
+		}
+		// 业务请求真的落在这里了 ⇒ 推进「当前网关」。
+		// PoolLive 不受 landed 影响：它是整个池子的读数，和这一发落到哪儿无关。
+		s.noteOpenAIGatewayUse(ctx, account, *usageLog.RouteGateway, region, verdict, true,
+			result.GatewayPoolApplied.PoolLive, result.GatewayPoolApplied.PoolFree,
+			result.GatewayPoolApplied.FullHeldMs)
+	}
 	isVideoUsage := isGrokVideoUsageResult(result, billingModels)
 	if isVideoUsage {
 		usageLog.VideoCount = result.VideoCount

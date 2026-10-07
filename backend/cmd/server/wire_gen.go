@@ -447,6 +447,10 @@ func provideCleanup(
 	promptAudit *securityaudit.PromptService,
 	pluginManager *service.PluginManager,
 ) func() {
+	// 仅应用生命周期启动持久反馈；构造服务本身不启动扫描任务。
+	if openAIGateway != nil {
+		openAIGateway.StartGatewayPoolReporter()
+	}
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -653,6 +657,7 @@ func provideCleanup(
 			}},
 			{"OpenAIWSPool", func() error {
 				if openAIGateway != nil {
+					openAIGateway.StopGatewayPoolReporter()
 					openAIGateway.CloseOpenAIWSPool()
 				}
 				return nil

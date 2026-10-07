@@ -19,7 +19,16 @@ import (
 )
 
 // Forward forwards request to OpenAI API
-func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+func (s *OpenAIGatewayService) Forward(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+) (result *OpenAIForwardResult, err error) {
+	// 网关池的 per-request 标记（openai_gwpool.go）：AttachRoute 往 sink 写，这里 publish 到结果上。
+	// 新增一条能打到 chatgpt.com 的转发入口时要照抄这两行。
+	ctx, gwpoolSink := withOpenAIGatewayPoolSink(ctx, c)
+	defer func() { gwpoolSink.publish(result) }()
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
 	if account.UsesOpenAIRawRelay() {
@@ -123,6 +132,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
 	// 仅允许 WS 入站请求走 WS 上游，避免出现 HTTP -> WS 协议混用。
 	wsDecision = resolveOpenAIWSDecisionByClientTransport(wsDecision, GetOpenAIClientTransport(c))
+	// 网关池接管的账号不走 WS 上游：连接复用 60 分钟而满血窗口约 150 秒（openai_gwpool.go）。
+	wsDecision = resolveOpenAIWSDecisionByGatewayPool(wsDecision, account)
 	passthroughEnabled := account.IsOpenAIPassthroughEnabled()
 	compactPath := isOpenAIResponsesCompactPath(c)
 	if shouldFlattenOpenAIResponsesNamespaces(account, wsDecision.Transport, passthroughEnabled, compactPath) {
@@ -1476,6 +1487,15 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	// 同一份出口解析结果的第二处投影：web_search 的 user_location 也要跟着改，
 	// 否则出站是"出口时区 + 客户端本机城市"（openai_codex_wire_user_location.go）。
 	body = rewriteCodexWebSearchUserLocation(c, account, body)
+
+	// 趁 body 还是明文，把出站模型名记进本次请求的网关池 sink：queue 档的预热垫话必须用同一个
+	// 模型（state 绑在 (账号 × 模型 × 这张票) 上），而它跑在传输层、只拿到 *http.Request ——
+	// 到那时双开账号的体已经是 zstd 了，解不出来（openai_gwpool_warm.go 的 gatewayPoolWarmModel）。
+	// 没挂 sink 的路径（猎手探测等）这一行是空操作。
+	openAIGatewayPoolSinkFrom(ctx).noteModel(gjson.GetBytes(body, "model").String())
+	if account.UsesGatewayPool() && account.gatewayPoolGuardEnabled() {
+		ctx = context.WithValue(ctx, gatewayPoolConfirmBodyKey{}, gatewayPoolConfirmBody(body))
+	}
 
 	// 上线字节：双开 /responses 的请求体按真客户端默认做 zstd 压缩（openai_codex_request_compression.go）。
 	// body 仍是明文 JSON，供下面的路由提示与诊断日志读取；每次构造独立压缩。

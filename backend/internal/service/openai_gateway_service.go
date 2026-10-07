@@ -251,8 +251,11 @@ type OpenAIForwardResult struct {
 	ResponseID string
 	// UpstreamHeaders 是直接上游的响应头，用于按账户配置解析上游请求标识。
 	UpstreamHeaders http.Header
-	Usage           OpenAIUsage
-	Model           string // 原始模型（用于响应和日志显示）
+	// GatewayPoolApplied 记这一发**真的**把网关池那张 pair 注入了出站头（openai_gwpool.go）。
+	// 由转发入口的 sink 在返回前 publish；零值 = 没注入（非推理面、没接管、没活票都落零值）。
+	GatewayPoolApplied OpenAIGatewayPoolApplied
+	Usage              OpenAIUsage
+	Model              string // 原始模型（用于响应和日志显示）
 	// BillingModel is the model used for cost calculation.
 	// When non-empty, CalculateCost uses this instead of Model.
 	// This is set by the Anthropic Messages conversion path where
@@ -495,6 +498,8 @@ type OpenAIGatewayService struct {
 	openaiWSPool                  *openAIWSConnPool
 	// codexCookies：推理面按账号隔离的 ChatGPT cookie 罐（openai_codex_cookies.go），HTTP 与 WS 握手共用。
 	codexCookies                   openAICodexCookieStore
+	gatewayReporterMu              sync.Mutex
+	gatewayReporter                *gatewayPoolReporter
 	openaiWSStateStore             OpenAIWSStateStore
 	openaiScheduler                OpenAIAccountScheduler
 	openaiWSPassthroughDialer      openAIWSClientDialer
@@ -616,6 +621,15 @@ func NewOpenAIGatewayService(
 	}
 	svc.logOpenAIWSModeBootstrap()
 	svc.codexSideCalls = newCodexSideCallState()
+	// 网关池接管推理面的路由 cookie（openai_gwpool.go）。配置全在账号 extra 上，客户端按需建。
+	svc.codexCookies.identity = svc.codexCredentialIdentity
+	svc.codexCookies.poolProbeObserved = svc.noteGatewayPoolProbeAndContact
+	if svc.accountRepo != nil {
+		svc.codexCookies.accountByID = svc.accountRepo.GetByID
+		svc.codexCookies.historyByTag = func(ctx context.Context, tag string) ([]Account, error) {
+			return svc.accountRepo.FindByExtraField(ctx, openAIGatewayLedgerTagExtraKey, tag)
+		}
+	}
 	return svc
 }
 

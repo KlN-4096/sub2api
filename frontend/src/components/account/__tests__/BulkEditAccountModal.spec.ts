@@ -81,6 +81,36 @@ function mountModal(extraProps: Record<string, unknown> = {}) {
 }
 
 describe('BulkEditAccountModal', () => {
+  it('网关池仅发送显式勾选字段，空Key保留且无后台预热', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth', 'setup-token'] })
+    expect(wrapper.find('[data-testid="bulk-gwpool"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid*="prewarm"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_warm_tickets"]').setValue(true)
+    await wrapper.get('[data-testid="bulk-gwpool-value-openai_gwpool_warm_tickets"]').setValue(3)
+    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_rotation_min_gateways"]').setValue(true)
+    await wrapper.get('[data-testid="bulk-gwpool-value-openai_gwpool_rotation_min_gateways"]').setValue(4)
+    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_consumer_key"]').setValue(true)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], expect.objectContaining({
+      extra: { openai_gwpool_warm_tickets: 3, openai_gwpool_rotation_min_gateways: 4 }
+    }))
+    wrapper.unmount()
+  })
+
+  it('网关池不支持混合平台；取消勾选字段不再提交', async () => {
+    const mixed = mountModal({ selectedPlatforms: ['openai', 'anthropic'], selectedTypes: ['oauth'] })
+    expect(mixed.find('[data-testid="bulk-gwpool"]').exists()).toBe(false)
+    mixed.unmount()
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth'] })
+    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_rotation"]').setValue(true)
+    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_rotation"]').setValue(false)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).not.toHaveBeenCalled()
+    expect(showError).toHaveBeenCalledWith('admin.accounts.bulkEdit.noFieldsSelected')
+    wrapper.unmount()
+  })
   beforeEach(() => {
     vi.mocked(adminAPI.accounts.bulkUpdate).mockReset()
     vi.mocked(adminAPI.accounts.checkMixedChannelRisk).mockReset()

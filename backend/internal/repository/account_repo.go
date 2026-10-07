@@ -83,6 +83,14 @@ var schedulerNeutralExtraKeys = map[string]struct{}{
 	// 降智恢复探测的运行态（连胜 / 下次窗口 / 已恢复时刻），每次探测写一次，纯展示不参与调度。
 	// 配置键 openai_turn_state_recovery 由管理员写，不在此列。
 	"openai_turn_state_recovery_state": {},
+	// 这个账号落过哪些网关、当前在哪个（openai_gwpool_gateway_history.go）。用量路径上
+	// 带节流地写，纯展示不参与调度。
+	"openai_gwpool_gateways":        {},
+	"openai_gwpool_metrics":         {},
+	"openai_gwpool_feedback_outbox": {},
+	"openai_gwpool_contacts":        {},
+	// 同一上游身份的历史查询标签；运行态中立键，消费端使用 GetByID / FindByExtraField 新鲜读取。
+	"openai_gwpool_ledger_tag": {},
 }
 
 const postgresParameterBatchSize = 50000
