@@ -888,9 +888,13 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		if err != nil {
 			return fmt.Errorf("refresh ws authentication headers: %w", err)
 		}
+		// 透传适配器不经连接池，cookie 回放在这里挂钩（池的对应点在 dialConn）。
+		s.codexCookies.Attach(account, wsURL, headers)
 		dialCtx, cancelDial := context.WithTimeout(ctx, s.openAIWSDialTimeout())
 		upstreamConn, statusCode, handshakeHeaders, err = dialer.Dial(dialCtx, wsURL, headers, proxyURL)
 		cancelDial()
+		// 握手成败都收 Set-Cookie（与连接池、doOpenAIUpstream 同口径：Cloudflare 在 4xx/5xx 上同样下发）。
+		s.codexCookies.Store(account, wsURL, handshakeHeaders)
 		if err == nil {
 			break
 		}
