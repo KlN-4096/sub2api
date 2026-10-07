@@ -305,8 +305,87 @@ func TestOpenAIGatewayServiceParseOpenAIImagesRequest_PromptOnlyDefaultsRemainBa
 	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
 	require.NoError(t, err)
 	require.NotNil(t, parsed)
-	require.Equal(t, "gpt-image-2", parsed.Model)
+	require.Equal(t, "gpt-image-2.5-sunburst", parsed.Model)
 	require.Equal(t, OpenAIImagesCapabilityBasic, parsed.RequiredCapability)
+}
+
+func TestOpenAIImagesModelDefaultsAndExplicitOverrides(t *testing.T) {
+	t.Setenv("SUB2API_IMAGES_MAIN_MODEL", "gpt-6-astra")
+	for _, endpoint := range []string{openAIImagesGenerationsEndpoint, openAIImagesEditsEndpoint} {
+		for _, tc := range []struct {
+			name, model, want string
+		}{
+			{"omitted", "", "gpt-image-2.5-sunburst"},
+			{"blank", " \t ", "gpt-image-2.5-sunburst"},
+			{"legacy_explicit", "gpt-image-2", "gpt-image-2"},
+			{"sunburst_explicit", "gpt-image-2.5-sunburst", "gpt-image-2.5-sunburst"},
+			{"other_explicit", "gpt-image-2.5-flare", "gpt-image-2.5-flare"},
+		} {
+			t.Run(endpoint+"/"+tc.name, func(t *testing.T) {
+				parsed := &OpenAIImagesRequest{
+					Endpoint: endpoint, Model: tc.model, Prompt: "draw a cat",
+				}
+				if parsed.IsEdits() {
+					parsed.InputImageURLs = []string{"data:image/png;base64,ZmFrZQ=="}
+				}
+				applyOpenAIImagesDefaults(parsed)
+				require.Equal(t, tc.want, parsed.Model)
+				require.NoError(t, validateOpenAIImagesModel(parsed.Model))
+				body, err := buildOpenAIImagesResponsesRequest(parsed, parsed.Model)
+				require.NoError(t, err)
+				require.Equal(t, "gpt-6-astra", gjson.GetBytes(body, "model").String())
+				require.Equal(t, tc.want, gjson.GetBytes(body, "tools.0.model").String())
+				action := "generate"
+				if parsed.IsEdits() {
+					action = "edit"
+				}
+				require.Equal(t, action, gjson.GetBytes(body, "tools.0.action").String())
+			})
+		}
+	}
+}
+
+func TestOpenAIImagesMainModelFromEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		name, value, want string
+	}{
+		{"empty", "", "gpt-5.6-luna"},
+		{"blank", " \t ", "gpt-5.6-luna"},
+		{"astra", "gpt-6-astra", "gpt-6-astra"},
+		{"trimmed_astra", " gpt-6-astra ", "gpt-6-astra"},
+		{"other_model", "gpt-5.6-sol", "gpt-5.6-sol"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SUB2API_IMAGES_MAIN_MODEL", tc.value)
+			parsed := &OpenAIImagesRequest{Prompt: "draw a cat"}
+			applyOpenAIImagesDefaults(parsed)
+			body, err := buildOpenAIImagesResponsesRequest(parsed, parsed.Model)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, gjson.GetBytes(body, "model").String())
+			require.Equal(t, "gpt-image-2.5-sunburst", gjson.GetBytes(body, "tools.0.model").String())
+
+			imageOnly := map[string]any{"model": "gpt-image-2", "prompt": "draw a cat"}
+			require.True(t, normalizeOpenAIResponsesImageOnlyModel(imageOnly))
+			require.Equal(t, tc.want, imageOnly["model"])
+			tools, ok := imageOnly["tools"].([]any)
+			require.True(t, ok)
+			tool, ok := tools[0].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, "gpt-image-2", tool["model"])
+		})
+	}
+}
+
+func TestOpenAIImagesSunburstPricingLookup(t *testing.T) {
+	legacy := &LiteLLMModelPricing{InputCostPerToken: 1}
+	sunburst := &LiteLLMModelPricing{InputCostPerToken: 2}
+	svc := &PricingService{pricingData: map[string]*LiteLLMModelPricing{
+		"gpt-image-2":            legacy,
+		"gpt-image-2.5-sunburst": sunburst,
+	}}
+	require.Same(t, sunburst, svc.GetModelPricing("gpt-image-2.5-sunburst"))
+	delete(svc.pricingData, "gpt-image-2.5-sunburst")
+	require.Same(t, openAIGPTImage25FallbackPricing, svc.GetModelPricing("gpt-image-2.5-sunburst"))
 }
 
 func TestOpenAIGatewayServiceParseOpenAIImagesRequest_ExplicitSizeRequiresNativeCapability(t *testing.T) {

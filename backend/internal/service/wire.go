@@ -189,11 +189,12 @@ func ProvideOpenAIQuotaService(
 	accountRepo AccountRepository,
 	proxyRepo ProxyRepository,
 	tokenProvider *OpenAITokenProvider,
-	privacyClientFactory PrivacyClientFactory,
+	codexBackendClientFactory CodexBackendClientFactory,
 	referralClient OpenAIReferralClient,
 	openAIGatewayService *OpenAIGatewayService,
 ) *OpenAIQuotaService {
-	service := NewOpenAIQuotaService(accountRepo, proxyRepo, tokenProvider, privacyClientFactory, referralClient)
+	// 额度面走不做浏览器伪装的客户端，与推理面自报同一个 Codex 身份。
+	service := NewOpenAIQuotaService(accountRepo, proxyRepo, tokenProvider, PrivacyClientFactory(codexBackendClientFactory), referralClient)
 	service.agentIdentityWS = openAIGatewayService
 	return service
 }
@@ -234,6 +235,7 @@ func ProvideAccountUsageService(
 	identityCache IdentityCache,
 	tlsFPProfileService *TLSFingerprintProfileService,
 	openAIGatewayService *OpenAIGatewayService,
+	cfg *config.Config,
 ) *AccountUsageService {
 	service := NewAccountUsageService(
 		accountRepo,
@@ -247,8 +249,8 @@ func ProvideAccountUsageService(
 		cache,
 		identityCache,
 		tlsFPProfileService,
+		cfg,
 	)
-	service.agentIdentityWS = openAIGatewayService
 	return service
 }
 
