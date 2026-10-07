@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
@@ -42,7 +41,7 @@ func (s *openAICodexCookieStore) gatewayPoolRestDuration(identity string, accoun
 	})
 	sort.Slice(eligibleAt, func(i, j int) bool { return eligibleAt[i].Before(eligibleAt[j]) })
 	delay := gatewayPoolRestDefault
-	threshold := account.gatewayPoolRotationMinGateways()
+	threshold := account.gatewayPoolResumeGateways()
 	if len(eligibleAt) >= threshold {
 		estimated := eligibleAt[threshold-1].Sub(now)
 		if estimated > 0 {
@@ -62,16 +61,16 @@ func (s *OpenAIGatewayService) restGatewayPoolAccount(ctx context.Context, accou
 	now := time.Now()
 	until := now.Add(s.codexCookies.gatewayPoolRestDuration(identity, account, now))
 	s.codexCookies.poolRounds.rest(group, identity, until)
+	if err := s.enterGatewayPoolRest(ctx, account, identity, now, until); err != nil {
+		slog.Warn("gwpool_rest_state_persist_failed", "account_id", account.ID)
+		return
+	}
 	if s.accountRepo == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gatewayPoolWarmNoteTimeout)
 	defer cancel()
-	reason := fmt.Sprintf("网关候选不足（低于%d），临时休息后重新评估 / Gateway candidates below %d; retry after rest",
-		account.gatewayPoolRotationMinGateways(), account.gatewayPoolRotationMinGateways())
-	// Existing repository operation only extends a temporary block, never
-	// shortens an auth/transport block or changes the manual schedulable flag.
-	if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, reason); err != nil {
-		slog.Warn("gwpool_rest_persist_failed", "account_id", account.ID)
-	}
+	s.changeGatewayPoolUsage(ctx, account, identity, func(state *gatewayPoolUsageLedger) bool {
+		return state.end(now.UTC(), "temporarily_unschedulable")
+	})
 }

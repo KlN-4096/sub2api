@@ -231,15 +231,16 @@ type CreateGroupRequest struct {
 	// 支持的模型系列（仅 antigravity 平台使用）
 	SupportedModelScopes []string `json:"supported_model_scopes"`
 	// OpenAI Messages 调度配置（仅 openai 平台使用）
-	AllowMessagesDispatch       bool                                      `json:"allow_messages_dispatch"`
-	AllowLive                   bool                                      `json:"allow_live"`
-	ForceOpenAIFast             bool                                      `json:"force_openai_fast"`
-	FreeOpenAIFast              bool                                      `json:"free_openai_fast"`
-	RequireOAuthOnly            bool                                      `json:"require_oauth_only"`
-	RequirePrivacySet           bool                                      `json:"require_privacy_set"`
-	DefaultMappedModel          string                                    `json:"default_mapped_model"`
-	MessagesDispatchModelConfig service.OpenAIMessagesDispatchModelConfig `json:"messages_dispatch_model_config"`
-	ModelAllowlist              service.GroupModelAllowlist               `json:"model_allowlist"`
+	AllowMessagesDispatch           bool                                      `json:"allow_messages_dispatch"`
+	AllowLive                       bool                                      `json:"allow_live"`
+	ForceOpenAIFast                 bool                                      `json:"force_openai_fast"`
+	FreeOpenAIFast                  bool                                      `json:"free_openai_fast"`
+	OpenAIGatewayPoolActiveAccounts *int                                      `json:"openai_gwpool_active_accounts" binding:"omitempty,min=1,max=64"`
+	RequireOAuthOnly                bool                                      `json:"require_oauth_only"`
+	RequirePrivacySet               bool                                      `json:"require_privacy_set"`
+	DefaultMappedModel              string                                    `json:"default_mapped_model"`
+	MessagesDispatchModelConfig     service.OpenAIMessagesDispatchModelConfig `json:"messages_dispatch_model_config"`
+	ModelAllowlist                  service.GroupModelAllowlist               `json:"model_allowlist"`
 	// 固定账号 manifest 配置；创建路径禁止开启，仅编辑可配置。
 	CodexModelsManifestConfig service.GroupCodexModelsManifestConfig `json:"codex_models_manifest_config"`
 	// 分组 RPM 上限（0 = 不限制）
@@ -306,15 +307,16 @@ type UpdateGroupRequest struct {
 	// 支持的模型系列（仅 antigravity 平台使用）
 	SupportedModelScopes *[]string `json:"supported_model_scopes"`
 	// OpenAI Messages 调度配置（仅 openai 平台使用）
-	AllowMessagesDispatch       *bool                                      `json:"allow_messages_dispatch"`
-	AllowLive                   *bool                                      `json:"allow_live"`
-	ForceOpenAIFast             *bool                                      `json:"force_openai_fast"`
-	FreeOpenAIFast              *bool                                      `json:"free_openai_fast"`
-	RequireOAuthOnly            *bool                                      `json:"require_oauth_only"`
-	RequirePrivacySet           *bool                                      `json:"require_privacy_set"`
-	DefaultMappedModel          *string                                    `json:"default_mapped_model"`
-	MessagesDispatchModelConfig *service.OpenAIMessagesDispatchModelConfig `json:"messages_dispatch_model_config"`
-	ModelAllowlist              *service.GroupModelAllowlist               `json:"model_allowlist"`
+	AllowMessagesDispatch           *bool                                      `json:"allow_messages_dispatch"`
+	AllowLive                       *bool                                      `json:"allow_live"`
+	ForceOpenAIFast                 *bool                                      `json:"force_openai_fast"`
+	FreeOpenAIFast                  *bool                                      `json:"free_openai_fast"`
+	OpenAIGatewayPoolActiveAccounts *int                                       `json:"openai_gwpool_active_accounts" binding:"omitempty,min=1,max=64"`
+	RequireOAuthOnly                *bool                                      `json:"require_oauth_only"`
+	RequirePrivacySet               *bool                                      `json:"require_privacy_set"`
+	DefaultMappedModel              *string                                    `json:"default_mapped_model"`
+	MessagesDispatchModelConfig     *service.OpenAIMessagesDispatchModelConfig `json:"messages_dispatch_model_config"`
+	ModelAllowlist                  *service.GroupModelAllowlist               `json:"model_allowlist"`
 	// 固定账号 manifest 配置；nil 表示不修改。
 	CodexModelsManifestConfig *service.GroupCodexModelsManifestConfig `json:"codex_models_manifest_config"`
 	// 分组 RPM 上限（0 = 不限制）；nil 表示未提供不改动
@@ -711,6 +713,7 @@ func (h *GroupHandler) Create(c *gin.Context) {
 		AllowLive:                       req.AllowLive,
 		ForceOpenAIFast:                 req.ForceOpenAIFast,
 		FreeOpenAIFast:                  req.FreeOpenAIFast,
+		OpenAIGatewayPoolActiveAccounts: req.OpenAIGatewayPoolActiveAccounts,
 		RequireOAuthOnly:                req.RequireOAuthOnly,
 		RequirePrivacySet:               req.RequirePrivacySet,
 		DefaultMappedModel:              req.DefaultMappedModel,
@@ -857,6 +860,7 @@ func (h *GroupHandler) Update(c *gin.Context) {
 		AllowLive:                       req.AllowLive,
 		ForceOpenAIFast:                 req.ForceOpenAIFast,
 		FreeOpenAIFast:                  req.FreeOpenAIFast,
+		OpenAIGatewayPoolActiveAccounts: req.OpenAIGatewayPoolActiveAccounts,
 		RequireOAuthOnly:                req.RequireOAuthOnly,
 		RequirePrivacySet:               req.RequirePrivacySet,
 		DefaultMappedModel:              req.DefaultMappedModel,

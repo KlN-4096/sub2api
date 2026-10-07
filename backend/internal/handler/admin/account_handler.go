@@ -2710,6 +2710,36 @@ func (h *AccountHandler) GetTempUnschedulable(c *gin.Context) {
 		return
 	}
 
+	isPoolReason := state != nil && (strings.HasPrefix(state.ErrorMessage, "网关候选低于") ||
+		strings.HasPrefix(state.ErrorMessage, "Gateway candidates below "))
+	if state != nil && !isPoolReason && state.UntilUnix > time.Now().Unix() {
+		response.Success(c, gin.H{"active": true, "state": state})
+		return
+	}
+	if reader, ok := h.adminService.(interface {
+		GatewayPoolRuntimeProgress(context.Context, []int64) (map[int64]service.GatewayPoolProgress, error)
+	}); ok {
+		progress, readErr := reader.GatewayPoolRuntimeProgress(c.Request.Context(), []int64{accountID})
+		if readErr != nil {
+			response.Error(c, http.StatusServiceUnavailable, "gateway rest status unavailable")
+			return
+		}
+		if runtime := progress[accountID].Runtime; runtime != nil {
+			if rest := runtime.Rest; rest.Active {
+				display := service.TempUnschedState{RuleIndex: -1, ErrorMessage: rest.Reason}
+				if !rest.NextCheck.IsZero() {
+					display.UntilUnix = rest.NextCheck.Unix()
+				}
+				if !rest.ChangedAt.IsZero() {
+					display.TriggeredAtUnix = rest.ChangedAt.Unix()
+				}
+				response.Success(c, gin.H{"active": true, "gateway_pool_rest": true, "state": display})
+				return
+			}
+			state = nil // a recovered latch overrides a stale generic pool-rest cache
+		}
+	}
+
 	if state == nil || state.UntilUnix <= time.Now().Unix() {
 		response.Success(c, gin.H{"active": false})
 		return

@@ -1262,6 +1262,9 @@ export default {
         unsupportedMessage: 'This Sub2API server cannot generate the required Live attestation. Live will not work even if enabled. Continue anyway?',
         enableAnyway: 'Enable anyway'
       },
+      gatewayPoolActiveAccounts: 'Active gateway-pool accounts',
+      gatewayPoolActiveAccountsHint: 'Applies only to this group; default 1, range 1–64. New sessions fill the primary before its standby and queue when all active accounts are full. Resting accounts are replaced at the tail. Existing sessions keep their account and may temporarily exceed this count, but still obey concurrency, rest and rate limits.',
+      gatewayPoolActiveAccountsInvalid: 'Active gateway-pool accounts must be an integer from 1 to 64',
       openaiFast: {
         title: 'OpenAI Fast mode',
         force: 'Force Fast (priority)',

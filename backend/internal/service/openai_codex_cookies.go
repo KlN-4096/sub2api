@@ -34,14 +34,15 @@ type openAICodexCookieStore struct {
 	// 由构造器注入；裸结构体（单元测试）里为 nil，退回按本地行算。
 	identity       openAICodexCredentialIdentity
 	poolPairs      sync.Map // 凭证域身份 → openAIGatewayPoolPair
-	poolFetch      singleflight.Group
+	poolFetch      gatewayPoolSharedWork[gatewayPoolFetchResult]
 	poolEarlyAt    sync.Map // credential domain -> last durable early reservation
 	poolEarlyLocks sync.Map // ledger domain (may span distinct pair-cache identities) -> *sync.Mutex
+	poolEarlySkips sync.Map // account ID -> last throttled skip reason
 	poolEarlyClaim func(context.Context, *Account, string, time.Time) error
 	// poolVerified 是「这个身份手上那张票**验过是满血**」（openai_gwpool_warm.go）。
 	//
 	// 必须单独记，**不能拿 poolPairs 的 Live 当「验过」**：Live 的唯一含义是取票那一刻写的
-	// `until = now + valid_for_s`，和验没验过是两件事。两条路都会留下一张 Live 的未验票 ——
+	// route credential未到期且未被拒绝，和验没验过是两件事。两条路都会留下一张 Live 的未验票 ——
 	// 并发取票（singleflight 的 shared 对领头者也为真 ⇒ 谁都拿不到还票闭包），以及同一份凭据
 	// 挂在多个账号行上（键是凭证域身份，别的行取的票这一行照样看得见）。换票即失效。
 	//
@@ -54,29 +55,41 @@ type openAICodexCookieStore struct {
 	poolFeedbackPolicies    sync.Map // binding+gateway -> latest reporting-policy observation
 	poolFeedbackPolicyPrune atomic.Int64
 	poolRounds              gatewayPoolRounds
+	poolRestLocks           sync.Map // ledger tag -> *sync.Mutex, serialized recovery decisions
+	poolRestState           sync.Map // ledger tag -> gatewayPoolRestState; includes fail-closed pending writes
 	poolUsageLocks          sync.Map // ledger tag -> *sync.Mutex, durable usage rounds
 	poolUsageCache          sync.Map // ledger tag -> *gatewayPoolUsageLedger, immutable committed snapshot
+	poolUsageSessionOnce    sync.Once
+	poolUsageSession        string
 	poolUsageAttempt        func(context.Context, *Account, string, string, OpenAIGatewayPoolApplied, time.Time, bool)
 	poolUsageFinished       func(context.Context, *Account)
+	poolUsageSettle         func(context.Context, *Account, string)
 	poolProgress            gatewayPoolProgressTracker
 	poolRotationAccounts    sync.Map // account ID -> fresh opt-in observed during preference hydration
 	// poolWarm 把同一张票上的并发预热判据收口成一次（openai_gwpool_warm.go）。
 	// 取票本身已经被 poolFetch 收成一次 ⇒ 同身份的并发请求手里是**同一张票**、同一个
-	// (上游账号 × 网关) 单元；同验证模型共享 A/B，各自取消不影响其它等待者，
+	// (上游账号 × 网关) 单元；跨模型共享 A/B，各自取消不影响其它等待者，
 	// 而供给只有个位数张/小时。键按票号分，换了票要重新验。
-	poolWarm gatewayPoolProbeFlights
+	poolWarm            gatewayPoolProbeFlights
+	poolPrepare         gatewayPoolSharedWork[struct{}]
+	poolPrepareProgress sync.Map // full credential identity -> last shared *gatewayPoolProgressRun
+	poolCandidateQueues sync.Map // full credential identity -> *gatewayPoolCandidateQueue
 	// poolUsed 是「这个凭证域身份最近碰过哪些网关」的本地账本，用来挑一个没烧过的落点，
 	// 并作为 /cookie 的 exclude 带给池子（裸取时也能避开烧过的落点）。
 	// 池子按它发的 consumer key 记账，认不出同一份凭据挂在多个账号行上（见 gatewayPoolLedgerKey）。
-	poolUsed            sync.Map // 凭证域身份 + "\x00" + 网关名 → time.Time
-	poolCooldownMu      sync.Mutex
-	poolCooldown        map[string]gatewayPoolCooldown
-	poolRecommendations sync.Map // ledger identity × gateway → gatewayPoolRecommendation
-	poolCooldownPersist func(context.Context, *Account, string)
-	poolHistoryLocks    sync.Map // 本地行 ID → *sync.Mutex，串行合并已有 history。
-	accountByID         func(context.Context, int64) (*Account, error)
-	historyByTag        func(context.Context, string) ([]Account, error)
-	poolHistoryLoad     singleflight.Group
+	poolUsed               sync.Map // 凭证域身份 + "\x00" + 网关名 → time.Time
+	poolCooldownMu         sync.Mutex
+	poolCooldown           map[string]gatewayPoolCooldown
+	poolCooldownReset      sync.Map // ledger identity -> last committed reset barrier; writes hold poolCooldownMu
+	poolCooldownClear      sync.Map // ledger identity -> last durable manual clear; history stays intact
+	poolCooldownResetLocks sync.Map // ledger identity -> *sync.Mutex; timer writes only
+	poolManualRetry        sync.Map // ledger identity -> an active administrator-triggered preparation
+	poolRecommendations    sync.Map // ledger identity × gateway → gatewayPoolRecommendation
+	poolCooldownPersist    func(context.Context, *Account, string)
+	poolHistoryLocks       sync.Map // 本地行 ID → *sync.Mutex，串行合并已有 history。
+	accountByID            func(context.Context, int64) (*Account, error)
+	historyByTag           func(context.Context, string) ([]Account, error)
+	poolHistoryLoad        singleflight.Group
 	// poolBackoff 是「池子让这个身份先别取票」的到点（见 gatewayPoolBackoff）。
 	// 按**上游账号**记而不是按请求：退避只对本次请求生效的话，重试环照旧每轮都去敲池子。
 	poolBackoff sync.Map // 账本身份（上游账号粒度）→ time.Time

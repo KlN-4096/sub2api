@@ -56,11 +56,13 @@ func TestStateEchoFinalDeliveryRechecksAfterContactPersistence(t *testing.T) {
 	}
 }
 
-func TestStateEchoExpiredLeaseCannotBeMarkedAsConfirmedDegradation(t *testing.T) {
+func TestStateEchoReferenceExpiryDoesNotSuppressConfirmedDegradation(t *testing.T) {
 	store := &openAICodexCookieStore{}
 	store.poolPairs.Store("identity", openAIGatewayPoolPair{cookie: "offline", version: "v", gateway: "g", until: time.Now().Add(-time.Second)})
 	_, marked := store.gatewayPoolMarkStaleMatched("identity", "v", "g", true)
-	require.False(t, marked)
+	require.True(t, marked)
+	_, marked = store.gatewayPoolMarkStaleMatched("identity", "v", "g", true)
+	require.False(t, marked, "a confirmed rejection is recorded once")
 }
 
 func TestStateEchoBuiltCompressedRequestKeepsFinalIdentities(t *testing.T) {
