@@ -45,8 +45,14 @@ func rankGatewayPoolContacts(candidates []gwpool.Gateway, seen map[string]gatewa
 	if len(ranked) < 2 {
 		return candidates
 	}
+	evidence := make([]gatewayPoolRankEvidence, 0, len(ranked))
+	for _, candidate := range ranked {
+		evidence = append(evidence, gatewayPoolRankEvidence{candidate.full, candidate.n})
+	}
+	prior := gatewayPoolRankPrior(evidence)
 	sort.SliceStable(ranked, func(i, j int) bool {
-		return int64(ranked[i].full)*int64(ranked[j].n) > int64(ranked[j].full)*int64(ranked[i].n)
+		return gatewayPoolRankScore(gatewayPoolRankEvidence{ranked[i].full, ranked[i].n}, prior) >
+			gatewayPoolRankScore(gatewayPoolRankEvidence{ranked[j].full, ranked[j].n}, prior)
 	})
 	out := append([]gwpool.Gateway(nil), candidates...)
 	for i, index := range indexes {
@@ -90,18 +96,26 @@ func (s *openAICodexCookieStore) gatewayPoolRankContacts(ctx context.Context, ac
 		}
 		if counter.Add(1)%gatewayPoolContactExploreEvery != 0 {
 			if global {
-				// Measured pool-wide rate is primary. Insufficient/unknown
-				// evidence has a neutral 1/2 score, never an invented zero.
-				score := func(candidate gwpool.Gateway) (int64, int64) {
+				// Shrink only comparable same-model evidence toward this
+				// eligible cohort's pooled rate. Unknown candidates retain the
+				// existing neutral 1/2 score, not an invented failure count.
+				evidence := make([]gatewayPoolRankEvidence, 0, len(out))
+				for _, candidate := range out {
 					if candidate.Priority.Valid(model) {
-						return int64(candidate.Priority.Full), int64(candidate.Priority.Samples)
+						evidence = append(evidence, gatewayPoolRankEvidence{
+							candidate.Priority.Full, candidate.Priority.Samples})
 					}
-					return 1, 2
+				}
+				prior := gatewayPoolRankPrior(evidence)
+				score := func(candidate gwpool.Gateway) float64 {
+					if candidate.Priority.Valid(model) {
+						return gatewayPoolRankScore(gatewayPoolRankEvidence{
+							candidate.Priority.Full, candidate.Priority.Samples}, prior)
+					}
+					return 0.5
 				}
 				sort.SliceStable(out, func(i, j int) bool {
-					fi, ni := score(out[i])
-					fj, nj := score(out[j])
-					return fi*nj > fj*ni
+					return score(out[i]) > score(out[j])
 				})
 			} else {
 				// Backward compatibility with pools without global priorities.
@@ -160,7 +174,7 @@ func (b *gatewayPoolTicketBatch) rankRemaining(ctx context.Context) {
 		if time.Until(pair.until) < openAIGatewayPoolMinRemaining {
 			continue
 		}
-		if _, cooling := b.store.gatewayPoolUsedAt(b.identity, pair.gateway, b.account.gatewayPoolGatewayWindow()); cooling {
+		if _, cooling := b.store.gatewayPoolUsedAt(b.identity, pair.gateway, b.account.gatewayPoolGatewayWindow(), b.account.gatewayPoolUseRecommendation()); cooling {
 			continue
 		}
 		candidate, ok := catalog[pair.gateway]
@@ -178,7 +192,7 @@ func (b *gatewayPoolTicketBatch) rankRemaining(ctx context.Context) {
 			if held[candidate.Name] || !candidate.PairReady || candidate.UsedByYou {
 				continue
 			}
-			if _, cooling := b.store.gatewayPoolUsedAt(b.identity, candidate.Name, b.account.gatewayPoolGatewayWindow()); !cooling {
+			if _, cooling := b.store.gatewayPoolUsedAt(b.identity, candidate.Name, b.account.gatewayPoolGatewayWindow(), b.account.gatewayPoolUseRecommendation()); !cooling {
 				additional = append(additional, candidate)
 			}
 		}

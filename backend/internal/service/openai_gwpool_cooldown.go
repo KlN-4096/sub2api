@@ -23,6 +23,12 @@ const (
 // gatewayPoolCooldown 持久化在已有的 seen[gateway] 中。Until 是本地下一次允许试用的时刻，
 // 不是上游保证恢复的时刻；成功样本只在不同尝试对应的独立冷却周期里计一次。
 type gatewayPoolCooldown struct {
+	SourcesKnown         bool        `json:"sources_known,omitempty"`
+	BaseSeconds          int         `json:"base_seconds,omitempty"`
+	LocalFloorSeconds    int         `json:"local_floor_seconds,omitempty"`
+	CycleAt              time.Time   `json:"cycle_at,omitzero"`
+	ScheduleUpdatedAt    time.Time   `json:"schedule_updated_at,omitzero"`
+	RecommendationUntil  time.Time   `json:"recommendation_until,omitzero"`
 	WindowSeconds        int         `json:"window_seconds"`
 	FixedSeconds         int         `json:"fixed_seconds,omitempty"`
 	Until                time.Time   `json:"until,omitzero"`
@@ -31,6 +37,7 @@ type gatewayPoolCooldown struct {
 	AttemptSeconds       int         `json:"attempt_seconds,omitempty"`
 	ElapsedSeconds       int         `json:"elapsed_seconds,omitempty"`
 	Outcome              string      `json:"outcome,omitempty"`
+	Early                bool        `json:"early,omitempty"`
 	Successes            map[int]int `json:"successes,omitempty"`
 	LastSuccessSeconds   int         `json:"last_success_seconds,omitempty"`
 	LastSuccessAt        time.Time   `json:"last_success_at,omitzero"`
@@ -102,6 +109,7 @@ func (c *gatewayPoolCooldown) begin(now, usedAt time.Time, base int) bool {
 		return false
 	}
 	c.AttemptSeconds, c.ElapsedSeconds = 0, 0
+	c.Early = false
 	if !until.IsZero() {
 		c.AttemptSeconds = c.WindowSeconds
 		start := until.Add(-time.Duration(c.WindowSeconds) * time.Second)
@@ -124,6 +132,14 @@ func (c *gatewayPoolCooldown) begin(now, usedAt time.Time, base int) bool {
 	return true
 }
 
+func (c *gatewayPoolCooldown) beginEarly(now time.Time, base int) {
+	c.WindowSeconds = max(c.WindowSeconds, base)
+	c.Early = true
+	c.AttemptSeconds, c.ElapsedSeconds = 0, 0
+	c.AttemptAt, c.UpdatedAt, c.Outcome = now, now, ""
+	c.Until = now.Add(time.Duration(c.WindowSeconds) * time.Second)
+}
+
 // observe 不接收网络错误/未知读数。一次已确认满血之后正常耗尽，开始新周期而不是升级；
 // 只有真正等完了上一档、再次尝试仍明确降级，才升级并解除固定。
 func (c *gatewayPoolCooldown) observe(now time.Time, verdict string, base int) (*gatewayPoolCooldownSample, bool) {
@@ -137,7 +153,7 @@ func (c *gatewayPoolCooldown) observe(now time.Time, verdict string, base int) (
 		c.resetWindow(base)
 	}
 	var sample *gatewayPoolCooldownSample
-	if c.AttemptSeconds > 0 && c.Outcome == "" {
+	if !c.Early && c.AttemptSeconds > 0 && c.Outcome == "" {
 		sample = &gatewayPoolCooldownSample{
 			AttemptAt: c.AttemptAt, WindowSeconds: c.AttemptSeconds,
 			ElapsedSeconds: c.ElapsedSeconds, Full: verdict == openAIGatewayVerdictFull,
@@ -169,12 +185,13 @@ func (c *gatewayPoolCooldown) observe(now time.Time, verdict string, base int) (
 			c.FixedSeconds = 0
 			c.WindowSeconds = min(int(gatewayPoolCooldownCeiling.Seconds()),
 				max(nextGatewayPoolCooldown(c.AttemptSeconds), max(base, c.WindowSeconds)))
-		} else {
+		} else if !c.Early {
 			c.resetWindow(base)
 		}
 		c.Until = now.Add(time.Duration(c.WindowSeconds) * time.Second)
 	}
 	c.Outcome, c.UpdatedAt = verdict, now
+	c.Early = false
 	return sample, true
 }
 
@@ -200,14 +217,28 @@ func validGatewayPoolCooldown(c *gatewayPoolCooldown, now time.Time, base int) b
 		// 账号改过初始值时，原先标准档的学习仍然合法。
 		return gwpool.IsCooldownStep(seconds)
 	}
-	if c == nil || c.UpdatedAt.IsZero() || c.UpdatedAt.After(now.Add(gatewayPoolCooldownGrace)) ||
-		!validStep(c.WindowSeconds) || c.Until.After(c.UpdatedAt.Add(time.Duration(c.WindowSeconds)*time.Second+gatewayPoolCooldownGrace)) ||
+	if c == nil {
+		return false
+	}
+	anchor := c.UpdatedAt
+	if c.SourcesKnown {
+		if c.CycleAt.IsZero() || c.CycleAt.After(now.Add(gatewayPoolCooldownGrace)) ||
+			!validStep(c.BaseSeconds) || (c.LocalFloorSeconds != 0 && !validStep(c.LocalFloorSeconds)) ||
+			c.ScheduleUpdatedAt.After(now.Add(gatewayPoolCooldownGrace)) ||
+			c.RecommendationUntil.After(now.Add(gatewayPoolRecommendationTTL+gatewayPoolCooldownGrace)) {
+			return false
+		}
+		anchor = c.CycleAt
+	}
+	if c.UpdatedAt.IsZero() || c.UpdatedAt.After(now.Add(gatewayPoolCooldownGrace)) ||
+		!validStep(c.WindowSeconds) || c.Until.After(anchor.Add(time.Duration(c.WindowSeconds)*time.Second+gatewayPoolCooldownGrace)) ||
 		c.Until.After(now.Add(gatewayPoolCooldownCeiling+gatewayPoolCooldownGrace)) ||
 		c.AttemptAt.After(now.Add(gatewayPoolCooldownGrace)) ||
 		c.AttemptAt.After(c.UpdatedAt.Add(gatewayPoolCooldownGrace)) ||
 		c.LastSuccessAt.After(now.Add(gatewayPoolCooldownGrace)) ||
 		(c.FixedSeconds != 0 && !validStep(c.FixedSeconds)) ||
 		(c.AttemptSeconds != 0 && (!validStep(c.AttemptSeconds) || c.AttemptAt.IsZero())) ||
+		(c.Early && (c.AttemptSeconds != 0 || c.ElapsedSeconds != 0)) ||
 		c.ElapsedSeconds < 0 || c.LastSuccessSeconds < 0 ||
 		c.ElapsedSeconds > int(gatewayPoolMaxObservedIdle.Seconds()) ||
 		c.LastSuccessSeconds > int(gatewayPoolMaxObservedIdle.Seconds()) ||
@@ -235,7 +266,7 @@ func (s *openAICodexCookieStore) hydrateCooldown(identity, gateway string, c *ga
 	s.poolCooldownMu.Lock()
 	defer s.poolCooldownMu.Unlock()
 	key := gatewayPoolLedgerKey(identity, gateway)
-	if prev, ok := s.poolCooldown[key]; ok && !c.UpdatedAt.After(prev.UpdatedAt) {
+	if prev, ok := s.poolCooldown[key]; ok && !c.changedAt().After(prev.changedAt()) {
 		return
 	}
 	if s.poolCooldown == nil {
@@ -251,6 +282,7 @@ func (s *openAICodexCookieStore) hydrateCooldown(identity, gateway string, c *ga
 }
 
 const openAIGatewayLedgerTagExtraKey = "openai_gwpool_ledger_tag"
+const openAIGatewayPreviousLedgerTagExtraKey = "openai_gwpool_previous_ledger_tag"
 
 func gatewayPoolLedgerTag(identity string) string {
 	sum := sha256.Sum256([]byte("gwpool-ledger\x00" + gatewayPoolLedgerIdentity(identity)))
@@ -282,7 +314,7 @@ func (s *openAICodexCookieStore) hydrateGatewayPoolSharedHistory(ctx context.Con
 	return err
 }
 
-func (s *openAICodexCookieStore) beginGatewayPoolAttempt(identity, gateway string, window time.Duration) bool {
+func (s *openAICodexCookieStore) beginGatewayPoolAttempt(identity, gateway string, window time.Duration, enabled ...bool) bool {
 	if identity == "" || gateway == "" {
 		return true
 	}
@@ -294,11 +326,20 @@ func (s *openAICodexCookieStore) beginGatewayPoolAttempt(identity, gateway strin
 	if used, ok := s.poolUsed.Load(key); ok {
 		usedAt, _ = used.(time.Time)
 	}
-	base, recommendation := s.gatewayPoolInitialCooldown(identity, gateway, window)
-	if !c.begin(time.Now().UTC(), usedAt, base) {
+	now := time.Now().UTC()
+	s.refreshGatewayPoolCooldown(&c, identity, gateway, window, usedAt, now, enabled...)
+	previous := c.clone()
+	base, recommendation := s.gatewayPoolInitialCooldown(identity, gateway, window, enabled...)
+	if !c.begin(now, usedAt, base) {
+		if s.poolCooldown == nil {
+			s.poolCooldown = map[string]gatewayPoolCooldown{}
+		}
+		s.poolCooldown[key] = c
 		return false
 	}
+	c.initSources(previous, gatewayPoolCooldownBase(window), now)
 	setGatewayPoolRecommendation(&c, recommendation)
+	s.refreshGatewayPoolCooldown(&c, identity, gateway, window, now, now, enabled...)
 	if s.poolCooldown == nil {
 		s.poolCooldown = map[string]gatewayPoolCooldown{}
 	}
@@ -306,7 +347,24 @@ func (s *openAICodexCookieStore) beginGatewayPoolAttempt(identity, gateway strin
 	return true
 }
 
-func (s *openAICodexCookieStore) observeGatewayPoolCooldown(identity, gateway, verdict string, window time.Duration) *gatewayPoolCooldownSample {
+func (s *openAICodexCookieStore) beginGatewayPoolEarlyAttempt(identity, gateway string, window time.Duration, enabled ...bool) {
+	s.poolCooldownMu.Lock()
+	defer s.poolCooldownMu.Unlock()
+	key := gatewayPoolLedgerKey(identity, gateway)
+	c := s.poolCooldown[key]
+	base, recommendation := s.gatewayPoolInitialCooldown(identity, gateway, window, enabled...)
+	now, previous := time.Now().UTC(), c.clone()
+	c.beginEarly(now, base)
+	c.initSources(previous, gatewayPoolCooldownBase(window), now)
+	setGatewayPoolRecommendation(&c, recommendation)
+	s.refreshGatewayPoolCooldown(&c, identity, gateway, window, now, now, enabled...)
+	if s.poolCooldown == nil {
+		s.poolCooldown = map[string]gatewayPoolCooldown{}
+	}
+	s.poolCooldown[key] = c
+}
+
+func (s *openAICodexCookieStore) observeGatewayPoolCooldown(identity, gateway, verdict string, window time.Duration, enabled ...bool) *gatewayPoolCooldownSample {
 	if identity == "" || gateway == "" {
 		return nil
 	}
@@ -314,10 +372,18 @@ func (s *openAICodexCookieStore) observeGatewayPoolCooldown(identity, gateway, v
 	defer s.poolCooldownMu.Unlock()
 	key := gatewayPoolLedgerKey(identity, gateway)
 	c := s.poolCooldown[key]
-	base, recommendation := s.gatewayPoolInitialCooldown(identity, gateway, window)
-	sample, changed := c.observe(time.Now().UTC(), verdict, base)
+	base, recommendation := s.gatewayPoolInitialCooldown(identity, gateway, window, enabled...)
+	now, previous := time.Now().UTC(), c.clone()
+	sample, changed := c.observe(now, verdict, base)
 	if changed {
+		c.initSources(previous, gatewayPoolCooldownBase(window), now)
+		if verdict == openAIGatewayVerdictFull || previous.Outcome == openAIGatewayVerdictFull {
+			c.LocalFloorSeconds = 0
+		} else if sample != nil {
+			c.LocalFloorSeconds = max(c.LocalFloorSeconds, nextGatewayPoolCooldown(sample.WindowSeconds))
+		}
 		setGatewayPoolRecommendation(&c, recommendation)
+		s.refreshGatewayPoolCooldown(&c, identity, gateway, window, now, now, enabled...)
 		if s.poolCooldown == nil {
 			s.poolCooldown = map[string]gatewayPoolCooldown{}
 		}
@@ -359,6 +425,9 @@ func (s *OpenAIGatewayService) noteGatewayPoolCooldownVerdict(
 	if err != nil {
 		return
 	}
-	sample := s.codexCookies.observeGatewayPoolCooldown(identity, applied.Gateway, verdict, account.gatewayPoolGatewayWindow())
+	if applied.LedgerTag != "" && applied.LedgerTag != gatewayPoolLedgerTag(identity) {
+		return
+	}
+	sample := s.codexCookies.observeGatewayPoolCooldown(identity, applied.Gateway, verdict, account.gatewayPoolGatewayWindow(), account.gatewayPoolUseRecommendation())
 	s.reportGatewayPoolCooldown(account, identity, sample)
 }
