@@ -71,6 +71,25 @@ export async function list(
   return data
 }
 
+export interface GatewayPoolProgress {
+  phase: 'fetching' | 'verifying' | 'ready' | 'exhausted' | 'unknown' | 'cancelled'
+  attempt: number
+  limit: number
+  rejected: number
+  gateway?: string
+  started_at: string
+  updated_at: string
+  elapsed_ms: number
+  active_requests: number
+}
+
+export async function getGatewayPoolProgress(ids: number[], signal?: AbortSignal): Promise<Record<number, GatewayPoolProgress>> {
+  const { data } = await apiClient.get<Record<number, GatewayPoolProgress>>('/admin/accounts/gateway-pool-progress', {
+    params: { ids: ids.join(',') }, signal
+  })
+  return data
+}
+
 export interface AccountListWithEtagResult {
   notModified: boolean
   etag: string | null
