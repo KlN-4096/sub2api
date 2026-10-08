@@ -105,7 +105,7 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 		if count, known := concurrency[account.ID]; known {
 			runtime.CurrentConcurrency = &count
 		}
-		live := s.codexCookies.gatewayPoolUsageLive(identity)
+		activeEvents := s.codexCookies.activeUsageTracker(identity).snapshot()
 		session := s.codexCookies.gatewayPoolUsageSession()
 		blockedAt := gatewayPoolUsageBlockedAt(account)
 		var idleAt time.Time
@@ -126,7 +126,7 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 					round.EndedAt, round.EndReason = blockedAt, "temporarily_unschedulable"
 				}
 			}
-			runtime.Rounds[i] = round.fullUsageView(live, session, runtime.ObservedAt)
+			runtime.Rounds[i] = round.fullUsageView(session, runtime.ObservedAt, activeEvents...)
 		}
 		if pair, live := s.codexCookies.cachedPoolPair(identity); live == openAIGatewayPoolPairLive {
 			ticket := GatewayPoolLiveTicket{Gateway: pair.gateway, Region: pair.region, ExpiresAt: pair.routeExpiresAt, VerifiedModels: []string{}}
@@ -159,6 +159,15 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 			map[int64]gatewayPoolProgressScope{progressAccount: {tag: tag, closedBefore: closedBefore, identity: identity}})[progressAccount]
 		if sharedProgress && progress.RunID != "" {
 			progress.ActiveRequests = s.codexCookies.gatewayPoolPreparationWaiters(identity)
+		}
+		if waiting := s.codexCookies.gatewayPoolContinuousWaiters(identity); waiting > 0 && account.GatewayPoolContinuousWaitEnabled() {
+			progress.ActiveRequests += waiting
+			if s.codexCookies.gatewayPoolPreparationWaiters(identity) == 0 && !s.codexCookies.gatewayPoolVerifiedFull(identity) {
+				progress.Phase = "waiting"
+				if !progress.StartedAt.IsZero() {
+					progress.ElapsedMS = runtime.ObservedAt.Sub(progress.StartedAt).Milliseconds()
+				}
+			}
 		}
 		if progress.Phase == "" {
 			progress.Phase = "idle"

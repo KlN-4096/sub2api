@@ -9,6 +9,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func (s *openAICodexCookieStore) gatewayPoolRankContacts(ctx context.Context, account *Account, identity string, candidates []gwpool.Gateway) []gwpool.Gateway {
+	ranking := s.gatewayPoolRankCandidates(ctx, account, identity, candidates)
+	return ranking.order(ranking.candidates)
+}
+
+func rankGatewayPoolContacts(candidates []gwpool.Gateway, seen map[string]gatewayPoolContactSeen,
+	model, source string, now time.Time,
+) []gwpool.Gateway {
+	scores := gatewayPoolQualityScores(candidates, gatewayPoolContacts{Seen: seen}, nil, model, source, now)
+	return rankGatewayPoolAdaptive(candidates, scores)
+}
+
 func contactRankCandidate(name string, full int) gwpool.Gateway {
 	return gwpool.Gateway{Name: name, PairReady: true, Contacts: []gwpool.ContactStats{{
 		Gateway: name, Model: "astra", Criterion: gwpool.ContactCriterion, Source: "foreground",

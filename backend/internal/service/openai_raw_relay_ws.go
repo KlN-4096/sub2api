@@ -162,6 +162,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketRawRelay(
 	client := &openAIRawRelayWSSide{
 		conn: clientConn,
 		read: func(context.Context) (coderws.MessageType, []byte, error) {
+			if hooks.ClientReadMessage != nil {
+				return hooks.ClientReadMessage(ctx, 0)
+			}
 			return ReadOpenAIWSClientMessage(ctx, clientConn, 0, 0, "")
 		},
 	}

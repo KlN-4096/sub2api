@@ -25,7 +25,9 @@ func gatewayPoolPostResponseRun(t *testing.T, svc *OpenAIGatewayService, account
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ctx, _ := withOpenAIGatewayPoolSink(context.Background(), c)
 	gwpoolEchoSeedVerified(t, svc, account)
-	response, err := svc.doOpenAIUpstream(request.WithContext(ctx), "", account)
+	// This suite isolates one quality decision; logical-request replay has
+	// its own multi-ticket tests in openai_gwpool_business_retry_test.go.
+	response, err := svc.doOpenAIUpstreamAttempt(request.WithContext(ctx), "", account)
 	return c, response, err
 }
 
@@ -73,7 +75,8 @@ func TestGatewayPoolPostResponseStateWithoutSent(t *testing.T) {
 			if tc.wantCalls == 2 {
 				require.Equal(t, "s1", upstream.sentState[1])
 				require.Equal(t, upstream.sentCookies[0], upstream.sentCookies[1])
-				require.Equal(t, "gpt-6-astra", gjson.Get(upstream.sentBodies[1], "model").String())
+				require.Equal(t, "gpt-6-astra", gjson.Get(upstream.sentBodies[0], "model").String())
+				require.Equal(t, gatewayPoolProbeModelLuna, gjson.Get(upstream.sentBodies[1], "model").String())
 				require.Equal(t, "hi", gjson.Get(upstream.sentBodies[1], "input.0.content.0.text").String())
 				require.True(t, upstream.bodies[1].closed)
 			}
@@ -174,7 +177,9 @@ func TestGatewayPoolPostResponseStateCompressedBuilders(t *testing.T) {
 			business, err := decoder.DecodeAll(wire, nil)
 			require.NoError(t, err)
 			require.Equal(t, "hi", gjson.GetBytes(confirmation, "input.0.content.0.text").String())
-			for _, field := range []string{"model", "prompt_cache_key", "client_metadata.session_id", "client_metadata.thread_id"} {
+			require.Equal(t, gjson.GetBytes(body, "model").String(), gjson.GetBytes(business, "model").String())
+			require.Equal(t, gatewayPoolProbeModelLuna, gjson.GetBytes(confirmation, "model").String())
+			for _, field := range []string{"prompt_cache_key", "client_metadata.session_id", "client_metadata.thread_id"} {
 				require.Equal(t, gjson.GetBytes(business, field).Raw, gjson.GetBytes(confirmation, field).Raw)
 			}
 			require.NotContains(t, OpenAITurnStateUsageSource(c), "gwpool_")

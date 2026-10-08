@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,8 +16,8 @@ type CooldownReportResult struct {
 	Recommendation *CooldownRecommendation `json:"recommendation,omitempty"`
 }
 
-// ReportCooldownBatch retains partial acknowledgements. Unknown old endpoints
-// fall back to the original single-report protocol with the same event IDs.
+// ReportCooldownBatch retains per-event acknowledgements. An unsupported batch
+// endpoint is a protocol error, not permission to send a second legacy request.
 func (c *Client) ReportCooldownBatch(ctx context.Context, reports []CooldownReport) ([]CooldownReportResult, error) {
 	if c == nil || len(reports) == 0 || len(reports) > CooldownBatchLimit {
 		return nil, fmt.Errorf("%w: invalid cooldown batch size", ErrPool)
@@ -45,23 +44,6 @@ func (c *Client) ReportCooldownBatch(ctx context.Context, reports []CooldownRepo
 	resp, err := c.do(req)
 	if err != nil {
 		return nil, err
-	}
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
-		_ = resp.Body.Close()
-		results := make([]CooldownReportResult, 0, len(reports))
-		for _, report := range reports {
-			rec, sendErr := c.ReportCooldown(ctx, report)
-			result := CooldownReportResult{ID: report.ID, Status: http.StatusOK, Recommendation: rec}
-			if sendErr != nil {
-				result.Status = http.StatusServiceUnavailable
-				var refused *PoolError
-				if errors.As(sendErr, &refused) && refused.Status >= http.StatusBadRequest {
-					result.Status = refused.Status
-				}
-			}
-			results = append(results, result)
-		}
-		return results, nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {

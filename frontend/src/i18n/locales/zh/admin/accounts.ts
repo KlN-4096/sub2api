@@ -760,20 +760,19 @@ export default {
       },
       // OpenAI specific hints
       openai: {
-        gwpoolMemberIsolation: 'Team 成员独立记账',
-        gwpoolUseRecommendation: '使用池端推荐冷却（默认关闭）',
-        gwpoolUseRecommendationDesc: '关闭时只使用本地配置、学习与失败退避。开启后叠加池端推荐；推荐降低或撤回不抹掉真实失败下限，固定档优先。旧版混合记录保守保留至下一真实周期。',
-        gwpoolMemberIsolationDesc: '用于同一Team空间中不同成员分别记录网关冷却，默认关闭。只改变本地账本和池端消费身份，不改出站身份，也不代表上游冷却一定独立。',
+        gwpoolCredentialScope: '同一套上游凭据共享验票和账本；同一工作区的不同成员独立记账。本地实测和冷却规则优先，池端数据仅供参考。',
         gatewayRuntime: {
           durationHours: '{hours}小时{minutes}分{seconds}秒',
           live: '已验证 · {gateway} · 验证模型：{models}',
           unverified: '尚未验证',
           counts: '本轮验满 / 尝试 {full} / {attempted} 张',
           active: '当前周期满血使用 {duration}',
+          activeHint: '仅统计已验满票承载业务的活跃区间，并发去重；不含空闲、找票、验证和重试等待。旧口径时长不再展示。',
           duration: '{minutes}分{seconds}秒',
           history: '使用历史',
           ended: '{full}/{attempted}张 · 满血使用 {duration} · {end}结束',
           archived: '历史满血累计 {duration} / {count}轮',
+          archivedCounts: '历史记录 {count}轮',
           legacy: '旧统计 · {model} · {full}/{attempted}张',
           legacyArchived: '旧归档 · {model} · {count}轮 · {full}/{attempted}张',
           durationIncomplete: '（部分时长未观测）',
@@ -797,29 +796,18 @@ export default {
           concurrent: '{count}个请求正在预检（含当前请求）',
           unavailable: '实时验证进度暂不可用'
         },
-        gwpoolRotation: '网关不足时多账号轮转',
-        gwpoolRotationMinGateways: '停用门槛',
-        gwpoolRotationMinGatewaysDesc: '候选少于此数时休息，优先用完活票。默认1。',
         gwpoolResumeGateways: '恢复门槛',
-        gwpoolResumeGatewaysDesc: '第N个本地冷却到期后恢复，不复查池端库存；已知不足N则等全部结束，无记录则不休息。不低于停用门槛，默认50。',
+        gwpoolResumeGatewaysDesc: '候选耗尽后，等第N个本地冷却到期恢复，不复查池端库存；已知不足N则等全部结束，无记录则不休息。默认50。',
         gwpoolCandidatesHint: '候选指可取且未冷却的网关，不代表已验满；清单读取失败不按零处理。',
         gwpoolBulkHint: '逐项勾选才修改；未选字段保留各账号原值。数字清空恢复默认；Key留空保留原Key，不复制任一账号的运行统计。',
         gwpoolBulkApply: '修改：{field}',
-        gwpoolAutoWait: '缺票或可恢复预检失败时等待（默认关闭）',
-        gwpoolEarlyProbe: '提前探测（实验性）',
-        gwpoolEarlyProbeDesc: '用于有请求等待、但正常候选已空的场景。每30分钟最多提前验证一个仍在本地冷却中的可取网关，成功即接业务；默认关闭，不后台囤票，不绕过鉴权或限流。',
-        gwpoolAutoWaitDesc: '仅在业务发送前，对缺票、全部冷却或可恢复的验证传输失败有限退避。不会重发已发送的业务；自身取消、验证预算/次数耗尽、鉴权及限流错误不走此重试。开启轮转时先等待本账号，换号仍须满足耗尽条件。',
-        gwpoolMaxWait: '请求等待最大时间（秒）',
-        gwpoolMaxWaitDesc: '默认120秒。每条请求独立累计取票、验证和恢复的等待；不限制成功后的推理时长，也不清空共享候选队列。客户端更早截止仍会退出。',
+        gwpoolContinuousWait: '缺票时持续等待',
+        gwpoolContinuousWaitDesc: '满血防护下，票失效后立即逐张取票验证，有候选就持续处理原请求，候选耗尽后按现有规则休息。此开关默认关闭；开启则耗尽后仍留号保活等待，不进入池休息。冷却、验满、鉴权及限流仍生效；客户端取消即退出，无请求不主动找票。',
+        gwpoolContinuousWaitInactiveLimits: '开启后，耗尽也不进入池休息，恢复数量设置暂不生效但保留原值。关闭后仍会试尽候选，耗尽才休息。客户端或中间代理的硬超时仍可能结束连接。',
         gwpoolProbeTimeout: '票验证最大时间（秒）',
-        gwpoolProbeTimeoutDesc: '默认35秒，范围1–120秒。每张票的A/B两次探测分别计时，不是两次合计；与请求等待最大时间独立。可恢复验证异常用完恢复次数后，丢弃当前票并按现有窗口冷却，继续下一张；不计为降级。',
+        gwpoolProbeTimeoutDesc: '默认10秒，范围1–120秒。前置A/B和后置确认的每一发均使用此超时，整组预算按发数计算；超时属于未知故障，不计为降级。所有满血验证固定使用Luna，不改变业务模型。',
         gwpoolPrepareRetries: '异常恢复次数',
         gwpoolPrepareRetriesDesc: '默认0次，不额外重试。可配置发送业务前取票或验证异常的额外恢复次数；并发请求共享恢复，次数用完后失败票进入冷却，不重放业务。',
-        gwpoolProbeModel: 'state-echo 预检模型（实验性）',
-        gwpoolProbeModelDefault: '默认：Luna（gpt-6-luna）',
-        gwpoolProbeModelBusiness: '跟随业务模型',
-        gwpoolProbeModelDesc: '默认用 Luna 完成 A 请求取 state、B 请求带同一 state 验证；两次请求始终使用所选模型。同账号同票共享验证结果，仍记录实际验证模型，业务继续使用自己的 state-echo 判据。修改从下一次预检生效；关闭质量防护时不运行预检。',
-        gwpoolRotationDesc: '网关池账号自动启用。活满血票优先用完；没有活满血票且最新清单确认候选低于阈值时，账号临时休息30秒至10分钟，并尝试同组其他合格网关池账号。到期仅重新评估，不保证满血。克隆去重、不回访、不强行切断续链；手动停用、认证和限流仍生效。候选严格为0且无活票、备用或在途工作，或超过30分钟无请求，或进入临时不可调度，任一条件结束当前周期并清零，历史保留。只累计本周期满血使用区间，不计找票等待；空闲结束截止最后请求完成，在途流不算空闲。',
         baseUrlHint: '留空使用官方 OpenAI API',
         apiKeyHint: '您的 OpenAI API Key',
         oauthPassthrough: '自动透传（仅替换认证）',
@@ -917,12 +905,10 @@ export default {
         gwpool: '使用网关池选择 Codex 路由',
         gwpoolManualRetry: '清空冷却',
         gwpoolManualRetryPending: '处理中…',
-        gwpoolManualRetryHint: '清零冷却与退避，保留活票和历史；无活票时重新准备。不清鉴权或上游限流。',
-        gwpoolManualRetryFailed: '清除冷却或启动重试失败',
+        gwpoolManualRetryHint: '仅清除本地冷却、退避及网关池休息，保留活票和历史。不取票、不发验证请求，不清鉴权或上游限流；下次业务到来时再准备。',
+        gwpoolManualRetryFailed: '清除本地冷却失败',
         gwpoolManualRetryResult: {
-          retained: '冷却已清除，保留当前活票。',
-          preparing: '冷却已清除，正在共享验证网关。',
-          blocked: '冷却已清除；账号仍受其它停调条件限制，未发起验证。'
+          cleared: '本地冷却已清除，活票和历史已保留；未发起验证。'
         },
         gwpoolDesc:
           '开启后，从网关池获取路由票，并在缓存有效期内复用。取不到可用票时，该账号请求失败，不回退到旧路由。原本使用 WebSocket 的上游请求会改走 HTTP/SSE。',
@@ -942,32 +928,20 @@ export default {
           '默认 3600 秒（1 小时），可设 1～24 小时。每个账号×网关独立学习并调整冷却；到期只表示允许重试，不保证恢复。',
         gwpoolFetchTimeout: '单次取票超时（秒）',
         gwpoolFetchTimeoutDesc:
-          '默认 25 秒。限制一次取票等待，包含池子准备路由票的时间。过短可能取票失败，过长会增加请求等待。',
+          '默认 10 秒。仅限制单次取票网络等待，不是整个候选验证过程的总时限。',
         gwpoolListTimeout: '单次网关清单超时（秒）',
         gwpoolListTimeoutDesc:
           '默认 2 秒。限制获取候选网关清单的等待；失败或超时后交给池子选择，仍遵守本地冷却。',
-        gwpoolWarmTickets: '前台最多验证几张票',
-        gwpoolWarmTicketsDesc:
-          '默认 5 张，上限 8 张。调大会增加验证请求、等待和冷却中的网关数量，不保证成功。仅在业务需要新票时进行前台验证，不提前准备下一张票。',
-        gwpoolGuard: '降智防护（默认开启）',
-        gwpoolGuardDesc:
-          '开启时严格验证：无法判断或预算不足就阻止业务请求，不把未知记成降级。关闭后不做质量预检或降智截断，但取票、冷却和限流仍然生效。验证是路由状态信号，不保证回答质量。',
-        gwpoolGuardDescs: {
-          queue:
-            '新票逐张验证，通过后并发请求共享活票并暂停验证；失效后继续候选队列。没有固定验票张数上限，但每条业务请求有独立等票期限。'
-        },
         gwpoolDetails: '查看冷却、触发条件与排障说明',
         gwpoolCooldownDetails:
-          '冷却按账号×网关分别计算。明确未恢复时依次退避到 1/2/4/6/8/10/12/16/20/24 小时；确认恢复后结束本周期。同一档位在两个独立周期成功后固定，再次失败会解除固定。网络错误不参与学习。匿名统计的推荐值参与后续周期，个人固定值优先，已有冷却不会被突然缩短。',
+          '冷却按成员凭据×网关分别计算。明确未恢复时依次退避到 1/2/4/6/8/10/12/16/20/24 小时；确认恢复后结束本周期。同一档位在两个独立周期成功后固定，再次失败会解除固定。网络错误不参与学习，池端建议不改变本地冷却。',
         gwpoolGuardDetails:
-          '前台A/B先取state再回带确认。业务需要复验时，票龄小于90秒额外最多3发，90秒及以上额外1发；任意HTTP 200且state同值或缺省即停止，保留原业务响应，全部刷新才丢票。不重发业务正文。错误、限流或超时为未知，不学习降级冷却。',
+          '网关池始终严格验满；未知或验证超时阻止业务请求，不记降级。前台 A/B 和后置确认统一使用 Luna，业务模型不变。A/B 先取 state 再回带确认；业务需要复验时，票龄小于90秒额外最多3发，90秒及以上额外1发。任意 HTTP 200 且 state 同值或缺省即停止，保留原业务响应，全部刷新才丢票。验证不发送业务正文。错误、限流或超时为未知，不学习降级冷却。',
         gwpoolWarmDetails:
           '同身份共享候选队列，取票和单次验证各有网络超时。每条请求独立等票，退出不影响其他等待者；最后一个等待者退出才取消网络工作，队列进度保留。验证请求消耗上游配额，不计入业务计费。',
         gwpoolErrors: {
           GWPOOL_SETTING_INVALID: '网关池设置无效，请检查开关类型和数值范围。',
           GWPOOL_TARGET_INVALID: '网关池批量设置仅支持OpenAI OAuth或Setup Token账号。',
-          GWPOOL_PROBE_MODEL_INVALID: '实验性预检模型只能选择 Astra、Sol 或 Luna；选择默认则保持业务模型。',
-          GWPOOL_WAIT_INVALID: '缺票等待开关必须是布尔值；最长等待需为1–3600的整数秒。',
           GWPOOL_BASE_URL_INVALID:
             '网关池地址必须是绝对的 http(s) 地址，例如 https://pool.0102400.xyz。填池子的根地址，不是 /a/xxxx 个人页面。',
           GWPOOL_CONSUMER_KEY_REQUIRED:

@@ -703,6 +703,7 @@ type UpstreamFailoverError struct {
 	Reason                    GatewayFailureReason
 	NextAccountAction         NextAccountAction
 	GatewayPoolRotation       bool // availability-only; handler must enforce opt-in and same-group scope
+	GatewayPoolRetry          bool // pre-delivery recovery, bounded by the original request's wait policy
 	ClientStatusCode          int
 	ClientMessage             string
 	// RawRelayResponse：原样中继账号整体不可用。换号耗尽时 handler 把 StatusCode/

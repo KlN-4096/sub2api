@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -15,41 +14,31 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 )
 
-func TestGatewayPoolRecommendationsRefreshCurrentCycleButNotFixed(t *testing.T) {
+func TestGatewayPoolLocalFixedTierWinsOverConfiguredBase(t *testing.T) {
 	store := &openAICodexCookieStore{}
-	rec := &gwpool.CooldownRecommendation{Seconds: 7200, Samples: 2, Source: "account"}
-	store.noteGatewayPoolRecommendation(gwpoolTestIdentity, "unified-142", rec)
-	require.True(t, store.beginGatewayPoolAttempt(gwpoolTestIdentity, "unified-142", time.Hour, true))
+	require.True(t, store.beginGatewayPoolAttempt(gwpoolTestIdentity, "unified-142", 2*time.Hour))
 	c, _ := store.cooldownEntry(gwpoolTestIdentity, "unified-142")
-	require.Equal(t, 7200, c.WindowSeconds, "不是只显示建议，必须真正进入冷却状态")
-	require.Equal(t, "account", c.RecommendationSource)
-	until := c.Until
-	store.noteGatewayPoolRecommendation(gwpoolTestIdentity, "unified-142",
-		&gwpool.CooldownRecommendation{Seconds: 3600, Samples: 2, Source: "account"})
-	store.gatewayPoolUsedAt(gwpoolTestIdentity, "unified-142", time.Hour, true)
-	unchanged, _ := store.cooldownEntry(gwpoolTestIdentity, "unified-142")
-	require.Equal(t, until.Add(-time.Hour), unchanged.Until, "only the recommendation's added hour is removed")
+	require.Equal(t, 7200, c.WindowSeconds)
 	c.FixedSeconds, c.Successes = 3600, map[int]int{3600: 2}
 	store.poolCooldown[gatewayPoolLedgerKey(gwpoolTestIdentity, "unified-142")] = c
-	store.noteGatewayPoolRecommendation(gwpoolTestIdentity, "unified-142", rec)
-	store.observeGatewayPoolCooldown(gwpoolTestIdentity, "unified-142", openAIGatewayVerdictFull, time.Hour, time.Time{}, true)
+	store.observeGatewayPoolCooldown(gwpoolTestIdentity, "unified-142", openAIGatewayVerdictFull, 4*time.Hour, time.Time{})
 	c, _ = store.cooldownEntry(gwpoolTestIdentity, "unified-142")
 	require.Equal(t, 3600, c.WindowSeconds, "本地已学到的固定档优先")
 }
 
-func TestGatewayPoolNewRecommendationUpdatesExistingNextWindow(t *testing.T) {
+func TestGatewayPoolConfiguredBaseUpdatesNextWindowNotObservedWait(t *testing.T) {
 	now := time.Now().UTC()
 	c := gatewayPoolCooldown{WindowSeconds: 3600, Until: now, Outcome: openAIGatewayVerdictFull}
 	require.True(t, c.begin(now, time.Time{}, 7200))
 	require.Equal(t, 3600, c.AttemptSeconds, "上一档实际等了1h，不能伪报等了2h")
-	require.Equal(t, 7200, c.WindowSeconds, "新推荐必须用于已有网关的下一窗口")
+	require.Equal(t, 7200, c.WindowSeconds, "a new local base applies to the next window")
 	require.Equal(t, now.Add(2*time.Hour), c.Until)
 	c = gatewayPoolCooldown{WindowSeconds: 14400, Until: now, Outcome: openAIGatewayVerdictDegraded}
 	require.True(t, c.begin(now, time.Time{}, 7200))
-	require.Equal(t, 14400, c.WindowSeconds, "推荐不能覆盖本地失败后的更长退避")
+	require.Equal(t, 14400, c.WindowSeconds, "a shorter local base cannot erase learned failure backoff")
 }
 
-func TestGatewayPoolDegradedObservationKeepsLongerNewRecommendation(t *testing.T) {
+func TestGatewayPoolDegradedObservationKeepsLongerConfiguredBase(t *testing.T) {
 	now := time.Now().UTC()
 	for _, fixed := range []int{0, 3600} {
 		c := gatewayPoolCooldown{WindowSeconds: 3600, FixedSeconds: fixed, Until: now}
@@ -57,7 +46,7 @@ func TestGatewayPoolDegradedObservationKeepsLongerNewRecommendation(t *testing.T
 		c.observe(now, openAIGatewayVerdictDegraded, 14400)
 		require.Zero(t, c.FixedSeconds)
 		require.Equal(t, 14400, c.WindowSeconds)
-		require.Equal(t, now.Add(4*time.Hour), c.Until, "失败不应把新推荐4h倒退为2h")
+		require.Equal(t, now.Add(4*time.Hour), c.Until, "failure cannot shorten the configured four-hour local base")
 	}
 }
 
@@ -149,13 +138,13 @@ func TestGatewayPoolCooldownReportIsAnonymousAndUsesExistingObservation(t *testi
 	case <-time.After(time.Second):
 		t.Fatal("没有上报已有观察")
 	}
-	require.Equal(t, gatewayPoolAccountTag(account, "chatgpt:acc-a:user:1"),
-		gatewayPoolAccountTag(account, "chatgpt:acc-a:user:2"))
+	require.NotEqual(t, gatewayPoolAccountTag(account, "gwpool-member:acc-a/1"),
+		gatewayPoolAccountTag(account, "gwpool-member:acc-a/2"))
 	require.NotEqual(t, gatewayPoolAccountTag(account, "chatgpt:acc-a"), gatewayPoolAccountTag(account, "chatgpt:acc-b"))
 	require.NotContains(t, gatewayPoolAccountTag(account, gwpoolTestIdentity), "acc-a")
 }
 
-func TestGatewayPoolRecommendationListActuallyChangesBareTakeExclusion(t *testing.T) {
+func TestGatewayPoolRecommendationListCannotOverrideLocalEligibility(t *testing.T) {
 	tagSeen := false
 	var query string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -172,7 +161,7 @@ func TestGatewayPoolRecommendationListActuallyChangesBareTakeExclusion(t *testin
 	}))
 	defer server.Close()
 	account := gwpoolTestAccount(1)
-	account.Extra[openAIGatewayPoolUseRecommendationKey] = true
+	account.Extra["openai_gwpool_use_recommended_cooldown"] = true
 	account.Extra[openAIGatewayPoolBaseURLExtraKey] = server.URL
 	account.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = "test-consumer"
 	store := &openAICodexCookieStore{}
@@ -180,6 +169,6 @@ func TestGatewayPoolRecommendationListActuallyChangesBareTakeExclusion(t *testin
 	_, err := store.AttachRoute(context.Background(), account, gwpoolTestURL, http.Header{})
 	require.Error(t, err)
 	require.True(t, tagSeen)
-	require.True(t, strings.Contains(query, "exclude=unified-142"), "1h 默认已过，但2h推荐应真正进入排除")
-	require.NotContains(t, query, "gateway=unified-142", "不得强行点名仍在推荐冷却里的网关")
+	require.NotContains(t, query, "exclude=unified-142", "local cooldown has ended; a pool recommendation cannot extend it")
+	require.Contains(t, query, "gateway=unified-142", "local eligibility wins even when a legacy switch remains saved")
 }

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,37 +11,50 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
-func TestGatewayPoolGuardOffSkipsVerificationAndResponseJudgment(t *testing.T) {
+// Retired keys are kept only as test inputs proving they cannot bypass policy.
+const (
+	openAIGatewayPoolGuardEnabledExtraKey        = "openai_gwpool_guard_enabled"
+	openAIGatewayPoolProbeModelExtraKey          = "openai_gwpool_probe_model"
+	openAIGatewayPoolRotationExtraKey            = "openai_gwpool_rotation"
+	openAIGatewayPoolRotationMinGatewaysExtraKey = "openai_gwpool_rotation_min_gateways"
+	openAIGatewayPoolWaitEnabledExtraKey         = "openai_gwpool_auto_wait"
+	openAIGatewayPoolWaitSecondsExtraKey         = "openai_gwpool_max_wait_s"
+	openAIGatewayPoolWarmTicketsExtraKey         = "openai_gwpool_warm_tickets"
+)
+
+func TestGatewayPoolLegacyGuardFalseCannotSkipLunaVerification(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 	account := fake.account(1)
 	account.Extra["openai_gwpool_guard_enabled"] = false
 	account.Extra["openai_gwpool_prewarm"] = true // Legacy setting is ignored.
+	account.Extra["openai_gwpool_probe_model"] = "business"
 	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
-		{status: http.StatusOK, minted: "changed-state"},
-		{status: http.StatusOK, minted: "changed-state"},
+		{status: http.StatusOK, minted: "probe-state"},
+		{status: http.StatusOK, minted: "probe-state"},
 		{status: http.StatusOK, minted: "changed-state"},
 		{status: http.StatusOK, minted: "changed-state"},
 	}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
-	for i := range 4 {
-		request, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
-		require.NoError(t, err)
-		if i%2 == 0 {
-			request.Header.Set(openAICodexTurnStateHeader, "client-state")
-		}
-		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
-		ctx, _ := withOpenAIGatewayPoolSink(request.Context(), ginCtx)
-		response, err := svc.doOpenAIUpstream(request.WithContext(ctx), "", account)
-		require.NoError(t, err, "防护关闭时不要求模型可读，也不运行预检/响应截断")
-		require.NotNil(t, response)
-		_ = response.Body.Close()
+	request, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
+	require.NoError(t, err)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx, _ := withOpenAIGatewayPoolSink(request.Context(), ginCtx)
+	response, err := svc.doOpenAIUpstream(request.WithContext(ctx), "", account)
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	_ = response.Body.Close()
+	require.Len(t, upstream.sentBodies, 4, "A/B、原业务和后置确认都必须执行")
+	require.Equal(t, gwpoolEchoBody1, upstream.sentBodies[2], "业务正文不变")
+	for _, i := range []int{0, 1, 3} {
+		require.Equal(t, "gpt-6-luna", gjson.Get(upstream.sentBodies[i], "model").String())
+		require.NotEqual(t, "x", gjson.Get(upstream.sentBodies[i], "input").String(), "验证不带业务正文")
 	}
-	require.Len(t, upstream.sentBodies, 4, "只发业务，不夹带验证")
 	require.EqualValues(t, 1, fake.hits.Load(), "取票和缓存仍然生效")
 	require.True(t, svc.codexCookies.gatewayPoolUsedRecently(gwpoolTestIdentity, "unified-142", time.Hour))
-	require.False(t, svc.codexCookies.gatewayPoolVerifiedFull(gwpoolTestIdentity), "关防护不等于验证成功")
+	require.True(t, svc.codexCookies.gatewayPoolVerifiedFull(gwpoolTestIdentity))
 }
 
 func TestGatewayPoolStrictGuardBlocksExpiredBudgetBeforeFetching(t *testing.T) {
@@ -75,14 +89,25 @@ func TestGatewayPoolStrictGuardChecksTheActualPairBeforeBusinessSend(t *testing.
 	require.Empty(t, upstream.sentBodies)
 }
 
-func TestGatewayPoolGuardOnlyExplicitBooleanFalseDisables(t *testing.T) {
-	account := gwpoolTestAccount(1)
-	account.Extra["openai_gwpool_guard"] = "off"
-	for _, setting := range []any{nil, true, "false", 0} {
-		account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = setting
-		require.True(t, account.gatewayPoolGuardEnabled())
+func TestGatewayPoolLegacyProbeModelCannotChangeLuna(t *testing.T) {
+	for _, setting := range []any{nil, "business", "gpt-6-astra", "gpt-6-sol", "invalid", true} {
+		t.Run(fmt.Sprint(setting), func(t *testing.T) {
+			fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+			account := fake.account(1)
+			account.Extra["openai_gwpool_probe_model"] = setting
+			upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
+				{status: http.StatusOK, minted: "probe-state"},
+				{status: http.StatusOK, minted: "probe-state"},
+			}}
+			svc := &OpenAIGatewayService{httpUpstream: upstream}
+			request, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
+			require.NoError(t, err)
+			ctx, _ := withOpenAIGatewayPoolSink(request.Context(), nil)
+			require.NoError(t, svc.gatewayPoolWarmUp(request.WithContext(ctx), "", account))
+			require.Len(t, upstream.sentBodies, 2)
+			for _, body := range upstream.sentBodies {
+				require.Equal(t, "gpt-6-luna", gjson.Get(body, "model").String())
+			}
+		})
 	}
-	account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = false
-	require.False(t, account.gatewayPoolGuardEnabled())
-	require.Equal(t, gatewayPoolWarmUnverifiedClientMsg, gatewayPoolClientMessage(errOpenAIGatewayPoolWarmUnverified))
 }

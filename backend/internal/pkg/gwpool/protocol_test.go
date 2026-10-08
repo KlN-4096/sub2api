@@ -228,52 +228,6 @@ func TestCookieVersionIsSanitized(t *testing.T) {
 	}
 }
 
-// 还票：204 成功、409（太晚 / 已还过 / 找不到）当失败报给调用方（它只记日志）、
-// 没有票号时一个请求都不发。
-func TestReleaseReturnsTicket(t *testing.T) {
-	var hits int
-	var gotPath, gotAuth, gotBody, gotContentType string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
-		gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
-		gotContentType = r.Header.Get("Content-Type")
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<10))
-		gotBody = string(body)
-		if hits == 1 {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		w.WriteHeader(http.StatusConflict)
-	}))
-	defer srv.Close()
-
-	client := New(srv.URL, "ck-secret", 0)
-	if err := client.Release(context.Background(), "tkt-7"); err != nil {
-		t.Fatalf("204 应算成功: %v", err)
-	}
-	if gotPath != "/release" {
-		t.Fatalf("path=%q", gotPath)
-	}
-	if gotAuth == "" {
-		t.Fatal("还票的认证必须与 /cookie 一致（带 consumer key）")
-	}
-	if gotContentType != "application/json" {
-		t.Fatalf("content-type=%q", gotContentType)
-	}
-	if gotBody != `{"cookie_version":"tkt-7"}` {
-		t.Fatalf("body=%q", gotBody)
-	}
-	if err := client.Release(context.Background(), "tkt-7"); !errors.Is(err, ErrPool) {
-		t.Fatalf("409 应是包着 ErrPool 的错误: %v", err)
-	}
-	if err := client.Release(context.Background(), "   "); err != nil {
-		t.Fatalf("没有票号就还不了，这不算错误: %v", err)
-	}
-	if hits != 2 {
-		t.Fatalf("空票号不该发请求，实际打了 %d 次", hits)
-	}
-}
-
 // 响应里的 valid_for_s 必须钳到物理上限（__oailb 的 exp-iat 恒 3900s）。不钳的后果是整个功能
 // 被**静默**抵消：池子报 1e9（或把单位写成毫秒）⇒ 消费端的缓存永远 live ⇒ 满血窗口过了还在拿
 // 烧掉的路由跑业务，而且池子再也不被调用（连日志都不再出现）。

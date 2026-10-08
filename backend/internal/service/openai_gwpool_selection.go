@@ -44,6 +44,7 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 	identities := map[int64]string{}
 	freshAccounts := map[int64]*Account{}
 	poolIDs := map[int64]bool{}
+	continuous := map[int64]string{}
 	complete := true
 	checker := &defaultOpenAIAccountScheduler{service: s}
 	for i := range accounts {
@@ -57,7 +58,7 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 			continue
 		}
 		s.codexCookies.poolRotationAccounts.Store(accounts[i].ID, gatewayPoolRotationAccount(account, *req.GroupID))
-		if !gatewayPoolRotationAccount(account, *req.GroupID) || !account.IsSchedulable() {
+		if !gatewayPoolRotationAccount(account, *req.GroupID) || !gatewayPoolWaitHealth(account) {
 			continue
 		}
 		poolIDs[account.ID] = true
@@ -68,7 +69,11 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 		}
 		// Membership is group-wide. A model-specific request cannot evict a
 		// healthy active account just because it cannot serve this model.
-		domains[account.ID] = gatewayPoolLedgerIdentity(identity)
+		domains[account.ID] = identity
+		s.codexCookies.poolRounds.setContinuousAccount(*req.GroupID, account.ID, identity, account.GatewayPoolContinuousWaitEnabled())
+		if account.GatewayPoolContinuousWaitEnabled() {
+			continuous[account.ID] = domains[account.ID]
+		}
 		compatible, _ := checker.isAccountRequestCompatibleReason(ctx, account, req)
 		if !compatible || !checker.isAccountTransportCompatible(account, req.RequiredTransport) ||
 			(req.RequireCompact && openAICompactSupportTier(account) == 0) {
@@ -96,7 +101,7 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 		}
 		// Merge all matching credential-domain rows. Counting distinct names in
 		// the hydrated ledger avoids treating clones as extra gateway capacity.
-		prefix := gatewayPoolLedgerIdentity(identity) + "\x00"
+		prefix := identity + "\x00"
 		pref := gatewayPoolAccountPreference{verified: s.codexCookies.gatewayPoolVerifiedFull(identity)}
 		known := pref.verified
 		s.codexCookies.poolUsed.Range(func(key, value any) bool {
@@ -110,7 +115,7 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 				return true
 			}
 			known = true
-			if _, cooling := s.codexCookies.gatewayPoolUsedAt(identity, gateway, account.gatewayPoolGatewayWindow(), account.gatewayPoolUseRecommendation()); !cooling {
+			if _, cooling := s.codexCookies.gatewayPoolUsedAt(identity, gateway, account.gatewayPoolGatewayWindow()); !cooling {
 				pref.cooled++
 			}
 			return true
@@ -150,6 +155,7 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 	}
 	// Exhaustion is group-wide, just like admission. A model/capability subset
 	// must not reset healthy primaries that serve other requests.
+	s.codexCookies.poolRounds.reconcileContinuous(*req.GroupID, continuous, complete)
 	shared, restFirst := s.codexCookies.poolRounds.snapshot(*req.GroupID, domains, complete)
 	if state := gatewayPoolRotationFrom(ctx); state != nil {
 		attempted := map[string]struct{}{}

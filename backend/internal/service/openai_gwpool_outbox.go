@@ -343,7 +343,7 @@ func (s *OpenAIGatewayService) sendGatewayPoolPending(ctx context.Context, accou
 			}
 		}
 	}
-	s.completeGatewayPoolPending(ctx, accountID, identity, pending, recommendation, err, bindingChanged, startedAt)
+	s.completeGatewayPoolPending(ctx, accountID, pending, recommendation, err, bindingChanged, startedAt)
 }
 
 func (s *OpenAIGatewayService) sendGatewayPoolCooldownBatch(ctx context.Context, accountID int64, batch []gatewayPoolPendingReport) {
@@ -363,7 +363,7 @@ func (s *OpenAIGatewayService) sendGatewayPoolCooldownBatch(ctx context.Context,
 	var reports []gwpool.CooldownReport
 	for _, pending := range batch {
 		if pending.Binding != binding {
-			s.completeGatewayPoolPending(ctx, accountID, identity, pending, nil, nil, true, startedAt)
+			s.completeGatewayPoolPending(ctx, accountID, pending, nil, nil, true, startedAt)
 			continue
 		}
 		sending = append(sending, pending)
@@ -387,11 +387,11 @@ func (s *OpenAIGatewayService) sendGatewayPoolCooldownBatch(ctx context.Context,
 		if itemErr == nil && result.Status != http.StatusOK {
 			itemErr = &gwpool.PoolError{Status: result.Status}
 		}
-		s.completeGatewayPoolPending(ctx, accountID, identity, pending, result.Recommendation, itemErr, false, startedAt)
+		s.completeGatewayPoolPending(ctx, accountID, pending, result.Recommendation, itemErr, false, startedAt)
 	}
 }
 
-func (s *OpenAIGatewayService) completeGatewayPoolPending(ctx context.Context, accountID int64, identity string,
+func (s *OpenAIGatewayService) completeGatewayPoolPending(ctx context.Context, accountID int64,
 	pending gatewayPoolPendingReport, recommendation *gwpool.CooldownRecommendation, sendErr error, bindingChanged bool, startedAt time.Time) {
 	// Network calls hold no history lock; merge ACKs into freshly read state by
 	// kind+ID+payload, never overwrite concurrent enqueue or contact finalization.
@@ -432,8 +432,5 @@ func (s *OpenAIGatewayService) completeGatewayPoolPending(ctx context.Context, a
 	})
 	if writeErr != nil {
 		slog.Warn("gwpool_feedback_update_failed", "account_id", accountID)
-	}
-	if sendErr == nil && !bindingChanged && pending.Kind != "contact" {
-		s.codexCookies.noteGatewayPoolRecommendationAt(identity, pending.Report.Gateway, recommendation, startedAt)
 	}
 }

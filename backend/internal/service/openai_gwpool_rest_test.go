@@ -8,20 +8,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGatewayPoolRotationThresholdCountsSpareAndKeepsVerifiedWindow(t *testing.T) {
+func TestGatewayPoolRotationThresholdCountsInFlightAndKeepsVerifiedWindow(t *testing.T) {
 	fake := newGwpoolFakePool(t, "offline", 150)
 	fake.listGateways = []gwpoolFakeGateway{{Name: "unified-142", PairReady: true}, {Name: "unified-143", PairReady: false, UsedByYou: true}}
 	account := rotationAccount(1, 7)
+	account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = false // legacy unguarded threshold policy
 	account.Extra[openAIGatewayPoolRotationMinGatewaysExtraKey] = 2
 	fake.configure(account)
 	svc := rotationService(account)
+	require.False(t, svc.gatewayPoolNoRemainingRoutes(context.Background(), account), "one candidate remains despite the retired stop threshold")
+	fake.listGateways = nil
 	require.True(t, svc.gatewayPoolNoRemainingRoutes(context.Background(), account))
-	spare := openAIGatewayPoolPair{gateway: "unified-143", version: "spare", cookie: "offline", until: time.Now().Add(2 * time.Minute)}
-	svc.codexCookies.poolSpare.Store(gwpoolTestIdentity, &gatewayPoolTicketBatch{pairs: []openAIGatewayPoolPair{spare}})
-	require.False(t, svc.gatewayPoolNoRemainingRoutes(context.Background(), account), "delivered spare counts once even if pool marks used")
-	svc.codexCookies.poolSpare.Delete(gwpoolTestIdentity)
-	svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, spare)
-	svc.codexCookies.gatewayPoolMarkVerifiedFull(gwpoolTestIdentity, spare.version)
+	current := openAIGatewayPoolPair{gateway: "unified-143", version: "current", cookie: "offline", until: time.Now().Add(2 * time.Minute)}
+	finish := svc.codexCookies.gatewayPoolInventoryOperation(gwpoolTestIdentity)
+	require.False(t, svc.gatewayPoolNoRemainingRoutes(context.Background(), account), "in-flight work is not exhaustion")
+	finish()
+	svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, current)
+	svc.codexCookies.gatewayPoolMarkVerifiedFull(gwpoolTestIdentity, current.version)
 	account.Extra[openAIGatewayPoolRotationMinGatewaysExtraKey] = 100
 	require.False(t, svc.gatewayPoolNoRemainingRoutes(context.Background(), account), "verified window is never preempted")
 }

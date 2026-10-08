@@ -5,48 +5,48 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 	"github.com/stretchr/testify/require"
 )
 
-func TestGatewayPoolRecommendationDefaultsOffAndPreservesLocalFloor(t *testing.T) {
-	for _, enabled := range []bool{false, true} {
-		store := &openAICodexCookieStore{}
-		store.noteGatewayPoolRecommendation("id", "g", &gwpool.CooldownRecommendation{Seconds: 14400, Samples: 6, Source: "pool"})
-		require.True(t, store.beginGatewayPoolAttempt("id", "g", time.Hour, enabled))
-		c, _ := store.cooldownEntry("id", "g")
-		want := 3600
-		if enabled {
-			want = 14400
+func TestGatewayPoolLocalCooldownIgnoresLegacyOverlayAndPreservesLocalFloor(t *testing.T) {
+	now := time.Now().UTC()
+	for _, known := range []bool{false, true} {
+		c := gatewayPoolCooldown{
+			SourcesKnown: known, BaseSeconds: 3600, CycleAt: now, WindowSeconds: 14400,
+			LegacyRecommendedSeconds: 14400, LegacyRecommendationSource: "pool",
+			UpdatedAt: now, Until: now.Add(4 * time.Hour),
 		}
-		require.Equal(t, want, c.WindowSeconds)
-		c.LocalFloorSeconds = 7200
-		store.poolCooldown[gatewayPoolLedgerKey("id", "g")] = c
-		store.noteGatewayPoolRecommendation("id", "g", nil)
-		store.gatewayPoolUsedAt("id", "g", time.Hour, enabled)
-		c, _ = store.cooldownEntry("id", "g")
-		require.Equal(t, 7200, c.WindowSeconds, "withdrawal cannot erase a real local lower bound")
+		want := 3600
+		if known {
+			c.LocalFloorSeconds, want = 7200, 7200
+		}
+		store := &openAICodexCookieStore{poolCooldown: map[string]gatewayPoolCooldown{gatewayPoolLedgerKey("id", "g"): c}}
+		store.gatewayPoolUsedAt("id", "g", time.Hour)
+		current, _ := store.cooldownEntry("id", "g")
+		require.Equal(t, want, current.WindowSeconds)
+		require.Equal(t, now.Add(time.Duration(want)*time.Second), current.Until)
+		require.Equal(t, c.UpdatedAt, current.UpdatedAt, "removing a pool overlay is not a local observation")
+		require.False(t, current.hasLegacyRecommendation())
 	}
 }
 
-func TestGatewayPoolRecommendationRefreshIsNotNewContactOrSample(t *testing.T) {
+func TestGatewayPoolCooldownRefreshIsNotNewContactOrSample(t *testing.T) {
 	account := gwpoolTestAccount(1)
-	account.Extra[openAIGatewayPoolUseRecommendationKey] = true
 	svc, repo := gatewayRuntimeService(account)
 	store := &svc.codexCookies
-	rec := &gwpool.CooldownRecommendation{Seconds: 7200, Samples: 6, Source: "pool"}
-	store.noteGatewayPoolRecommendation(gwpoolTestIdentity, "g", rec)
-	require.True(t, store.beginGatewayPoolAttempt(gwpoolTestIdentity, "g", time.Hour, true))
+	require.True(t, store.beginGatewayPoolAttempt(gwpoolTestIdentity, "g", time.Hour))
 	before, _ := store.cooldownEntry(gwpoolTestIdentity, "g")
 	before.AttemptSeconds, before.ElapsedSeconds = 3600, 3605
+	before.LocalFloorSeconds, before.WindowSeconds = 7200, 14400
+	before.LegacyRecommendedSeconds, before.LegacyRecommendationSource = 14400, "pool"
+	before.Until = before.CycleAt.Add(4 * time.Hour)
 	store.poolCooldown[gatewayPoolLedgerKey(gwpoolTestIdentity, "g")] = before
 	history := openAIGatewayHistory{LedgerTag: gatewayPoolLedgerTag(gwpoolTestIdentity),
 		Seen: map[string]openAIGatewaySeen{"g": {At: before.CycleAt, FullAt: before.CycleAt, Verdict: "full", Cooldown: &before}}}
 	require.NoError(t, repo.UpdateExtra(context.Background(), 1, map[string]any{openAIGatewayHistoryExtraKey: history}))
-	store.noteGatewayPoolRecommendation(gwpoolTestIdentity, "g", nil)
-	store.gatewayPoolUsedAt(gwpoolTestIdentity, "g", time.Hour, true)
+	store.gatewayPoolUsedAt(gwpoolTestIdentity, "g", time.Hour)
 	after, _ := store.cooldownEntry(gwpoolTestIdentity, "g")
-	require.Equal(t, before.CycleAt.Add(time.Hour), after.Until)
+	require.Equal(t, before.CycleAt.Add(2*time.Hour), after.Until)
 	require.Equal(t, before.UpdatedAt, after.UpdatedAt)
 	require.Equal(t, before.AttemptSeconds, after.AttemptSeconds)
 	require.Equal(t, before.ElapsedSeconds, after.ElapsedSeconds)
@@ -60,44 +60,25 @@ func TestGatewayPoolRecommendationRefreshIsNotNewContactOrSample(t *testing.T) {
 	require.Equal(t, history.Seen["g"].FullAt, saved.Seen["g"].FullAt)
 	require.Equal(t, "full", saved.Seen["g"].Verdict)
 	require.Equal(t, after.Until, saved.Seen["g"].Cooldown.Until)
-	store.gatewayPoolUsedAt(gwpoolTestIdentity, "g", time.Hour, true)
+	store.gatewayPoolUsedAt(gwpoolTestIdentity, "g", time.Hour)
 	again, _ := store.cooldownEntry(gwpoolTestIdentity, "g")
 	require.Equal(t, after.Until, again.Until, "polling must not restart cooldown")
 }
 
-func TestGatewayPoolLegacyRecommendationPeriodIsNotGuessed(t *testing.T) {
-	now := time.Now().UTC()
-	old := gatewayPoolCooldown{WindowSeconds: 14400, RecommendedSeconds: 14400,
-		RecommendationSource: "pool", UpdatedAt: now, Until: now.Add(4 * time.Hour)}
-	store := &openAICodexCookieStore{poolCooldown: map[string]gatewayPoolCooldown{gatewayPoolLedgerKey("id", "g"): old}}
-	store.noteGatewayPoolRecommendation("id", "g", nil)
-	store.gatewayPoolUsedAt("id", "g", time.Hour, false)
-	current, _ := store.cooldownEntry("id", "g")
-	require.Equal(t, old, current, "legacy mixed data has no safe recommendation-only subtraction")
-}
-
-func TestGatewayPoolRecommendationLateAckCannotUndoWithdrawal(t *testing.T) {
+func TestGatewayPoolLateHistoryCannotRestoreRemovedPoolOverlay(t *testing.T) {
 	store := &openAICodexCookieStore{}
-	at := time.Now().UTC()
-	rec := &gwpool.CooldownRecommendation{Seconds: 14400, Samples: 6, Source: "pool"}
-	store.noteGatewayPoolRecommendationAt("id", "g", nil, at.Add(time.Second))
-	store.noteGatewayPoolRecommendationAt("id", "g", rec, at)
-	base, got := store.gatewayPoolInitialCooldown("id", "g", time.Hour, true)
-	require.Equal(t, 3600, base)
-	require.Nil(t, got)
-}
-
-func TestGatewayPoolSameRecommendationPersistsTheLatestTTL(t *testing.T) {
-	store := &openAICodexCookieStore{}
-	now := time.Now().UTC()
-	rec := &gwpool.CooldownRecommendation{Seconds: 14400, Samples: 6, Source: "pool"}
-	store.noteGatewayPoolRecommendationAt("id", "g", rec, now.Add(-20*time.Minute))
-	require.True(t, store.beginGatewayPoolAttempt("id", "g", time.Hour, true))
-	before, _ := store.cooldownEntry("id", "g")
-	store.noteGatewayPoolRecommendationAt("id", "g", rec, now)
-	store.gatewayPoolUsedAt("id", "g", time.Hour, true)
+	at := time.Now().UTC().Add(-20 * time.Minute)
+	old := gatewayPoolCooldown{
+		SourcesKnown: true, BaseSeconds: 3600, CycleAt: at, WindowSeconds: 14400,
+		LegacyRecommendedSeconds: 14400, LegacyRecommendationSource: "pool",
+		UpdatedAt: at, Until: at.Add(4 * time.Hour),
+	}
+	store.hydrateCooldown("id", "g", &old, 3600, at)
 	after, _ := store.cooldownEntry("id", "g")
-	require.Equal(t, now.Add(gatewayPoolRecommendationTTL), after.RecommendationUntil)
-	require.Equal(t, before.Until, after.Until, "TTL refresh is not a new contact")
-	require.True(t, after.changedAt().After(before.changedAt()))
+	require.Equal(t, at.Add(time.Hour), after.Until)
+	require.False(t, after.hasLegacyRecommendation())
+	require.True(t, after.changedAt().After(old.changedAt()))
+	store.hydrateCooldown("id", "g", &old, 3600, at)
+	again, _ := store.cooldownEntry("id", "g")
+	require.Equal(t, after, again, "late history cannot regain precedence by being migrated again")
 }

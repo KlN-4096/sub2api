@@ -125,7 +125,7 @@ func TestGatewayPoolRotationFreshlyEnabledSourceStopsUnrelatedFailure(t *testing
 func TestGatewayPoolRotationNeverSwitchesOnAnyOtherError(t *testing.T) {
 	for _, err := range []error{
 		errOpenAIGatewayPoolRouteDegraded, errOpenAIGatewayPoolWarmExhausted,
-		errOpenAIGatewayPoolWarmUnverified, errOpenAIGatewayPoolWarmNoModel,
+		errOpenAIGatewayPoolWarmUnverified,
 		context.DeadlineExceeded, errors.New("authentication failed"), gwpool.ErrNoSlot,
 		&gwpool.PoolError{Code: gwpool.CodeNoLivePair}, &gwpool.PoolError{Code: gwpool.CodeNoGateway},
 		&gwpool.PoolError{Code: gwpool.CodeRateLimited}, &gwpool.PoolError{Code: gwpool.CodeConsumerRejected},
@@ -146,7 +146,7 @@ func TestGatewayPoolRotationNeverSwitchesOnAnyOtherError(t *testing.T) {
 			failure := &UpstreamFailoverError{StatusCode: status, RetryableOnSameAccount: true}
 			svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, failure)
 			require.False(t, failure.ShouldRetryNextAccount(), "status %d", status)
-			require.False(t, failure.RetryableOnSameAccount)
+			require.Equal(t, gatewayPoolBusinessRetryStatus(status), failure.RetryableOnSameAccount)
 		}
 	}
 }
@@ -321,7 +321,7 @@ func TestGatewayPoolRotationCanceledOrNoGroupDoesNotReadPool(t *testing.T) {
 }
 
 func TestGatewayPoolRotationDoesNotConfuseDeliveredWithTried(t *testing.T) {
-	for _, state := range []string{"spare", "live-unverified"} {
+	for _, state := range []string{"in-flight", "live-unverified"} {
 		t.Run(state, func(t *testing.T) {
 			fake := newGwpoolFakePool(t, "offline-cookie", 150)
 			fake.listGateways = []gwpoolFakeGateway{{Name: "unified-71", PairReady: true, UsedByYou: true}}
@@ -330,14 +330,12 @@ func TestGatewayPoolRotationDoesNotConfuseDeliveredWithTried(t *testing.T) {
 			svc := rotationService(account)
 			pair := openAIGatewayPoolPair{cookie: "offline-cookie", gateway: "unified-71", version: "unused",
 				until: time.Now().Add(150 * time.Second), since: time.Now()}
-			if state == "spare" {
-				svc.codexCookies.gatewayPoolSpareShelve(gwpoolTestIdentity, &gatewayPoolTicketBatch{
-					store: &svc.codexCookies, account: account, identity: gwpoolTestIdentity,
-					pairs: []openAIGatewayPoolPair{pair},
-				})
+			if state == "in-flight" {
+				finish := svc.codexCookies.gatewayPoolInventoryOperation(gwpoolTestIdentity)
+				defer finish()
 			} else {
 				svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, pair)
-				// next() reserves the local attempt before the probe starts.
+				// Acquisition reserves the local attempt before the probe starts.
 				svc.codexCookies.gatewayPoolMarkUsed(gwpoolTestIdentity, pair.gateway)
 			}
 			failure := &UpstreamFailoverError{GatewayPoolRotation: true, NextAccountAction: NextAccountStop}

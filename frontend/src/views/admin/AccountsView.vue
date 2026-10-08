@@ -338,7 +338,7 @@
             </div>
           </template>
           <template #cell-gateway="{ row }">
-            <AccountGatewayCell :account="row" :progress="gatewayProgress[row.id]" :progress-unavailable="gatewayProgressUnavailable"
+            <AccountGatewayCell :account="row" :progress="gatewayProgress[row.id]" :progress-unavailable="gatewaySnapshotUnavailable" :progress-paused="gatewayProgressPaused"
               :retry-pending="retryingGatewayAccounts.has(row.id)" @retry="retryGatewayPool" />
           </template>
           <template #cell-proxy="{ row }">
@@ -1143,11 +1143,14 @@ const {
   }
 })
 
-const { progress: gatewayProgress, unavailable: gatewayProgressUnavailable } = useGatewayPoolProgress(computed(() =>
+const { progress: gatewayProgress, unavailable: gatewaySnapshotUnavailable, paused: gatewayProgressPaused } = useGatewayPoolProgress(computed(() =>
   hiddenColumns.has('gateway') && hiddenColumns.has('capacity') && hiddenColumns.has('status') ? [] : accounts.value
     .filter(account => account.extra?.openai_gwpool === true)
     .map(account => account.id)
 ))
+// Capacity/rest admission still requires live data; the gateway card can retain
+// a paused display without mistaking an intentional blur for a read failure.
+const gatewayProgressUnavailable = computed(() => gatewaySnapshotUnavailable.value || gatewayProgressPaused.value)
 
 const {
   selectedSet,

@@ -57,17 +57,13 @@ const fields: Field[] = [
   { key: 'openai_gwpool', label: 'gwpool', type: 'boolean', default: true, wide: true },
   { key: 'openai_gwpool_base_url', label: 'gwpoolBaseUrl', type: 'url', default: '', wide: true },
   { key: 'openai_gwpool_consumer_key', label: 'gwpoolConsumerKey', type: 'password', default: '', wide: true },
-  { key: 'openai_gwpool_max_wait_s', label: 'gwpoolMaxWait', hint: 'gwpoolMaxWaitDesc', type: 'number', default: 120, max: 3600 },
-  { key: 'openai_gwpool_probe_timeout_s', label: 'gwpoolProbeTimeout', hint: 'gwpoolProbeTimeoutDesc', type: 'number', default: 35, max: 120 },
+  { key: 'openai_gwpool_continuous_wait', label: 'gwpoolContinuousWait', hint: 'gwpoolContinuousWaitDesc', type: 'boolean', default: false, wide: true },
+  { key: 'openai_gwpool_probe_timeout_s', label: 'gwpoolProbeTimeout', hint: 'gwpoolProbeTimeoutDesc', type: 'number', default: 10, max: 120 },
   { key: 'openai_gwpool_prepare_retries', label: 'gwpoolPrepareRetries', hint: 'gwpoolPrepareRetriesDesc', type: 'number', default: 0, min: 0, max: 10 },
-  { key: 'openai_gwpool_rotation_min_gateways', label: 'gwpoolRotationMinGateways', hint: 'gwpoolRotationMinGatewaysDesc', type: 'number', default: 1, max: 512 },
   { key: 'openai_gwpool_resume_gateways', label: 'gwpoolResumeGateways', hint: 'gwpoolResumeGatewaysDesc', type: 'number', default: 50, max: 512 },
   { key: 'openai_gwpool_gateway_window_s', label: 'gwpoolGatewayWindow', type: 'number', default: 3600, max: 86400 },
   { key: 'openai_gwpool_cooldown_reset_hours', label: 'gwpoolCooldownResetHours', hint: 'gwpoolCooldownResetDesc', type: 'number', default: 24, min: 0, max: cooldownResetMaxHours },
-  { key: 'openai_gwpool_member_isolation', label: 'gwpoolMemberIsolation', hint: 'gwpoolMemberIsolationDesc', type: 'boolean', default: false, wide: true },
-  { key: 'openai_gwpool_early_probe_enabled', label: 'gwpoolEarlyProbe', hint: 'gwpoolEarlyProbeDesc', type: 'boolean', default: false, wide: true },
-  { key: 'openai_gwpool_use_recommended_cooldown', label: 'gwpoolUseRecommendation', hint: 'gwpoolUseRecommendationDesc', type: 'boolean', default: false, wide: true },
-  { key: 'openai_gwpool_fetch_timeout_s', label: 'gwpoolFetchTimeout', type: 'number', default: 25, max: 86400 },
+  { key: 'openai_gwpool_fetch_timeout_s', label: 'gwpoolFetchTimeout', type: 'number', default: 10, max: 86400 },
   { key: 'openai_gwpool_list_timeout_s', label: 'gwpoolListTimeout', type: 'number', default: 2, max: 86400 }
 ]
 const selected = (key: string) => Object.prototype.hasOwnProperty.call(props.modelValue, key)

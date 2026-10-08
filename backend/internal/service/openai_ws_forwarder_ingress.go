@@ -509,13 +509,15 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 
 	readClientMessage := func() ([]byte, error) {
 		idleTimeout := s.openAIWSIngressInterTurnIdleTimeout()
-		msgType, payload, readErr := ReadOpenAIWSClientMessage(
-			ctx,
-			clientConn,
-			idleTimeout,
-			coderws.StatusNormalClosure,
-			"websocket idle timeout",
-		)
+		var msgType coderws.MessageType
+		var payload []byte
+		var readErr error
+		if hooks != nil && hooks.ClientReadMessage != nil {
+			msgType, payload, readErr = hooks.ClientReadMessage(ctx, idleTimeout)
+		} else {
+			msgType, payload, readErr = ReadOpenAIWSClientMessage(
+				ctx, clientConn, idleTimeout, coderws.StatusNormalClosure, "websocket idle timeout")
+		}
 		if readErr != nil {
 			var closeErr *OpenAIWSClientCloseError
 			if errors.As(readErr, &closeErr) && closeErr.StatusCode() == coderws.StatusNormalClosure {
@@ -815,6 +817,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if c != nil {
 				c.Set(gatewayPoolWaitGinKey, &gatewayPoolWaitHolder{})
 			}
+			ctx = context.WithValue(ctx, gatewayPoolWaitKey{}, (*gatewayPoolWaitState)(nil))
+			ctx = context.WithValue(ctx, gatewayPoolRetryOnlyKey{}, gatewayPoolRetryOnly{})
 			currentBridgePayload = nextPayload
 		}
 	}

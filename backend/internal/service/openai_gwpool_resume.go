@@ -78,6 +78,9 @@ func (s *OpenAIGatewayService) loadGatewayPoolRest(ctx context.Context, account 
 		}
 	}
 	state := readGatewayPoolRest(fresh, tag)
+	if fresh.GatewayPoolContinuousWaitEnabled() {
+		return state, fresh, nil // this row does not consume another clone's rest latch
+	}
 	adopt := func(other gatewayPoolRestState) {
 		if other.ChangedAt.After(state.ChangedAt) {
 			previous := state.Previous
@@ -181,8 +184,8 @@ func (s *OpenAIGatewayService) writeGatewayPoolRest(ctx context.Context, account
 
 func gatewayPoolRestReason(account *Account) string {
 	return fmt.Sprintf("网关候选低于%d，按%d个本地冷却截止恢复 / Gateway candidates below %d; resume after %d local cooldowns",
-		account.gatewayPoolRotationMinGateways(), account.gatewayPoolResumeGateways(),
-		account.gatewayPoolRotationMinGateways(), account.gatewayPoolResumeGateways())
+		1, account.gatewayPoolResumeGateways(),
+		1, account.gatewayPoolResumeGateways())
 }
 
 func gatewayPoolOwnsTempBlock(account *Account) bool {
@@ -217,6 +220,9 @@ func (s *OpenAIGatewayService) enterGatewayPoolRest(ctx context.Context, account
 	if at.Before(state.ChangedAt) {
 		return nil // late shortage result cannot undo a newer recovery
 	}
+	if fresh.GatewayPoolContinuousWaitEnabled() {
+		return nil
+	}
 	if !state.Active {
 		state.StartedAt = at
 	}
@@ -235,6 +241,9 @@ func (s *OpenAIGatewayService) gatewayPoolResumeAllowed(ctx context.Context, acc
 		return true, nil
 	}
 	if s.accountRepo == nil {
+		if account.GatewayPoolContinuousWaitEnabled() {
+			return gatewayPoolWaitHealth(account), nil
+		}
 		// Lightweight services without a repository have no durable states.
 		// Preserve the existing resolved-identity path when no local rest has
 		// ever been registered; in-memory rest still uses the same gate.
@@ -259,6 +268,9 @@ func (s *OpenAIGatewayService) gatewayPoolResumeAllowed(ctx context.Context, acc
 	if err != nil {
 		return false, err
 	}
+	if fresh.GatewayPoolContinuousWaitEnabled() {
+		return s.allowGatewayPoolContinuousWait(ctx, fresh)
+	}
 	if !state.Active {
 		// A clone can still carry a pool-owned block after another row published
 		// the shared inactive tombstone. Retry its cleanup independently.
@@ -275,7 +287,7 @@ func (s *OpenAIGatewayService) gatewayPoolResumeAllowed(ctx context.Context, acc
 	if err := s.codexCookies.hydrateGatewayPoolSharedHistory(ctx, fresh, identity); err != nil {
 		return false, err
 	}
-	generation, active, _ := s.codexCookies.gatewayPoolInventoryCandidates(identity, fresh)
+	generation, active, _ := s.codexCookies.gatewayPoolInventoryCandidates(identity)
 	if active {
 		return false, errors.New("gateway local recovery work still in flight")
 	}
