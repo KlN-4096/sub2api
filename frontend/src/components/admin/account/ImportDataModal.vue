@@ -101,6 +101,7 @@ import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import { adminAPI } from '@/api/admin'
 import { useAppStore } from '@/stores/app'
+import { extractI18nErrorMessage } from '@/utils/apiError'
 import type { AdminDataImportResult, AdminDataPayload } from '@/types'
 
 interface Props {
@@ -251,14 +252,25 @@ const isValidDataPayload = (payload: unknown): payload is AdminDataPayload => {
 
 const mergeDataPayloads = (payloads: AdminDataPayload[]): AdminDataPayload => {
   const [firstPayload] = payloads
-  if (payloads.length === 1 && firstPayload) return firstPayload
+  const unique = <T,>(entries: T[]): T[] => {
+    const seen = new Set<string>()
+    return entries.filter(entry => {
+      const key = JSON.stringify(entry)
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }
+  if (payloads.length === 1 && firstPayload) {
+    return { ...firstPayload, proxies: unique(firstPayload.proxies), accounts: unique(firstPayload.accounts) }
+  }
 
   return {
     type: payloads.find((item) => typeof item.type === 'string')?.type,
     version: payloads.find((item) => typeof item.version === 'number')?.version,
     exported_at: new Date().toISOString(),
-    proxies: payloads.flatMap((item) => item.proxies),
-    accounts: payloads.flatMap((item) => item.accounts),
+    proxies: unique(payloads.flatMap((item) => item.proxies)),
+    accounts: unique(payloads.flatMap((item) => item.accounts)),
     skipped_shadows: payloads.reduce((sum, item) => {
       const count = Number(item.skipped_shadows || 0)
       return Number.isFinite(count) ? sum + count : sum
@@ -267,6 +279,7 @@ const mergeDataPayloads = (payloads: AdminDataPayload[]): AdminDataPayload => {
 }
 
 const handleImport = async () => {
+  if (importing.value) return
   if (files.value.length === 0) {
     appStore.showError(t('admin.accounts.dataImportSelectFile'))
     return
@@ -318,7 +331,7 @@ const handleImport = async () => {
       emit('imported')
     }
   } catch (error: any) {
-    appStore.showError(error?.message || t('admin.accounts.dataImportFailed'))
+    appStore.showError(extractI18nErrorMessage(error, t, 'admin.accounts.importErrors', t('admin.accounts.dataImportFailed')))
   } finally {
     importing.value = false
   }

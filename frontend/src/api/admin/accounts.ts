@@ -804,6 +804,10 @@ export async function exportData(options?: {
   return data
 }
 
+// OAuth backend allows 120s; leave room for transport and persistence without
+// changing the timeout of unrelated admin requests.
+const ACCOUNT_IMPORT_TIMEOUT_MS = 150000
+
 export async function importData(payload: {
   data: AdminDataPayload
   skip_default_group_bind?: boolean
@@ -811,7 +815,15 @@ export async function importData(payload: {
   const { data } = await apiClient.post<AdminDataImportResult>('/admin/accounts/data', {
     data: payload.data,
     skip_default_group_bind: payload.skip_default_group_bind
-  })
+  }, { timeout: ACCOUNT_IMPORT_TIMEOUT_MS })
+  const counters: Array<keyof AdminDataImportResult> = [
+    'proxy_created', 'proxy_reused', 'proxy_failed', 'account_created', 'account_failed'
+  ]
+  if (!data || counters.some(key => !Number.isSafeInteger(data[key]) || Number(data[key]) < 0)) {
+    throw Object.assign(new Error('Import response is invalid. The result is unconfirmed; check the account list before retrying.'), {
+      code: 'INVALID_IMPORT_RESPONSE', status: 0
+    })
+  }
   return data
 }
 
@@ -859,7 +871,14 @@ export async function refreshOpenAIToken(
   if (clientId) {
     payload.client_id = clientId
   }
-  const { data } = await apiClient.post<Record<string, unknown>>(endpoint, payload)
+  const { data } = await apiClient.post<Record<string, unknown>>(endpoint, payload, {
+    timeout: ACCOUNT_IMPORT_TIMEOUT_MS
+  })
+  if (!data || typeof data.access_token !== 'string' || !data.access_token.trim()) {
+    throw Object.assign(new Error('Token refresh response is invalid. Do not retry automatically; the refresh token may have rotated.'), {
+      code: 'INVALID_IMPORT_RESPONSE', status: 0
+    })
+  }
   return data
 }
 
