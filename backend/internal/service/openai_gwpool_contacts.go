@@ -54,6 +54,7 @@ type gatewayPoolContactRound struct {
 
 type gatewayPoolContacts struct {
 	LedgerTag        string                            `json:"ledger_tag"`
+	Previous         *gatewayPoolContacts              `json:"previous,omitempty"`
 	TrackingSince    time.Time                         `json:"tracking_since"`
 	HistoryTruncated bool                              `json:"history_truncated,omitempty"`
 	LastUSAt         time.Time                         `json:"last_us_at,omitempty"`
@@ -74,7 +75,7 @@ func gatewayPoolContactHash(value string) string {
 }
 
 func gatewayPoolContactRoundID(identity, version string, at time.Time) string {
-	return gatewayPoolContactHash("contact-round-v1\x00" + gatewayPoolLedgerIdentity(identity) + "\x00" + version + "\x00" + at.UTC().Format(time.RFC3339Nano))
+	return gatewayPoolContactHash("contact-round-v1\x00" + identity + "\x00" + version + "\x00" + at.UTC().Format(time.RFC3339Nano))
 }
 
 func readGatewayPoolContacts(account *Account, tag string) gatewayPoolContacts {
@@ -84,7 +85,16 @@ func readGatewayPoolContacts(account *Account, tag string) gatewayPoolContacts {
 		_ = json.Unmarshal(raw, &state)
 	}
 	if state.LedgerTag != tag {
-		state = gatewayPoolContacts{LedgerTag: tag}
+		previous := state
+		previous.Previous = nil
+		next := gatewayPoolContacts{LedgerTag: tag}
+		if state.Previous != nil && state.Previous.LedgerTag == tag {
+			next = *state.Previous
+		}
+		if previous.LedgerTag != "" || len(previous.Rounds) > 0 || len(previous.Seen) > 0 {
+			next.Previous = &previous
+		}
+		state = next
 	}
 	if state.Seen == nil {
 		state.Seen = map[string]gatewayPoolContactSeen{}

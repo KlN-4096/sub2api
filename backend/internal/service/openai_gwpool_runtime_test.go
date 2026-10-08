@@ -343,6 +343,7 @@ func TestGatewayPoolBusinessPreflightFailureDoesNotStartReusedPairAge(t *testing
 	svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
 		cookie: "offline-cookie", gateway: "g", version: "v", until: time.Now().Add(time.Minute),
 	})
+	svc.codexCookies.gatewayPoolMarkVerifiedFull(gwpoolTestIdentity, "v", gatewayPoolProbeModelLuna)
 	request, err := http.NewRequest(http.MethodPost, gwpoolTestURL, nil)
 	require.NoError(t, err)
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())

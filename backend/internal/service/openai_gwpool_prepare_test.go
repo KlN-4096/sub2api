@@ -149,9 +149,9 @@ func TestGatewayPoolCandidateQueueRetainsOrderAndRejoinsAtTail(t *testing.T) {
 
 func TestGatewayPoolPreparationSettingsDefaultsAndRecoveryBounds(t *testing.T) {
 	account := gwpoolTestAccount(1)
-	require.Equal(t, 120*time.Second, account.gatewayPoolMaxWait())
+	require.True(t, account.GatewayPoolLongWaitEnabled())
 	account.Extra[openAIGatewayPoolWaitEnabledExtraKey] = false
-	require.Equal(t, 120*time.Second, account.gatewayPoolMaxWait(), "obsolete auto-wait switch does not disable queue waiting")
+	require.True(t, account.GatewayPoolLongWaitEnabled(), "obsolete auto-wait switch does not disable queue waiting")
 	require.Zero(t, account.gatewayPoolPreparationRecoveries())
 	for _, value := range []any{0, float64(0), int64(0)} {
 		account.Extra[openAIGatewayPoolRecoveryExtraKey] = value
@@ -165,8 +165,8 @@ func TestGatewayPoolPreparationSettingsDefaultsAndRecoveryBounds(t *testing.T) {
 	}
 }
 
-func TestGatewayPoolPreparationDeadlineDoesNotCancelSuccessfulBusiness(t *testing.T) {
-	svc, repo, _, account, request, wait := ticketWaitFixture(t)
+func TestGatewayPoolPreparationDoesNotImposeDeadlineOnSuccessfulBusiness(t *testing.T) {
+	svc, repo, _, account, request, _ := ticketWaitFixture(t)
 	account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = true
 	account.Credentials["access_token"] = "offline"
 	repo.account = *account
@@ -177,9 +177,6 @@ func TestGatewayPoolPreparationDeadlineDoesNotCancelSuccessfulBusiness(t *testin
 	upstream.beforeReply = func(request *http.Request, call int) error {
 		if call == 3 {
 			businessCtx = request.Context()
-			wait.mu.Lock()
-			wait.deadline = time.Now().Add(-time.Second) // inference outlived preparation allowance
-			wait.mu.Unlock()
 		}
 		return nil
 	}
@@ -198,6 +195,11 @@ func TestGatewayPoolPreparationDeadlineDoesNotCancelSuccessfulBusiness(t *testin
 
 func TestGatewayPoolPreparationContinuesPastLegacyTicketLimit(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	for i := 1; i <= 10; i++ {
+		fake.listGateways = append(fake.listGateways, gwpoolFakeGateway{
+			Name: fmt.Sprintf("unified-%d", 140+i), PairReady: true,
+		})
+	}
 	fake.cookieForHit = func(hit int64) string {
 		return gwpoolTestPairCookie(t, fmt.Sprintf("unified-%d", 140+hit))
 	}

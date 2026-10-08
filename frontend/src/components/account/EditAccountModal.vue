@@ -2619,22 +2619,20 @@
               />
               <p class="input-hint">{{ t('admin.accounts.openai.gwpoolConsumerKeyDesc') }}</p>
             </div>
+            <div class="flex items-center justify-between gap-4" data-testid="edit-openai-gwpool-wait-policy">
+              <div class="min-w-0">
+                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolContinuousWait') }}</label>
+                <p class="input-hint">{{ t('admin.accounts.openai.gwpoolContinuousWaitDesc') }}</p>
+              </div>
+              <input v-model="openAIGwpoolContinuousWait" data-testid="edit-openai-gwpool-continuous-wait"
+                type="checkbox" class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500" />
+            </div>
             <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolProbeTimeout') }}</label>
               <input v-model.number="openAIGwpoolProbeTimeout" data-testid="edit-openai-gwpool-probe-timeout"
-                type="number" min="1" max="120" step="1" placeholder="35" class="input text-xs" />
+                type="number" min="1" max="120" step="1" placeholder="10" class="input text-xs" />
               <p class="input-hint">{{ t('admin.accounts.openai.gwpoolProbeTimeoutDesc') }}</p>
-            </div>
-            <div>
-              <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolMaxWait') }}</label>
-              <input
-                v-model.number="openAIGwpoolMaxWait"
-                data-testid="edit-openai-gwpool-max-wait"
-                type="number" min="1" max="3600" step="1" placeholder="120"
-                class="input text-xs"
-              />
-              <p class="input-hint">{{ t('admin.accounts.openai.gwpoolMaxWaitDesc') }}</p>
             </div>
             <div>
               <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolPrepareRetries') }}</label>
@@ -2643,45 +2641,18 @@
               <p class="input-hint">{{ t('admin.accounts.openai.gwpoolPrepareRetriesDesc') }}</p>
             </div>
             </div>
-            <div class="flex items-center justify-between gap-4">
-              <div class="min-w-0">
-                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolEarlyProbe') }}</label>
-                <p class="input-hint">{{ t('admin.accounts.openai.gwpoolEarlyProbeDesc') }}</p>
-              </div>
-              <input v-model="openAIGwpoolEarlyProbe"
-                data-testid="edit-openai-gwpool-early-probe" type="checkbox"
-                class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500" />
-            </div>
-            <div class="flex items-center justify-between gap-4">
-              <div class="min-w-0">
-                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolMemberIsolation') }}</label>
-                <p class="input-hint">{{ t('admin.accounts.openai.gwpoolMemberIsolationDesc') }}</p>
-              </div>
-              <input v-model="openAIGwpoolMemberIsolation" data-testid="edit-openai-gwpool-member-isolation"
-                type="checkbox" class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500" />
-            </div>
-            <div class="flex items-center justify-between gap-4">
-              <div class="min-w-0">
-                <label class="input-label mb-0 text-xs">{{ t('admin.accounts.openai.gwpoolUseRecommendation') }}</label>
-                <p class="input-hint">{{ t('admin.accounts.openai.gwpoolUseRecommendationDesc') }}</p>
-              </div>
-              <input v-model="openAIGwpoolUseRecommendation" data-testid="edit-openai-gwpool-use-recommendation"
-                type="checkbox" class="h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500" />
-            </div>
-            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2" data-testid="edit-openai-gwpool-thresholds">
-            <div>
-              <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolRotationMinGateways') }}</label>
-              <input v-model.number="openAIGwpoolRotationMinGateways" type="number" min="1" max="512" step="1"
-                placeholder="1" class="input text-xs" data-testid="edit-openai-gwpool-rotation-min-gateways" />
-              <p class="input-hint">{{ t('admin.accounts.openai.gwpoolRotationMinGatewaysDesc') }}</p>
-            </div>
+            <p class="input-hint" data-testid="edit-openai-gwpool-credential-scope">
+              {{ t('admin.accounts.openai.gwpoolCredentialScope') }}
+            </p>
+            <fieldset :disabled="openAIGwpoolContinuousWait" class="grid grid-cols-1 gap-3 sm:grid-cols-2" data-testid="edit-openai-gwpool-thresholds">
             <div>
               <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolResumeGateways') }}</label>
               <input v-model.number="openAIGwpoolResumeGateways" type="number" min="1" max="512" step="1"
                 placeholder="50" class="input text-xs" data-testid="edit-openai-gwpool-resume-gateways" />
               <p class="input-hint">{{ t('admin.accounts.openai.gwpoolResumeGatewaysDesc') }}</p>
             </div>
-            </div>
+            </fieldset>
+            <p v-if="openAIGwpoolContinuousWait" class="input-hint">{{ t('admin.accounts.openai.gwpoolContinuousWaitInactiveLimits') }}</p>
             <p class="input-hint">{{ t('admin.accounts.openai.gwpoolCandidatesHint') }}</p>
             <div>
               <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -2728,7 +2699,7 @@
                     min="1"
                     max="86400"
                     step="1"
-                    placeholder="25"
+                    placeholder="10"
                     class="input text-xs"
                     data-testid="edit-openai-gwpool-fetch-timeout"
                     :title="t('admin.accounts.openai.gwpoolFetchTimeoutDesc')"
@@ -4137,20 +4108,12 @@ const openAIGwpoolBaseURL = ref('')
 // 输入框恒为空：后端把已存的 key 脱敏成 true，页面从不回显原值。留空 = 不修改。
 const openAIGwpoolConsumerKey = ref('')
 const openAIGwpoolConsumerKeySaved = ref(false)
-const openAIGwpoolRotationMinGateways = ref<number | ''>('')
 const openAIGwpoolResumeGateways = ref<number | ''>('')
-const openAIGwpoolEarlyProbe = ref(false)
-const openAIGwpoolMemberIsolation = ref(false)
-const openAIGwpoolUseRecommendation = ref(false)
-const openAIGwpoolMaxWait = ref<number | ''>('')
+const openAIGwpoolContinuousWait = ref(false)
 const openAIGwpoolProbeTimeout = ref<number | ''>('')
 const openAIGwpoolPrepareRetries = ref<number | ''>('')
-// 降智防护**没有档位了**（2026-10-03）：三个老键 openai_gwpool_guard /
-// openai_gwpool_state_echo / openai_gwpool_degraded_retries 都不再读也不再写，页面上那个
-// select 一起删了。存量行里留着它们是无害的死键 —— 但别再接回来，后端也不读了。
-// 续期缺省即关：那一发要摘掉 __oailb 出站，是对真实 Codex 报文形状的偏离，而且从没单独实测过。
-// 三个「秒」旋钮：null = 留空 = 用后端默认值（1h / 25s / 2s），不往 extra 里写键。
-// 占位符要和后端那三个常量一致 —— 它展示的就是「留空会用什么」。
+// 秒数留空使用后端默认值：初始CD 1h、取票10s、清单2s。
+// 严格验证与Luna固定，不保存退役开关。
 const openAIGwpoolGatewayWindow = ref<number | null>(null)
 const gatewayPoolCooldownResetDefaultHours = 24
 const openAIGwpoolCooldownResetHours = ref<number | null>(gatewayPoolCooldownResetDefaultHours)
@@ -4711,12 +4674,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	openAIGwpoolConsumerKeySaved.value = extra?.openai_gwpool_consumer_key === true
 	openAIGwpoolConsumerKey.value = ''
 	// 网关池强制组内轮转，阈值留空沿用后端默认。
-	openAIGwpoolRotationMinGateways.value = typeof extra?.openai_gwpool_rotation_min_gateways === 'number' ? extra.openai_gwpool_rotation_min_gateways : ''
 	openAIGwpoolResumeGateways.value = typeof extra?.openai_gwpool_resume_gateways === 'number' ? extra.openai_gwpool_resume_gateways : ''
-	openAIGwpoolEarlyProbe.value = extra?.openai_gwpool_early_probe_enabled === true
-	openAIGwpoolMemberIsolation.value = extra?.openai_gwpool_member_isolation === true
-	openAIGwpoolUseRecommendation.value = extra?.openai_gwpool_use_recommended_cooldown === true
-	openAIGwpoolMaxWait.value = typeof extra?.openai_gwpool_max_wait_s === 'number' ? extra.openai_gwpool_max_wait_s : ''
+	openAIGwpoolContinuousWait.value = extra?.openai_gwpool_continuous_wait === true
 	openAIGwpoolProbeTimeout.value = typeof extra?.openai_gwpool_probe_timeout_s === 'number' ? extra.openai_gwpool_probe_timeout_s : ''
 	openAIGwpoolPrepareRetries.value = typeof extra?.openai_gwpool_prepare_retries === 'number' ? extra.openai_gwpool_prepare_retries : ''
 	// 续期缺省即关：只有显式 true 才算开（与后端 gatewayPoolRenew 同口径）。
@@ -6339,48 +6298,33 @@ const handleSubmit = async () => {
         delete newExtra.openai_gwpool_steering
         delete newExtra.openai_gwpool_auto_wait
         delete newExtra.openai_gwpool_warm_tickets
+        delete newExtra.openai_gwpool_max_wait_s
+        if (openAIGwpoolEnabled.value && openAIGwpoolContinuousWait.value) {
+          newExtra.openai_gwpool_continuous_wait = true
+        } else {
+          delete newExtra.openai_gwpool_continuous_wait
+        }
         for (const [key, value] of [
-          ['openai_gwpool_max_wait_s', openAIGwpoolMaxWait.value],
           ['openai_gwpool_probe_timeout_s', openAIGwpoolProbeTimeout.value],
           ['openai_gwpool_prepare_retries', openAIGwpoolPrepareRetries.value]
         ] as const) {
           if (openAIGwpoolEnabled.value && value !== '') newExtra[key] = value
           else delete newExtra[key]
         }
-        if (openAIGwpoolEnabled.value && openAIGwpoolUseRecommendation.value) {
-          newExtra.openai_gwpool_use_recommended_cooldown = true
-        } else {
-          delete newExtra.openai_gwpool_use_recommended_cooldown
-        }
-        if (openAIGwpoolEnabled.value && openAIGwpoolMemberIsolation.value) {
-          newExtra.openai_gwpool_member_isolation = true
-        } else {
-          delete newExtra.openai_gwpool_member_isolation
-        }
-        if (openAIGwpoolEnabled.value && openAIGwpoolEarlyProbe.value) {
-          newExtra.openai_gwpool_early_probe_enabled = true
-        } else {
-          delete newExtra.openai_gwpool_early_probe_enabled
-        }
+        delete newExtra.openai_gwpool_use_recommended_cooldown
+        delete newExtra.openai_gwpool_member_isolation
+        delete newExtra.openai_gwpool_early_probe_enabled
+        delete newExtra.openai_gwpool_early_probe_state
         // 后台预热已移除，保存时清理旧键。
         delete newExtra.openai_gwpool_prewarm
         delete newExtra.openai_gwpool_rotation
-        if (openAIGwpoolEnabled.value) {
-          if (openAIGwpoolRotationMinGateways.value !== '') {
-            newExtra.openai_gwpool_rotation_min_gateways = openAIGwpoolRotationMinGateways.value
-          } else {
-            delete newExtra.openai_gwpool_rotation_min_gateways
-          }
-        } else {
-          delete newExtra.openai_gwpool_rotation_min_gateways
-        }
+        delete newExtra.openai_gwpool_rotation_min_gateways
         if (openAIGwpoolEnabled.value && openAIGwpoolResumeGateways.value !== '') {
           newExtra.openai_gwpool_resume_gateways = openAIGwpoolResumeGateways.value
         } else {
           delete newExtra.openai_gwpool_resume_gateways
         }
-        // Frontend fixed policy: quality protection on, default Luna preflight.
-        // The backend keeps compatibility with callers of the existing API.
+        // Strict verification and Luna are backend rules, not saved overrides.
         delete newExtra.openai_gwpool_probe_model
         delete newExtra.openai_gwpool_guard_enabled
         delete newExtra.openai_gwpool_guard

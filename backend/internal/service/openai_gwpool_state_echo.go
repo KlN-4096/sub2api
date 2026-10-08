@@ -8,6 +8,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -17,7 +18,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 )
 
-// 默认开；仅 guard_enabled=false 关闭，旧 guard/state_echo/retries 键不再读取。
+// 池业务始终验证，旧 guard/state_echo/retries 键不再读取。
 // 错误响应只说类别，不携带 state、cookie 或上游身份。
 const gatewayPoolDegradedClientMsg = "网关连续回声确认均刷新，当前网关已标记为要换，本次不交付业务结果" +
 	" / All gateway echo confirmations refreshed; the route is marked for rotation and the business response is withheld"
@@ -29,40 +30,13 @@ const gatewayPoolDegradedClientMsg = "网关连续回声确认均刷新，当前
 // 会让一次误判（判据有假阴性，见文件头纪律 2）停掉一个真账号。
 var errOpenAIGatewayPoolRouteDegraded = fmt.Errorf("%s: %w", gatewayPoolDegradedClientMsg, gwpool.ErrPool)
 
-// gatewayPoolWarmNoModelClientMsg 是 queue 档读不出本轮模型时那条。
-//
-// **fail closed 而不是静默退回 retry**：判据的 turn-state 绑在 (账号 × 模型 × 这张票) 上，
-// 不知道模型就没法验。悄悄降级会把运营方选的「绝不把降智交给客户端」抹掉，而唯一线索是一条日志。
-// 已知触发条件只有一种：双开（codex_fingerprint_mode=device，出站体被 zstd 压过）× 0.156 之前的
-// 客户端（turn-metadata 头里不补 model）。文案要直接说出该怎么办。
-const gatewayPoolWarmNoModelClientMsg = "读不出本轮模型，无法在请求前验满血（降智防护为「只用验过满血的槽」档）。" +
-	"已知成因：账号开了 device 指纹收敛（出站请求体被压缩）而客户端是 Codex 0.156 之前的版本。" +
-	"请升级客户端，或在接受未经验证路由的前提下关闭降智防护" +
-	" / Cannot read this turn's model, so the route cannot be verified before the request " +
-	"(degradation guard is set to verified-full slots only). Known cause: this account runs the device " +
-	"fingerprint profile (compressed outbound body) with a pre-0.156 Codex client. Upgrade the client, " +
-	"or disable the guard only if you accept an unverified route"
-
-var errOpenAIGatewayPoolWarmNoModel = fmt.Errorf("%s: %w", gatewayPoolWarmNoModelClientMsg, gwpool.ErrPool)
-
 const gatewayPoolWarmUnverifiedClientMsg = "无法完成网关质量验证（预算不足、上游异常或路由已更换），严格防护已阻止业务请求，请稍后重试" +
 	" / Gateway verification could not complete (insufficient budget, upstream error or a changed route); strict protection blocked the business request. Retry later."
 
 var errOpenAIGatewayPoolWarmUnverified = fmt.Errorf("%s: %w", gatewayPoolWarmUnverifiedClientMsg, gwpool.ErrPool)
 
-// gatewayPoolWarmExhaustedClientMsg 是 queue 档取满上限张票、一张都没验出满血时那条。
-//
-// **刻意不复用 gatewayPoolDegradedClientMsg**：那条说的三件事在这里逐条都不对 ——
-// 这一发的业务请求一个字节都没出去过、被标记要换的是**好几个**网关而不是「当前网关」，
-// 而「稍后重试即可」在这里是最坏的建议：Codex CLI 对 503 会自动重发，每一次重发都可能再烧
-// 几张票，而池子的供给是个位数张/小时。文案必须把「别立刻重发」说出来。
-const gatewayPoolWarmExhaustedClientMsg = "连取几张路由票都没验出满血，本次按失败处理" +
-	"（降智防护为「只用验过满血的槽」档，绝不把降智结果交给客户端）。这一档每次失败都会花掉几张票，" +
-	"而供给有限 —— 请隔一会儿再发，不要立刻重试" +
-	" / Several route pairs were taken and none verified full strength, so this request fails " +
-	"(the degradation guard is set to verified-full slots only and never serves a degraded answer). " +
-	"Each failure in this mode spends several pairs from a limited supply: wait a while before sending " +
-	"again rather than retrying immediately"
+const gatewayPoolWarmExhaustedClientMsg = "当前候选已试尽，未获得可用的验满路由；本次不发送业务请求，请等待冷却恢复" +
+	" / Eligible gateway candidates are exhausted without a usable verified route; no business request was sent. Wait for cooldown recovery."
 
 var errOpenAIGatewayPoolWarmExhausted = fmt.Errorf("%s: %w", gatewayPoolWarmExhaustedClientMsg, gwpool.ErrPool)
 
@@ -71,7 +45,7 @@ var errOpenAIGatewayPoolWarmExhausted = fmt.Errorf("%s: %w", gatewayPoolWarmExha
 // 第一道闸是「这一发到底有没有注入池子那张 pair」（per-request 标记，不是回读 pair 缓存）：
 // 没注入就没有「当前网关」可换，判出来也没有动作可做 —— 非推理面的请求
 // 落回罐回放，回读缓存会把它们也算进来。账号必须对得上：故障转移在同一个 ctx 里换号重试，
-// 标记留的是前一个号的（与 routePairInUse / gatewayPoolRenew 同一条校验）。
+// 标记留的是前一个号的（与 routePairInUse 同一条校验）。
 func (s *OpenAIGatewayService) gatewayPoolRouteDegraded(
 	request *http.Request,
 	resp *http.Response,
@@ -79,7 +53,7 @@ func (s *OpenAIGatewayService) gatewayPoolRouteDegraded(
 	proxyURL, identity string,
 	sentAt time.Time,
 ) (bool, error) {
-	if s == nil || request == nil || resp == nil || !account.gatewayPoolGuardEnabled() {
+	if s == nil || request == nil || resp == nil || account == nil || !account.UsesGatewayPool() {
 		return false, nil
 	}
 	applied := openAIGatewayPoolSinkFrom(request.Context()).snapshot()
@@ -94,7 +68,7 @@ func (s *OpenAIGatewayService) gatewayPoolRouteDegraded(
 		if cookie.Name == "__oailb" {
 			actual := openAICodexRouteGateway("__oailb=" + cookie.Value)
 			if actual != "" && actual != applied.Gateway {
-				return false, errOpenAIGatewayPoolWarmUnverified
+				return false, retryGatewayPoolAttempt(errOpenAIGatewayPoolWarmUnverified)
 			}
 		}
 	}
@@ -107,14 +81,28 @@ func (s *OpenAIGatewayService) gatewayPoolRouteDegraded(
 	}
 	refreshed := fresh != "" && fresh != sent
 	if refreshed {
+		resumeUsage := pauseGatewayPoolActiveUse(request.Context())
 		// Freeze this business contact before confirmations update the same
 		// round. Confirmation traffic is not a new initial-quality sample.
 		s.noteGatewayPoolBusinessContact(request, account, identity, applied, sentAt, resp)
-		full, conclusive, err := s.gatewayPoolConfirmResponse(request, account, proxyURL, identity, fresh, applied)
+		full, conclusive, err := s.gatewayPoolConfirmResponse(request, account, proxyURL, identity, fresh, applied, sentAt)
 		if err != nil || !conclusive {
+			if request.Context().Err() != nil {
+				return false, request.Context().Err()
+			}
+			var retryError *gatewayPoolAttemptRetryError
+			if errors.As(err, &retryError) {
+				return false, err
+			}
+			if request.Context().Err() == nil && gatewayPoolRetryableProbeError(err) {
+				return false, retryGatewayPoolAttempt(err)
+			}
 			return false, errOpenAIGatewayPoolWarmUnverified
 		}
 		refreshed = !full
+		if full {
+			resumeUsage()
+		}
 	}
 	if !refreshed {
 		openAIGatewayPoolSinkFrom(request.Context()).noteVerdict(applied.Gateway, openAIGatewayVerdictFull)
@@ -140,18 +128,18 @@ func gatewayPoolEchoStrikes(age time.Duration) int {
 
 // gatewayPoolMarkStale 把缓存里那张票的满血窗口按「已到点」处理。
 //
-// 不是删（gatewayPoolDropPair）：删掉之后下一发会走不带 force / 不带 exclude_versions 的
+// 不是直接删缓存：删掉之后下一发会走不带 force / 不带 exclude_versions 的
 // /cookie，池子可能原样把这张烧过的再发回来。标 Stale 保留票号 ⇒ cachedPoolPair 读成
 // openAIGatewayPoolPairStale ⇒ 取票时 force=1 + exclude_versions=<这张> ⇒ 必定换一个网关。
 //
 // 票号对不上就什么都不做：那说明缓存里已经是另一张票了（并发换过、还过）。
 // 返回值是这张票的满血时长，0 = 没验过满血 / 没标上（见 gatewayPoolNoteFullWindow）。
-func (s *openAICodexCookieStore) gatewayPoolMarkStale(identity, version, gateway string) time.Duration {
-	held, _ := s.gatewayPoolMarkStaleMatched(identity, version, gateway, false)
+func (s *openAICodexCookieStore) gatewayPoolMarkStale(identity, version string) time.Duration {
+	held, _ := s.gatewayPoolMarkStaleMatched(identity, version)
 	return held
 }
 
-func (s *openAICodexCookieStore) gatewayPoolMarkStaleMatched(identity, version, gateway string, exact bool) (time.Duration, bool) {
+func (s *openAICodexCookieStore) gatewayPoolMarkStaleMatched(identity, version string) (time.Duration, bool) {
 	if s == nil || identity == "" {
 		return 0, false
 	}
@@ -166,15 +154,8 @@ func (s *openAICodexCookieStore) gatewayPoolMarkStaleMatched(identity, version, 
 	if cached.invalidated {
 		return 0, false
 	}
-	// 票号对不上时**再按落点比一次**，别直接放弃。
-	//
-	// 并发 + 临期票的交叠窗口里票号会变：另一路请求抢到续期名额、goroutine 回来后
-	// gatewayPoolSwapPair 把缓存里的票号从 v1 换成 v2，而本路判降智时手上还是 v1 ⇒
-	// 只比票号的话这里静默什么都不做，`until` 不清零、cachedPoolPair 继续判 Live ⇒
-	// 刚被判死的那条路由在窗口剩余时间里每一发都照走，force=1 也发不出去。
-	//
-	// 被判死的是**落点**不是票号：同一个网关换没换票都该换走，所以落点一致就照标。
-	if cached.version != version && (exact || gateway == "" || cached.gateway != gateway) {
+	// A late verdict cannot invalidate a replacement, even on the same gateway.
+	if version == "" || cached.version != version {
 		return 0, false
 	}
 	next := cached
@@ -183,6 +164,7 @@ func (s *openAICodexCookieStore) gatewayPoolMarkStaleMatched(identity, version, 
 	if !s.poolPairs.CompareAndSwap(identity, cached, next) {
 		return 0, false
 	}
+	s.invalidateGatewayPoolActiveUse(identity, cached.gateway, cached.version, next.invalidatedAt)
 	// CAS 成功后才结束这张票的统计窗口，避免重复记时。
 	return s.gatewayPoolNoteFullWindow(identity, cached.version), true
 }
@@ -208,25 +190,24 @@ func (s *OpenAIGatewayService) dropDegradedGatewayPoolRoute(
 	}
 	applied := openAIGatewayPoolSinkFrom(request.Context()).snapshot()
 	// 身份解析对影子行要读一次库：用脱离取消的 ctx，否则客户端刚好断开的那一瞬连标 Stale 都做不了，
-	// 票会留在缓存里被下一发继续拿出去（与 gatewayPoolRenew 同一处取舍）。
+	// 票会留在缓存里被下一发继续拿出去。
 	detached := context.WithoutCancel(request.Context())
 	if identity, err := s.codexCookies.gatewayPoolIdentity(detached, account); err == nil {
 		// 标 Stale 顺手量到这张票的满血时长 ⇒ 记进 sink，由用量侧落到这个网关的账本上。
 		if request.Context().Err() != nil {
 			return false
 		}
-		held, marked := s.codexCookies.gatewayPoolMarkStaleMatched(identity, applied.Version, applied.Gateway, true)
+		held, marked := s.codexCookies.gatewayPoolMarkStaleMatched(identity, applied.Version)
 		if !marked {
 			return false
 		}
-		s.endGatewayPoolFullUse(detached, account, identity, applied, time.Now().UTC())
 		openAIGatewayPoolSinkFrom(request.Context()).noteVerdict(applied.Gateway, openAIGatewayVerdictDegraded)
 		applied.Verdict = openAIGatewayVerdictDegraded
 		applied.FullHeldMs = held.Milliseconds()
 		s.finishGatewayPoolContact(detached, account, identity, applied, held)
 		openAIGatewayPoolSinkFrom(detached).noteFullHeld(applied, held)
 		// 账本记的是**实际交付的那个网关**：标 Stale 只让下一发换票，账本才是「这个上游账号
-		// 4 小时内别再点这个落点」的依据。
+		// 本地冷却内别再点这个落点」的依据。
 		s.codexCookies.gatewayPoolMarkUsed(identity, applied.Gateway, applied.cooldownResetAt)
 		s.noteGatewayPoolCooldownVerdict(detached, account, applied, openAIGatewayVerdictDegraded)
 	} else {

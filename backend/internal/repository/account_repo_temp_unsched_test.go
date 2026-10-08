@@ -49,6 +49,8 @@ func TestAccountRepository_SetGatewayPoolRestIsAtomicAndPreservesLongerBlock(t *
 	require.Contains(t, query, "ELSE temp_unschedulable_reason END")
 	require.Contains(t, query, "|| $4::jsonb || jsonb_build_object($5::text, NOW())")
 	require.Contains(t, query, "INSERT INTO scheduler_outbox")
+	require.Contains(t, query, "COALESCE(extra->'openai_gwpool_continuous_wait', 'false'::jsonb) <> 'true'::jsonb",
+		"a stale rest writer cannot reblock a row that switched to continuous waiting")
 	patch, ok := exec.execArgs[0][3].(string)
 	require.True(t, ok)
 	require.JSONEq(t, `{"openai_gwpool_rest_state":{"active":true}}`, patch)

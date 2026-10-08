@@ -16,15 +16,16 @@ func TestGatewayPoolUsageIdleCutoffExcludesWaitingAndFreezesHistory(t *testing.T
 	at := time.Now().UTC().Add(-time.Hour)
 	state := gatewayPoolUsageLedger{Tag: "offline", LastRequestCompletedAt: at.Add(5 * time.Minute)}
 	state.note("luna", "one", at, true)
-	state.startFullUse("one", at, time.Time{}, "process")
-	state.endFullUse("one", at.Add(time.Minute))
 	state.note("luna", "two", at.Add(3*time.Minute), true)
-	state.startFullUse("two", at.Add(4*time.Minute), time.Time{}, "process")
+	state.Rounds[0].syncActiveUsage([]gatewayPoolActiveUseEvent{
+		{roundID: state.Rounds[0].ID, ticket: "one", start: at, end: at.Add(time.Minute)},
+		{roundID: state.Rounds[0].ID, ticket: "two", start: at.Add(4 * time.Minute), end: at.Add(5 * time.Minute)},
+	}, "process", at.Add(5*time.Minute))
 	require.True(t, state.idleCutoff(at.Add(35*time.Minute)).IsZero(), "exactly 30 minutes is not over 30")
 	cutoff := state.idleCutoff(at.Add(36 * time.Minute))
 	require.Equal(t, state.LastRequestCompletedAt, cutoff)
 	state.end(cutoff, "idle_timeout")
-	require.EqualValues(t, 120000, state.Rounds[0].fullUseDuration(time.Now()), "one minute per ticket, no acquisition gap or 30min idle tail")
+	require.EqualValues(t, 120000, state.Rounds[0].ActiveUsage.duration(time.Now()), "one minute per ticket, no acquisition gap or 30min idle tail")
 }
 
 func TestGatewayPoolUsageBodyCompletesExactlyOnceAtEOFOrClose(t *testing.T) {
@@ -113,16 +114,17 @@ func TestGatewayPoolUsageBlockAfterRestartDoesNotInventTail(t *testing.T) {
 	start := time.Now().UTC().Add(-time.Hour)
 	state := gatewayPoolUsageLedger{Tag: gatewayPoolLedgerTag(identity)}
 	state.note("luna", "ticket", start, true)
-	state.startFullUse("ticket", start, time.Time{}, "old-process")
-	state.startFullUse("ticket", start.Add(time.Minute), time.Time{}, "old-process")
+	state.Rounds[0].syncActiveUsage([]gatewayPoolActiveUseEvent{{
+		roundID: state.Rounds[0].ID, ticket: "ticket", start: start,
+	}}, "old-process", start.Add(time.Minute))
 	account.Extra[gatewayPoolUsageExtraKey] = state
 	account.Extra[GatewayPoolUsageBlockedAtKey] = start.Add(20 * time.Minute).Format(time.RFC3339Nano)
 	svc, repo := gatewayRuntimeService(account)
 	svc.maintainGatewayPoolUsage(context.Background(), account, time.Now())
 	fresh, _ := repo.GetByID(context.Background(), 1)
 	state = readGatewayPoolUsage(fresh, gatewayPoolLedgerTag(identity))
-	require.EqualValues(t, 60000, state.Rounds[0].fullUseDuration(time.Now()))
-	require.True(t, state.Rounds[0].DurationIncomplete)
+	require.EqualValues(t, 60000, state.Rounds[0].ActiveUsage.duration(time.Now()))
+	require.True(t, state.Rounds[0].ActiveUsage.Incomplete)
 }
 
 func TestGatewayPoolUsageBlockBeforeFirstAttemptStopsOldRequest(t *testing.T) {
@@ -171,14 +173,4 @@ func TestGatewayPoolUsageBlockDuringBeginDoesNotRewriteOldRequest(t *testing.T) 
 	finish()
 	fresh, _ := repo.GetByID(ctx, 1)
 	require.Empty(t, readGatewayPoolUsage(fresh, gatewayPoolLedgerTag(identity)).Rounds)
-}
-
-func TestGatewayPoolEarlySkipLogsAreThrottledPerAccountAndReason(t *testing.T) {
-	store := &openAICodexCookieStore{}
-	now := time.Now()
-	require.True(t, store.gatewayPoolEarlySkipDue(1, "budget_not_due", now))
-	require.False(t, store.gatewayPoolEarlySkipDue(1, "budget_not_due", now.Add(time.Second)))
-	require.True(t, store.gatewayPoolEarlySkipDue(2, "budget_not_due", now))
-	require.True(t, store.gatewayPoolEarlySkipDue(1, "account_blocked", now))
-	require.True(t, store.gatewayPoolEarlySkipDue(1, "account_blocked", now.Add(time.Minute)))
 }

@@ -137,15 +137,15 @@ func TestGatewayPoolAdaptiveQueueReturnAndExploration(t *testing.T) {
 	require.Equal(t, "a", queue.pick(input))
 	require.Equal(t, "b", queue.pick(input[1:]))
 	scores := map[string]float64{"a": 100, "b": 10, "c": 20, "cooling": 9999}
-	require.Equal(t, "a", queue.pick(input, scores), "returned a can be selected ahead of the tail")
+	require.Equal(t, "a", queue.pick(input, gatewayPoolCandidateRanking{adaptive: scores}), "returned a can be selected ahead of the tail")
 	require.Equal(t, "c", queue.pick(input), "fallback retained FIFO, not score ordering")
 	require.Equal(t, "b", queue.pick(input), "lower-scoring b retains its exploration turn")
 	scores = map[string]float64{"b": 10, "c": 20}
-	require.Equal(t, "a", queue.pick(input, scores), "unmeasured head is not starved")
+	require.Equal(t, "a", queue.pick(input, gatewayPoolCandidateRanking{adaptive: scores}), "unmeasured head is not starved")
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Add(1)
-		go func() { defer wg.Done(); queue.pick(input, scores) }()
+		go func() { defer wg.Done(); queue.pick(input, gatewayPoolCandidateRanking{adaptive: scores}) }()
 	}
 	wg.Wait()
 	queue.mu.Lock()

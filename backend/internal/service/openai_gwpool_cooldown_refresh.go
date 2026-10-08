@@ -16,9 +16,8 @@ func (c gatewayPoolCooldown) changedAt() time.Time {
 func (c *gatewayPoolCooldown) initSources(previous gatewayPoolCooldown, base int, now time.Time) {
 	c.Cleared = false
 	c.SourcesKnown, c.BaseSeconds, c.CycleAt = true, base, now
-	if !previous.SourcesKnown && previous.WindowSeconds > base && previous.Outcome != openAIGatewayVerdictFull {
-		// The old combined record cannot tell failure backoff from a recommendation.
-		// Preserve that unknown lower bound until a real success resets it.
+	if !previous.SourcesKnown && !previous.hasLegacyRecommendation() &&
+		previous.WindowSeconds > base && previous.Outcome != openAIGatewayVerdictFull {
 		c.LocalFloorSeconds = previous.WindowSeconds
 	}
 	if previous.Outcome == openAIGatewayVerdictFull {
@@ -26,35 +25,37 @@ func (c *gatewayPoolCooldown) initSources(previous gatewayPoolCooldown, base int
 	}
 }
 
-// Called under poolCooldownMu. Recompute from the original cycle/touch, never
-// now+duration; refreshing a recommendation must not extend the resting period.
+func (c gatewayPoolCooldown) hasLegacyRecommendation() bool {
+	return c.LegacyRecommendedSeconds != 0 || c.LegacyRecommendationSource != "" || !c.LegacyRecommendationUntil.IsZero()
+}
+
+// Called under poolCooldownMu. Only local base, learned backoff and fixed tiers
+// control scheduling. Recompute from the original cycle/touch, never now+window.
 func (s *openAICodexCookieStore) refreshGatewayPoolCooldown(c *gatewayPoolCooldown,
-	identity, gateway string, window time.Duration, touched, now time.Time, enabled ...bool,
+	identity string, window time.Duration, touched, now time.Time,
 ) {
 	c.clearCooldown(s.gatewayPoolCooldownClearAt(identity), gatewayPoolCooldownBase(window))
 	c.resetBackoff(s.gatewayPoolCooldownResetAt(identity), touched, gatewayPoolCooldownBase(window))
-	if c.Cleared || !c.SourcesKnown {
-		return // conservative migration of old, irreversibly mixed records
+	if c.Cleared || (c.WindowSeconds == 0 && c.UpdatedAt.IsZero()) {
+		return
 	}
 	beforeWindow, beforeUntil, beforeBase := c.WindowSeconds, c.Until, c.BaseSeconds
-	beforeRec, beforeExpiry, beforeSource := c.RecommendedSeconds, c.RecommendationUntil, c.RecommendationSource
+	legacy := c.hasLegacyRecommendation()
 	previousChange := c.changedAt()
 	c.BaseSeconds = gatewayPoolCooldownBase(window)
-	use := len(enabled) != 0 && enabled[0]
-	raw, loaded := s.poolRecommendations.Load(gatewayPoolLedgerKey(identity, gateway))
-	if !use {
-		c.RecommendedSeconds, c.RecommendationSource, c.RecommendationUntil = 0, "", time.Time{}
-	} else if rec, ok := raw.(gatewayPoolRecommendation); loaded && ok {
-		if !rec.Valid() || now.Sub(rec.at) > gatewayPoolRecommendationTTL || !rec.at.After(c.ResetAt) {
-			c.RecommendedSeconds, c.RecommendationSource, c.RecommendationUntil = 0, "", time.Time{}
-		} else {
-			c.RecommendedSeconds, c.RecommendationSource = rec.Seconds, rec.Source
-			c.RecommendationUntil = rec.at.Add(gatewayPoolRecommendationTTL)
+	if !c.SourcesKnown {
+		c.SourcesKnown = true
+		c.CycleAt = c.UpdatedAt
+		if !legacy && c.Outcome != openAIGatewayVerdictFull {
+			c.LocalFloorSeconds = max(c.LocalFloorSeconds, c.WindowSeconds)
+		} else if legacy {
+			// A combined legacy overlay cannot prove a local failure floor.
+			// Keep the old record as history, not as authority over local policy.
+			c.LocalFloorSeconds = 0
 		}
-	} else if !now.Before(c.RecommendationUntil) {
-		c.RecommendedSeconds, c.RecommendationSource, c.RecommendationUntil = 0, "", time.Time{}
 	}
-	c.WindowSeconds = max(c.BaseSeconds, max(c.LocalFloorSeconds, c.RecommendedSeconds))
+	c.LegacyRecommendedSeconds, c.LegacyRecommendationSource, c.LegacyRecommendationUntil = 0, "", time.Time{}
+	c.WindowSeconds = max(c.BaseSeconds, c.LocalFloorSeconds)
 	if c.FixedSeconds > 0 {
 		c.WindowSeconds = c.FixedSeconds
 	}
@@ -62,8 +63,7 @@ func (s *openAICodexCookieStore) refreshGatewayPoolCooldown(c *gatewayPoolCooldo
 		c.CycleAt = touched
 	}
 	c.Until = c.CycleAt.Add(time.Duration(c.WindowSeconds) * time.Second)
-	if c.WindowSeconds != beforeWindow || !c.Until.Equal(beforeUntil) || c.BaseSeconds != beforeBase ||
-		c.RecommendedSeconds != beforeRec || c.RecommendationSource != beforeSource || !c.RecommendationUntil.Equal(beforeExpiry) {
+	if c.WindowSeconds != beforeWindow || !c.Until.Equal(beforeUntil) || c.BaseSeconds != beforeBase || legacy {
 		c.ScheduleUpdatedAt = now
 		if !now.After(previousChange) {
 			c.ScheduleUpdatedAt = previousChange.Add(time.Nanosecond)
@@ -72,7 +72,7 @@ func (s *openAICodexCookieStore) refreshGatewayPoolCooldown(c *gatewayPoolCooldo
 }
 
 // Persist only cooldown metadata; preserving Seen.At/FullAt/verdict is crucial
-// because rewriting a recommendation is not a new contact or quality sample.
+// because changing the local schedule is not a new contact or quality sample.
 func (s *OpenAIGatewayService) persistGatewayPoolCooldownRefresh(ctx context.Context, account *Account, identity string) {
 	if s.accountRepo == nil || account == nil {
 		return

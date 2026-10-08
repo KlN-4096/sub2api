@@ -24,23 +24,9 @@ func gwpoolBackoffLeft(store *openAICodexCookieStore) time.Duration {
 	return left
 }
 
-func TestGatewayPoolProbeModelOverrideIsExplicitAndWhitelisted(t *testing.T) {
+func TestGatewayPoolRetiredProbeSettingsDoNotRejectAccountUpdates(t *testing.T) {
 	account := gwpoolTestAccount(1)
-	require.Equal(t, "gpt-6-luna", account.gatewayPoolProbeModel("gpt-6-astra"))
-	account.Extra[openAIGatewayPoolProbeModelExtraKey] = "gpt-6-luna"
-	require.Equal(t, "gpt-6-luna", account.gatewayPoolProbeModel("gpt-6-astra"))
-	account.Extra[openAIGatewayPoolProbeModelExtraKey] = "gpt-99-test"
-	require.Equal(t, "gpt-6-luna", account.gatewayPoolProbeModel("gpt-6-astra"),
-		"invalid persisted values fall back to the default probe model")
-	require.Error(t, validateOpenAIGatewayPoolAccountExtra(account, map[string]any{
-		openAIGatewayPoolExtraKey:            true,
-		openAIGatewayPoolBaseURLExtraKey:     "https://pool.example.test",
-		OpenAIGatewayPoolConsumerKeyExtraKey: "key",
-		openAIGatewayPoolProbeModelExtraKey:  "gpt-99-test",
-	}))
-	account.Extra[openAIGatewayPoolProbeModelExtraKey] = gatewayPoolProbeModelBusiness
-	require.Equal(t, "gpt-6-astra", account.gatewayPoolProbeModel("gpt-6-astra"))
-	for _, model := range []string{gatewayPoolProbeModelAstra, gatewayPoolProbeModelSol, gatewayPoolProbeModelLuna, gatewayPoolProbeModelBusiness} {
+	for _, model := range []any{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "business", "invalid", true} {
 		require.NoError(t, validateOpenAIGatewayPoolAccountExtra(account, map[string]any{
 			openAIGatewayPoolExtraKey: true, openAIGatewayPoolBaseURLExtraKey: "https://pool.example.test",
 			OpenAIGatewayPoolConsumerKeyExtraKey: "key", openAIGatewayPoolProbeModelExtraKey: model,
@@ -68,9 +54,8 @@ func TestGatewayPoolExcludesRecentlyBurntGateways(t *testing.T) {
 	require.Equal(t, []string{"unified-2", "unified-1"}, burnt,
 		"窗口内的两个、最近烧的在前；5 小时前那个出了 4 小时窗口，别的身份的不算")
 
-	// 收敛到上游账号粒度：同一个 chatgpt_account_id 下的另一个 user 看到同一本账
-	// （降智的作用单位是 (上游账号 × 网关)）。
-	require.Equal(t, burnt, store.gatewayPoolBurnedGateways("chatgpt:acc-a:user:user-b",
+	// A different member under the same workspace has its own cooldown.
+	require.Empty(t, store.gatewayPoolBurnedGateways("gwpool-member:acc-a/user-b",
 		openAIGatewayPoolGatewayWindow, gwpool.MaxExcludeItems))
 
 	// 上限：裁到 limit 项，裁掉的是最久的那些。
@@ -271,10 +256,10 @@ func TestGatewayPoolClearsBackoffAfterSuccess(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 	store := &openAICodexCookieStore{}
 	acct := fake.account(1)
-	store.poolBackoff.Store(gatewayPoolLedgerIdentity(gwpoolTestIdentity), time.Now().Add(-time.Second))
+	store.poolBackoff.Store(gwpoolTestIdentity, time.Now().Add(-time.Second))
 
 	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, http.Header{}))
-	_, present := store.poolBackoff.Load(gatewayPoolLedgerIdentity(gwpoolTestIdentity))
+	_, present := store.poolBackoff.Load(gwpoolTestIdentity)
 	require.False(t, present, "过期的退避记录取票成功后就该删掉")
 }
 
@@ -292,7 +277,7 @@ func TestGatewayPoolAsksForUsableLifetimeAndWait(t *testing.T) {
 	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, http.Header{}))
 	query, err := url.ParseQuery(fake.nextRawQuery(t))
 	require.NoError(t, err)
-	require.Equal(t, strconv.Itoa(int(openAIGatewayPoolMinRemaining.Seconds())), query.Get("min_remaining"))
+	require.Equal(t, "30", query.Get("min_remaining"), "use the lowest supported pool delivery floor, never impose an extra local 60s filter")
 
 	wait, err := strconv.Atoi(query.Get("wait"))
 	require.NoError(t, err, "wait 必须带，不然池子不会等现铸")
@@ -342,22 +327,19 @@ func TestGatewayPoolExcludesStaleTicketVersion(t *testing.T) {
 // 6. 取了票但一个字节都没发出去 ⇒ 还票
 // ---------------------------------------------------------------------------
 
-// gwpoolRunOnce 跑**预热下面那一层**。
-//
-// 这一组用例关闭质量防护，只验取票/注入/
-// 还票协议：走上层的话每个用例都要先把判据那两发也配出来，而且它们的请求体里没有 model ⇒
-// 预热会先 fail closed（errOpenAIGatewayPoolWarmNoModel），一张票都取不到，测不到任何东西。
-//
-// 靶子选这一层是对的，不是绕过：还票判据本身就住在 doOpenAIUpstreamOnce 里
-// （gatewayPoolReleasesUnsent 的调用点）。预热与转发的组合由 openai_gwpool_warm_test.go 盯。
+// gwpoolRunOnce supplies an exact-version verified fixture before exercising the
+// production send gate. It never disables guard; real A/B is covered separately.
 func gwpoolRunOnce(svc *OpenAIGatewayService, req *http.Request, acct *Account) (*http.Response, error) {
-	transportOnly := *acct
-	transportOnly.Extra = make(map[string]any, len(acct.Extra)+1)
-	for key, value := range acct.Extra {
-		transportOnly.Extra[key] = value
+	ctx, _ := withOpenAIGatewayPoolSink(req.Context(), nil)
+	req = req.WithContext(ctx)
+	if _, err := svc.codexCookies.AttachRoute(ctx, acct, req.URL.String(), req.Header); err != nil {
+		return nil, err
 	}
-	transportOnly.Extra[openAIGatewayPoolGuardEnabledExtraKey] = false
-	resp, _, err := svc.doOpenAIUpstreamOnce(req, "", &transportOnly)
+	if pair, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity); state == openAIGatewayPoolPairLive {
+		svc.codexCookies.gatewayPoolMarkVerifiedFull(gwpoolTestIdentity, pair.version, "gpt-6-luna")
+		svc.codexCookies.gatewayPoolMarkSent(gwpoolTestIdentity, pair.version, time.Now())
+	}
+	resp, _, err := svc.doOpenAIUpstreamOnce(req, "", acct)
 	return resp, err
 }
 
@@ -365,7 +347,7 @@ func gwpoolRunOnce(svc *OpenAIGatewayService, req *http.Request, acct *Account) 
 //
 // 为什么要能给任意形态：doOpenAIUpstreamRoundTrip 有**两条出口**（先插件
 // RoundTripOpenAIOAuth，没命中才 httpUpstream.Do），两条出口的错误汇到同一个判据
-// （gatewayPoolReleasesUnsent）。插件那条返回的是 *PluginTransportError（带 RequestSent，
+// （gatewayPoolDefinitelyUnsent）。插件那条返回的是 *PluginTransportError（带 RequestSent，
 // 而且**没有 Unwrap**）或裸 ctx.Err()，用一个「只会回裸 error / *url.Error」的假上游
 // 就永远穿不到那两种形态——2026-10-02 的审查正是在这里抓到一个错边的判据。
 // 插件进程没法在单测里立起来（PluginManager 是具体类型 + 子进程），所以按**错误形态**覆盖。
@@ -398,42 +380,23 @@ func (u *gwpoolErrorUpstream) DoWithTLS(
 	return u.Do(req, proxyURL, id, c)
 }
 
-// 这一发在进 http.Client 之前就失败（裸 error）⇒ 槽位还给池子，并把缓存里那张删掉
-// （槽位都还了还继续拿它出站等于对池子说谎）。
-func TestGatewayPoolReleasesTicketWhenNothingWasSent(t *testing.T) {
-	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-	upstream := &gwpoolErrorUpstream{err: gwpoolBareError()}
-	svc := &OpenAIGatewayService{httpUpstream: upstream}
-	acct := fake.account(1)
-
-	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
-	require.NoError(t, err)
-	_, err = gwpoolRunOnce(svc, req, acct)
-	require.Error(t, err)
-
-	require.Equal(t, `{"cookie_version":"tkt-1"}`, fake.nextRelease(t))
-	require.EqualValues(t, 1, fake.releaseHits.Load())
-	_, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
-	require.Equal(t, openAIGatewayPoolPairNone, state, "还掉的票不许留在缓存里继续出站")
-}
-
-// 同上，但票是**临期票**：取票后第一发会先抢走续期名额（原地改掉缓存里那张的 renewPending），
-// 所以还票时按整个结构体做 CompareAndDelete 会对不上 ⇒ 票还了、本地还留着它继续出站。
-// 认票只能按票号。
-func TestGatewayPoolReleasesNearExpiryTicketFromCacheToo(t *testing.T) {
-	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-	fake.pairRemainingS = 600
-	svc := &OpenAIGatewayService{httpUpstream: &gwpoolErrorUpstream{err: gwpoolBareError()}}
-	acct := fake.account(1)
-
-	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
-	require.NoError(t, err)
-	_, err = gwpoolRunOnce(svc, req, acct)
-	require.Error(t, err)
-
-	require.Equal(t, `{"cookie_version":"tkt-1"}`, fake.nextRelease(t))
-	_, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
-	require.Equal(t, openAIGatewayPoolPairNone, state, "还掉的票不许留在缓存里继续出站")
+// A verified ticket was already used by its probe, so a business dispatch
+// rejected locally must preserve it, including a short advisory remaining time.
+func TestGatewayPoolKeepsVerifiedTicketAfterUnsentBusiness(t *testing.T) {
+	for _, remaining := range []int{0, 600} {
+		fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+		fake.pairRemainingS = remaining
+		svc := &OpenAIGatewayService{httpUpstream: &gwpoolErrorUpstream{err: gwpoolBareError()}}
+		req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
+		require.NoError(t, err)
+		_, err = gwpoolRunOnce(svc, req, fake.account(1))
+		require.EqualError(t, err, gwpoolBareError().Error())
+		require.Zero(t, fake.releaseHits.Load())
+		pair, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
+		require.Equal(t, openAIGatewayPoolPairLive, state)
+		require.Equal(t, "tkt-1", pair.version)
+		require.False(t, pair.firstSent.IsZero())
+	}
 }
 
 // 最后一个客户端在取票完成前离开：取消网络工作，不发送业务。
@@ -508,19 +471,6 @@ func TestGatewayPoolDoesNotReleaseReusedTicket(t *testing.T) {
 	require.Equal(t, "tkt-reused", reused.version)
 }
 
-// 还票失败（池子回 409 / 打不通）绝不影响主流程：请求的错误原样返回，不多出别的错误。
-func TestGatewayPoolReleaseFailureIsSwallowed(t *testing.T) {
-	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-	fake.releaseStatus = http.StatusConflict
-	svc := &OpenAIGatewayService{httpUpstream: &gwpoolErrorUpstream{err: gwpoolBareError()}}
-
-	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
-	require.NoError(t, err)
-	_, err = gwpoolRunOnce(svc, req, fake.account(1))
-	require.EqualError(t, err, gwpoolBareError().Error(), "还票的失败不许冒泡")
-	require.EqualValues(t, 1, fake.releaseHits.Load())
-}
-
 // 池子没报 cookie_version（老池子）⇒ 还不了，但主流程照常，一个 /release 都不发。
 func TestGatewayPoolSkipsReleaseWithoutTicketVersion(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
@@ -559,45 +509,10 @@ func TestGatewayPoolPairExpiresByValidForNotLedgerWindow(t *testing.T) {
 		"绝不能按账本窗口（这里 2h、默认 4h）算：那会让一张票在满血窗口之后继续出站")
 }
 
-// 复现口径：一张票过了 valid_for_s 之后，下一发**重新取票**（带 force=1 换网关），
-// 而不是复用那张已经烧掉的。
-//
-// valid_for_s 用 1 秒而不是 150 秒：判据是「现在过了 until 没有」（cachedPoolPair），
-// 与具体秒数无关，而单个后端测试要留在 60s 预算内。上面那条用例钉的正是「until 来自
-// valid_for_s」，两条合起来覆盖「151 秒后不复用」。
-func TestGatewayPoolReusesAfterValidForElapses(t *testing.T) {
-	first := gwpoolTestPairCookie(t, "unified-142")
-	fake := newGwpoolFakePool(t, first, 1)
-	fake.forceCookie = gwpoolTestPairCookie(t, "unified-84")
-	store := &openAICodexCookieStore{}
-	acct := fake.account(1)
-
-	fresh := http.Header{}
-	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, fresh))
-	require.Equal(t, first, fresh.Get("Cookie"))
-	require.EqualValues(t, 1, fake.hits.Load())
-	_ = fake.nextQuery(t)
-
-	// 窗口内复用：不许再敲池子。
-	reused := http.Header{}
-	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, reused))
-	require.Equal(t, first, reused.Get("Cookie"))
-	require.EqualValues(t, 1, fake.hits.Load(), "窗口内复用同一张，不许每发都取票")
-
-	pair, _ := store.cachedPoolPair(gwpoolTestIdentity)
-	pair.until = time.Now().Add(-time.Second)
-	store.poolPairs.Store(gwpoolTestIdentity, pair)
-
-	rotated := http.Header{}
-	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, rotated))
-	require.EqualValues(t, 1, fake.hits.Load(), "reference expiry cannot refetch")
-	require.Equal(t, first, rotated.Get("Cookie"))
-}
-
 // 还票判据必须覆盖 doOpenAIUpstreamRoundTrip 的**两条出口**的全部错误形态。
 // 插件那条的 *PluginTransportError 没有 Unwrap ⇒ 只看 *url.Error 的判据会把「已经发出去的」
 // 也还回池子，而错还是**害别人**：池子会把一个其实烧过的槽位当新鲜的再发给下一个消费者。
-func TestGatewayPoolReleaseJudgementCoversBothRoundTripExits(t *testing.T) {
+func TestGatewayPoolUnsentJudgementCoversBothRoundTripExits(t *testing.T) {
 	cases := []struct {
 		name        string
 		err         error
@@ -617,14 +532,15 @@ func TestGatewayPoolReleaseJudgementCoversBothRoundTripExits(t *testing.T) {
 			// ctx 是活的：发送前那道显式检查不许抢掉这里要测的判据。
 			req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 			require.NoError(t, err)
-			_, err = gwpoolRunOnce(svc, req, fake.account(1))
-			require.Error(t, err)
-
-			if tc.wantRelease {
-				require.Equal(t, `{"cookie_version":"tkt-1"}`, fake.nextRelease(t))
-				return
+			cleanup, err := svc.codexCookies.AttachRoute(req.Context(), fake.account(1), req.URL.String(), req.Header)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantRelease, gatewayPoolDefinitelyUnsent(nil, tc.err))
+			if gatewayPoolDefinitelyUnsent(nil, tc.err) {
+				gatewayPoolCleanupUnsent(cleanup)
 			}
-			require.Zero(t, fake.releaseHits.Load(), "可能已经发出去了，不许谎报没用过")
+			_, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
+			require.Equal(t, tc.wantRelease, state == openAIGatewayPoolPairNone)
+			require.Zero(t, fake.releaseHits.Load(), "sending evidence never triggers remote release")
 		})
 	}
 }
@@ -731,6 +647,7 @@ func TestGatewayPoolSeedsExcludeFromThePersistedLandingRecord(t *testing.T) {
 	store := &openAICodexCookieStore{} // 全新进程：poolUsed 是空的
 	acct := fake.account(1)
 	acct.Extra[openAIGatewayHistoryExtraKey] = map[string]any{
+		"ledger_tag": gatewayPoolLedgerTag(gwpoolTestIdentity),
 		"seen": map[string]any{
 			"unified-167": map[string]any{"at": time.Now().Add(-10 * time.Minute).Format(time.RFC3339Nano)},
 			// 出了本地初始窗口（默认 1 小时）⇒ 不该补进来。

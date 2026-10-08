@@ -10,6 +10,7 @@ const MAX_ACCOUNTS = 200
 export function useGatewayPoolProgress(ids: ComputedRef<number[]>) {
   const progress = ref<Record<number, GatewayPoolProgress>>({})
   const unavailable = ref(true)
+  const paused = ref(true)
   let timer: ReturnType<typeof setTimeout> | undefined
   let controller: AbortController | undefined
   let mounted = false
@@ -25,9 +26,12 @@ export function useGatewayPoolProgress(ids: ComputedRef<number[]>) {
     clearTimeout(timer)
     controller?.abort()
   }
-  function refresh() {
+  function refresh(preserveAvailability = false) {
     stop()
-    unavailable.value = true
+    if (!preserveAvailability) unavailable.value = true
+    // Blur is an intentional pause, not a failed snapshot. Keep the display
+    // frozen through focus until a complete replacement arrives.
+    paused.value = true
     const visible = new Set(targets())
     // Keep the same cells during blur/focus, but never carry a previous page's
     // rows into a different target set.
@@ -35,6 +39,7 @@ export function useGatewayPoolProgress(ids: ComputedRef<number[]>) {
     refreshPending = active()
     if (!inFlight && refreshPending) void poll()
   }
+  const refreshVisibility = () => refresh(true)
   async function poll() {
     if (inFlight || !active()) return
     clearTimeout(timer)
@@ -50,10 +55,12 @@ export function useGatewayPoolProgress(ids: ComputedRef<number[]>) {
       if (current === generation && active()) {
         progress.value = Object.fromEntries(Object.entries(snapshots).filter(([id]) => requested.includes(Number(id))))
         unavailable.value = false
+        paused.value = false
       }
     } catch {
       if (current === generation) {
         unavailable.value = true
+        paused.value = false
       }
     } finally {
       clearTimeout(timeout)
@@ -65,20 +72,20 @@ export function useGatewayPoolProgress(ids: ComputedRef<number[]>) {
       }
     }
   }
-  watch(() => ids.value.join(','), refresh)
+  watch(() => ids.value.join(','), () => refresh())
   onMounted(() => {
     mounted = true
-    document.addEventListener('visibilitychange', refresh)
-    window.addEventListener('focus', refresh)
-    window.addEventListener('blur', refresh)
+    document.addEventListener('visibilitychange', refreshVisibility)
+    window.addEventListener('focus', refreshVisibility)
+    window.addEventListener('blur', refreshVisibility)
     refresh()
   })
   onUnmounted(() => {
     mounted = false
     stop()
-    document.removeEventListener('visibilitychange', refresh)
-    window.removeEventListener('focus', refresh)
-    window.removeEventListener('blur', refresh)
+    document.removeEventListener('visibilitychange', refreshVisibility)
+    window.removeEventListener('focus', refreshVisibility)
+    window.removeEventListener('blur', refreshVisibility)
   })
-  return { progress, unavailable, refresh }
+  return { progress, unavailable, paused, refresh }
 }

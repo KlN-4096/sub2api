@@ -139,10 +139,8 @@ func TestGatewayPoolForwardPreparationDoesNotSpendBusinessFirstOutputTimeout(t *
 			defer cancel()
 			result, err := svc.Forward(ctx, c, account, body)
 			if stalled {
-				var failure *UpstreamFailoverError
-				require.ErrorAs(t, err, &failure)
-				require.Equal(t, http.StatusGatewayTimeout, failure.StatusCode)
-				require.Contains(t, string(failure.ResponseBody), "first_output_timeout")
+				require.ErrorIs(t, err, context.DeadlineExceeded,
+					"an attempt timeout is recovered until the logical request is canceled")
 				require.Empty(t, recorder.Body.String())
 				require.Len(t, upstream.sentBodies, 2, "preparation must finish before business timeout")
 			} else {

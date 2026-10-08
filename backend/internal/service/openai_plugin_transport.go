@@ -24,7 +24,7 @@ func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
 // 这里还夹着 state-echo 降智判据（openai_gwpool_state_echo.go）。判定点落在这一层是因为它同时
 // 满足两个条件：响应头已经到手，而调用方还一个字节都没往下游写（调用方要等这个函数返回才开始
 // 解析响应）。所以「截断」在这里是干净的，不会留一个半截的 SSE 流。
-func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL string, account *Account) (response *http.Response, responseErr error) {
+func (s *OpenAIGatewayService) doOpenAIUpstreamAttempt(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
 	if request != nil {
 		if failure := GatewayPoolRetryFailure(request.Context()); failure != nil {
 			return nil, failure
@@ -34,17 +34,6 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 		if allowed, err := s.gatewayPoolResumeAllowed(request.Context(), account, true); err != nil || !allowed {
 			return nil, gatewayPoolRestError()
 		}
-		ctx, finish := s.beginGatewayPoolUsageRequest(request.Context(), account)
-		request = request.WithContext(ctx)
-		if finish != nil {
-			defer func() {
-				if response != nil && response.Body != nil && responseErr == nil {
-					response.Body = &gatewayPoolUsageBody{ReadCloser: response.Body, finish: finish}
-				} else {
-					finish()
-				}
-			}()
-		}
 	}
 	if request != nil {
 		ctx := s.gatewayPoolWaitContext(request.Context(), account)
@@ -52,12 +41,14 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 	}
 	// 业务请求只落在**验过满血**的槽上。判据跑在这一发之前、用便宜的垫话，所以用户的请求不会是
 	// 那个去试网关的人（openai_gwpool_warm.go）。验不出来就把错误往上抛，**绝不降级放行**。
-	// 显式关闭防护时跳过质量验证；取票、冷却和限流仍在后续路径生效。
 	var resp *http.Response
 	var degraded bool
 	var err error
 	for {
 		if err = s.gatewayPoolWarmUp(request, proxyURL, account); err != nil {
+			return nil, err
+		}
+		if err = s.refreshGatewayPoolWaitingAuth(request, account); err != nil {
 			return nil, err
 		}
 		resp, degraded, err = s.doOpenAIUpstreamOnce(request, proxyURL, account)
@@ -75,13 +66,10 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 	if !degraded {
 		return resp, err
 	}
-	// 判到降智就**只截断**，不在这里换票重发：重发走 AttachRoute 换一张没验过的票就把用户的
-	// prompt 打出去，还会重复已经送出的业务。缺state只使用响应值做最小复验，不重放业务。
-	// 当前 pair 已标 Stale ⇒ 下一发客户端请求的 AttachRoute 自然带 force=1 换网关。
-	if !s.dropDegradedGatewayPoolRoute(request, resp, account) {
-		return nil, errOpenAIGatewayPoolWarmUnverified
-	}
-	return nil, errOpenAIGatewayPoolRouteDegraded
+	// End this attempt only. The request supervisor may replay the original
+	// business on a newly verified ticket before exposing any response bytes.
+	marked := s.dropDegradedGatewayPoolRoute(request, resp, account)
+	return nil, gatewayPoolDegradedAttemptError(request.Context(), marked)
 }
 
 // doOpenAIUpstreamOnce 发一发上游，并把 state-echo 判据跑在 Store **之前**。
@@ -94,9 +82,6 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 	account *Account,
 ) (*http.Response, bool, error) {
 	if err := requireOpenAIProxyBinding(account, proxyURL); err != nil {
-		return nil, false, err
-	}
-	if err := gatewayPoolPreparationDeadlineError(request.Context()); err != nil {
 		return nil, false, err
 	}
 	// ChatGPT cookie 回放（openai_codex_cookies.go）：出站前带上该账号罐里的 cookie，拿到响应
@@ -113,9 +98,9 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 	}
 	// 取到票之后、真正发出去之前，这一发还可能死在三处：客户端已经走了（ctx 取消）、
 	// 上游主机校验否掉、取 HTTP 客户端/并发槽失败。它们都在 httpUpstream.Do 进 http.Client
-	// **之前**，一个字节都没出去 ⇒ 槽位还给池子（见 gatewayPoolReleasesUnsent）。
+	// **之前**，确证未发可本地丢弃独占新票（见 gatewayPoolDefinitelyUnsent）。
 	if ctxErr := request.Context().Err(); ctxErr != nil {
-		gatewayPoolReleaseUnsent(release)
+		gatewayPoolCleanupUnsent(release)
 		return nil, false, ctxErr
 	}
 	applied := openAIGatewayPoolSinkFrom(request.Context()).snapshot()
@@ -126,17 +111,13 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 	if poolRequest && applied.AccountID == account.ID && applied.Version != "" {
 		identity, identityErr = s.codexCookies.gatewayPoolIdentity(request.Context(), account)
 	}
-	if poolRequest && (account.gatewayPoolGuardEnabled() || applied.early != nil) {
+	if poolRequest {
 		// WarmUp 与实际发送之间可能过期/换票。只检查本次真正附带的那一张，
 		// 不允许“旧票验证成功，新票直接发业务”的竞态穿过严格模式。
 		mark, verified := s.codexCookies.gatewayPoolVerifiedMarkOf(identity)
-		probeModel := account.gatewayPoolProbeModel(gatewayPoolWarmModel(request))
-		if applied.early != nil {
-			probeModel = applied.early.model
-		}
 		if identityErr != nil || applied.AccountID != account.ID || applied.Version == "" ||
-			!verified || mark.version != applied.Version || s.codexCookies.gatewayPoolVerifiedVersionFor(identity, probeModel) != applied.Version {
-			gatewayPoolReleaseUnsent(release)
+			!verified || mark.version != applied.Version || !s.codexCookies.gatewayPoolVerifiedFull(identity) {
+			gatewayPoolCleanupUnsent(release)
 			return nil, false, errGatewayPoolPreflightChanged
 		}
 	}
@@ -148,7 +129,7 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 		defer finish() // includes response classification and durable accounting
 	}
 	if failure := GatewayPoolRetryFailure(request.Context()); failure != nil {
-		gatewayPoolReleaseUnsent(release)
+		gatewayPoolCleanupUnsent(release)
 		return nil, false, failure
 	}
 	if poolRequest {
@@ -178,14 +159,14 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 		if degraded {
 			return resp, true, nil
 		}
-		if poolRequest && (account.gatewayPoolGuardEnabled() || applied.early != nil) {
+		if poolRequest {
 			current, state := s.codexCookies.cachedPoolPair(identity)
 			if state == openAIGatewayPoolPairNone || current.invalidated || current.version != applied.Version {
 				openAIGatewayPoolSinkFrom(request.Context()).noteVerdict(applied.Gateway, "")
 				if resp.Body != nil {
 					_ = resp.Body.Close()
 				}
-				return nil, false, errOpenAIGatewayPoolWarmUnverified
+				return nil, false, retryGatewayPoolAttempt(errOpenAIGatewayPoolWarmUnverified)
 			}
 		}
 		if err := request.Context().Err(); err != nil {
@@ -197,15 +178,15 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 		s.codexCookies.Store(account, rawURL, resp.Header)
 		return resp, false, nil
 	}
-	if gatewayPoolReleasesUnsent(resp, err) {
-		gatewayPoolReleaseUnsent(release)
+	if gatewayPoolDefinitelyUnsent(resp, err) {
+		gatewayPoolCleanupUnsent(release)
 	} else if !sentAt.IsZero() {
 		s.noteGatewayPoolBusinessContact(request, account, identity, applied, sentAt)
 	}
 	return resp, false, err
 }
 
-// Not being safe to return a ticket is not evidence of a send. Native HTTP
+// Unknown sending is not evidence of a send. Native HTTP
 // records a completed request write; plugins may explicitly attest RequestSent.
 // A response itself is sufficient evidence when the transport has no trace.
 func (s *OpenAIGatewayService) gatewayPoolObservedRoundTrip(request *http.Request, proxyURL string, account *Account, observe bool, onSent ...func(time.Time)) (*http.Response, time.Time, error) {
@@ -222,9 +203,6 @@ func (s *OpenAIGatewayService) gatewayPoolObservedRoundTrip(request *http.Reques
 	if request.Context().Value(gatewayPoolProbeTraceKey{}) == nil {
 		if failure := GatewayPoolRetryFailure(request.Context()); failure != nil {
 			return nil, time.Time{}, failure
-		}
-		if err := gatewayPoolPreparationDeadlineError(request.Context()); err != nil {
-			return nil, time.Time{}, err
 		}
 	}
 	started := time.Now()
@@ -259,10 +237,10 @@ func (s *OpenAIGatewayService) gatewayPoolObservedRoundTrip(request *http.Reques
 	return resp, time.Time{}, err
 }
 
-// gatewayPoolReleasesUnsent 判「这一发一个字节都没发出去」，决定取到的池子票要不要还。
+// gatewayPoolDefinitelyUnsent reports positive evidence that no bytes were sent.
 //
 // 两条出口都要判：doOpenAIUpstreamRoundTrip 先走插件（RoundTripOpenAIOAuth），没命中才走
-// httpUpstream.Do。错还的代价不是自损——池子会把一个其实烧过的槽位当新鲜的再发给别人。
+// httpUpstream.Do。未知发送不能当作未发送，不能据此丢弃共享中的票。
 //
 // 判据只认**确证**，不猜：
 //   - 拿到响应 ⇒ 确证发过了（而且满血窗口已经烧掉）。
@@ -275,8 +253,8 @@ func (s *OpenAIGatewayService) gatewayPoolObservedRoundTrip(request *http.Reques
 //     里取客户端之前那几道（主机校验 validateRequestHost、取客户端/并发槽 acquireClientWithProfile）
 //     返回的都是裸 error，而 client.Do 的失败一律被 net/http 包成 *url.Error ⇒ 确证没发。
 //   - 没拿到响应但是 *url.Error ⇒ 传输跑过了，「连上没连上」分不出来。满血窗口是**首次接触**就
-//     烧掉的（docs/conventions/codex-full-strength-tickets.md），所以这里**刻意不还**。
-func gatewayPoolReleasesUnsent(resp *http.Response, err error) bool {
+//     烧掉的（docs/conventions/codex-full-strength-tickets.md），所以不能确认为未发送。
+func gatewayPoolDefinitelyUnsent(resp *http.Response, err error) bool {
 	if resp != nil || err == nil {
 		return false
 	}
@@ -291,11 +269,10 @@ func gatewayPoolReleasesUnsent(resp *http.Response, err error) bool {
 	return !errors.As(err, &transport)
 }
 
-// gatewayPoolReleaseUnsent 调一次还票闭包（nil = 这一发没自己取票，没什么可还）。
-// 同步调：它自带超时与独立 ctx，而且不还就白丢一个槽位——不值得为它开一条 goroutine。
-func gatewayPoolReleaseUnsent(release func()) {
-	if release != nil {
-		release()
+// gatewayPoolCleanupUnsent runs local CAS cleanup; nil means shared/cache reuse.
+func gatewayPoolCleanupUnsent(cleanup func()) {
+	if cleanup != nil {
+		cleanup()
 	}
 }
 

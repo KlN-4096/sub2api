@@ -3,6 +3,7 @@ package gwpool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,7 +12,7 @@ import (
 	"time"
 )
 
-func TestCooldownBatchLegacyFallbackKeepsIDsAndTimestampHeader(t *testing.T) {
+func TestCooldownBatchDoesNotFallbackToLegacyEndpoint(t *testing.T) {
 	at := time.Now().UTC()
 	var singles []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -40,8 +41,9 @@ func TestCooldownBatchLegacyFallbackKeepsIDsAndTimestampHeader(t *testing.T) {
 		{ID: strings.Repeat("b", 64), AccountTag: strings.Repeat("c", 64), Gateway: "g", WindowSeconds: 3600, ElapsedSeconds: 3600, Result: "full", ObservedAt: at},
 	}
 	results, err := New(server.URL, "test-key", time.Second).ReportCooldownBatch(context.Background(), reports)
-	if err != nil || len(results) != 2 || len(singles) != 2 || results[0].Status != 200 || singles[1] != reports[1].ID {
-		t.Fatalf("fallback lost acknowledgement or stable ID: %+v %v %v", results, singles, err)
+	var refused *PoolError
+	if !errors.As(err, &refused) || refused.Status != http.StatusNotFound || len(results) != 0 || len(singles) != 0 {
+		t.Fatalf("unsupported batch endpoint must fail without single-report fallback: %+v %v %v", results, singles, err)
 	}
 }
 

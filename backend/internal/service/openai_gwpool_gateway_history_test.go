@@ -22,7 +22,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 
 	t.Run("第一次落点要写，并记成当前网关", func(t *testing.T) {
 		svc, repo := newSvc()
-		acct := &Account{ID: 7}
+		acct := gwpoolTestAccount(7)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true, 0, 0, 0)
 
 		require.Len(t, repo.extraWrites, 1)
@@ -38,7 +38,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 	// 落点都没有」，和「池子真的空了」长得一模一样。拆开写还会出现新 free 配旧 live 的组合。
 	t.Run("池子清单的两个读数成对记下，没问到时整对不覆盖", func(t *testing.T) {
 		svc, _ := newSvc()
-		acct := &Account{ID: 7}
+		acct := gwpoolTestAccount(7)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true, 62, 5, 0)
 		rec, ok := readOpenAIGatewayHistory(acct)
 		require.True(t, ok)
@@ -61,7 +61,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 
 	t.Run("同一个网关在节流窗口里不再写", func(t *testing.T) {
 		svc, repo := newSvc()
-		acct := &Account{ID: 7}
+		acct := gwpoolTestAccount(7)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true, 0, 0, 0)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true, 0, 0, 0)
 		require.Len(t, repo.extraWrites, 1, "节流没生效：每发请求都会写一次账号行")
@@ -69,7 +69,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 
 	t.Run("换了网关立刻写", func(t *testing.T) {
 		svc, repo := newSvc()
-		acct := &Account{ID: 7}
+		acct := gwpoolTestAccount(7)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true, 0, 0, 0)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-73", "", "", true, 0, 0, 0)
 
@@ -83,7 +83,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 	// 这一发会被吞掉，于是卡片上的当前网关一直停在上一个，正好把这张卡唯一要答的问题答错。
 	t.Run("切回刚用过的网关也要立刻写", func(t *testing.T) {
 		svc, repo := newSvc()
-		acct := &Account{ID: 7}
+		acct := gwpoolTestAccount(7)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true, 0, 0, 0)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-73", "", "", true, 0, 0, 0)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true, 0, 0, 0)
@@ -95,7 +95,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 
 	t.Run("节流窗口过了同一个网关也要刷新时间", func(t *testing.T) {
 		svc, repo := newSvc()
-		acct := &Account{ID: 7}
+		acct := gwpoolTestAccount(7)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true, 0, 0, 0)
 
 		rec, _ := readOpenAIGatewayHistory(acct)
@@ -112,7 +112,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 	// 大区是这张卡按「九个大区」归档落点的唯一依据。
 	t.Run("大区跟着落点一起记", func(t *testing.T) {
 		svc, _ := newSvc()
-		acct := &Account{ID: 7}
+		acct := gwpoolTestAccount(7)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "east-asia", "", true, 0, 0, 0)
 
 		rec, _ := readOpenAIGatewayHistory(acct)
@@ -124,7 +124,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 	// 否则一发改派就把这一格的归档擦成「未归类」。
 	t.Run("读不出大区时不擦掉已记的", func(t *testing.T) {
 		svc, _ := newSvc()
-		acct := &Account{ID: 7}
+		acct := gwpoolTestAccount(7)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "east-asia", "", true, 0, 0, 0)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-73", "", "", true, 0, 0, 0)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true, 0, 0, 0)
@@ -138,7 +138,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 	// 被节流窗口压住的话这一格要等五分钟才归档，而满血窗口本来就只有几分钟。
 	t.Run("第一次拿到大区要穿过节流窗口", func(t *testing.T) {
 		svc, repo := newSvc()
-		acct := &Account{ID: 7}
+		acct := gwpoolTestAccount(7)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true, 0, 0, 0)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "east-asia", "", true, 0, 0, 0)
 
@@ -150,7 +150,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 	// 大区没新消息时节流照旧生效（这是节流存在的理由：每发请求一次 UPDATE）。
 	t.Run("大区重复上报不绕过节流", func(t *testing.T) {
 		svc, repo := newSvc()
-		acct := &Account{ID: 7}
+		acct := gwpoolTestAccount(7)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "east-asia", "", true, 0, 0, 0)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "east-asia", "", true, 0, 0, 0)
 		require.Len(t, repo.extraWrites, 1, "同一个大区重复上报也在写库")
@@ -158,7 +158,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 
 	t.Run("读不出落点时什么都不做", func(t *testing.T) {
 		svc, repo := newSvc()
-		acct := &Account{ID: 7}
+		acct := gwpoolTestAccount(7)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", "", true, 0, 0, 0)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "   ", "", "", true, 0, 0, 0)
 
@@ -170,7 +170,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 	// state-echo 读数（2026-10-02 加的两个字段）。卡片上「验过是满血」和「没验过」是两回事。
 	t.Run("判定写进落点，判定变了要穿过节流", func(t *testing.T) {
 		svc, repo := newSvc()
-		acct := &Account{ID: 7}
+		acct := gwpoolTestAccount(7)
 		seen := func() openAIGatewaySeen {
 			rec, _ := readOpenAIGatewayHistory(acct)
 			return rec.Seen["unified-167"]
@@ -204,7 +204,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 	// 本地账本 poolUsed 重启即失），但**不许推进 Current** —— 上面永远不会有业务请求。
 	t.Run("只记 Seen 不推进当前网关", func(t *testing.T) {
 		svc, repo := newSvc()
-		acct := &Account{ID: 7}
+		acct := gwpoolTestAccount(7)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "east-asia", openAIGatewayVerdictFull, true, 0, 0, 0)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-73", "us-east", openAIGatewayVerdictDegraded, false, 0, 0, 0)
 
@@ -222,7 +222,7 @@ func TestNoteOpenAIGatewayUse(t *testing.T) {
 	// 183 秒后掉成琥珀，而它可能几十秒前刚验过 —— 运营方照着这一格挑落点，会跳过一个好的。
 	t.Run("满血判定过了满血窗口要穿过节流刷新时刻", func(t *testing.T) {
 		svc, repo := newSvc()
-		acct := &Account{ID: 7}
+		acct := gwpoolTestAccount(7)
 		svc.noteOpenAIGatewayUse(context.Background(), acct, "unified-167", "", openAIGatewayVerdictFull, true, 0, 0, 0)
 		require.Len(t, repo.extraWrites, 1)
 
@@ -296,6 +296,7 @@ func TestGatewayPoolCooldownFreshPersistenceAndCrossRowRestart(t *testing.T) {
 	seen := history.Seen["unified-142"]
 	updated := *seen.Cooldown
 	updated.WindowSeconds = 7200
+	updated.LocalFloorSeconds = 7200 // this is a new local failure floor, not a pool overlay
 	updated.UpdatedAt = time.Now().UTC().Add(time.Millisecond)
 	updated.Until = updated.UpdatedAt.Add(2 * time.Hour)
 	seen.Cooldown = &updated
@@ -312,7 +313,7 @@ func TestGatewayPoolCooldownFreshPersistenceAndCrossRowRestart(t *testing.T) {
 	require.False(t, restarted.gatewayPoolUsedRecently(other, "unified-142", 30*time.Minute))
 }
 
-func TestGatewayPoolLegacyHistoryMigratesOnlyBoundedTouchNotLearning(t *testing.T) {
+func TestGatewayPoolLegacyWorkspaceHistoryDoesNotBecomeMemberEvidence(t *testing.T) {
 	account := gwpoolTestAccount(1)
 	now := time.Now().UTC()
 	writeGatewayHistoryForTest(t, account, openAIGatewayHistory{Seen: map[string]openAIGatewaySeen{
@@ -324,7 +325,7 @@ func TestGatewayPoolLegacyHistoryMigratesOnlyBoundedTouchNotLearning(t *testing.
 	}})
 	store := &openAICodexCookieStore{}
 	store.gatewayPoolHydrateUsed(account, gwpoolTestIdentity)
-	require.True(t, store.gatewayPoolUsedRecently(gwpoolTestIdentity, "unified-142", 30*time.Minute))
+	require.False(t, store.gatewayPoolUsedRecently(gwpoolTestIdentity, "unified-142", 30*time.Minute), "untagged workspace history cannot be attributed to this member")
 	require.False(t, store.gatewayPoolUsedRecently(gwpoolTestIdentity, "unified-143", 30*time.Minute))
 	_, learned := store.cooldownEntry(gwpoolTestIdentity, "unified-142")
 	require.False(t, learned, "无身份标签的旧记录不能迁移学习/固定档位")
@@ -342,5 +343,8 @@ func writeGatewayHistoryForTest(t *testing.T, a *Account, rec openAIGatewayHisto
 	require.NoError(t, err)
 	var generic map[string]any
 	require.NoError(t, json.Unmarshal(encoded, &generic))
+	if a.Extra == nil {
+		a.Extra = map[string]any{}
+	}
 	a.Extra[openAIGatewayHistoryExtraKey] = generic
 }

@@ -12,21 +12,46 @@ import (
 
 func TestGatewayPoolProbeTimeoutSettings(t *testing.T) {
 	account := newGwpoolFakePool(t, "", 150).account(1)
-	require.Equal(t, 35*time.Second, account.gatewayPoolProbeTimeout())
+	require.Equal(t, 10*time.Second, account.gatewayPoolProbeTimeout())
+	require.Equal(t, 10*time.Second, account.gatewayPoolFetchTimeout())
 	for _, value := range []any{0, -1, 121, 1.5, "10", true} {
 		account.Extra[openAIGatewayPoolProbeTimeoutExtraKey] = value
 		require.Error(t, validateOpenAIGatewayPoolAccountExtra(account, account.Extra))
-		require.Equal(t, 35*time.Second, account.gatewayPoolProbeTimeout())
+		require.Equal(t, 10*time.Second, account.gatewayPoolProbeTimeout())
 	}
 	for _, value := range []int{1, 10, 35, 120} {
 		account.Extra[openAIGatewayPoolProbeTimeoutExtraKey] = value
 		require.NoError(t, validateOpenAIGatewayPoolAccountExtra(account, account.Extra))
 		require.Equal(t, time.Duration(value)*time.Second, account.gatewayPoolProbeTimeout())
-		require.GreaterOrEqual(t, gatewayPoolProbeBudget(context.Background(), account), 2*account.gatewayPoolProbeTimeout())
+		require.Equal(t, 2*account.gatewayPoolProbeTimeout(), gatewayPoolProbeBudget(context.Background(), account))
 	}
 	account.Extra[openAIGatewayPoolProbeTimeoutExtraKey] = nil
 	require.NoError(t, validateOpenAIGatewayPoolAccountExtra(account, account.Extra))
-	require.Equal(t, 35*time.Second, account.gatewayPoolProbeTimeout())
+	require.Equal(t, 10*time.Second, account.gatewayPoolProbeTimeout())
+}
+
+func TestGatewayPoolConfirmationUsesConfiguredProbeTimeoutAndLuna(t *testing.T) {
+	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	account := fake.account(1)
+	account.Extra[openAIGatewayPoolProbeTimeoutExtraKey] = 2
+	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
+		{status: http.StatusOK, minted: "new-state"}, {status: http.StatusOK, minted: "new-state"},
+	}}
+	upstream.beforeReply = func(request *http.Request, shot int) error {
+		if shot == 2 {
+			deadline, ok := request.Context().Deadline()
+			require.True(t, ok)
+			require.InDelta(t, 2, time.Until(deadline).Seconds(), 0.5)
+		}
+		return nil
+	}
+	svc := &OpenAIGatewayService{httpUpstream: upstream}
+	_, response, err := gwpoolEchoRun(t, svc, account, "old-state")
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Len(t, upstream.sentBodies, 2)
+	require.Equal(t, gwpoolEchoBody1, upstream.sentBodies[0], "business body is never changed")
+	require.Contains(t, upstream.sentBodies[1], `"model":"gpt-6-luna"`)
 }
 
 func TestGatewayPoolProbeTimeoutUsesFreshSettingsOnBothShots(t *testing.T) {

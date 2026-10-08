@@ -87,7 +87,7 @@ export interface GatewayPoolProgress {
     observed_at: string
     tickets: Array<{ gateway: string; region: string; expires_at?: string; verified_at?: string; verified_models: string[] }>
     rounds: GatewayPoolUsageRound[]
-    archived: Record<string, { rounds: number; attempted: number; full: number; duration_ms: number; incomplete?: boolean; duration_incomplete?: boolean }> | null
+    archived: Record<string, { rounds: number; attempted: number; full: number; duration_ms: number; active_duration_ms?: number; active_duration_incomplete?: boolean; incomplete?: boolean; duration_incomplete?: boolean }> | null
     incomplete?: boolean
     history?: Record<string, unknown>
     contacts?: Record<string, unknown>
@@ -110,6 +110,7 @@ export interface GatewayPoolUsageRound {
   full: number
   full_started_at?: string
   full_duration_ms?: number
+  full_usage_mode?: string
   full_active_until?: string[]
   duration_incomplete?: boolean
   incomplete?: boolean
@@ -1182,7 +1183,7 @@ export async function refreshOpenCodeGoUsage(id: number): Promise<OpenCodeGoUsag
   return data
 }
 
-export async function retryGatewayPool(id: number): Promise<{ state: 'retained' | 'preparing' | 'blocked' }> {
+export async function retryGatewayPool(id: number): Promise<{ state: 'cleared' }> {
   const { data } = await apiClient.post(`/admin/accounts/${id}/gateway-pool-retry`)
   return data
 }

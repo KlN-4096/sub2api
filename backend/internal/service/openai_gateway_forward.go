@@ -1071,11 +1071,11 @@ func (s *OpenAIGatewayService) Forward(
 	rejectedFieldRetryState := openAIResponsesRejectedFieldRetryStateForRequest(c, body)
 	for {
 		// Build upstream request
-		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
+		upstreamCtx, releaseUpstreamCtx := gatewayPoolUpstreamContext(ctx, account)
 		var headerGuard *openAIFirstOutputHeaderGuard
-		if poolFirstOutputBudget != nil {
-			upstreamCtx, headerGuard = newGatewayPoolFirstOutputGuard(upstreamCtx, releaseUpstreamCtx, poolFirstOutputBudget)
-		} else if firstOutputTimeout > 0 {
+		// Pool attempts own their header guards inside the replay supervisor.
+		// Protocol repair retains the budget; a new business attempt renews it.
+		if poolFirstOutputBudget == nil && firstOutputTimeout > 0 {
 			upstreamCtx, headerGuard = newOpenAIFirstOutputHeaderGuard(
 				upstreamCtx, releaseUpstreamCtx, startTime.Add(firstOutputTimeout),
 			)
@@ -1498,7 +1498,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	// 到那时双开账号的体已经是 zstd 了，解不出来（openai_gwpool_warm.go 的 gatewayPoolWarmModel）。
 	// 没挂 sink 的路径（猎手探测等）这一行是空操作。
 	openAIGatewayPoolSinkFrom(ctx).noteModel(gjson.GetBytes(body, "model").String())
-	if account.UsesGatewayPool() && account.gatewayPoolGuardEnabled() {
+	if account.UsesGatewayPool() {
 		ctx = context.WithValue(ctx, gatewayPoolConfirmBodyKey{}, gatewayPoolConfirmBody(body))
 	}
 

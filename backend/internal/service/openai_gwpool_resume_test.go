@@ -51,11 +51,11 @@ func TestGatewayPoolResumeThresholdIsIndependentAndDefaultsTo50(t *testing.T) {
 	account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 60
 	require.Equal(t, 60, account.gatewayPoolResumeGateways())
 	account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 5
-	require.Equal(t, 10, account.gatewayPoolResumeGateways(), "legacy malformed values cannot resume below stop")
+	require.Equal(t, 5, account.gatewayPoolResumeGateways(), "retired stop threshold cannot override explicit recovery count")
 	account.Extra[openAIGatewayPoolRotationMinGatewaysExtraKey] = 80
 	delete(account.Extra, openAIGatewayPoolResumeGatewaysExtraKey)
-	require.Equal(t, 80, account.gatewayPoolResumeGateways(), "default is floored by the stop threshold")
-	require.Error(t, validateOpenAIGatewayPoolAccountExtra(account, map[string]any{
+	require.Equal(t, 50, account.gatewayPoolResumeGateways(), "retired stop threshold cannot override the default")
+	require.NoError(t, validateOpenAIGatewayPoolAccountExtra(account, map[string]any{
 		openAIGatewayPoolRotationMinGatewaysExtraKey: 10, openAIGatewayPoolResumeGatewaysExtraKey: 5,
 	}))
 	require.NoError(t, validateOpenAIGatewayPoolAccountExtra(account, map[string]any{
@@ -63,14 +63,17 @@ func TestGatewayPoolResumeThresholdIsIndependentAndDefaultsTo50(t *testing.T) {
 	}))
 }
 
-func TestGatewayPoolResumeWaitsFor50LocalCooldownsAfterStoppingBelow10(t *testing.T) {
+func TestGatewayPoolResumeWaitsFor50LocalCooldownsAfterExhaustion(t *testing.T) {
 	account := rotationAccount(1, 7)
+	account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = false // legacy stop threshold; strict mode exhausts candidates
 	account.Extra[openAIGatewayPoolRotationMinGatewaysExtraKey] = 10
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 	fake.configure(account)
 	fake.listGateways = gatewayPoolReadyList(9)
 	repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*account}}}
 	svc := &OpenAIGatewayService{accountRepo: repo}
+	require.False(t, svc.gatewayPoolNoRemainingRoutes(context.Background(), account), "nine candidates are not exhausted")
+	fake.listGateways = nil
 	require.True(t, svc.gatewayPoolNoRemainingRoutes(context.Background(), account))
 	seedGatewayPoolLocalReady(svc, 9, 50)
 	svc.restGatewayPoolAccount(context.Background(), account, gwpoolTestIdentity, 7)
@@ -150,7 +153,7 @@ func TestGatewayPoolResumeIgnoresSupplyButKeepsLocalCooldownAndInflightGuards(t 
 	}
 }
 
-func TestGatewayPoolResumeDoesNotCountCachedOrSpareAsLocalCooldowns(t *testing.T) {
+func TestGatewayPoolResumeDoesNotCountCachedOrInFlightAsLocalCooldowns(t *testing.T) {
 	for _, cached := range []bool{false, true} {
 		t.Run(fmt.Sprintf("cached=%t", cached), func(t *testing.T) {
 			account := rotationAccount(1, 7)
@@ -168,20 +171,25 @@ func TestGatewayPoolResumeDoesNotCountCachedOrSpareAsLocalCooldowns(t *testing.T
 				svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, pair)
 				svc.codexCookies.gatewayPoolMarkUsed(gwpoolTestIdentity, pair.gateway)
 			} else {
-				svc.codexCookies.poolSpare.Store(gwpoolTestIdentity, &gatewayPoolTicketBatch{pairs: []openAIGatewayPoolPair{pair}})
+				finish := svc.codexCookies.gatewayPoolInventoryOperation(gwpoolTestIdentity)
+				defer finish()
 			}
 			at := time.Now().Add(-time.Minute)
 			require.NoError(t, svc.enterGatewayPoolRest(context.Background(), account, gwpoolTestIdentity, at, at))
 			allowed, err := svc.gatewayPoolResumeAllowed(context.Background(), account, true)
-			require.NoError(t, err)
+			if cached {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, "work still in flight")
+			}
 			require.False(t, allowed, "one of the 50 known local cooldowns is still active")
 		})
 	}
 }
 
-func TestGatewayPoolResumeDoesNotClearAuthBlockAndEarlyCannotBypass(t *testing.T) {
+func TestGatewayPoolResumeDoesNotClearAuthBlock(t *testing.T) {
 	account := rotationAccount(1, 7)
-	account.Extra[openAIGatewayPoolEarlyEnabledKey] = true
+	account.Extra["openai_gwpool_early_probe_enabled"] = true
 	fake := newGwpoolFakePool(t, "offline", 150)
 	fake.configure(account)
 	fake.listGateways = gatewayPoolReadyList(50)
@@ -194,12 +202,11 @@ func TestGatewayPoolResumeDoesNotClearAuthBlockAndEarlyCannotBypass(t *testing.T
 	allowed, err := svc.gatewayPoolResumeAllowed(context.Background(), account, true)
 	require.NoError(t, err)
 	require.False(t, allowed)
-	require.Error(t, svc.claimGatewayPoolEarly(context.Background(), account, gwpoolTestIdentity, time.Now()))
 	fresh, err := repo.GetByID(context.Background(), 1)
 	require.NoError(t, err)
 	require.Equal(t, until, *fresh.TempUnschedulableUntil)
 	require.Equal(t, "auth", fresh.TempUnschedulableReason)
-	require.Nil(t, fresh.Extra[openAIGatewayPoolEarlyStateKey], "blocked early attempt spends no reservation")
+	require.Nil(t, fresh.Extra["openai_gwpool_early_probe_state"], "legacy settings never launch a probe")
 }
 
 func TestGatewayPoolResumeLastMileBlocksEvenWithVerifiedPair(t *testing.T) {

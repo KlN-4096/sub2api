@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGatewayPoolSpareYieldsToFreshGlobalCandidateButSurvivesListFailure(t *testing.T) {
-	for _, mode := range []string{"priority", "US", "list-failure"} {
+func TestGatewayPoolFreshSelectionRespectsLatestCatalogAndLocalRules(t *testing.T) {
+	for _, mode := range []string{"priority", "US", "list-failure", "cooling"} {
 		t.Run(mode, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				if mode == "list-failure" {
@@ -20,8 +20,9 @@ func TestGatewayPoolSpareYieldsToFreshGlobalCandidateButSurvivesListFailure(t *t
 					return
 				}
 				_, _ = w.Write([]byte(`{"gateways":[
-					{"name":"spare","pair_ready":true,"datacenter_country":"US","priority":{"model":"luna","full":1,"samples":10}},
-					{"name":"new","pair_ready":true,"datacenter_country":"JP","priority":{"model":"luna","full":9,"samples":10}}]}`))
+					{"name":"low","pair_ready":true,"datacenter_country":"US","priority":{"model":"luna","full":1,"samples":10}},
+					{"name":"new","pair_ready":true,"datacenter_country":"JP","priority":{"model":"luna","full":9,"samples":10}},
+					{"name":"not-ready","pair_ready":false,"priority":{"model":"luna","full":10,"samples":10}}]}`))
 			}))
 			defer server.Close()
 			account := gwpoolTestAccount(1)
@@ -35,71 +36,22 @@ func TestGatewayPoolSpareYieldsToFreshGlobalCandidateButSurvivesListFailure(t *t
 					},
 				}))
 			}
-			batch := &gatewayPoolTicketBatch{store: &svc.codexCookies, account: account, identity: gwpoolTestIdentity, idx: 1,
-				pairs: []openAIGatewayPoolPair{{gateway: "already-tried"}, {
-					cookie: "offline", gateway: "spare", datacenterCountry: "US", until: time.Now().Add(2 * time.Minute),
-				}}}
-			ctx := context.WithValue(context.Background(), gatewayPoolProbeModelKey{}, "luna")
-			pair, ok := batch.next(ctx)
-			if mode == "list-failure" {
-				require.True(t, ok)
-				require.Equal(t, "spare", pair.gateway)
-			} else {
-				require.False(t, ok, "fetch from latest catalog rather than forcing a stale spare")
-				require.False(t, svc.codexCookies.gatewayPoolUsedRecently(gwpoolTestIdentity, "spare", time.Hour))
-			}
-		})
-	}
-}
-
-func TestGatewayPoolSpareRankingExcludesUnusableHeldCandidates(t *testing.T) {
-	for _, mode := range []string{"expired-high-rank", "cooling-hides-global"} {
-		t.Run(mode, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				if mode == "expired-high-rank" {
-					_, _ = w.Write([]byte(`{"gateways":[
-						{"name":"valid","pair_ready":true,"priority":{"model":"luna","full":6,"samples":10}},
-						{"name":"expired","pair_ready":true,"priority":{"model":"luna","full":10,"samples":10}}]}`))
-					return
-				}
-				_, _ = w.Write([]byte(`{"gateways":[
-					{"name":"cooling","pair_ready":true,"datacenter_country":"JP","priority":{"model":"luna","full":10,"samples":10}},
-					{"name":"us","pair_ready":true,"datacenter_country":"US","priority":{"model":"luna","full":8,"samples":10}},
-					{"name":"new","pair_ready":true,"datacenter_country":"JP","priority":{"model":"luna","full":9,"samples":10}}]}`))
-			}))
-			defer server.Close()
-			account := gwpoolTestAccount(1)
-			account.Extra[openAIGatewayPoolBaseURLExtraKey] = server.URL
-			account.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = "offline"
-			svc, repo := gatewayRuntimeService(account)
-			pairs := []openAIGatewayPoolPair{{gateway: "already-tried"}, {
-				cookie: "offline", gateway: "valid", until: time.Now().Add(2 * time.Minute),
-			}, {cookie: "offline", gateway: "expired", routeExpiresAt: time.Now().Add(-time.Second)}}
-			if mode == "cooling-hides-global" {
-				pairs[1].gateway = "cooling"
-				pairs[2] = openAIGatewayPoolPair{
-					cookie: "offline", gateway: "us", datacenterCountry: "US", until: time.Now().Add(2 * time.Minute),
-				}
-				svc.codexCookies.gatewayPoolMarkUsed(gwpoolTestIdentity, "cooling")
-				require.NoError(t, repo.UpdateExtra(context.Background(), 1, map[string]any{
-					openAIGatewayPoolContactsExtraKey: gatewayPoolContacts{
-						LedgerTag: gatewayPoolLedgerTag(gwpoolTestIdentity), LastUSAt: time.Now(),
-					},
-				}))
-			}
-			batch := &gatewayPoolTicketBatch{
-				store: &svc.codexCookies, account: account, identity: gwpoolTestIdentity, pairs: pairs, idx: 1,
+			if mode == "cooling" {
+				svc.codexCookies.gatewayPoolMarkUsed(gwpoolTestIdentity, "new")
 			}
 			ctx := context.WithValue(context.Background(), gatewayPoolProbeModelKey{}, "luna")
-			pair, ok := batch.next(ctx)
-			if mode == "expired-high-rank" {
-				require.True(t, ok)
-				require.Equal(t, "valid", pair.gateway)
-				require.False(t, svc.codexCookies.gatewayPoolUsedRecently(gwpoolTestIdentity, "expired", time.Hour))
-			} else {
-				require.False(t, ok, "a cooling held route cannot hide a better global non-US candidate")
-				require.False(t, svc.codexCookies.gatewayPoolUsedRecently(gwpoolTestIdentity, "us", time.Hour))
+			pool, err := svc.codexCookies.poolClient(account)
+			require.NoError(t, err)
+			picked := svc.codexCookies.gatewayPoolPick(ctx, pool, account, gwpoolTestIdentity)
+			switch mode {
+			case "list-failure":
+				require.Empty(t, picked, "listing failure permits bare acquisition, not invented exhaustion")
+			case "cooling":
+				require.Equal(t, "low", picked, "pool priority cannot bypass local cooldown")
+			default:
+				require.Equal(t, "new", picked)
 			}
+			require.False(t, svc.codexCookies.gatewayPoolUsedRecently(gwpoolTestIdentity, "low", time.Hour), "listing alone is not a touch")
 		})
 	}
 }
