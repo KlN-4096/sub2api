@@ -4,12 +4,15 @@ import { ref, type ComputedRef } from 'vue'
 import { useGatewayPoolProgress } from '@/composables/useGatewayPoolProgress'
 import type { GatewayPoolProgress } from '@/api/admin/accounts'
 import AccountStatusIndicator from '@/components/account/AccountStatusIndicator.vue'
+import AccountGatewayCell from '@/components/account/AccountGatewayCell.vue'
+import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'
 
 import AccountsView from '../AccountsView.vue'
 
 vi.mock('@/composables/useGatewayPoolProgress', () => ({ useGatewayPoolProgress: vi.fn() }))
 const progress = ref<Record<number, GatewayPoolProgress>>({})
 const unavailable = ref(false)
+const paused = ref(false)
 let pollIDs: ComputedRef<number[]>
 
 const { listAccounts } = vi.hoisted(() => ({
@@ -59,6 +62,8 @@ const DataTableStub = {
       </span>
       <button data-test="sort-priority" @click="$emit('sort', 'priority', 'desc')" />
       <slot v-for="row in data" name="cell-status" :row="row" />
+      <slot v-for="row in data" name="cell-gateway" :row="row" />
+      <slot v-for="row in data" name="cell-capacity" :row="row" />
     </div>
   `
 }
@@ -92,6 +97,7 @@ function mountView() {
         BulkEditAccountModal: true,
         PlatformTypeBadge: true,
         AccountCapacityCell: true,
+        AccountGatewayCell: true,
         AccountStatusIndicator: true,
         AccountTodayStatsCell: true,
         AccountGroupsCell: true,
@@ -108,9 +114,10 @@ describe('admin AccountsView priority column preferences', () => {
   beforeEach(() => {
     progress.value = {}
     unavailable.value = false
+    paused.value = false
     vi.mocked(useGatewayPoolProgress).mockImplementation(ids => {
       pollIDs = ids
-      return { progress, unavailable, refresh: vi.fn() }
+      return { progress, unavailable, paused, refresh: vi.fn() }
     })
     localStorage.clear()
     listAccounts.mockReset().mockResolvedValue({
@@ -135,6 +142,15 @@ describe('admin AccountsView priority column preferences', () => {
     expect(pollIDs.value).toEqual([1])
     const status = wrapper.findComponent(AccountStatusIndicator)
     expect(status.props('gatewayPoolRest')).toEqual({ active: false })
+    paused.value = true
+    await flushPromises()
+    expect(wrapper.findComponent(AccountGatewayCell).props()).toMatchObject({
+      progressUnavailable: false, progressPaused: true
+    })
+    expect(wrapper.findComponent(AccountCapacityCell).props('gatewayProgressUnavailable')).toBe(true)
+    expect(status.props('gatewayPoolRest')).toBeUndefined()
+    expect(status.props('gatewayPoolRestPending')).toBe(true)
+    paused.value = false
     unavailable.value = true
     await flushPromises()
     expect(status.props('gatewayPoolRest')).toBeUndefined()

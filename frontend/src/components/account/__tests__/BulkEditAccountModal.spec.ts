@@ -80,24 +80,43 @@ function mountModal(extraProps: Record<string, unknown> = {}) {
   })
 }
 
+describe('continuous gateway ticket waiting', () => {
+  it('supports explicit enable and disable without adding unchanged wait thresholds', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth'] })
+    const field = 'openai_gwpool_continuous_wait'
+    const apply = wrapper.get<HTMLInputElement>(`[data-testid="bulk-gwpool-apply-${field}"]`)
+    const value = wrapper.get<HTMLInputElement>(`[data-testid="bulk-gwpool-value-${field}"]`)
+    expect(apply.element.checked).toBe(false)
+    await apply.setValue(true)
+    expect(value.element.checked).toBe(false)
+    await value.setValue(true)
+    expect(value.element.checked).toBe(true)
+    await value.setValue(false)
+    expect(value.element.checked).toBe(false)
+    expect(wrapper.find('[data-testid="bulk-gwpool-apply-openai_gwpool_max_wait_s"]').exists()).toBe(false)
+    await apply.setValue(false)
+    expect(value.element.disabled).toBe(true)
+    wrapper.unmount()
+  })
+})
+
 describe('BulkEditAccountModal', () => {
-  it('网关池发送勾选字段及固定防护/Luna策略，空Key保留且无后台预热', async () => {
+  it('网关池只发送勾选字段，不回写旧策略，空Key保留且无后台预热', async () => {
     const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth', 'setup-token'] })
     expect(wrapper.find('[data-testid="bulk-gwpool"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid*="prewarm"]').exists()).toBe(false)
-    for (const key of ['guard_enabled', 'probe_model', 'rotation']) {
+    for (const key of ['guard_enabled', 'probe_model', 'rotation', 'rotation_min_gateways', 'max_wait_s', 'warm_tickets']) {
       expect(wrapper.find(`[data-testid="bulk-gwpool-apply-openai_gwpool_${key}"]`).exists()).toBe(false)
     }
     await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_prepare_retries"]').setValue(true)
     expect(wrapper.get<HTMLInputElement>('[data-testid="bulk-gwpool-value-openai_gwpool_prepare_retries"]').element.value).toBe('0')
-    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_rotation_min_gateways"]').setValue(true)
-    await wrapper.get('[data-testid="bulk-gwpool-value-openai_gwpool_rotation_min_gateways"]').setValue(4)
+    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_resume_gateways"]').setValue(true)
+    await wrapper.get('[data-testid="bulk-gwpool-value-openai_gwpool_resume_gateways"]').setValue(4)
     await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_consumer_key"]').setValue(true)
     await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
     await flushPromises()
     expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], expect.objectContaining({
-      extra: { openai_gwpool_prepare_retries: 0, openai_gwpool_rotation_min_gateways: 4,
-        openai_gwpool_guard_enabled: true, openai_gwpool_probe_model: 'gpt-6-luna' }
+      extra: { openai_gwpool_prepare_retries: 0, openai_gwpool_resume_gateways: 4 }
     }))
     wrapper.unmount()
   })
@@ -107,8 +126,8 @@ describe('BulkEditAccountModal', () => {
     expect(mixed.find('[data-testid="bulk-gwpool"]').exists()).toBe(false)
     mixed.unmount()
     const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth'] })
-    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_rotation_min_gateways"]').setValue(true)
-    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_rotation_min_gateways"]').setValue(false)
+    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_resume_gateways"]').setValue(true)
+    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_resume_gateways"]').setValue(false)
     await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
     await flushPromises()
     expect(adminAPI.accounts.bulkUpdate).not.toHaveBeenCalled()
@@ -121,18 +140,18 @@ describe('BulkEditAccountModal', () => {
     const key = 'openai_gwpool_probe_timeout_s'
     await wrapper.get(`[data-testid="bulk-gwpool-apply-${key}"]`).setValue(true)
     const value = wrapper.get<HTMLInputElement>(`[data-testid="bulk-gwpool-value-${key}"]`)
-    expect(value.element.value).toBe('35')
+    expect(value.element.value).toBe('10')
     await value.setValue(10)
     await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
     await flushPromises()
     expect(adminAPI.accounts.bulkUpdate).toHaveBeenLastCalledWith([1, 2], expect.objectContaining({
-      extra: { [key]: 10, openai_gwpool_guard_enabled: true, openai_gwpool_probe_model: 'gpt-6-luna' }
+      extra: { [key]: 10 }
     }))
     await value.setValue('')
     await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
     await flushPromises()
     expect(adminAPI.accounts.bulkUpdate).toHaveBeenLastCalledWith([1, 2], expect.objectContaining({
-      extra: { [key]: null, openai_gwpool_guard_enabled: true, openai_gwpool_probe_model: 'gpt-6-luna' }
+      extra: { [key]: null }
     }))
     vi.mocked(adminAPI.accounts.bulkUpdate).mockClear()
     await wrapper.get(`[data-testid="bulk-gwpool-apply-${key}"]`).setValue(false)
@@ -149,13 +168,13 @@ describe('BulkEditAccountModal', () => {
     await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
     await flushPromises()
     expect(adminAPI.accounts.bulkUpdate).toHaveBeenLastCalledWith([1, 2], expect.objectContaining({
-      extra: { openai_gwpool_resume_gateways: 50, openai_gwpool_guard_enabled: true, openai_gwpool_probe_model: 'gpt-6-luna' }
+      extra: { openai_gwpool_resume_gateways: 50 }
     }))
     await wrapper.get('[data-testid="bulk-gwpool-value-openai_gwpool_resume_gateways"]').setValue('')
     await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
     await flushPromises()
     expect(adminAPI.accounts.bulkUpdate).toHaveBeenLastCalledWith([1, 2], expect.objectContaining({
-      extra: { openai_gwpool_resume_gateways: null, openai_gwpool_guard_enabled: true, openai_gwpool_probe_model: 'gpt-6-luna' }
+      extra: { openai_gwpool_resume_gateways: null }
     }))
     wrapper.unmount()
   })
@@ -959,14 +978,14 @@ describe('BulkEditAccountModal', () => {
     await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
     await flushPromises()
     expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
-      extra: { openai_gwpool_cooldown_reset_hours: 24, openai_gwpool_guard_enabled: true, openai_gwpool_probe_model: 'gpt-6-luna' }
+      extra: { openai_gwpool_cooldown_reset_hours: 24 }
     })
     vi.mocked(adminAPI.accounts.bulkUpdate).mockClear()
     await wrapper.get('[data-testid="bulk-gwpool-value-openai_gwpool_cooldown_reset_hours"]').setValue(0)
     await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
     await flushPromises()
     expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
-      extra: { openai_gwpool_cooldown_reset_hours: 0, openai_gwpool_guard_enabled: true, openai_gwpool_probe_model: 'gpt-6-luna' }
+      extra: { openai_gwpool_cooldown_reset_hours: 0 }
     })
   })
 

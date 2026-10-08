@@ -109,14 +109,14 @@ func (c *gatewayPoolCooldown) resetBackoff(at, touched time.Time, base int) bool
 	c.WindowSeconds, c.LocalFloorSeconds, c.FixedSeconds = base, 0, 0
 	c.Until, c.ScheduleUpdatedAt = anchor.Add(time.Duration(base)*time.Second), at
 	c.AttemptAt, c.AttemptSeconds, c.ElapsedSeconds = time.Time{}, 0, 0
-	c.Early, c.Successes = false, nil
+	c.Successes = nil
 	c.LastSuccessAt, c.LastSuccessSeconds = time.Time{}, 0
-	c.RecommendedSeconds, c.RecommendationSource, c.RecommendationUntil = 0, "", time.Time{}
+	c.LegacyRecommendedSeconds, c.LegacyRecommendationSource, c.LegacyRecommendationUntil = 0, "", time.Time{}
 	return true
 }
 
 func (s *openAICodexCookieStore) gatewayPoolCooldownResetAt(identity string) time.Time {
-	value, _ := s.poolCooldownReset.Load(gatewayPoolLedgerIdentity(identity))
+	value, _ := s.poolCooldownReset.Load(identity)
 	at, _ := value.(time.Time)
 	return at
 }
@@ -127,7 +127,7 @@ func (s *openAICodexCookieStore) applyGatewayPoolCooldownReset(identity string, 
 	}
 	s.poolCooldownMu.Lock()
 	defer s.poolCooldownMu.Unlock()
-	ledger := gatewayPoolLedgerIdentity(identity)
+	ledger := identity
 	if !at.After(s.gatewayPoolCooldownResetAt(identity)) {
 		return
 	}
@@ -222,7 +222,7 @@ func (s *OpenAIGatewayService) maintainGatewayPoolCooldownReset(ctx context.Cont
 	if !schedule.advance(hours, now, s.codexCookies.gatewayPoolCooldownResetAt(identity)) {
 		return nil // ordinary feedback wakes must not cause extra DB scans/writes
 	}
-	lock, _ := s.codexCookies.poolCooldownResetLocks.LoadOrStore(gatewayPoolLedgerIdentity(identity), &sync.Mutex{})
+	lock, _ := s.codexCookies.poolCooldownResetLocks.LoadOrStore(identity, &sync.Mutex{})
 	mu, ok := lock.(*sync.Mutex)
 	if !ok || mu == nil {
 		return errors.New("invalid gateway cooldown reset lock")

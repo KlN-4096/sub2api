@@ -1,21 +1,12 @@
 // Package gwpool 是网关池（E:/Project/GO/gwpool，SPEC.md 第 10 节）的消费端 HTTP 客户端。
 //
-// 池子负责发现 Codex 后端网关、维护活的路由 pair（__cflb + __oailb）并下发。本包做三件事：
-// 列网关（GET /gateways）、取一张 pair（GET /cookie）、把没用过的票还回去（POST /release）。
-// 满血验证、续期全在池子那边，这里不复制任何判据；列表只用来**挑落点**——按
-// (上游账号 × 网关) 算的「烧过没」只有消费端知道。
-//
-// 刻意**没有触碰回报**：票是池子发的、满血也是池子验的——交付那一刻它自己就写了槽位的
-// last_touch，验证时写了 last_verdict。转发路径上一个降智判据都不剩（模型标签会说谎、
-// turn-state 一律 780、safety-buffering 头健康账号也带），消费端能回报的只有 "unknown"，
-// 而 unknown 回报过去只会覆盖掉池子的真判定，让刚验过满血的槽位提前被拿去烧。
-// 「这张票坏了」由取 pair 时的 force=1 承载。
+// Lists gateways, acquires one route pair at a time and submits observations.
+// Quality verification and local cooldown decisions belong to the service.
 //
 // 红线：consumer key 只进 Authorization 头，不进日志、不进错误串；cookie 全文同样不进日志。
 package gwpool
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -52,8 +43,7 @@ const (
 	CodeMintFailed       = "mint_failed"       //
 	CodePublicClosed     = "public_closed"     // 匿名此刻不开放
 	CodeDegraded         = "degraded"          //
-	// CodeConsumerRejected 是**我们自己**的 consumer key 不被受理（/cookie 与 /release 的认证失败
-	// 都走它）。与 CodeUpstreamRejected 分开：那个讲的是池子的上游被 OpenAI 否决。
+	// CodeConsumerRejected is rejection of our consumer key, not the upstream credential.
 	CodeConsumerRejected = "consumer_rejected"
 	// CodeBadRequest 是出站请求本身不合法（400 参数不合法 / 404 点名的账号不存在，池子把两者
 	// 合成一个：对调用方是同一件事「你的请求错了，改了再来」）。池子**刻意不给**
@@ -127,10 +117,6 @@ const (
 	// 项数上限导出：调用方要按它裁自己那本账（裁掉哪些由它定，这里只保证不发非法请求）。
 	MaxExcludeItems   = 64
 	maxExcludeItemLen = 64
-	// MaxCookieCount 是 ?count= 的契约上限（池子的 cookieBatchMax）。超限池子**拒掉整条
-	// 请求**（400，不是钳到 5），所以出站前自己先钳 —— 多要几张的代价是多烧几个槽位，
-	// 而整条被拒的代价是一张都拿不到。导出给调用方算批量大小。
-	MaxCookieCount = 5
 	// min_remaining 的契约钳位区间（池子那边也钳，这里先钳是为了别发一个必然被改写的值）。
 	minRemainingFloor = 30 * time.Second
 	minRemainingCeil  = time.Hour
@@ -162,7 +148,8 @@ type Pair struct {
 	Cookie string
 	// ValidFor is advisory, never a quality or cookie-expiry decision.
 	ValidFor time.Duration
-	// Absolute route deadline calculated by the pool; zero means unknown.
+	// Advisory deadline calculated by the pool with unspecified provenance.
+	// It must not be used as a hard credential-expiry boundary.
 	RouteExpiresAt time.Time
 	// PairRemaining 是**这张 pair 自己**的剩余寿命（池子的 pair_remaining_s = __cflb 的死期
 	// 减现在）。和 ValidFor 是两根轴：ValidFor = min(满血窗口剩余, pair 剩余)，绝大多数时候
@@ -175,8 +162,8 @@ type Pair struct {
 	// 纯读数——消费端的逻辑本来就是「自己判这张不行了就 force 换一张」，不按这个字段分流。
 	TTLIsAdvisory bool
 	// Version 是**这一张具体的票**的不透明稳定身份（池子的 cookie_version）。两个用处：
-	// 还票（Release）与「这张不行，别再给我」（CookieRequest.ExcludeVersions）。
-	// 池子没报 / 报了畸形值时为空串——那只是少了这两个能力，不是丢弃这张票的理由。
+	// Exact-version local cleanup and CookieRequest.ExcludeVersions.
+	// Missing or malformed versions cannot support exact-version cleanup.
 	Version string
 }
 
@@ -207,16 +194,6 @@ type CookieRequest struct {
 	// Wait 是愿意等池子现铸多久。池子只在「没有活票 / 池子空」这两种可等待的失败上等。
 	// **它会被钳到本次调用的死线之内**（见 Cookie）：池子还在等、这边先超时等于白等一场。
 	Wait time.Duration
-	// Count 是一次要几张（池子的 ?count=，1..MaxCookieCount）。0 / 1 = 一张，不带这个参数。
-	//
-	// 只有 Cookies 看它；Cookie 恒取一张。要它是为了省往返：验满血那条路是
-	// 「取一张 → 验 → 不满血再取一张」，每轮一个 HTTP 往返，而池子内部可能顺带现铸
-	// （取票超时默认 25s）。一发拿够之后那 N−1 个往返就没了。
-	//
-	// 代价：拿到的每一张都在池子侧烧掉一个 (账号 × 网关) 槽位。**没发出过字节的剩余票
-	// 必须还回去**（Release），不然批量就是把「可能只烧 1 张」变成「必烧 N 张」，
-	// 而供给是个位数张/小时。
-	Count int
 }
 
 // query 把参数编成 /cookie 的查询串。budget 是本次调用还剩多少时间（≤0 = 没有死线）。
@@ -239,11 +216,6 @@ func (r CookieRequest) query(budget time.Duration) url.Values {
 	}
 	if r.MinRemaining > 0 {
 		query.Set("min_remaining", strconv.Itoa(int(clampDuration(r.MinRemaining, minRemainingFloor, minRemainingCeil).Seconds())))
-	}
-	// count 只在真的要多张时才带：带 count=1 会让池子回批量形状（{tickets:[...]}），
-	// 而单取那条路解的是扁平形状。少发一个参数比两边各写一套解析可靠。
-	if r.Count > 1 {
-		query.Set("count", strconv.Itoa(min(r.Count, MaxCookieCount)))
 	}
 	// wait 的两道钳位：契约上限 30s，以及本次调用的剩余预算。后者**必须是代码**而不是注释——
 	// 调用方把 wait 算错（或配了一个更短的取票超时）时，不该出现「池子等 25s、客户端 8s 就断」。
@@ -286,7 +258,7 @@ func clampDuration(value, low, high time.Duration) time.Duration {
 
 // sanitizeOpaque 收口池子给的不透明字符串（cookie_version、错误码）：**这是信任边界**。
 // 它们会进 URL query、JSON 体、数据库和页面，所以控制字符一律判废（返回空串 = 当池子没报），
-// 超长同样判废而不是截断——截断出来的 version 还回去是另一张票。
+// 超长同样判废而不是截断，不能将截断后的 version 用于精确匹配。
 func sanitizeOpaque(value string, maxLen int) string {
 	value = strings.TrimSpace(value)
 	if value == "" || len(value) > maxLen {
@@ -417,89 +389,7 @@ func (c *Client) Cookie(ctx context.Context, request CookieRequest) (Pair, error
 	return payload.pair()
 }
 
-// Cookies 一次取**最多** request.Count 张票，每张是不同的落点。
-//
-// 语义照池子那边：拿到一张就算成功，凑不满照样成功（返回的切片短一点）。调用方必须按
-// len(返回值) 办事，别按 Count 办 —— 这是「少等」而不是「保量」的特性。
-//
-// Count ≤ 1 时直接走 Cookie：少发一个参数，响应也是扁平形状。
-//
-// **老池子兼容是承重的，不是防御性检查。** 没升级的池子会把 ?count= 当未知参数静默忽略、
-// 回扁平形状（线上 2026-10-03 那个构建就是）。只解 {tickets:[...]} 的版本会把它读成
-// 「0 张票」⇒ 明明交付成功、槽位真烧了，调用方却当失败重试 ⇒ 每发业务请求白烧一个槽位。
-// 所以这里两种形状一起解：tickets 为空而扁平那份有 cookie ⇒ 按一张处理。
-func (c *Client) Cookies(ctx context.Context, request CookieRequest) ([]Pair, error) {
-	if c == nil {
-		return nil, fmt.Errorf("%w: client is nil", ErrPool)
-	}
-	if request.Count <= 1 {
-		pair, err := c.Cookie(ctx, request)
-		if err != nil {
-			return nil, err
-		}
-		return []Pair{pair}, nil
-	}
-	var budget time.Duration
-	if deadline, ok := ctx.Deadline(); ok {
-		budget = time.Until(deadline)
-	}
-	endpoint := c.endpoint("cookie")
-	if encoded := request.query(budget).Encode(); encoded != "" {
-		endpoint += "?" + encoded
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, fmt.Errorf("%w: build cookie request: %w", ErrPool, err)
-	}
-	resp, err := c.do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
-	if resp.StatusCode != http.StatusOK {
-		return nil, refusal(resp)
-	}
-	// 内嵌 cookiePayload：批量形状的 tickets[] 和扁平形状在同一个对象上一起解出来。
-	var payload struct {
-		cookiePayload
-		Tickets []cookiePayload `json:"tickets"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("%w: decode cookie response: %w", ErrPool, err)
-	}
-	raw := payload.Tickets
-	if len(raw) == 0 {
-		raw = []cookiePayload{payload.cookiePayload} // 老池子：忽略了 count，回的是一张
-	}
-	// 钳住张数：池子最多给 MaxCookieCount 张，更多只可能来自畸形响应，而每一项都要进出站头。
-	if len(raw) > MaxCookieCount {
-		raw = raw[:MaxCookieCount]
-	}
-	pairs := make([]Pair, 0, len(raw))
-	for i, item := range raw {
-		pair, err := item.pair()
-		if err != nil {
-			// **已经拿到的那几张照用。** 整批丢掉等于把真交付了的槽位白烧掉，而池子那边
-			// 已经记了账；一张都没解出来才算失败。
-			if len(pairs) == 0 && i == len(raw)-1 {
-				return nil, err
-			}
-			continue
-		}
-		pairs = append(pairs, pair)
-	}
-	if len(pairs) == 0 {
-		return nil, fmt.Errorf("%w: cookie response carried no usable ticket", ErrPool)
-	}
-	return pairs, nil
-}
-
-// cookiePayload 是 /cookie 一张票的线上形状。**批量响应里的每一项是同一个形状**
-// （池子的 batchResponse.tickets[]），所以单取和批量共用这一份解析与校验 —— 分两份写
-// 必然走散，而走散的那一半是信任边界。
+// cookiePayload is the single-ticket wire response.
 type cookiePayload struct {
 	Gateway           string    `json:"gateway"`
 	DatacenterCountry string    `json:"datacenter_country"`
@@ -540,44 +430,6 @@ func (p cookiePayload) pair() (Pair, error) {
 		// 报一个大数被钳到 3900s 仍然远在续期阈值之上 ⇒ 同样不续。
 		PairRemaining: clampDuration(time.Duration(p.PairRemainingS)*time.Second, 0, maxValidFor),
 	}, nil
-}
-
-// Release 把一张**一个字节都没发出去**的票还给池子，让它把槽位还给我们自己
-// （池子只在交付后 DeliverTTL 内受理，太晚 / 找不到 / 已还过都是 409）。
-//
-// 调用方把它当**尽力而为**：失败只记日志，不影响主流程。版本串为空（池子没报 cookie_version）
-// 时直接返回——没有身份就还不了，这不是错误。
-func (c *Client) Release(ctx context.Context, version string) error {
-	if c == nil {
-		return fmt.Errorf("%w: client is nil", ErrPool)
-	}
-	version = sanitizeOpaque(version, maxVersionLen)
-	if version == "" {
-		return nil
-	}
-	body, err := json.Marshal(map[string]string{"cookie_version": version})
-	if err != nil {
-		return fmt.Errorf("%w: build release request: %w", ErrPool, err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint("release"), bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("%w: build release request: %w", ErrPool, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.do(req)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
-	// 409 = 太晚 / 找不到 / 已还过。它和「网络不通」对调用方是同一回事（记日志走人），
-	// 所以不给它单独的 sentinel。
-	if resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("%w: release returned HTTP %d", ErrPool, resp.StatusCode)
-	}
-	return nil
 }
 
 // refusal 把非 200 的响应读成 *PoolError。

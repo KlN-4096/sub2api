@@ -47,12 +47,8 @@ describe('gateway pool locale keys', () => {
       'gwpoolPrepareRetriesDesc',
       'gwpoolManualRetry',
       'gwpoolManualRetryHint',
-      'gwpoolMaxWait',
-      'gwpoolMaxWaitDesc',
       'gwpoolProbeTimeout',
       'gwpoolProbeTimeoutDesc',
-      'gwpoolGuard',
-      'gwpoolGuardDesc',
       'gwpoolDetails',
       'gwpoolCooldownDetails',
       'gwpoolGuardDetails',
@@ -60,17 +56,17 @@ describe('gateway pool locale keys', () => {
     ]) {
       expect(typeof openai[key], key).toBe('string')
     }
-    // 降智防护 2026-10-03 删成零档：页面上只剩一段常驻说明，下拉和三个档的标签全删了。
-    // 这三条钉住「别把档位接回来」—— 留着任何一个标签，页面就会重新长出一个选不中的选项。
-    expect(openai.gwpoolGuardModes, '档位已删').toBeUndefined()
-    for (const mode of ['off', 'cut', 'retry']) {
-      expect(openai.gwpoolGuardDescs[mode], `${mode} 档已删`).toBeUndefined()
+    for (const key of ['gwpoolGuardModes', 'gwpoolGuardDescs', 'gwpoolGuard', 'gwpoolGuardDesc',
+      'gwpoolRotation', 'gwpoolRotationDesc']) {
+      expect(openai[key], `${key} is retired`).toBeUndefined()
     }
-    expect(typeof openai.gwpoolGuardDescs.queue).toBe('string')
-    expect(openai.gwpoolGuardDescs.queue.length).toBeGreaterThan(40)
     expect(openai.gwpoolWarmDetails).toMatch(/共享候选队列|shared candidate queue/)
     expect(openai.gwpoolPrepareRetriesDesc).toContain('0')
-    expect(openai.gwpoolMaxWaitDesc).toContain('120')
+    for (const key of ['gwpoolMaxWait', 'gwpoolMaxWaitDesc', 'gwpoolWarmTickets',
+      'gwpoolWarmTicketsDesc', 'gwpoolRotationMinGateways', 'gwpoolRotationMinGatewaysDesc',
+      'gwpoolAutoWait', 'gwpoolAutoWaitDesc', 'gwpoolProbeModel']) {
+      expect(openai[key], `${key} is retired`).toBeUndefined()
+    }
     expect(openai.gwpoolPrewarm).toBeUndefined()
     expect(openai.gwpoolPrewarmDesc).toBeUndefined()
     expect(openai.gwpoolPrewarmDetails).toBeUndefined()
@@ -114,15 +110,15 @@ describe('gateway pool locale keys', () => {
     expect(openai.gatewayHistory.forecastPending).toMatch(/待统计|awaiting/)
   })
 
-  // 判不出来那条路的文案在中英两边都必须说「放行」，不能说「失败」。
-  // 分开一条用例是因为判别词按语言不同，塞进上面那个 it.each 会变成一堆 if。
-  it('describes strict blocking and the explicit off switch', () => {
-    expect(zh.admin.accounts.openai.gwpoolGuardDesc).toContain('阻止业务请求')
-    expect(zh.admin.accounts.openai.gwpoolGuardDesc).toContain('关闭后')
-    expect(zh.admin.accounts.openai.gwpoolGuardDesc).not.toContain('这一发直接失败')
-    expect(en.admin.accounts.openai.gwpoolGuardDesc).toContain('blocks the business request')
-    expect(en.admin.accounts.openai.gwpoolGuardDesc).toContain('When off')
-    expect(en.admin.accounts.openai.gwpoolGuardDesc).not.toContain('the request simply fails')
+  it('describes mandatory strict Luna verification without an off switch', () => {
+    expect(zh.admin.accounts.openai.gwpoolGuardDetails).toContain('阻止业务请求')
+    expect(zh.admin.accounts.openai.gwpoolGuardDetails).not.toContain('关闭后')
+    expect(zh.admin.accounts.openai.gwpoolGuardDetails).toContain('统一使用 Luna')
+    expect(zh.admin.accounts.openai.gwpoolGuardDetails).not.toContain('这一发直接失败')
+    expect(en.admin.accounts.openai.gwpoolGuardDetails).toContain('blocks the business request')
+    expect(en.admin.accounts.openai.gwpoolGuardDetails).not.toContain('When off')
+    expect(en.admin.accounts.openai.gwpoolGuardDetails).toContain('always use Luna')
+    expect(en.admin.accounts.openai.gwpoolGuardDetails).not.toContain('the request simply fails')
   })
 
   it.each([

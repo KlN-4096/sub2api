@@ -69,6 +69,9 @@ func (s *OpenAIGatewayService) maintainGatewayPoolRests(ctx context.Context) tim
 			}
 			continue
 		}
+		if account.GatewayPoolContinuousWaitEnabled() {
+			continue // shared ordinary-mode rest does not schedule this row's timer
+		}
 		identity, identityErr := s.codexCookies.gatewayPoolIdentity(ctx, account)
 		if identityErr != nil {
 			continue

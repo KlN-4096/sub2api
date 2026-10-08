@@ -11,6 +11,12 @@ const (
 	gatewayPoolFeedbackPolicyPruneInterval = time.Minute
 )
 
+// Pool advice may control feedback batching, never local gateway eligibility.
+type gatewayPoolFeedbackPolicyUpdate struct {
+	gwpool.CooldownRecommendation
+	at time.Time
+}
+
 // Persisted with the outbox, not with scheduling cooldowns. Immediate invalidates
 // a stable policy until the next successful report acknowledgement.
 type gatewayPoolFeedbackPolicy struct {
@@ -26,7 +32,7 @@ func (p gatewayPoolFeedbackPolicy) stable(binding string, now time.Time) bool {
 
 func (s *openAICodexCookieStore) noteGatewayPoolFeedbackPolicy(account *Account, identity, gateway string, recommendation *gwpool.CooldownRecommendation) {
 	binding := gatewayPoolReportBinding(account, gatewayPoolAccountTag(account, identity))
-	update := gatewayPoolRecommendation{at: time.Now().UTC()}
+	update := gatewayPoolFeedbackPolicyUpdate{at: time.Now().UTC()}
 	if recommendation != nil {
 		update.CooldownRecommendation = *recommendation
 	}
@@ -34,7 +40,7 @@ func (s *openAICodexCookieStore) noteGatewayPoolFeedbackPolicy(account *Account,
 	previous := s.poolFeedbackPolicyPrune.Load()
 	if update.at.Unix() >= previous && s.poolFeedbackPolicyPrune.CompareAndSwap(previous, update.at.Add(gatewayPoolFeedbackPolicyPruneInterval).Unix()) {
 		s.poolFeedbackPolicies.Range(func(key, value any) bool {
-			policy, valid := value.(gatewayPoolRecommendation)
+			policy, valid := value.(gatewayPoolFeedbackPolicyUpdate)
 			if !valid || update.at.Sub(policy.at) > gwpool.CooldownReportPolicyTTL {
 				s.poolFeedbackPolicies.CompareAndDelete(key, value)
 			}
@@ -58,7 +64,7 @@ func (s *openAICodexCookieStore) syncGatewayPoolFeedbackPolicies(box *gatewayPoo
 	changed := false
 	for gateway, policy := range box.Policies {
 		raw, ok := s.poolFeedbackPolicies.Load(policy.Binding + "\x00" + gateway)
-		update, valid := raw.(gatewayPoolRecommendation)
+		update, valid := raw.(gatewayPoolFeedbackPolicyUpdate)
 		// Equal timestamps can be separate operations on coarse Windows clocks;
 		// when ordering is ambiguous, conservatively resume immediate reporting.
 		if !ok || !valid || update.at.Before(policy.UpdatedAt) ||

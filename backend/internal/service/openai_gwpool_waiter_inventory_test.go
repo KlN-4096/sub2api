@@ -10,10 +10,7 @@ import (
 
 func TestGatewayPoolPreparingWaiterCannotMaskExhaustion(t *testing.T) {
 	fake := newGwpoolFakePool(t, "offline", 150)
-	fake.listGateways = []gwpoolFakeGateway{
-		{Name: "unified-128", PairReady: true},
-		{Name: "unified-88", PairReady: true},
-	}
+	fake.listGateways = nil // true exhaustion, not the retired low-count threshold
 	account := gwpoolTestAccount(1)
 	account.Extra[openAIGatewayPoolRotationMinGatewaysExtraKey] = 10
 	fake.configure(account)
@@ -45,7 +42,7 @@ func TestGatewayPoolBusinessBodyPinsInventoryUntilEOF(t *testing.T) {
 	account := fake.account(1)
 	svc, _ := gatewayRuntimeService(account)
 	svc.httpUpstream = &gwpoolEchoUpstream{replies: []gwpoolEchoReply{{status: 200}}}
-	_, response, err := gwpoolEchoRun(t, svc, account, "same-state")
+	_, response, err := gwpoolEchoRun(t, svc, account, "same-state", true)
 	require.NoError(t, err)
 	require.NotNil(t, response)
 	inventory := svc.codexCookies.gatewayPoolInventory(gwpoolTestIdentity)
