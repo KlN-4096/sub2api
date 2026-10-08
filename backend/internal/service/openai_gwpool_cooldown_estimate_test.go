@@ -37,18 +37,18 @@ func TestGatewayPoolCooldownEstimateRefreshesPrivateCopyOnly(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			account := gwpoolTestAccount(1)
 			account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 1
-			account.Extra[openAIGatewayPoolUseRecommendationKey] = mode != "recommendation-off"
+			account.Extra["openai_gwpool_use_recommended_cooldown"] = mode != "recommendation-off"
 			at := now.Add(-10 * time.Minute)
 			c := gatewayPoolCooldown{SourcesKnown: true, BaseSeconds: 3600, CycleAt: at,
-				WindowSeconds: 14400, RecommendedSeconds: 14400, RecommendationSource: "pool",
-				RecommendationUntil: now.Add(time.Hour), UpdatedAt: at, Until: at.Add(4 * time.Hour)}
+				WindowSeconds: 14400, LegacyRecommendedSeconds: 14400, LegacyRecommendationSource: "pool",
+				LegacyRecommendationUntil: now.Add(time.Hour), UpdatedAt: at, Until: at.Add(4 * time.Hour)}
 			want := at.Add(time.Hour)
 			if mode == "recommendation-expired" {
-				c.RecommendationUntil = now.Add(-time.Second)
+				c.LegacyRecommendationUntil = now.Add(-time.Second)
 			}
 			if mode == "base-changed" {
 				account.Extra[openAIGatewayPoolGatewayWindowExtraKey] = 7200
-				account.Extra[openAIGatewayPoolUseRecommendationKey] = false
+				account.Extra["openai_gwpool_use_recommended_cooldown"] = false
 				want = at.Add(2 * time.Hour)
 			}
 			history := openAIGatewayHistory{Seen: map[string]openAIGatewaySeen{"g": {At: at, Cooldown: &c}}}

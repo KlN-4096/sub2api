@@ -2003,16 +2003,10 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     return updates.extra as Record<string, unknown>
   }
   if (allOpenAIOAuth.value) {
-    let hasGatewayPoolChanges = false
     for (const [key, value] of Object.entries(gatewayPoolExtra.value)) {
       // Empty secret input means keep each account's own key.
       if (key === 'openai_gwpool_consumer_key' && (typeof value !== 'string' || !value.trim())) continue
       ensureExtra()[key] = value
-      hasGatewayPoolChanges = true
-    }
-    if (hasGatewayPoolChanges) {
-      ensureExtra().openai_gwpool_guard_enabled = true
-      ensureExtra().openai_gwpool_probe_model = 'gpt-6-luna'
     }
   }
 

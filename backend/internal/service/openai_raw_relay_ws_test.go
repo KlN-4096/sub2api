@@ -219,6 +219,45 @@ func TestOpenAIRawRelayWSRelaysFramesVerbatimAcrossTurns(t *testing.T) {
 	}, h.log.Events())
 }
 
+func TestOpenAIRawRelayWSImageInputUsageIsSettledPerTurn(t *testing.T) {
+	type after struct {
+		turn  int
+		usage OpenAIUsage
+		err   error
+	}
+	results := make(chan after, 2)
+	h := startRawRelayWS(t, nil, nil, rawRelayWSFirstFrame, func(l *rawRelayWSHookLog, c *gin.Context) *OpenAIWSIngressHooks {
+		hooks := l.hooks(c)
+		hooks.AfterTurn = func(turn int, result *OpenAIForwardResult, err error) {
+			results <- after{turn: turn, usage: result.Usage, err: err}
+		}
+		return hooks
+	})
+	rawRelayRecv(t, h.upstream.frames)
+	up := rawRelayRecv(t, h.upstream.conns)
+	first := `{"type":"response.completed","response":{"id":"image_1","usage":{"input_tokens":120,"output_tokens":70,"input_tokens_details":{"image_tokens":40}},"tool_usage":{"image_gen":{"input_tokens_details":{"image_tokens":900},"output_tokens_details":{"image_tokens":55}}}}}`
+	h.send(t, up, first)
+	require.Equal(t, first, string(h.clientReads(t)), "usage extraction must not rewrite the frame")
+	got := rawRelayRecv(t, results)
+	require.NoError(t, got.err)
+	require.Equal(t, 1, got.turn)
+	require.Equal(t, 40, got.usage.ImageInputTokens, "explicit usage wins over tool backfill")
+	require.Equal(t, 55, got.usage.ImageOutputTokens)
+
+	h.send(t, h.client, `{"type":"response.create","model":"gpt-5.5","input":[]}`)
+	rawRelayRecv(t, h.upstream.frames)
+	second := `{"type":"response.completed","response":{"id":"image_2","usage":{"input_tokens":50,"output_tokens":30},"tool_usage":{"image_gen":{"input_tokens_details":{"image_tokens":17},"output_tokens_details":{"image_tokens":9}}}}}`
+	h.send(t, up, second)
+	require.Equal(t, second, string(h.clientReads(t)))
+	got = rawRelayRecv(t, results)
+	require.NoError(t, got.err)
+	require.Equal(t, 2, got.turn)
+	require.Equal(t, 17, got.usage.ImageInputTokens, "tool backfill is local to this turn")
+	require.Equal(t, 9, got.usage.ImageOutputTokens)
+	require.NoError(t, h.client.Close(coderws.StatusNormalClosure, "done"))
+	require.NoError(t, rawRelayRecv(t, h.serverErr))
+}
+
 func TestOpenAIRawRelayWSMirrorsUpstreamClose(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

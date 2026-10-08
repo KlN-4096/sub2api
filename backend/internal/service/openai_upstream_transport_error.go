@@ -173,22 +173,10 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 		StatusCode:   http.StatusBadGateway,
 		ResponseBody: openAITransportFailoverBody,
 	}
-	// 判降智**不换账号**：这是**路由**问题不是账号问题，换个账号换不出满血路由。
-	//
-	// 不拦的话放大系数在 handler 层：换账号上限 maxAccountSwitches 默认 10，而内层
-	// degraded_retries 封顶 1 ⇒ 一次客户端请求最坏 2×(1+10) = 22 发真实上游，各烧一张
-	// pair 和一个 (上游账号 × 网关) 单位——而 pair 按文档是个位数张/小时。
-	// degraded_retries 的常量注释写着「放大系数必须封顶」，但真正的乘数在这儿，
-	// 不设 Stop 的话那句话只封住了内层。
-	// 同型先例：gatewayPoolRetriesBare 对 no_exit 也是「不值得换网关」。
-	//
-	// queue 档那两条同理，而且更凶：预热每换一个账号要重来一遍「最多 N 张票 × 2 发垫话」（N 默认 5、可配），
-	// 不设 Stop 的话一次客户端请求最坏 11 个账号 × 5 张票 = 55 张票 —— 而再生预算约 25 张/小时。
-	// 「读不出模型」换账号理论上有用（换到一个没开 device 收敛的号就读得出来了），但那个代价
-	// 不值得：文案已经直接告诉运营方该换档还是升客户端。
+	// 路由质量失败不能交给通用换号重试。池专属恢复层在未交付且确证耗尽后，
+	// 再按本地候选/休息规则决定后续动作，避免通用重试放大验票请求。
 	if errors.Is(err, errOpenAIGatewayPoolRouteDegraded) ||
-		errors.Is(err, errOpenAIGatewayPoolWarmExhausted) ||
-		errors.Is(err, errOpenAIGatewayPoolWarmNoModel) {
+		errors.Is(err, errOpenAIGatewayPoolWarmExhausted) {
 		out.NextAccountAction = NextAccountStop
 	}
 	// 把池子那三条双语说明交到客户端手里。不填的话 handler 的分支全不命中，最后落到

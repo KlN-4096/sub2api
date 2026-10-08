@@ -402,6 +402,7 @@ export default {
     latencyDuration: '总耗时',
     outputTps: '输出 TPS',
     outputTpsHint: '输出 Token ÷ 总耗时（包含首字等待），单位 tok/s。输出 Token 可能包含推理 Token。',
+    tpsDescription: '平均输出 token/秒：流式按输出 token ÷（总耗时−首字耗时），非流式按输出 token ÷ 总耗时；数据不足时不显示。',
     time: '时间',
     ws: 'WS',
     stream: '流式',

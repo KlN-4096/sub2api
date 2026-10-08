@@ -61,7 +61,7 @@ func TestGatewayPoolRoundsRestIncludesActualProbesAndKeepsRequestCloneExclusions
 	require.Equal(t, prefs[a.ID].lastTouch, prefs[clone.ID].lastTouch)
 	require.Empty(t, gatewayPoolRoundExclusions(ctx, nil))
 	rotating := context.WithValue(gatewayPoolTestGroupContext(group, 2), gatewayPoolRotationKey{}, &gatewayPoolRotation{
-		groupID: group, attempted: map[int64]struct{}{a.ID: {}}, domains: map[string]struct{}{gatewayPoolLedgerIdentity(aid): {}},
+		groupID: group, attempted: map[int64]struct{}{a.ID: {}}, domains: map[string]struct{}{aid: {}},
 	})
 	ctx = svc.withGatewayPoolAccountPreferences(rotating, req)
 	require.Contains(t, gatewayPoolRoundExclusions(ctx, nil), clone.ID,

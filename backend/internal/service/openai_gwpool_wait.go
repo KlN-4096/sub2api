@@ -14,20 +14,15 @@ import (
 )
 
 const (
-	openAIGatewayPoolWaitEnabledExtraKey = "openai_gwpool_auto_wait"
-	openAIGatewayPoolWaitSecondsExtraKey = "openai_gwpool_max_wait_s"
-	openAIGatewayPoolRecoveryExtraKey    = "openai_gwpool_prepare_retries"
-	gatewayPoolRecoveryDefault           = 0
-	gatewayPoolRecoveryMax               = 10
-	gatewayPoolWaitDefaultSeconds        = 120
-	gatewayPoolWaitMaxSeconds            = 3600
-	gatewayPoolWaitDefaultGap            = 30 * time.Second
-	gatewayPoolWaitMinGap                = time.Second
-	gatewayPoolWaitMaxGap                = time.Minute
+	openAIGatewayPoolRecoveryExtraKey = "openai_gwpool_prepare_retries"
+	gatewayPoolRecoveryDefault        = 0
+	gatewayPoolRecoveryMax            = 10
+	gatewayPoolWaitDefaultGap         = 30 * time.Second
+	gatewayPoolWaitMinGap             = time.Second
+	gatewayPoolWaitMaxGap             = time.Minute
 )
 
 type gatewayPoolWaitKey struct{}
-type gatewayPoolWaitWorkKey struct{}
 type gatewayPoolWaitHolder struct {
 	mu    sync.Mutex
 	state *gatewayPoolWaitState
@@ -36,23 +31,14 @@ type gatewayPoolWaitHolder struct {
 const gatewayPoolWaitGinKey = "openai_gwpool_wait_budget"
 
 type gatewayPoolWaitState struct {
-	mu       sync.Mutex
-	max      time.Duration
-	deadline time.Time
-	waited   time.Duration
-	now      func() time.Time
-	sleep    func(context.Context, time.Duration) error
+	accountID  int64
+	identity   string
+	continuous bool
+	sleep      func(context.Context, time.Duration) error
 }
 
-func (s *gatewayPoolWaitState) snapshot() (time.Duration, time.Time, time.Duration) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.max, s.deadline, s.waited
-}
-
-// retry never refreshes the original request's absolute preparation deadline.
-// A shared preparation has only per-operation deadlines and is cancelled when
-// the last business waiter leaves, not when its first waiter's budget expires.
+// Shared preparation has only per-operation deadlines and is cancelled when
+// the last business waiter leaves. Each waiter retains its own caller context.
 func (s *OpenAIGatewayService) waitGatewayPoolRetry(ctx context.Context, account *Account, gap time.Duration) (bool, error) {
 	if shared, _ := ctx.Value(gatewayPoolPreparationKey{}).(bool); shared {
 		fresh, err := s.freshGatewayPoolPreparationAccount(ctx, account)
@@ -90,46 +76,36 @@ func (s *OpenAIGatewayService) waitGatewayPoolRetry(ctx context.Context, account
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	if remaining, ok := ctx.Value(gatewayPoolWaitWorkKey{}).(func() time.Duration); ok && remaining() <= 0 {
-		return false, context.DeadlineExceeded
-	}
 	fresh, err := s.freshGatewayPoolPreparationAccount(ctx, account)
-	if err != nil || !gatewayPoolWaitAccountMatches(fresh, account) {
-		return false, err
-	}
-	state.mu.Lock()
-	maxWait := min(state.max, fresh.gatewayPoolMaxWait())
-	now := state.now()
-	if state.deadline.IsZero() {
-		state.deadline = now.Add(maxWait)
-	}
-	remaining := min(state.deadline.Sub(now), maxWait-state.waited)
-	state.mu.Unlock()
-	if remaining <= 0 {
+	if err != nil {
+		if gatewayPoolIdentityFailure(err) {
+			return false, err
+		}
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		// A read outage blocks sending, not waiting; dispatch still needs a fresh read.
+	} else if !gatewayPoolWaitAccountMatches(fresh, account) {
 		return false, nil
 	}
 	if gap <= 0 {
 		gap = gatewayPoolWaitDefaultGap
 	}
+	gap = min(gap, gatewayPoolWaitMaxGap)
 	if gap < gatewayPoolWaitMinGap {
 		gap = gatewayPoolWaitMinGap
 	}
-	gap = min(gap, gatewayPoolWaitMaxGap, remaining)
-	before := state.now()
-	sleepErr := state.sleep(ctx, gap)
-	state.mu.Lock()
-	state.waited += state.now().Sub(before)
-	expired := !state.now().Before(state.deadline) || state.waited >= maxWait
-	state.mu.Unlock()
-	if sleepErr != nil || expired {
-		return false, sleepErr
+	if err := state.sleep(ctx, gap); err != nil {
+		return false, err
 	}
 	fresh, err = s.freshGatewayPoolPreparationAccount(ctx, account)
+	if gatewayPoolIdentityFailure(err) {
+		return false, err
+	}
+	if err != nil && ctx.Err() == nil {
+		return true, nil
+	}
 	return err == nil && gatewayPoolWaitAccountMatches(fresh, account), err
-}
-
-func gatewayPoolWaitSeconds(raw any) (int, bool) {
-	return gatewayPoolInteger(raw, gatewayPoolWaitMaxSeconds)
 }
 
 func gatewayPoolInteger(raw any, limit int) (int, bool) {
@@ -157,21 +133,6 @@ func gatewayPoolInteger(raw any, limit int) (int, bool) {
 	return int(value), true
 }
 
-func (a *Account) gatewayPoolMaxWait() time.Duration {
-	if a == nil || !a.UsesGatewayPool() {
-		return 0
-	}
-	seconds := gatewayPoolWaitDefaultSeconds
-	if raw, exists := a.Extra[openAIGatewayPoolWaitSecondsExtraKey]; exists && raw != nil {
-		var ok bool
-		seconds, ok = gatewayPoolWaitSeconds(raw)
-		if !ok {
-			return 0 // bad runtime data must never create an unbounded retry loop
-		}
-	}
-	return time.Duration(seconds) * time.Second
-}
-
 func (a *Account) gatewayPoolPreparationRecoveries() int {
 	if a == nil {
 		return gatewayPoolRecoveryDefault
@@ -184,18 +145,6 @@ func (a *Account) gatewayPoolPreparationRecoveries() int {
 		return value
 	}
 	return 0
-}
-
-// Check only before dispatch. Do not put this deadline on the request that owns
-// a successful business response body: inference can legitimately outlive it.
-func gatewayPoolPreparationDeadlineError(ctx context.Context) error {
-	if wait := gatewayPoolWaitFrom(ctx); wait != nil {
-		_, deadline, _ := wait.snapshot()
-		if !deadline.IsZero() && !wait.now().Before(deadline) {
-			return errOpenAIGatewayPoolWarmExhausted
-		}
-	}
-	return nil
 }
 
 func gatewayPoolWaitFrom(ctx context.Context) *gatewayPoolWaitState {
@@ -219,17 +168,28 @@ func (s *OpenAIGatewayService) gatewayPoolWaitContext(ctx context.Context, accou
 		return ctx
 	}
 	fresh, err := s.freshGatewayPoolPreparationAccount(ctx, account)
-	if err != nil || fresh == nil || fresh.gatewayPoolMaxWait() == 0 {
+	if err != nil {
+		// This snapshot supplies waiting policy only. Every dispatch still
+		// requires fresh identity/health/configuration admission.
+		fresh = account
+	}
+	if !fresh.GatewayPoolLongWaitEnabled() {
 		return ctx
 	}
-	newState := &gatewayPoolWaitState{
-		max: fresh.gatewayPoolMaxWait(), deadline: time.Now().Add(fresh.gatewayPoolMaxWait()),
-		now: time.Now, sleep: gatewayPoolSleep,
+	identity, identityErr := s.codexCookies.gatewayPoolIdentity(ctx, fresh)
+	if identityErr != nil {
+		return ctx // preparation reports the identity error; never invent a shared domain
 	}
+	newState := &gatewayPoolWaitState{
+		accountID: fresh.ID, identity: identity,
+		sleep: gatewayPoolSleep,
+	}
+	newState.continuous = fresh.GatewayPoolContinuousWaitEnabled()
 	if sink := openAIGatewayPoolSinkFrom(ctx); sink != nil && sink.waitBudget != nil {
 		holder := sink.waitBudget
 		holder.mu.Lock()
-		if holder.state == nil {
+		if holder.state == nil || holder.state.accountID != newState.accountID ||
+			holder.state.identity != newState.identity || holder.state.continuous != newState.continuous {
 			holder.state = newState
 		}
 		newState = holder.state
@@ -239,12 +199,15 @@ func (s *OpenAIGatewayService) gatewayPoolWaitContext(ctx context.Context, accou
 }
 
 func gatewayPoolRetryableShortage(err error) (*gwpool.PoolError, bool) {
+	if errors.Is(err, gwpool.ErrCatalogUnavailable) {
+		return &gwpool.PoolError{}, true
+	}
 	var poolErr *gwpool.PoolError
 	if !errors.As(err, &poolErr) {
 		return nil, false
 	}
 	switch poolErr.Code {
-	case gwpool.CodeNoGateway, gwpool.CodeNoLivePair, gwpool.CodeAllCooling:
+	case gwpool.CodeNoGateway, gwpool.CodeNoLivePair, gwpool.CodeAllCooling, gwpool.CodeConsumerRateLimited:
 		return poolErr, true
 	default:
 		return nil, false
@@ -252,27 +215,12 @@ func gatewayPoolRetryableShortage(err error) (*gwpool.PoolError, bool) {
 }
 
 func gatewayPoolWaitAccountMatches(fresh, original *Account) bool {
-	return fresh != nil && fresh.IsSchedulable() && fresh.gatewayPoolMaxWait() > 0 &&
+	return fresh != nil && gatewayPoolWaitHealth(fresh) && fresh.GatewayPoolLongWaitEnabled() &&
+		fresh.GatewayPoolContinuousWaitEnabled() == original.GatewayPoolContinuousWaitEnabled() &&
+		gatewayPoolWaitTransportMatches(fresh, original) &&
 		fresh.gatewayPoolBaseURL() == original.gatewayPoolBaseURL() &&
 		fresh.gatewayPoolConsumerKey() == original.gatewayPoolConsumerKey() &&
-		fresh.getExtraBool(openAIGatewayPoolMemberIsolationKey) == original.getExtraBool(openAIGatewayPoolMemberIsolationKey) &&
 		codexAccountIdentityNamespace(fresh) == codexAccountIdentityNamespace(original)
-}
-
-func gatewayPoolFetchTimeoutForContext(ctx context.Context, account *Account) time.Duration {
-	timeout := account.gatewayPoolFetchTimeout()
-	state := gatewayPoolWaitFrom(ctx)
-	if state == nil {
-		return timeout
-	}
-	if remaining, ok := ctx.Value(gatewayPoolWaitWorkKey{}).(func() time.Duration); ok {
-		timeout = min(timeout, remaining())
-	}
-	maxWait, deadline, waited := state.snapshot()
-	if !deadline.IsZero() {
-		timeout = min(timeout, deadline.Sub(state.now()), maxWait-waited)
-	}
-	return timeout
 }
 
 // Only repeats ticket acquisition, BEFORE business transmission. HTTP/auth,
@@ -282,20 +230,16 @@ func (s *OpenAIGatewayService) attachGatewayPoolRouteWithWait(
 ) (func(), error) {
 	state := gatewayPoolWaitFrom(ctx)
 	shared, _ := ctx.Value(gatewayPoolPreparationKey{}).(bool)
-	workRemaining, _ := ctx.Value(gatewayPoolWaitWorkKey{}).(func() time.Duration)
 	waited := false
 	for {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if workRemaining != nil && workRemaining() <= 0 {
-			return nil, context.DeadlineExceeded
-		}
 		release, err := s.codexCookies.AttachRoute(ctx, account, rawURL, headers)
 		if err == nil && waited {
 			fresh, readErr := s.codexCookies.freshGatewayPoolAccount(ctx, account)
 			if readErr != nil || !gatewayPoolWaitAccountMatches(fresh, account) {
-				gatewayPoolReleaseUnsent(release)
+				gatewayPoolCleanupUnsent(release)
 				return nil, fmt.Errorf("%w: account configuration changed during ticket wait", gwpool.ErrPool)
 			}
 		}
@@ -305,11 +249,13 @@ func (s *OpenAIGatewayService) attachGatewayPoolRouteWithWait(
 		}
 		// Fresh exhaustion is actionable immediately. Waiting on a dead queue
 		// for every request would prevent the normal account-rest transition.
-		if shared && s.gatewayPoolNoRemainingRoutes(ctx, account) {
-			return release, errGatewayPoolWarmAttemptsFinished
-		}
-		if workRemaining != nil && workRemaining() <= 0 {
-			return release, context.DeadlineExceeded
+		if shared && poolErr.Code != gwpool.CodeConsumerRateLimited {
+			if identity, ok := ctx.Value(gatewayPoolPreparationIdentityKey{}).(string); ok {
+				s.applyGatewayPoolPreparationPolicies(ctx, identity)
+			}
+			if s.gatewayPoolNoRemainingRoutes(ctx, account) {
+				return release, errGatewayPoolWarmAttemptsFinished
+			}
 		}
 		retry, sleepErr := s.waitGatewayPoolRetry(ctx, account, poolErr.RetryAfter)
 		waited = true

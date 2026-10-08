@@ -60,6 +60,13 @@ type openAICompatBridgeTurnMetadata struct {
 // 根线程的 agent_name：protocol/src/agent_path.rs:18 AgentPath::ROOT（core/src/turn_metadata.rs:200-203）。
 const openAICompatBridgeAgentName = "/root"
 
+const openAICompatBridgeTurnsKey = "openai_compat_bridge_turns"
+
+type openAICompatBridgeTurnKey struct {
+	accountID  int64
+	sessionKey string
+}
+
 // openAICompatBridgeSessionKey 按凭证域命名空间 + 下游 API key + 桥会话键定位会话：共用一份
 // ChatGPT 凭证的多个本地行 / spark 影子行刻意共享出站身份（与 scopeCodexAccountIdentityValue
 // 的隔离空间一致），换行或 failover 时会话不变；没有命名空间时退回本地行 ID。
@@ -127,9 +134,60 @@ func (s *OpenAIGatewayService) injectOpenAICompatBridgeIdentity(c *gin.Context, 
 	if s == nil || c == nil || c.Request == nil || reqBody == nil || !codexDeviceWireProfileEnabled(c, account) {
 		return restore, false
 	}
-	session, ok := s.openAICompatBridgeSession(c, account, promptCacheKey)
+	turn, ok := s.openAICompatBridgeTurn(c, account, reqBody, promptCacheKey)
 	if !ok {
 		return restore, false
+	}
+	payload, err := marshalOpenAIUpstreamJSON(turn)
+	if err != nil {
+		return restore, false
+	}
+	turnMetadata := string(bytes.TrimSpace(payload))
+
+	original := c.Request.Header
+	inbound := original.Clone()
+	inbound.Set("session-id", turn.SessionID)
+	inbound.Set("thread-id", turn.ThreadID)
+	inbound.Set("x-codex-window-id", turn.WindowID)
+	inbound.Set(openAIWSTurnMetadataHeader, turnMetadata)
+	c.Request.Header = inbound
+	restore = func() { c.Request.Header = original }
+
+	reqBody["prompt_cache_key"] = turn.SessionID
+	clientMetadata, _ := reqBody["client_metadata"].(map[string]any)
+	if clientMetadata == nil {
+		clientMetadata = make(map[string]any)
+	}
+	clientMetadata["session_id"] = turn.SessionID
+	clientMetadata["thread_id"] = turn.ThreadID
+	clientMetadata["turn_id"] = turn.TurnID
+	clientMetadata["x-codex-window-id"] = turn.WindowID
+	clientMetadata[openAIWSTurnMetadataHeader] = turnMetadata
+	reqBody["client_metadata"] = clientMetadata
+	if _, ok := reqBody["tool_choice"]; !ok {
+		// 真客户端恒发 tool_choice（codex-api/src/common.rs:289 无 skip_serializing_if），默认 "auto"。
+		reqBody["tool_choice"] = "auto"
+	}
+	return restore, true
+}
+
+// The gin context belongs to one logical HTTP request. Pool failover to the
+// same account reuses its original raw identity, even after the session cache
+// expires; another account or a new downstream request gets a separate turn.
+func (s *OpenAIGatewayService) openAICompatBridgeTurn(c *gin.Context, account *Account, reqBody map[string]any, promptCacheKey string) (openAICompatBridgeTurnMetadata, bool) {
+	key := openAICompatBridgeTurnKey{accountID: account.ID, sessionKey: openAICompatBridgeSessionKey(c, account, promptCacheKey)}
+	var turns map[openAICompatBridgeTurnKey]openAICompatBridgeTurnMetadata
+	if account.UsesGatewayPool() {
+		if value, exists := c.Get(openAICompatBridgeTurnsKey); exists {
+			turns, _ = value.(map[openAICompatBridgeTurnKey]openAICompatBridgeTurnMetadata)
+		}
+		if turn, exists := turns[key]; exists {
+			return turn, true
+		}
+	}
+	session, ok := s.openAICompatBridgeSession(c, account, promptCacheKey)
+	if !ok {
+		return openAICompatBridgeTurnMetadata{}, false
 	}
 	installationID := ""
 	if ids := resolveCodexFingerprintIDsWithBody(c, account, nil, nil); ids != nil {
@@ -142,7 +200,7 @@ func (s *OpenAIGatewayService) injectOpenAICompatBridgeIdentity(c *gin.Context, 
 	if reasoning, ok := reqBody["reasoning"].(map[string]any); ok {
 		effort, _ = reasoning["effort"].(string)
 	}
-	payload, err := marshalOpenAIUpstreamJSON(openAICompatBridgeTurnMetadata{
+	turn := openAICompatBridgeTurnMetadata{
 		InstallationID:      installationID,
 		SessionID:           session.SessionID,
 		ThreadID:            session.SessionID,
@@ -155,35 +213,13 @@ func (s *OpenAIGatewayService) injectOpenAICompatBridgeIdentity(c *gin.Context, 
 		TurnStartedAtUnixMs: time.Now().UnixMilli(),
 		Model:               model,
 		ReasoningEffort:     effort,
-	})
-	if err != nil {
-		return restore, false
 	}
-	turnMetadata := string(bytes.TrimSpace(payload))
-
-	original := c.Request.Header
-	inbound := original.Clone()
-	inbound.Set("session-id", session.SessionID)
-	inbound.Set("thread-id", session.SessionID)
-	inbound.Set("x-codex-window-id", windowID)
-	inbound.Set(openAIWSTurnMetadataHeader, turnMetadata)
-	c.Request.Header = inbound
-	restore = func() { c.Request.Header = original }
-
-	reqBody["prompt_cache_key"] = session.SessionID
-	clientMetadata, _ := reqBody["client_metadata"].(map[string]any)
-	if clientMetadata == nil {
-		clientMetadata = make(map[string]any)
+	if account.UsesGatewayPool() {
+		if turns == nil {
+			turns = make(map[openAICompatBridgeTurnKey]openAICompatBridgeTurnMetadata)
+		}
+		turns[key] = turn
+		c.Set(openAICompatBridgeTurnsKey, turns)
 	}
-	clientMetadata["session_id"] = session.SessionID
-	clientMetadata["thread_id"] = session.SessionID
-	clientMetadata["turn_id"] = turnID
-	clientMetadata["x-codex-window-id"] = windowID
-	clientMetadata[openAIWSTurnMetadataHeader] = turnMetadata
-	reqBody["client_metadata"] = clientMetadata
-	if _, ok := reqBody["tool_choice"]; !ok {
-		// 真客户端恒发 tool_choice（codex-api/src/common.rs:289 无 skip_serializing_if），默认 "auto"。
-		reqBody["tool_choice"] = "auto"
-	}
-	return restore, true
+	return turn, true
 }

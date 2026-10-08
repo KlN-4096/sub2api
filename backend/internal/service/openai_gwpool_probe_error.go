@@ -36,8 +36,9 @@ func (e *gatewayPoolProbeHTTPError) Error() string {
 	return fmt.Sprintf("gateway probe HTTP %d", e.status)
 }
 
-// Only for the pre-business A/B loop. WarmUnverified itself is not retryable:
-// the same sentinel can occur after business transmission, where replay is forbidden.
+// Classify A/B failures without treating every WarmUnverified as retryable:
+// it also covers authentication/policy changes. Recoverable post-business
+// failures use gatewayPoolAttemptRetryError before any downstream delivery.
 func gatewayPoolRetryableProbeError(err error) bool {
 	if errors.Is(err, errGatewayPoolProbeMissingState) || errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded) {
@@ -46,7 +47,7 @@ func gatewayPoolRetryableProbeError(err error) bool {
 	var status *gatewayPoolProbeHTTPError
 	if errors.As(err, &status) {
 		switch status.status {
-		case http.StatusRequestTimeout, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		case http.StatusRequestTimeout, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 			return true
 		default:
 			return false // authentication, quota and configuration are not supply shortages

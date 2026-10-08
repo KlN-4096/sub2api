@@ -162,6 +162,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketRawRelay(
 	client := &openAIRawRelayWSSide{
 		conn: clientConn,
 		read: func(context.Context) (coderws.MessageType, []byte, error) {
+			if hooks.ClientReadMessage != nil {
+				return hooks.ClientReadMessage(ctx, 0)
+			}
 			return ReadOpenAIWSClientMessage(ctx, clientConn, 0, 0, "")
 		},
 	}
@@ -270,6 +273,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketRawRelay(
 					OutputTokens:             turn.Usage.OutputTokens,
 					CacheCreationInputTokens: turn.Usage.CacheCreationInputTokens,
 					CacheReadInputTokens:     turn.Usage.CacheReadInputTokens,
+					ImageInputTokens:         turn.Usage.ImageInputTokens,
 					ImageOutputTokens:        turn.Usage.ImageOutputTokens,
 				}
 				result.UpstreamResponseModel = turn.ResponseModel

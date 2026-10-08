@@ -18,11 +18,10 @@ type gatewayPoolConfirmBodyKey struct{}
 // response IDs. Sending these values through the identity builder again would
 // namespace them twice. The original body is not retained in this context value.
 func gatewayPoolConfirmBody(body []byte) []byte {
-	model := gjson.GetBytes(body, "model").String()
-	if model == "" || !gjson.ValidBytes(body) {
+	if !gjson.ValidBytes(body) || gjson.GetBytes(body, "model").String() == "" {
 		return nil
 	}
-	payload := openAITurnStateProbeBody(model, gatewayPoolWarmProbeEffort, openAITurnStateProbeIdentity{}, gatewayPoolWarmProbeText)
+	payload := openAITurnStateProbeBody(gatewayPoolProbeModelLuna, gatewayPoolWarmProbeEffort, openAITurnStateProbeIdentity{}, gatewayPoolWarmProbeText)
 	delete(payload, "prompt_cache_key")
 	delete(payload, "client_metadata")
 	for _, key := range []string{"prompt_cache_key", "reasoning", "service_tier"} {
@@ -35,6 +34,10 @@ func gatewayPoolConfirmBody(body []byte) []byte {
 		"x-codex-installation-id", "x-codex-window-id", "x-codex-turn-metadata"} {
 		if value := gjson.GetBytes(body, "client_metadata."+key); value.Exists() {
 			metadata[key] = json.RawMessage(value.Raw)
+			if key == openAIWSTurnMetadataHeader && value.Type == gjson.String {
+				encoded, _ := json.Marshal(alignCodexTurnMetadataJSON(value.String(), map[string]string{"model": gatewayPoolProbeModelLuna}))
+				metadata[key] = encoded
+			}
 		}
 	}
 	if len(metadata) > 0 {
@@ -92,36 +95,46 @@ func gatewayPoolConfirmationRequest(ctx context.Context, original *http.Request,
 	request.TransferEncoding = nil
 	request.Header.Del("Content-Length")
 	request.Header.Set(openAICodexTurnStateHeader, state)
+	alignCodexTurnMetadataFields(request.Header, map[string]string{"model": gatewayPoolProbeModelLuna})
 	return request, nil
 }
 
 // The whole round shares one deadline, bounded by the caller and this exact
 // probe budget. Reference TTL cannot cancel a confirmation or business response.
 func (s *OpenAIGatewayService) gatewayPoolConfirmResponse(request *http.Request, account *Account,
-	proxyURL, identity, state string, applied OpenAIGatewayPoolApplied,
+	proxyURL, identity, state string, applied OpenAIGatewayPoolApplied, businessSentAt time.Time,
 ) (bool, bool, error) {
 	pair, live := s.codexCookies.cachedPoolPair(identity)
 	if live != openAIGatewayPoolPairLive || pair.version != applied.Version || pair.firstSent.IsZero() {
-		return false, false, errOpenAIGatewayPoolWarmUnverified
+		return false, false, retryGatewayPoolAttempt(errOpenAIGatewayPoolWarmUnverified)
 	}
 	template, err := gatewayPoolConfirmTemplate(request)
 	if err != nil {
 		return false, false, err
 	}
-	deadline := time.Now().Add(gatewayPoolWarmBudget)
-	ctx, cancel := context.WithDeadline(request.Context(), deadline)
+	// Freeze age at this business send, not at response arrival or after
+	// contact persistence. Unknown/inconsistent sending time uses the old tier.
+	age := gatewayPoolEchoYoungAge
+	if !businessSentAt.IsZero() && !businessSentAt.Before(pair.firstSent) {
+		age = businessSentAt.Sub(pair.firstSent)
+	}
+	attempts := gatewayPoolEchoStrikes(age)
+	shotTimeout := gatewayPoolProbeTimeout(request.Context(), account)
+	ctx, cancel := context.WithTimeout(request.Context(), time.Duration(attempts)*shotTimeout)
 	defer cancel()
 	trace := &gatewayPoolProbeTrace{}
+	// This confirms an already-dispatched business response. The old 429
+	// admission window must still gate new business, not this bounded probe.
+	ctx = context.WithValue(ctx, gatewayPoolProbeTraceKey{}, trace)
 	started := time.Now()
 	var steps []gatewayPoolProbeStep
-	attempts := gatewayPoolEchoStrikes(time.Since(pair.firstSent))
 	full, conclusive, err := gatewayPoolConfirmState(ctx, request.Header.Get("Cookie"), state,
 		attempts, func(ctx context.Context, cookie, state string) (int, string, error) {
 			current, status := s.codexCookies.cachedPoolPair(identity)
 			if status != openAIGatewayPoolPairLive || current.version != applied.Version {
-				return 0, "", errOpenAIGatewayPoolWarmUnverified
+				return 0, "", retryGatewayPoolAttempt(errOpenAIGatewayPoolWarmUnverified)
 			}
-			shotCtx, stop := context.WithTimeout(ctx, gatewayPoolWarmShotTimeout)
+			shotCtx, stop := context.WithTimeout(ctx, shotTimeout)
 			defer stop()
 			probe, err := gatewayPoolConfirmationRequest(shotCtx, request, template, state)
 			if err != nil {
@@ -157,7 +170,7 @@ func (s *OpenAIGatewayService) gatewayPoolConfirmResponse(request *http.Request,
 					_ = resp.Body.Close()
 				}
 				if step.ActualGateway != "" && step.ActualGateway != applied.Gateway {
-					err = errOpenAIGatewayPoolWarmUnverified
+					err = retryGatewayPoolAttempt(errOpenAIGatewayPoolWarmUnverified)
 				}
 			}
 			steps = append(steps, step)
@@ -165,7 +178,7 @@ func (s *OpenAIGatewayService) gatewayPoolConfirmResponse(request *http.Request,
 		})
 	current, status := s.codexCookies.cachedPoolPair(identity)
 	if status == openAIGatewayPoolPairNone || current.invalidated || current.version != applied.Version || ctx.Err() != nil {
-		full, conclusive, err = false, false, errOpenAIGatewayPoolWarmUnverified
+		full, conclusive, err = false, false, retryGatewayPoolAttempt(errOpenAIGatewayPoolWarmUnverified)
 	}
 	// Same round as the original business: extra traffic updates last contact
 	// but must not become another initial full-strength sample.
@@ -179,7 +192,7 @@ func (s *OpenAIGatewayService) gatewayPoolConfirmResponse(request *http.Request,
 	})
 	current, status = s.codexCookies.cachedPoolPair(identity)
 	if status == openAIGatewayPoolPairNone || current.invalidated || current.version != applied.Version || ctx.Err() != nil {
-		full, conclusive, err = false, false, errOpenAIGatewayPoolWarmUnverified
+		full, conclusive, err = false, false, retryGatewayPoolAttempt(errOpenAIGatewayPoolWarmUnverified)
 	}
 	return full, conclusive, err
 }
@@ -202,6 +215,9 @@ func gatewayPoolConfirmState(ctx context.Context, cookie, state string, attempts
 		if err != nil || ctx.Err() != nil || status != http.StatusOK {
 			if err == nil {
 				err = ctx.Err()
+				if err == nil && status != http.StatusOK {
+					err = &gatewayPoolProbeHTTPError{status: status}
+				}
 			}
 			return false, false, err
 		}

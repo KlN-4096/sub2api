@@ -41,9 +41,9 @@ func TestCookieRequestCarriesNewParams(t *testing.T) {
 	many = append(many, "", strings.Repeat("x", maxExcludeItemLen+1))
 
 	pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{
-		Account: "acc-a", Gateway: "unified-9", Force: true,
+		Account: "acc-a", Gateway: "unified-9",
 		Exclude: many, ExcludeVersions: []string{"tkt-1", "tkt-2"},
-		MinRemaining: 60 * time.Second, Wait: 5 * time.Second,
+		MinRemaining: 60 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("取票失败: %v", err)
@@ -56,8 +56,8 @@ func TestCookieRequestCarriesNewParams(t *testing.T) {
 		t.Fatalf("查询串解不开 %q: %v", gotQuery, err)
 	}
 	for key, want := range map[string]string{
-		"account": "acc-a", "gateway": "unified-9", "force": "1",
-		"exclude_versions": "tkt-1,tkt-2", "min_remaining": "60", "wait": "5",
+		"account": "acc-a", "gateway": "unified-9", "force": "",
+		"exclude_versions": "tkt-1,tkt-2", "min_remaining": "60", "wait": "",
 	} {
 		if got := query.Get(key); got != want {
 			t.Fatalf("%s=%q，期望 %q", key, got, want)
@@ -82,37 +82,29 @@ func TestCookieRequestCarriesNewParams(t *testing.T) {
 }
 
 // min_remaining 与 wait 按契约区间钳位，不发一个必然被池子改写的值。
-func TestCookieClampsMinRemainingAndWait(t *testing.T) {
-	low := CookieRequest{MinRemaining: time.Second, Wait: -time.Second}.query(0)
+func TestCookieClampsMinRemaining(t *testing.T) {
+	low := CookieRequest{MinRemaining: time.Second}.query()
 	if got := low.Get("min_remaining"); got != "30" {
 		t.Fatalf("低于下限应钳到 30，实际 %q", got)
 	}
 	if got := low.Get("wait"); got != "" {
 		t.Fatalf("wait 非正数时不该带，实际 %q", got)
 	}
-	high := CookieRequest{MinRemaining: 10 * time.Hour, Wait: time.Hour}.query(0)
+	high := CookieRequest{MinRemaining: 10 * time.Hour}.query()
 	if got := high.Get("min_remaining"); got != "3600" {
 		t.Fatalf("超上限应钳到 3600，实际 %q", got)
 	}
-	if got := high.Get("wait"); got != "30" {
-		t.Fatalf("wait 超上限应钳到 30，实际 %q", got)
+	if got := high.Get("wait"); got != "" {
+		t.Fatalf("server-side waiting is unsupported, got %q", got)
 	}
 }
 
 // wait 必须钳进本次调用的剩余预算：池子还在等、这边先断等于白等一场。
 // 这条钳位是代码而不是注释 —— 调用方算错 wait 时不该出现「池子等 25s、客户端 8s 就断」。
-func TestCookieWaitIsClampedToCallBudget(t *testing.T) {
-	request := CookieRequest{Wait: 30 * time.Second}
-	if got := request.query(4 * time.Second).Get("wait"); got != "3" {
-		t.Fatalf("预算 4s 时 wait 应为 3（留 1s 写回响应），实际 %q", got)
-	}
-	if got := request.query(waitSafetyMargin).Get("wait"); got != "" {
-		t.Fatalf("预算只够余量时不该带 wait，实际 %q", got)
-	}
-
-	var gotWait string
+func TestCookieNeverDelegatesWaitingOrRotation(t *testing.T) {
+	var gotQuery url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotWait = r.URL.Query().Get("wait")
+		gotQuery = r.URL.Query()
 		_, _ = io.WriteString(w, `{"gateway":"g","cookie":"__cflb=a; __oailb=b","valid_for_s":150}`)
 	}))
 	defer srv.Close()
@@ -122,15 +114,13 @@ func TestCookieWaitIsClampedToCallBudget(t *testing.T) {
 	// 断言只在够快的机器上绿（CI 上就红过）。
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := New(srv.URL, "k", 0).Cookie(ctx, CookieRequest{Wait: 30 * time.Second}); err != nil {
+	if _, err := New(srv.URL, "k", 0).Cookie(ctx, testCookieRequest()); err != nil {
 		t.Fatalf("取票失败: %v", err)
 	}
-	w, err := strconv.Atoi(gotWait)
-	if err != nil {
-		t.Fatalf("出站 wait 解不开: %q", gotWait)
-	}
-	if w <= 0 || w > 9 {
-		t.Fatalf("死线 10s 时出站 wait 应落在 (0, 9]（预算内、且留了写回余量），实际 %d", w)
+	for _, key := range []string{"wait", "force", "count"} {
+		if gotQuery.Has(key) {
+			t.Fatalf("unsupported parameter %q was sent", key)
+		}
 	}
 }
 
@@ -179,7 +169,7 @@ func TestCookieRefusalCarriesCodeAndRetryAfter(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			_, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{})
+			_, err := New(srv.URL, "k", 0).Cookie(context.Background(), testCookieRequest())
 			if !errors.Is(err, ErrNoSlot) {
 				t.Fatalf("池子拒票必须 Unwrap 到 ErrNoSlot（消费端据此 fail-closed）: %v", err)
 			}
@@ -217,7 +207,7 @@ func TestCookieVersionIsSanitized(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write(body)
 		}))
-		pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{})
+		pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), testCookieRequest())
 		srv.Close()
 		if err != nil {
 			t.Fatalf("畸形 version 不该废掉整张票: %v", err)
@@ -225,52 +215,6 @@ func TestCookieVersionIsSanitized(t *testing.T) {
 		if pair.Version != "" {
 			t.Fatalf("version %q 应判废，实际收上来 %q", version, pair.Version)
 		}
-	}
-}
-
-// 还票：204 成功、409（太晚 / 已还过 / 找不到）当失败报给调用方（它只记日志）、
-// 没有票号时一个请求都不发。
-func TestReleaseReturnsTicket(t *testing.T) {
-	var hits int
-	var gotPath, gotAuth, gotBody, gotContentType string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
-		gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
-		gotContentType = r.Header.Get("Content-Type")
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<10))
-		gotBody = string(body)
-		if hits == 1 {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		w.WriteHeader(http.StatusConflict)
-	}))
-	defer srv.Close()
-
-	client := New(srv.URL, "ck-secret", 0)
-	if err := client.Release(context.Background(), "tkt-7"); err != nil {
-		t.Fatalf("204 应算成功: %v", err)
-	}
-	if gotPath != "/release" {
-		t.Fatalf("path=%q", gotPath)
-	}
-	if gotAuth == "" {
-		t.Fatal("还票的认证必须与 /cookie 一致（带 consumer key）")
-	}
-	if gotContentType != "application/json" {
-		t.Fatalf("content-type=%q", gotContentType)
-	}
-	if gotBody != `{"cookie_version":"tkt-7"}` {
-		t.Fatalf("body=%q", gotBody)
-	}
-	if err := client.Release(context.Background(), "tkt-7"); !errors.Is(err, ErrPool) {
-		t.Fatalf("409 应是包着 ErrPool 的错误: %v", err)
-	}
-	if err := client.Release(context.Background(), "   "); err != nil {
-		t.Fatalf("没有票号就还不了，这不算错误: %v", err)
-	}
-	if hits != 2 {
-		t.Fatalf("空票号不该发请求，实际打了 %d 次", hits)
 	}
 }
 
@@ -283,7 +227,7 @@ func TestCookieClampsValidFor(t *testing.T) {
 			_, _ = io.WriteString(w, `{"gateway":"g","cookie":"__cflb=a; __oailb=b","valid_for_s":`+
 				strconv.Itoa(validForS)+`}`)
 		}))
-		pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{})
+		pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), testCookieRequest())
 		srv.Close()
 		if err != nil {
 			t.Fatalf("valid_for_s=%d 不该整票作废: %v", validForS, err)
@@ -297,7 +241,7 @@ func TestCookieClampsValidFor(t *testing.T) {
 		_, _ = io.WriteString(w, `{"gateway":"g","cookie":"__cflb=a; __oailb=b","valid_for_s":150}`)
 	}))
 	defer srv.Close()
-	pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{})
+	pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), testCookieRequest())
 	if err != nil || pair.ValidFor != 150*time.Second {
 		t.Fatalf("150s 应原样通过，实际 %v err=%v", pair.ValidFor, err)
 	}
@@ -319,7 +263,7 @@ func TestCookieSanitizesGateway(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write(body)
 		}))
-		pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{})
+		pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), testCookieRequest())
 		srv.Close()
 		if err != nil {
 			t.Fatalf("畸形 gateway 不该废掉整张票: %v", err)
@@ -336,7 +280,7 @@ func TestTransportErrorDropsQuery(t *testing.T) {
 	// 连一个必然拒绝的地址：错误是 *url.Error，URL 字段就是我们发出去的那条。
 	client := New("http://127.0.0.1:1", "k", 0)
 	_, err := client.Cookie(context.Background(), CookieRequest{
-		Account: "acc-secret", Exclude: []string{"unified-7"}, ExcludeVersions: []string{"tkt-9"},
+		Account: "acc-secret", Gateway: "g", Exclude: []string{"unified-7"}, ExcludeVersions: []string{"tkt-9"},
 	})
 	if err == nil {
 		t.Fatal("打不通应当报错")
@@ -376,7 +320,7 @@ func TestCookieReadsPairRemaining(t *testing.T) {
 			_, _ = io.WriteString(w, `{"gateway":"g","cookie":"__cflb=a; __oailb=b","valid_for_s":150`+
 				tc.field+`}`)
 		}))
-		pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{})
+		pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), testCookieRequest())
 		srv.Close()
 		if err != nil {
 			t.Fatalf("%q 不该整票作废: %v", tc.field, err)
@@ -406,7 +350,7 @@ func TestCookieReadsRegion(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(body))
 		}))
-		pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{})
+		pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), testCookieRequest())
 		srv.Close()
 		if err != nil {
 			t.Fatalf("%s: %v", tc.field, err)

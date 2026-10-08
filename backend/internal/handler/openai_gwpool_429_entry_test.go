@@ -17,18 +17,48 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 type gatewayPool429EntryRepo struct{ *grokCredentialHandlerRepo }
 
-func (r gatewayPool429EntryRepo) GetByID(ctx context.Context, id int64) (*service.Account, error) {
-	account, err := r.grokCredentialHandlerRepo.GetByID(ctx, id)
-	if account != nil {
-		r.mu.Lock()
-		account.Extra = cloneCredentialMap(account.Extra)
-		r.mu.Unlock()
+func (r gatewayPool429EntryRepo) GetByID(_ context.Context, id int64) (*service.Account, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.missingOnGet[id] {
+		return nil, nil
 	}
-	return account, err
+	for _, account := range r.accounts {
+		if account.ID == id {
+			account.Extra = cloneCredentialMap(account.Extra)
+			account.Credentials = cloneCredentialMap(account.Credentials)
+			return &account, nil
+		}
+	}
+	return nil, nil
+}
+
+func (r gatewayPool429EntryRepo) ListSchedulableByPlatform(_ context.Context, platform string) ([]service.Account, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.selectionCalls++
+	var out []service.Account
+	for _, account := range r.accounts {
+		if account.Platform == platform && account.IsSchedulable() {
+			account.Extra = cloneCredentialMap(account.Extra)
+			account.Credentials = cloneCredentialMap(account.Credentials)
+			out = append(out, account)
+		}
+	}
+	return out, nil
+}
+
+func (r gatewayPool429EntryRepo) ListSchedulableByGroupIDAndPlatform(ctx context.Context, _ int64, platform string) ([]service.Account, error) {
+	return r.ListSchedulableByPlatform(ctx, platform)
+}
+
+func (r gatewayPool429EntryRepo) ListSchedulableUngroupedByPlatform(ctx context.Context, platform string) ([]service.Account, error) {
+	return r.ListSchedulableByPlatform(ctx, platform)
 }
 
 func (r gatewayPool429EntryRepo) ListByPlatform(_ context.Context, platform string) ([]service.Account, error) {
@@ -38,6 +68,7 @@ func (r gatewayPool429EntryRepo) ListByPlatform(_ context.Context, platform stri
 	for _, account := range r.accounts {
 		if account.Platform == platform {
 			account.Extra = cloneCredentialMap(account.Extra)
+			account.Credentials = cloneCredentialMap(account.Credentials)
 			out = append(out, account)
 		}
 	}
@@ -51,6 +82,7 @@ func (r gatewayPool429EntryRepo) FindByExtraField(_ context.Context, key string,
 	for _, account := range r.accounts {
 		if account.Extra[key] == value {
 			account.Extra = cloneCredentialMap(account.Extra)
+			account.Credentials = cloneCredentialMap(account.Credentials)
 			out = append(out, account)
 		}
 	}
@@ -109,6 +141,9 @@ func TestGatewayPool429EntryRetriesSameAccountWithoutInterruptingResponse(t *tes
 			repo := gatewayPool429EntryRepo{&grokCredentialHandlerRepo{accounts: accounts}}
 			upstream, router, cleanup := newCodexWireEntry(t, accounts, repo)
 			defer cleanup()
+			// The retired guard=false setting must not bypass A/B. Business-only
+			// failures/callbacks begin after these two successful Luna probes.
+			upstream.probeState = "offline-full"
 			upstream.sequence = []int{429, 429, 0}
 			upstream.errorBody = `{"detail":"Rate limit exceeded"}`
 			ctx, cancel := context.WithCancel(context.Background())
@@ -136,6 +171,12 @@ func TestGatewayPool429EntryRetriesSameAccountWithoutInterruptingResponse(t *tes
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
 			calls := upstream.taken()
+			require.GreaterOrEqual(t, len(calls), 3)
+			for _, probe := range calls[:2] {
+				require.Equal(t, account.ID, probe.accountID)
+				require.Equal(t, "gpt-6-luna", gjson.GetBytes(probe.body, "model").String())
+			}
+			calls = calls[2:]
 			if tc.mode == "success" {
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 				require.Len(t, calls, 3)
@@ -153,6 +194,7 @@ func TestGatewayPool429EntryRetriesSameAccountWithoutInterruptingResponse(t *tes
 			}
 			for _, call := range calls {
 				require.Equal(t, account.ID, call.accountID, "transient 429 cannot rotate credentials")
+				require.Equal(t, "gpt-5.4", gjson.GetBytes(call.body, "model").String(), "business model is unchanged")
 			}
 		})
 	}

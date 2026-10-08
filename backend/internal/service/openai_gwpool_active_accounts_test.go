@@ -42,7 +42,7 @@ func TestGatewayPoolModelSubsetExhaustionPreservesHealthyActiveAccounts(t *testi
 	})
 	require.Equal(t, uint64(0), svc.codexCookies.poolRounds.generation(group))
 	require.Contains(t, gatewayPoolRoundExclusions(ctx, nil), c.ID)
-	require.Equal(t, []string{gatewayPoolLedgerIdentity(aid), gatewayPoolLedgerIdentity(bid)},
+	require.Equal(t, []string{aid, bid},
 		svc.codexCookies.poolRounds.groups[group].active, "a model subset cannot evict healthy group-wide primary accounts")
 }
 

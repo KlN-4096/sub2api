@@ -43,13 +43,8 @@ const (
 	// 每一发请求都要 UPDATE 一次账号行（UpdateExtra 对中性键仍会连带 GetByID + Redis 写）。
 	// 换网关要立刻写——那正是这张卡要看的事，不该被节流窗口压住。
 	openAIGatewayHistoryWriteInterval = 5 * time.Minute
-	// openAIGatewayFullWindow 是前端把「验过满血」那一格显示成绿色的时长，也是 FullAt 必须
-	// 刷新的节奏（见下面的节流穿透）。
-	//
-	// 183 秒不是我们测出来的，是**取两边最保守的那个**：实测窗口是 200–300 秒，而池子自己的
-	// types.FullWindow 就是 183 秒、DeliverTTL 只有 150 秒（gwpool/internal/types）。取大的
-	// 会让格子在池子和后端都认为窗口已关之后还绿着 —— 而运营方正照着这一格挑落点。
-	// 前端 AccountGatewayCell.vue 的 FULL_WINDOW_MS 必须和它同值（跨语言，只能靠这条注释）。
+	// openAIGatewayFullWindow 只用于历史 FullAt 刷新节奏与接触终报关联。
+	// 它不是活票期限或前端绿色凭据；准入与绿色只认 fresh 当前版本的 proof。
 	openAIGatewayFullWindow = 183 * time.Second
 )
 
@@ -60,25 +55,8 @@ const (
 	openAIGatewayVerdictDegraded = "degraded"
 )
 
-// 满血分钟预测**刻意不在这里算**，在前端（AccountGatewayCell.vue 的 forecastUnits）。
-//
-// 它是个随时间衰减的值，而这条记录有 5 分钟写节流（openAIGatewayHistoryWriteInterval）
-// ⇒ 存进去的预测立刻就过期。前端那边 now 跟着 ticker 走，而 seen[].at / seen[].region
-// 和冷却窗口（openai_gwpool_gateway_window_s）本来就全在 extra 里，算得出来。
-//
-// 单位是 (账号 × 大区) 不是 (账号 × 网关)：一个号在一个大区同一时间只有一个网关，
-// 同一大区下的多个网关名是同一个单位（现网 us-west 一个大区有 20 个不同网关名）。
-
-// **这是上界不是承诺**，两个方向都偏乐观，前端那边的 tooltip 必须把它们说出来：
-//   - 这本账挂在**账号行**上，而单位是**上游账号**的 —— 同一份凭据的克隆行/影子行各自
-//     只看得见自己发出去的那些，所以「烧过」记少了（见本文件开头那段口径）。
-//   - 冷却时长本身没测准（openAIGatewayPoolGatewayWindow 的注释：静置 30 分钟到 4 小时
-//     命中率恒定，零相关），4 小时是工程保守取值。
-//   - openAIGatewayHistoryMax 从 24 提到 201 之前写下的行，历史被按时间裁过 ⇒ 那些被裁掉
-//     的落点看起来「没碰过」。
-//
-// 所以它答的是「最多」，用来回答「现在值不值得发请求」，**不能**反过来当调度闸 ——
-// 那条仍然只信 gatewayPoolUsedRecently 那本内存账。
+// 历史观测不是当前 proof 或保证恢复时间；显示由 runtime 与本地 CD 统计投影，
+// 调度始终 fresh 核成员账本和当前票，不拿历史 FullAt 或浏览器倒计时放行。
 
 // openAIGatewayHistory 是那条记录。
 //
@@ -107,7 +85,7 @@ type openAIGatewayHistory struct {
 	// 装的是过去一个窗口里碰过的网关名、清单是此刻还有活票的，两者不是包含关系，相减会出
 	// 负数，夹到 0 就成了「池子用完了」（2026-10-03 现网：账本 67、可交付 62，卡片报成 0）。
 	//
-	// PoolLive=0 = 还没问到过：关了 steering 的号不取清单（gatewayPoolPick 直接返回），
+	// PoolLive=0 = 还没成功取得清单；
 	// 列表打不开时也不覆盖旧值。卡片在那时只报已用，不编分母。PoolLive>0 时 PoolFree=0
 	// 是**真的 0**（可交付的全烧过了）。
 	//
@@ -136,7 +114,7 @@ type openAIGatewaySeen struct {
 	//
 	// 只能当排序权重，**不能当闸**：回归的触发变量未知（10-01 的 11 点测试里休息 30 分钟到
 	// 4 小时的命中率是常数，零相关），所以「等 N 小时就算恢复」没有实测依据。判「这个网关
-	// 还能不能用」仍然走 gatewayPoolUsedRecently 那个工程兜底窗口。
+	// 还能不能用」必须结合本地 CD 和当前 exact-version 验满 proof。
 	// omitzero 而不是 omitempty：omitempty 对 struct 不生效，零值会落库成
 	// "0001-01-01T00:00:00Z"（同 openai_turn_state_recovery.go 的两个时间字段）。
 	FullAt time.Time `json:"full_at,omitzero"`
@@ -183,7 +161,7 @@ func readOpenAIGatewayHistory(a *Account) (openAIGatewayHistory, bool) {
 // advanceCurrent=false 只更新 Seen，不动 `Current`/`CurrentRegion`：queue 档的预热在业务请求
 // **之前**判死一批落点，那些落点上永远不会有业务请求，推进「当前网关」会把卡片第一行写成最后
 // 一个被判死的落点（见 openai_gwpool_warm.go 的 noteWarmVerdict）。
-// poolLive/poolFree 是池子这一发清单的两个读数，poolLive=0 = 没问到（关了 steering /
+// poolLive/poolFree 是池子这一发清单的两个读数，poolLive=0 = 没问到（如请求中止 /
 // 列表打不开）⇒ 整对留旧值。它蹭的是这条已有的写路径：另起一条写 extra 的路就是两个写者
 // 抢同一个键。
 func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
@@ -291,7 +269,7 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 		}
 	}
 	rec.Seen[gateway] = next
-	// 成对写、0 不覆盖：没问到清单的那些发（关了 steering、列表超时）该留着上一次问到的
+	// 成对写、0 不覆盖：没问到清单的那些发（如列表超时）该留着上一次问到的
 	// 那一对，写 0 会让卡片说「池子一个落点都没有」。拆开写会出现新 free 配旧 live 的组合，
 	// 而那个组合从来没有同时成立过。跟着这条写路径走、不单独穿过节流 —— 它只是展示用的
 	// 读数，下一次正常写就会刷新。
@@ -333,10 +311,10 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 // Current 不许被裁掉：它是这张卡最要紧的那一格，而「当前网关」恰好可能是刚加进来的那条
 // （加进来时它是最新的，裁的是最旧的，所以这里实际裁不到它——留着这个判断是为了让
 // 以后改排序规则的人撞上它）。
-// Keep one previous identity view so toggling the experimental partition does
-// not erase cooldowns. Previous views are never merged into another identity.
+// Retain an old identity's history without adopting its observations. Untagged
+// workspace-era records cannot establish ownership by the current member.
 func gatewayPoolHistoryForTag(rec openAIGatewayHistory, tag string) openAIGatewayHistory {
-	if rec.LedgerTag == "" || rec.LedgerTag == tag {
+	if rec.LedgerTag == tag {
 		return rec
 	}
 	previous := rec
@@ -345,7 +323,11 @@ func gatewayPoolHistoryForTag(rec openAIGatewayHistory, tag string) openAIGatewa
 	if rec.Previous != nil && rec.Previous.LedgerTag == tag {
 		next = *rec.Previous
 	}
-	next.Previous = &previous
+	if rec.LedgerTag != "" || rec.Seen != nil || rec.Current != "" || rec.CurrentRegion != "" ||
+		!rec.UpdatedAt.IsZero() || rec.PoolLive != 0 || rec.PoolFree != 0 ||
+		rec.CooldownReset != (gatewayPoolCooldownResetState{}) {
+		next.Previous = &previous
+	}
 	return next
 }
 

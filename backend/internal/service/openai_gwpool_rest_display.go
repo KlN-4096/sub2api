@@ -14,6 +14,9 @@ type GatewayPoolRestView struct {
 // Read-only projection of the admission latch. The local timer publishes the
 // inactive tombstone durably; the browser must not infer a successful write.
 func (s *OpenAIGatewayService) gatewayPoolRestDisplay(account *Account, identity string, peers []Account) GatewayPoolRestView {
+	if account.GatewayPoolContinuousWaitEnabled() {
+		return GatewayPoolRestView{}
+	}
 	tag := gatewayPoolLedgerTag(identity)
 	state := readGatewayPoolRest(account, tag)
 	adopt := func(other gatewayPoolRestState) {

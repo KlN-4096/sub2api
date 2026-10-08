@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 )
 
 func TestGatewayPoolCooldownResetConfig(t *testing.T) {
@@ -107,9 +105,9 @@ func TestGatewayPoolCooldownResetKeepsActualRest(t *testing.T) {
 	require.Equal(t, now.Add(50*time.Minute), c.Until)
 }
 
-func cooldownResetService(t *testing.T, now time.Time) (*OpenAIGatewayService, *gatewayEarlyAccountsRepo, string) {
+func cooldownResetService(t *testing.T, now time.Time) (*OpenAIGatewayService, *gatewayPoolAccountsRepo, string) {
 	t.Helper()
-	repo := &gatewayEarlyAccountsRepo{rows: map[int64]*gatewayRuntimeRepo{}}
+	repo := &gatewayPoolAccountsRepo{rows: map[int64]*gatewayRuntimeRepo{}}
 	for _, id := range []int64{1, 2} {
 		account := gwpoolTestAccount(id)
 		identity, err := (&openAICodexCookieStore{}).gatewayPoolIdentity(context.Background(), account)
@@ -302,22 +300,19 @@ func TestGatewayPoolCooldownResetWritersKeepNewEpochLearning(t *testing.T) {
 	}
 }
 
-func TestGatewayPoolCooldownResetIgnoresOldRecommendations(t *testing.T) {
+func TestGatewayPoolCooldownResetDropsLegacyPoolOverlay(t *testing.T) {
 	now, identity := time.Now().UTC(), gwpoolTestIdentity
 	store := &openAICodexCookieStore{}
-	rec := &gwpool.CooldownRecommendation{Seconds: 28800, Samples: 2, Source: "account"}
-	store.noteGatewayPoolRecommendationAt(identity, "g", rec, now.Add(-time.Minute))
+	oldAt := now.Add(-24 * time.Hour)
+	old := gatewayPoolCooldown{SourcesKnown: true, BaseSeconds: 3600, CycleAt: oldAt,
+		WindowSeconds: 28800, LegacyRecommendedSeconds: 28800, LegacyRecommendationSource: "account",
+		UpdatedAt: oldAt, Until: oldAt.Add(8 * time.Hour)}
+	store.hydrateCooldown(identity, "g", &old, 3600, oldAt)
 	store.applyGatewayPoolCooldownReset(identity, now, 3600)
-	base, recommendation := store.gatewayPoolInitialCooldown(identity, "g", time.Hour, true)
-	require.Equal(t, 3600, base)
-	require.Nil(t, recommendation)
-	store.noteGatewayPoolRecommendationAt(identity, "g", rec, now.Add(-time.Second))
-	require.True(t, store.beginGatewayPoolAttempt(identity, "g", time.Hour, true))
+	require.True(t, store.beginGatewayPoolAttempt(identity, "g", time.Hour))
 	cooldown, _ := store.cooldownEntry(identity, "g")
 	require.Equal(t, 3600, cooldown.WindowSeconds)
-	store.noteGatewayPoolRecommendationAt(identity, "g", rec, now.Add(time.Nanosecond))
-	base, _ = store.gatewayPoolInitialCooldown(identity, "g", time.Hour, true)
-	require.Equal(t, 28800, base, "new explicitly enabled recommendations remain a separate policy")
+	require.False(t, cooldown.hasLegacyRecommendation())
 }
 
 func TestGatewayPoolCooldownResetRunsWithoutOutboxOrModelRequests(t *testing.T) {
