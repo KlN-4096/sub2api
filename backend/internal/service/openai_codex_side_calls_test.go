@@ -89,6 +89,24 @@ func requireNoCodexSideCall(t *testing.T, up *codexSideCallUpstream) {
 	}
 }
 
+func TestCodexSideCallSnapshotDoesNotShareMutableRequestMaps(t *testing.T) {
+	account := wireProfileTestAccount(true)
+	account.Credentials["access_token"] = "before"
+	account.Extra[openAIGatewayPoolExtraKey] = true
+	snapshot := snapshotCodexSideCallAccount(account)
+
+	// Response observation replaces entries in request.Extra; auth refresh
+	// similarly updates Credentials after the asynchronous GET is scheduled.
+	account.Extra[openAIGatewayPoolExtraKey] = false
+	account.Credentials["access_token"] = "after"
+	require.True(t, snapshot.UsesGatewayPool(), "the side call must retain its own routing snapshot")
+	require.Equal(t, "before", snapshot.Credentials["access_token"])
+	snapshot.Extra["side-only"] = true
+	snapshot.Credentials["side-only"] = true
+	require.NotContains(t, account.Extra, "side-only")
+	require.NotContains(t, account.Credentials, "side-only")
+}
+
 func TestCodexSideCallsFollowRealClientCadence(t *testing.T) {
 	svc, up := codexSideCallTestService()
 	proxyID := int64(77)

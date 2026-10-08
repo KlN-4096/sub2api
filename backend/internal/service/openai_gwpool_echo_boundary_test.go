@@ -59,9 +59,9 @@ func TestStateEchoFinalDeliveryRechecksAfterContactPersistence(t *testing.T) {
 func TestStateEchoReferenceExpiryDoesNotSuppressConfirmedDegradation(t *testing.T) {
 	store := &openAICodexCookieStore{}
 	store.poolPairs.Store("identity", openAIGatewayPoolPair{cookie: "offline", version: "v", gateway: "g", until: time.Now().Add(-time.Second)})
-	_, marked := store.gatewayPoolMarkStaleMatched("identity", "v", "g", true)
+	_, marked := store.gatewayPoolMarkStaleMatched("identity", "v")
 	require.True(t, marked)
-	_, marked = store.gatewayPoolMarkStaleMatched("identity", "v", "g", true)
+	_, marked = store.gatewayPoolMarkStaleMatched("identity", "v")
 	require.False(t, marked, "a confirmed rejection is recorded once")
 }
 
@@ -93,7 +93,9 @@ func TestStateEchoBuiltCompressedRequestKeepsFinalIdentities(t *testing.T) {
 	require.NoError(t, err)
 	confirmation, err := decoder.DecodeAll([]byte(upstream.sentBodies[1]), nil)
 	require.NoError(t, err)
-	for _, field := range []string{"model", "prompt_cache_key", "client_metadata.session_id", "client_metadata.thread_id"} {
+	require.Equal(t, "gpt-5.5", gjson.GetBytes(original, "model").String(), "business model stays unchanged")
+	require.Equal(t, gatewayPoolProbeModelLuna, gjson.GetBytes(confirmation, "model").String())
+	for _, field := range []string{"prompt_cache_key", "client_metadata.session_id", "client_metadata.thread_id"} {
 		if gjson.GetBytes(original, field).Exists() {
 			require.JSONEq(t, gjson.GetBytes(original, field).Raw, gjson.GetBytes(confirmation, field).Raw, field)
 		}

@@ -4,12 +4,14 @@ import { ref, type ComputedRef } from 'vue'
 import { useGatewayPoolProgress } from '@/composables/useGatewayPoolProgress'
 import type { GatewayPoolProgress } from '@/api/admin/accounts'
 import AccountStatusIndicator from '@/components/account/AccountStatusIndicator.vue'
+import AccountGatewayCell from '@/components/account/AccountGatewayCell.vue'
+import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'
 
 import AccountsView from '../AccountsView.vue'
 
 vi.mock('@/composables/useGatewayPoolProgress', () => ({ useGatewayPoolProgress: vi.fn() }))
 const progress = ref<Record<number, GatewayPoolProgress>>({})
-const unavailable = ref(false)
+const paused = ref(false)
 let pollIDs: ComputedRef<number[]>
 
 const { listAccounts } = vi.hoisted(() => ({
@@ -59,6 +61,8 @@ const DataTableStub = {
       </span>
       <button data-test="sort-priority" @click="$emit('sort', 'priority', 'desc')" />
       <slot v-for="row in data" name="cell-status" :row="row" />
+      <slot v-for="row in data" name="cell-gateway" :row="row" />
+      <slot v-for="row in data" name="cell-capacity" :row="row" />
     </div>
   `
 }
@@ -92,6 +96,7 @@ function mountView() {
         BulkEditAccountModal: true,
         PlatformTypeBadge: true,
         AccountCapacityCell: true,
+        AccountGatewayCell: true,
         AccountStatusIndicator: true,
         AccountTodayStatsCell: true,
         AccountGroupsCell: true,
@@ -107,10 +112,10 @@ function mountView() {
 describe('admin AccountsView priority column preferences', () => {
   beforeEach(() => {
     progress.value = {}
-    unavailable.value = false
+    paused.value = false
     vi.mocked(useGatewayPoolProgress).mockImplementation(ids => {
       pollIDs = ids
-      return { progress, unavailable, refresh: vi.fn() }
+      return { progress, paused, refresh: vi.fn() }
     })
     localStorage.clear()
     listAccounts.mockReset().mockResolvedValue({
@@ -122,7 +127,7 @@ describe('admin AccountsView priority column preferences', () => {
     })
   })
 
-  it('polls rest for the status column and does not trust a failed cached snapshot', async () => {
+  it('polls rest for the status column without treating pause or read failure as a state change', async () => {
     localStorage.setItem('account-hidden-columns', JSON.stringify(['gateway', 'capacity']))
     localStorage.setItem('account-hidden-columns-version', 'scheduler-score-hidden-by-default')
     listAccounts.mockResolvedValueOnce({ items: [{
@@ -135,11 +140,36 @@ describe('admin AccountsView priority column preferences', () => {
     expect(pollIDs.value).toEqual([1])
     const status = wrapper.findComponent(AccountStatusIndicator)
     expect(status.props('gatewayPoolRest')).toEqual({ active: false })
-    unavailable.value = true
+    paused.value = true
     await flushPromises()
-    expect(status.props('gatewayPoolRest')).toBeUndefined()
-    expect(status.props('gatewayPoolRestPending')).toBe(true)
+    expect(wrapper.findComponent(AccountGatewayCell).props()).toMatchObject({
+      progressPaused: true
+    })
+    expect(wrapper.findComponent(AccountCapacityCell).props('progressPaused')).toBe(true)
+    expect(status.props('progressPaused')).toBe(true)
+    expect(status.props('gatewayPoolRest')).toEqual({ active: false })
+    expect(status.props('gatewayPoolRestPending')).toBe(false)
+    paused.value = false
+    await flushPromises()
+    expect(status.props('gatewayPoolRest')).toEqual({ active: false })
+    expect(status.props('gatewayPoolRestPending')).toBe(false)
     wrapper.unmount()
+  })
+
+  it('does not freeze non-pool rows when gateway polling is paused or has no targets', async () => {
+    paused.value = true
+    listAccounts.mockResolvedValueOnce({ items: [{
+      id: 2, name: 'ordinary', platform: 'openai', type: 'oauth', status: 'active', schedulable: true,
+      extra: {}
+    }], total: 1, page: 1, page_size: 20, pages: 1 })
+    const wrapper = mountView()
+    try {
+      await flushPromises()
+      expect(pollIDs.value).toEqual([])
+      for (const component of [AccountGatewayCell, AccountCapacityCell, AccountStatusIndicator]) {
+        expect(wrapper.findComponent(component).props('progressPaused')).toBe(false)
+      }
+    } finally { wrapper.unmount() }
   })
 
   it('shows priority as a sortable column for fresh preferences', async () => {

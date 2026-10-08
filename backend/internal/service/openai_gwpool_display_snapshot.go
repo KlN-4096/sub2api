@@ -83,7 +83,7 @@ func (s *OpenAIGatewayService) gatewayPoolDisplaySnapshot(
 			merge(&peers[i])
 		}
 	}
-	prefix := gatewayPoolLedgerIdentity(identity) + "\x00"
+	prefix := identity + "\x00"
 	clearAt := s.codexCookies.gatewayPoolCooldownClearAt(identity)
 	if !clearAt.IsZero() {
 		s.codexCookies.poolKnown.Range(func(key, _ any) bool {

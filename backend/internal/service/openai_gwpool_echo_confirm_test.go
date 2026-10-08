@@ -102,9 +102,13 @@ func TestStateEchoConfirmationUnknownClosesBusinessWithoutDegrading(t *testing.T
 			req, err := http.NewRequestWithContext(ctx, http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
 			require.NoError(t, err)
 			req.Header.Set(openAICodexTurnStateHeader, "old")
-			resp, err := svc.doOpenAIUpstream(req, "", acct)
+			resp, err := svc.doOpenAIUpstreamAttempt(req, "", acct)
 			require.Nil(t, resp)
-			require.ErrorIs(t, err, errOpenAIGatewayPoolWarmUnverified)
+			if failure == "cancel" {
+				require.ErrorIs(t, err, context.Canceled)
+			} else {
+				require.ErrorIs(t, err, errOpenAIGatewayPoolWarmUnverified)
+			}
 			require.NotEqual(t, openAIGatewayVerdictDegraded, sink.snapshot().Verdict)
 			require.Empty(t, sink.discarded, "unknown is not a degraded training/usage event")
 			require.True(t, upstream.bodies[0].closed)
@@ -138,7 +142,8 @@ func TestStateEchoConfirmationSharesDeadlineAndFreezesBudget(t *testing.T) {
 func TestStateEchoConfirmationPreservesWireIdentityWithoutUserContent(t *testing.T) {
 	body := []byte(`{"model":"gpt-6-astra","prompt_cache_key":"final-scoped-session","client_metadata":{"session_id":"final-scoped-session","thread_id":"final-thread","turn_id":"final-turn","root_turn_id":"root","x-codex-installation-id":"install","x-codex-turn-metadata":"metadata","unrelated":"private-value"},"reasoning":{"effort":"high"},"service_tier":"priority","input":"private-input","instructions":"private-instructions","tools":[{"name":"private-tool"}],"previous_response_id":"private-response"}`)
 	template := gatewayPoolConfirmBody(body)
-	for _, field := range []string{"model", "prompt_cache_key", "client_metadata.session_id", "client_metadata.thread_id", "client_metadata.turn_id",
+	require.Equal(t, gatewayPoolProbeModelLuna, gjson.GetBytes(template, "model").String())
+	for _, field := range []string{"prompt_cache_key", "client_metadata.session_id", "client_metadata.thread_id", "client_metadata.turn_id",
 		"client_metadata.root_turn_id", "client_metadata.x-codex-installation-id", "client_metadata.x-codex-turn-metadata", "reasoning", "service_tier"} {
 		require.JSONEq(t, gjson.GetBytes(body, field).Raw, gjson.GetBytes(template, field).Raw, field)
 	}
@@ -174,6 +179,29 @@ func TestStateEchoConfirmationPreservesWireIdentityWithoutUserContent(t *testing
 	original.GetBody = nil
 	_, err = gatewayPoolConfirmTemplate(original)
 	require.ErrorIs(t, err, errOpenAIGatewayPoolWarmUnverified)
+}
+
+func TestStateEchoConfirmationLunaMetadataPreservesScopedIdentity(t *testing.T) {
+	const metadata = `{"model":"gpt-6-astra","session_id":"scoped-session","turn_id":"scoped-turn","parent_thread_id":"parent","reasoning_effort":"high"}`
+	body := []byte(`{"model":"gpt-6-astra","client_metadata":{"x-codex-turn-metadata":"{\"model\":\"gpt-6-astra\",\"session_id\":\"scoped-session\",\"turn_id\":\"scoped-turn\",\"parent_thread_id\":\"parent\",\"reasoning_effort\":\"high\"}"}}`)
+	template := gatewayPoolConfirmBody(body)
+	original, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(string(body)))
+	require.NoError(t, err)
+	original.Header.Set(openAIWSTurnMetadataHeader, metadata)
+	request, err := gatewayPoolConfirmationRequest(context.Background(), original, template, "state")
+	require.NoError(t, err)
+	defer func() { _ = request.Body.Close() }()
+	for _, raw := range []string{
+		request.Header.Get(openAIWSTurnMetadataHeader),
+		gjson.GetBytes(template, "client_metadata."+openAIWSTurnMetadataHeader).String(),
+	} {
+		require.Equal(t, gatewayPoolProbeModelLuna, gjson.Get(raw, "model").String())
+		for _, key := range []string{"session_id", "turn_id", "parent_thread_id", "reasoning_effort"} {
+			require.Equal(t, gjson.Get(metadata, key).String(), gjson.Get(raw, key).String(), key)
+		}
+	}
+	require.Equal(t, metadata, original.Header.Get(openAIWSTurnMetadataHeader), "business header is unchanged")
+	require.Equal(t, "gpt-6-astra", gjson.GetBytes(body, "model").String())
 }
 
 func TestStateEchoConfirmationRejectsOriginalResponseGatewayDrift(t *testing.T) {

@@ -782,6 +782,7 @@ type UpstreamFailoverError struct {
 	Reason                    GatewayFailureReason
 	NextAccountAction         NextAccountAction
 	GatewayPoolRotation       bool // availability-only; handler must enforce opt-in and same-group scope
+	GatewayPoolRetry          bool // pre-delivery recovery, bounded by the original request's wait policy
 	ClientStatusCode          int
 	ClientMessage             string
 	StreamFailedFrame         *OpenAIStreamFailedFrame // 触发本次 failover 的流内 failed/error 帧；耗尽时用于错误透传规则匹配

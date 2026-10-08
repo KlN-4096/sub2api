@@ -8,8 +8,8 @@ import (
 
 // Only names are queued, never a stockpile of live route credentials. Each pick
 // reconciles a fresh catalog + local cooldown projection. The FIFO remains the
-// exploration/fallback baseline; measured candidates may exchange positions for
-// this pick only. A cancelled caller does not reset the baseline order.
+// exploration/fallback baseline; ranking splits it into dynamic quality/ordinary
+// queues for this pick only. A cancelled caller does not reset the baseline order.
 type gatewayPoolCandidateQueue struct {
 	mu    sync.Mutex
 	names []string
@@ -24,17 +24,50 @@ func (s *openAICodexCookieStore) gatewayPoolCandidateQueue(identity string) *gat
 	return queue
 }
 
-func (q *gatewayPoolCandidateQueue) pick(eligible []gwpool.Gateway, adaptive ...map[string]float64) string {
+func (q *gatewayPoolCandidateQueue) pick(eligible []gwpool.Gateway, policy ...gatewayPoolCandidateRanking) string {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	ordered := gatewayPoolReconcileCandidates(q.names, eligible)
+	q.names = make([]string, len(ordered))
+	for i, candidate := range ordered {
+		q.names[i] = candidate.Name
+	}
+	if len(ordered) == 0 {
+		return ""
+	}
+	selected := ordered[0].Name
+	if len(policy) > 0 {
+		selected = policy[0].order(ordered)[0].Name
+	}
+	// Rotate in the untouched FIFO, not the score order: baseline exploration
+	// can still reach a lower-scoring or unmeasured candidate.
+	for i, name := range q.names {
+		if name == selected {
+			q.names = append(append(q.names[:i], q.names[i+1:]...), selected)
+			break
+		}
+	}
+	return selected
+}
+
+// Reconcile a private view without rotating, admitting work, or storing names.
+func (q *gatewayPoolCandidateQueue) preview(eligible []gwpool.Gateway) []gwpool.Gateway {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return gatewayPoolReconcileCandidates(q.names, eligible)
+}
+
+func gatewayPoolReconcileCandidates(queued []string, eligible []gwpool.Gateway) []gwpool.Gateway {
 	ready := make(map[string]bool, len(eligible))
+	catalog := make(map[string]gwpool.Gateway, len(eligible))
 	for _, candidate := range eligible {
 		if candidate.Name != "" {
 			ready[candidate.Name] = true
+			catalog[candidate.Name] = candidate
 		}
 	}
 	names := make([]string, 0, len(ready))
-	for _, name := range q.names {
+	for _, name := range queued {
 		if ready[name] {
 			names = append(names, name)
 			ready[name] = false
@@ -46,27 +79,11 @@ func (q *gatewayPoolCandidateQueue) pick(eligible []gwpool.Gateway, adaptive ...
 			ready[candidate.Name] = false
 		}
 	}
-	q.names = names
-	if len(names) == 0 {
-		return ""
+	ordered := make([]gwpool.Gateway, 0, len(names))
+	for _, name := range names {
+		ordered = append(ordered, catalog[name])
 	}
-	selected := names[0]
-	if len(adaptive) > 0 && len(adaptive[0]) >= 2 {
-		ordered := make([]gwpool.Gateway, 0, len(names))
-		for _, name := range names {
-			ordered = append(ordered, gwpool.Gateway{Name: name})
-		}
-		selected = rankGatewayPoolAdaptive(ordered, adaptive[0])[0].Name
-	}
-	// Rotate in the untouched FIFO, not the score order: baseline exploration
-	// can still reach a lower-scoring or unmeasured candidate.
-	for i, name := range q.names {
-		if name == selected {
-			q.names = append(append(q.names[:i], q.names[i+1:]...), selected)
-			break
-		}
-	}
-	return selected
+	return ordered
 }
 
 func (q *gatewayPoolCandidateQueue) reset() {

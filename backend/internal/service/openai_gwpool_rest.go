@@ -15,7 +15,7 @@ const (
 // No pool I/O. With fewer than N known gateways, wait for all known cooldowns.
 // No history means no local cooldown rest, not an invented retry interval.
 func (s *openAICodexCookieStore) gatewayPoolLocalResumeAt(identity string, account *Account) time.Time {
-	prefix := gatewayPoolLedgerIdentity(identity) + "\x00"
+	prefix := identity + "\x00"
 	var eligibleAt []time.Time
 	known := map[string]time.Time{}
 	s.poolKnown.Range(func(key, _ any) bool {
@@ -45,8 +45,8 @@ func (s *openAICodexCookieStore) gatewayPoolLocalResumeAt(identity string, accou
 		if at.IsZero() {
 			continue
 		}
-		_, _ = s.gatewayPoolUsedAt(identity, gateway, account.gatewayPoolGatewayWindow(), account.gatewayPoolUseRecommendation())
-		base, _ := s.gatewayPoolInitialCooldown(identity, gateway, account.gatewayPoolGatewayWindow(), account.gatewayPoolUseRecommendation())
+		_, _ = s.gatewayPoolUsedAt(identity, gateway, account.gatewayPoolGatewayWindow())
+		base := gatewayPoolCooldownBase(account.gatewayPoolGatewayWindow())
 		until := at.Add(time.Duration(base) * time.Second)
 		if cooldown, found := s.cooldownEntry(identity, gateway); found {
 			until = cooldown.Until
@@ -71,6 +71,9 @@ func (s *openAICodexCookieStore) gatewayPoolRestDuration(identity string, accoun
 }
 
 func (s *OpenAIGatewayService) restGatewayPoolAccount(ctx context.Context, account *Account, identity string, group int64) {
+	if account.GatewayPoolContinuousWaitEnabled() {
+		return
+	}
 	now := time.Now()
 	until := s.codexCookies.gatewayPoolLocalResumeAt(identity, account)
 	if !until.After(now) {
