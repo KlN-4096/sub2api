@@ -1524,6 +1524,12 @@ export default {
         adminApiKeyRequired: '请输入 CPR Admin API Key'
       },
       // OAuth flow
+      importErrors: {
+        ECONNABORTED: '请求超时，结果未确认；请先核对账号列表，不要直接重复刷新或导入。',
+        ETIMEDOUT: '请求超时，结果未确认；请先核对账号列表，不要直接重复刷新或导入。',
+        ERR_NETWORK: '连接中断，结果未确认；请先核对账号列表后再决定是否重试。',
+        INVALID_IMPORT_RESPONSE: '服务端回执异常，结果未确认；请先核对账号列表。刷新令牌可能已轮换，请勿盲目重试。'
+      },
       oauth: {
         title: 'Claude 账号授权',
         authMethod: '授权方式',
@@ -1569,6 +1575,7 @@ export default {
         batchSuccess: '成功创建 {count} 个账号',
         batchPartialSuccess: '部分成功：{success} 个成功，{failed} 个失败',
         batchFailed: '批量创建失败',
+        batchProgress: '已处理 {completed} / {total} 项（最多 3 项并发）',
         // OpenAI specific
         openai: {
           title: 'OpenAI 账户授权',

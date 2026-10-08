@@ -3696,6 +3696,9 @@
         @authorize-password="handleGrokAuthorizePassword"
       />
 
+      <p v-if="openAIBatchRunning" role="status" class="mt-2 text-sm text-gray-500">
+        {{ t('admin.accounts.oauth.batchProgress', { completed: openAIBatchCompleted, total: openAIBatchTotal }) }}
+      </p>
     </div>
 
     <template #footer>
@@ -3740,7 +3743,7 @@
         </button>
       </div>
       <div v-else class="flex justify-between gap-3">
-        <button type="button" class="btn btn-secondary" @click="goBackToBasicInfo">
+        <button type="button" class="btn btn-secondary" :disabled="openAIBatchRunning" @click="goBackToBasicInfo">
           {{ t('common.back') }}
         </button>
         <button
@@ -4031,7 +4034,7 @@ import {
   type AddMethod,
   type AuthInputMethod
 } from '@/composables/useAccountOAuth'
-import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
+import { useOpenAIOAuth, type OpenAITokenInfo } from '@/composables/useOpenAIOAuth'
 import { useGeminiOAuth } from '@/composables/useGeminiOAuth'
 import { useAntigravityOAuth } from '@/composables/useAntigravityOAuth'
 import { useGrokOAuth } from '@/composables/useGrokOAuth'
@@ -4100,6 +4103,7 @@ import {
   parseDateTimeLocalInput
 } from '@/utils/format'
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
+import { extractApiErrorCode, extractI18nErrorMessage } from '@/utils/apiError'
 import { getAccountExpiryTimestamp } from '@/components/account/accountExpiry'
 import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
 import {
@@ -5496,6 +5500,7 @@ const submitCreateAccount = async (payload: CreateAccountRequest) => {
 
 // Methods
 const resetForm = () => {
+  openAIRetryTokens.clear()
   step.value = 1
   form.name = ''
   form.notes = ''
@@ -5618,6 +5623,7 @@ const resetForm = () => {
 }
 
 const handleClose = () => {
+  if (openAIBatchRunning.value) return
   antigravityMixedChannelConfirmed.value = false
   clearMixedChannelDialog()
   emit('close')
@@ -6126,6 +6132,7 @@ const handleSubmit = async () => {
 }
 
 const goBackToBasicInfo = () => {
+  if (openAIBatchRunning.value) return
   step.value = 1
   oauth.resetState()
   openaiOAuth.resetState()
@@ -6795,15 +6802,29 @@ const handleOpenAIImportCodexPAT = async (accessToken: string) => {
   }
 }
 
+const OPENAI_IMPORT_CONCURRENCY = 3
+const openAIBatchRunning = ref(false)
+const openAIBatchCompleted = ref(0)
+const openAIBatchTotal = ref(0)
+// Only failed, already-refreshed credentials are kept in memory. A manual
+// account-write retry must not rotate the same RT again.
+const openAIRetryTokens = new Map<string, OpenAITokenInfo>()
+
 // OpenAI RT 批量验证和创建（共享逻辑）
 const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string) => {
   const oauthClient = openaiOAuth
-  if (!refreshTokenInput.trim()) return
+  if (openAIBatchRunning.value || oauthClient.loading.value || !refreshTokenInput.trim()) return
 
+  const seen = new Set<string>()
   const refreshTokens = refreshTokenInput
     .split('\n')
     .map((rt) => rt.trim())
-    .filter((rt) => rt)
+    .map((token, index) => ({ token, index }))
+    .filter(({ token }) => {
+      if (!token || seen.has(token)) return false
+      seen.add(token)
+      return true
+    })
 
   if (refreshTokens.length === 0) {
     oauthClient.error.value = t('admin.accounts.oauth.openai.pleaseEnterRefreshToken')
@@ -6811,79 +6832,101 @@ const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string)
   }
 
   oauthClient.loading.value = true
+  openAIBatchRunning.value = true
+  openAIBatchCompleted.value = 0
+  openAIBatchTotal.value = refreshTokens.length
   oauthClient.error.value = ''
 
   let successCount = 0
   let failedCount = 0
-  const errors: string[] = []
+  const errors: Array<string | undefined> = []
+  const failedTokens: Array<string | undefined> = []
   const shouldCreateOpenAI = form.platform === 'openai'
+  const proxyId = form.proxy_id
+  const defaults = {
+    notes: form.notes, proxy_id: proxyId, concurrency: form.concurrency,
+    load_factor: form.load_factor ?? undefined, priority: form.priority,
+    rate_multiplier: form.rate_multiplier, group_ids: [...form.group_ids],
+    expires_at: form.expires_at, auto_pause_on_expired: autoPauseOnExpired.value
+  }
+  const configuredName = form.name
+  const baseExtra = withUpstreamRequestIdHeader(buildOpenAIExtra())
+  const modelMapping = shouldCreateOpenAI && !isOpenAIModelRestrictionDisabled.value
+    ? buildModelMappingObject(modelRestrictionMode.value, allowedModels.value, modelMappings.value) : undefined
+  const compactModelMapping = shouldCreateOpenAI ? buildOpenAICompactModelMapping() : undefined
+  const cacheKey = (token: string) => (clientId || '') + '\0' + token
+  const currentKeys = new Set(refreshTokens.map(({ token }) => cacheKey(token)))
+  for (const key of openAIRetryTokens.keys()) {
+    if (!currentKeys.has(key)) openAIRetryTokens.delete(key)
+  }
+  let next = 0
 
   try {
-    for (let i = 0; i < refreshTokens.length; i++) {
+    const upload = async (i: number) => {
+      const item = refreshTokens[i]!
+      let retryToken = item.token
       try {
-        const tokenInfo = await oauthClient.validateRefreshToken(
-          refreshTokens[i],
-          form.proxy_id,
-          clientId
-        )
-        if (!tokenInfo) {
-          failedCount++
-          errors.push(`#${i + 1}: ${oauthClient.error.value || 'Validation failed'}`)
-          oauthClient.error.value = ''
-          continue
-        }
+        // Batch owns loading/error state; the single-token composable toggles
+        // loading in its finally and must not be used by concurrent workers.
+        const tokenInfo = openAIRetryTokens.get(cacheKey(item.token)) || await adminAPI.accounts.refreshOpenAIToken(
+          item.token, proxyId, '/admin/openai/refresh-token', clientId
+        ) as OpenAITokenInfo
+        retryToken = tokenInfo.refresh_token || item.token
+        tokenInfo.refresh_token = retryToken
+        openAIRetryTokens.delete(cacheKey(item.token))
+        openAIRetryTokens.set(cacheKey(retryToken), tokenInfo)
 
         const credentials = oauthClient.buildCredentials(tokenInfo)
         if (clientId) {
           credentials.client_id = clientId
         }
         const oauthExtra = oauthClient.buildExtraInfo(tokenInfo) as Record<string, unknown> | undefined
-        const extra = buildOpenAIExtra(oauthExtra)
+        const extra = { ...oauthExtra, ...baseExtra }
 
         // Add model mapping for OpenAI OAuth accounts（透传模式下不应用）
-        if (shouldCreateOpenAI && !isOpenAIModelRestrictionDisabled.value) {
-          const modelMapping = buildModelMappingObject(modelRestrictionMode.value, allowedModels.value, modelMappings.value)
-          if (modelMapping) {
-            credentials.model_mapping = modelMapping
-          }
-        }
-        if (shouldCreateOpenAI) {
-          const compactModelMapping = buildOpenAICompactModelMapping()
-          if (compactModelMapping) {
-            credentials.compact_model_mapping = compactModelMapping
-          }
-        }
+        if (modelMapping) credentials.model_mapping = modelMapping
+        if (compactModelMapping) credentials.compact_model_mapping = compactModelMapping
 
         // Generate account name; fallback to email if name is empty (ent schema requires NotEmpty)
-        const baseName = form.name || tokenInfo.email || 'OpenAI OAuth Account'
-        const accountName = refreshTokens.length > 1 ? `${baseName} #${i + 1}` : baseName
+        const baseName = configuredName || tokenInfo.email || 'OpenAI OAuth Account'
+        const accountName = refreshTokens.length > 1 ? `${baseName} #${item.index + 1}` : baseName
 
         if (shouldCreateOpenAI) {
-          await adminAPI.accounts.create({
+          const created = await adminAPI.accounts.create({
+            ...defaults,
             name: accountName,
-            notes: form.notes,
             platform: 'openai',
             type: 'oauth',
             credentials,
-            extra: withUpstreamRequestIdHeader(extra),
-            proxy_id: form.proxy_id,
-            concurrency: form.concurrency,
-            load_factor: form.load_factor ?? undefined,
-            priority: form.priority,
-            rate_multiplier: form.rate_multiplier,
-            group_ids: form.group_ids,
-            expires_at: form.expires_at,
-            auto_pause_on_expired: autoPauseOnExpired.value
+            extra
           })
+          if (!created || !Number.isSafeInteger(created.id) || created.id <= 0) {
+            throw Object.assign(new Error('Account creation response is invalid. Check the account list before retrying.'), {
+              code: 'INVALID_IMPORT_RESPONSE', status: 0
+            })
+          }
         }
 
+        openAIRetryTokens.delete(cacheKey(retryToken))
         successCount++
       } catch (error: any) {
         failedCount++
-        const errMsg = error.response?.data?.detail || error.message || 'Unknown error'
-        errors.push(`#${i + 1}: ${errMsg}`)
+        const importErrorKey = 'admin.accounts.importErrors.' + extractApiErrorCode(error)
+        const namespace = t(importErrorKey) !== importErrorKey
+          ? 'admin.accounts.importErrors' : 'admin.accounts.oauth.openai.errors'
+        const errMsg = extractI18nErrorMessage(error, t, namespace, 'Unknown error')
+        const status = Number(error.status || error.response?.status)
+        errors[i] = `#${item.index + 1}: ${status > 0 ? `HTTP ${status}: ` : ''}${errMsg}`
+        failedTokens[i] = retryToken
+      } finally {
+        openAIBatchCompleted.value++
       }
     }
+    const worker = async () => {
+      while (next < refreshTokens.length) await upload(next++)
+    }
+    await Promise.all(Array.from({ length: Math.min(OPENAI_IMPORT_CONCURRENCY, refreshTokens.length) }, worker))
+    if (oauthFlowRef.value) oauthFlowRef.value.refreshToken = failedTokens.filter(Boolean).join('\n')
 
     // Show results
     if (successCount > 0 && failedCount === 0) {
@@ -6893,18 +6936,20 @@ const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string)
           : t('admin.accounts.accountCreated')
       )
       emit('created')
+      openAIBatchRunning.value = false
       handleClose()
     } else if (successCount > 0 && failedCount > 0) {
       appStore.showWarning(
         t('admin.accounts.oauth.batchPartialSuccess', { success: successCount, failed: failedCount })
       )
-      oauthClient.error.value = errors.join('\n')
+      oauthClient.error.value = errors.filter(Boolean).join('\n')
       emit('created')
     } else {
-      oauthClient.error.value = errors.join('\n')
+      oauthClient.error.value = errors.filter(Boolean).join('\n')
       appStore.showError(t('admin.accounts.oauth.batchFailed'))
     }
   } finally {
+    openAIBatchRunning.value = false
     oauthClient.loading.value = false
   }
 }
