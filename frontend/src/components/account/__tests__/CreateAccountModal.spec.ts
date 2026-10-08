@@ -67,7 +67,10 @@ vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
   return {
     ...actual,
-    useI18n: () => ({ t: (key: string) => key }),
+    useI18n: () => ({ t: (key: string) => (({
+      'admin.accounts.importErrors.ECONNABORTED': 'offline localized timeout: result unconfirmed',
+      'admin.accounts.oauth.openai.errors.OPENAI_OAUTH_PROXY_REQUIRED': 'offline localized proxy hint'
+    } as Record<string, string>)[key] || key) }),
   }
 })
 
@@ -88,6 +91,7 @@ const OAuthAuthorizationFlowStub = defineComponent({
     showCodexPatOption: Boolean,
     initialInputMethod: String,
     loading: Boolean,
+    error: String,
   },
   data: () => ({ inputMethod: 'manual', refreshToken: '' }),
   emits: ['import-codex-session', 'import-codex-pat', 'validate-refresh-token'],
@@ -218,6 +222,21 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
   })
 
   afterEach(() => vi.useRealTimers())
+
+  it.each([
+    [{ status: 0, code: 'ECONNABORTED', message: 'Network error. Please check your connection.' }, 'offline localized timeout: result unconfirmed'],
+    [{ status: 502, reason: 'OPENAI_OAUTH_PROXY_REQUIRED', message: 'raw upstream proxy message' }, 'HTTP 502: offline localized proxy hint'],
+  ])('localizes import failures without altering global network behavior', async (failure, message) => {
+    const wrapper = await openCodexImportStep()
+    const flow = wrapper.findComponent(OAuthAuthorizationFlowStub)
+    refreshOpenAITokenMock.mockRejectedValue(failure)
+    flow.vm.$emit('validate-refresh-token', 'offline-input-rt')
+    await flushPromises()
+    expect(flow.props('error')).toBe('#1: ' + message)
+    expect(createAccountMock).not.toHaveBeenCalled()
+    expect(flow.vm.refreshToken).toBe('offline-input-rt')
+    wrapper.unmount()
+  })
 
   it('keeps batch RT loading until account writes finish, deduplicates and rejects a second submission', async () => {
     const wrapper = await openCodexImportStep()
