@@ -1430,12 +1430,6 @@ export default {
         adminApiKeyRequired: 'Please enter the CPR admin API key'
       },
       // OAuth flow
-      importErrors: {
-        ECONNABORTED: 'Request timed out; the result is unconfirmed. Check the account list before refreshing or importing again.',
-        ETIMEDOUT: 'Request timed out; the result is unconfirmed. Check the account list before refreshing or importing again.',
-        ERR_NETWORK: 'Connection interrupted; the result is unconfirmed. Check the account list before retrying.',
-        INVALID_IMPORT_RESPONSE: 'Invalid server receipt; the result is unconfirmed. Check the account list. The refresh token may already have rotated; do not retry blindly.'
-      },
       oauth: {
         title: 'Claude Account Authorization',
         authMethod: 'Authorization Method',
@@ -1485,7 +1479,6 @@ export default {
         batchSuccess: 'Successfully created {count} account(s)',
         batchPartialSuccess: 'Partial success: {success} succeeded, {failed} failed',
         batchFailed: 'Batch creation failed',
-        batchProgress: 'Processed {completed} / {total} items (up to 3 at a time)',
         // OpenAI specific
         openai: {
           title: 'OpenAI Account Authorization',
