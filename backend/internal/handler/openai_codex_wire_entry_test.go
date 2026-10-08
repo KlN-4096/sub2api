@@ -55,11 +55,20 @@ type codexWireUpstream struct {
 	mu       sync.Mutex
 	captures []codexWireCapture
 	// status 按账号强制返回的状态码，用于换号测试。
-	status     map[int64]int
-	sequence   []int // optional POST-only statuses; zero uses the normal success fixture
-	errorBody  string
-	streamBody string
-	afterPost  func()
+	status        map[int64]int
+	sequence      []int // optional POST-only statuses; zero uses the normal success fixture
+	errorBody     string
+	streamBody    string
+	afterPost     func()
+	postResponses []*http.Response // optional per-POST wire responses, including A/B probes
+	probeState    string           // optional Luna A/B fixture, separate from business failures
+	afterRequest  func(*gin.Context)
+}
+
+type codexWireRenewableCache struct{ *concurrencyCacheMock }
+
+func (codexWireRenewableCache) RefreshConcurrencySlot(context.Context, string, int64, string) (bool, error) {
+	return true, nil
 }
 
 func (u *codexWireUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
@@ -85,12 +94,24 @@ func (u *codexWireUpstream) Do(req *http.Request, _ string, accountID int64, _ i
 		header:    req.Header.Clone(),
 		body:      body,
 	})
+	if req.Method == http.MethodPost && u.probeState != "" && gjson.GetBytes(body, "model").String() == "gpt-6-luna" {
+		state := u.probeState
+		u.mu.Unlock()
+		headers := http.Header{"Content-Type": []string{"text/event-stream"}}
+		headers.Set("x-codex-turn-state", state)
+		return &http.Response{StatusCode: http.StatusOK, Header: headers, Body: io.NopCloser(strings.NewReader(""))}, nil
+	}
 	forced := u.status[accountID]
 	if req.Method == http.MethodPost && len(u.sequence) > 0 {
 		forced = u.sequence[0]
 		u.sequence = u.sequence[1:]
 	}
 	errorBody := u.errorBody
+	var queued *http.Response
+	if req.Method == http.MethodPost && len(u.postResponses) > 0 {
+		queued = u.postResponses[0]
+		u.postResponses = u.postResponses[1:]
+	}
 	afterPost := u.afterPost
 	if req.Method == http.MethodPost {
 		u.afterPost = nil
@@ -100,6 +121,9 @@ func (u *codexWireUpstream) Do(req *http.Request, _ string, accountID int64, _ i
 	u.mu.Unlock()
 	if afterPost != nil {
 		afterPost()
+	}
+	if queued != nil {
+		return queued, nil
 	}
 
 	if forced > 0 {
@@ -174,6 +198,11 @@ func codexWireAccount(id int64, name string, extra map[string]any) service.Accou
 
 func newCodexWireEntry(t *testing.T, accounts []service.Account, repos ...service.AccountRepository) (*codexWireUpstream, *gin.Engine, func()) {
 	t.Helper()
+	return newCodexWireEntryWithUsage(t, accounts, nil, repos...)
+}
+
+func newCodexWireEntryWithUsage(t *testing.T, accounts []service.Account, usage service.UsageLogRepository, repos ...service.AccountRepository) (*codexWireUpstream, *gin.Engine, func()) {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 	groupID := int64(9001)
 	var repo service.AccountRepository = &grokCredentialHandlerRepo{accounts: accounts, missingOnGet: map[int64]bool{}}
@@ -188,7 +217,7 @@ func newCodexWireEntry(t *testing.T, accounts []service.Account, repos ...servic
 	// openAITokenProvider 传 nil：GetAccessToken 会降级直接读 credentials.access_token，
 	// 省掉一整套 OAuth 刷新 mock。
 	gateway := service.NewOpenAIGatewayService(
-		repo, nil, nil, nil, nil, nil, nil, cfg, nil, nil,
+		repo, usage, nil, nil, nil, nil, nil, cfg, nil, nil,
 		service.NewBillingService(cfg, nil), nil, billingCache, upstream,
 		&service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil,
 	)
@@ -196,7 +225,7 @@ func newCodexWireEntry(t *testing.T, accounts []service.Account, repos ...servic
 		acquireUserSlotFn:    func(context.Context, int64, int, string) (bool, error) { return true, nil },
 		acquireAccountSlotFn: func(context.Context, int64, int, string) (bool, error) { return true, nil },
 	}
-	h := NewOpenAIGatewayHandler(gateway, service.NewConcurrencyService(cache), billingCache,
+	h := NewOpenAIGatewayHandler(gateway, service.NewConcurrencyService(codexWireRenewableCache{cache}), billingCache,
 		&service.APIKeyService{}, nil, nil, nil, nil, cfg)
 
 	apiKey := &service.APIKey{
@@ -209,6 +238,9 @@ func newCodexWireEntry(t *testing.T, accounts []service.Account, repos ...servic
 		c.Set(string(middleware.ContextKeyAPIKey), apiKey)
 		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: apiKey.User.ID, Concurrency: 1})
 		c.Next()
+		if upstream.afterRequest != nil {
+			upstream.afterRequest(c)
+		}
 	})
 	router.POST("/v1/responses", h.Responses)
 	router.POST("/responses", h.Responses)

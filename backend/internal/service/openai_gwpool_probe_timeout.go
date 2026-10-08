@@ -31,9 +31,6 @@ func gatewayPoolProbeTimeout(ctx context.Context, account *Account) time.Duratio
 }
 
 func gatewayPoolProbeBudget(ctx context.Context, account *Account) time.Duration {
-	// Preserve the default envelope while allowing two configured A/B shots.
-	if budget := 2 * gatewayPoolProbeTimeout(ctx, account); budget > gatewayPoolWarmBudget {
-		return budget
-	}
-	return gatewayPoolWarmBudget
+	const warmProbeShots = 2
+	return warmProbeShots * gatewayPoolProbeTimeout(ctx, account)
 }

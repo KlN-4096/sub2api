@@ -11,11 +11,12 @@ func (p openAIGatewayPoolPair) routeExpired(now time.Time) bool {
 	return !p.routeExpiresAt.IsZero() && !now.Before(p.routeExpiresAt)
 }
 
-// The pool supplies its absolute RouteDeadline, including its existing cflb
-// accounting. Independently, an oailb exp is an explicit cookie claim. Missing
-// information stays unknown: no now+valid_for, received+remaining, or exp-300.
-func gatewayPoolRouteExpiresAt(cookie string, deadline time.Time) time.Time {
+// Only the cookie's explicit exp is a hard boundary. The pool's unproven
+// route_expires_at may include an exp-300 estimate and is not credential expiry.
+// Missing information stays unknown: no now+valid_for or received+remaining.
+func gatewayPoolRouteExpiresAt(cookie string) time.Time {
 	const maxCookiePayload = 16 << 10
+	var deadline time.Time
 	for _, part := range strings.Split(cookie, ";") {
 		name, value, _ := strings.Cut(strings.TrimSpace(part), "=")
 		if name != "__oailb" || len(value) > maxCookiePayload {

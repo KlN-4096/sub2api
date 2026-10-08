@@ -229,7 +229,7 @@ func TestGatewayPoolBatchLateAckCannotReviveRevokedPolicy(t *testing.T) {
 
 func TestGatewayPoolBatchPolicyCacheExpiresOldBindings(t *testing.T) {
 	var store openAICodexCookieStore
-	store.poolFeedbackPolicies.Store("old-binding\x00g", gatewayPoolRecommendation{at: time.Now().Add(-25 * time.Hour)})
+	store.poolFeedbackPolicies.Store("old-binding\x00g", gatewayPoolFeedbackPolicyUpdate{at: time.Now().Add(-25 * time.Hour)})
 	store.noteGatewayPoolFeedbackPolicy(gwpoolTestAccount(1), gwpoolTestIdentity, "g", nil)
 	_, exists := store.poolFeedbackPolicies.Load("old-binding\x00g")
 	require.False(t, exists)

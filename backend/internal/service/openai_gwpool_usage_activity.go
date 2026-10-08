@@ -22,6 +22,7 @@ type gatewayPoolUsageActivity struct {
 	inventory *gatewayPoolInventoryState
 	sending   bool // Protected, with closed, by inventory.mu.
 	closed    bool
+	fullUse   *gatewayPoolActiveUseAttempt // protected by inventory.mu
 }
 
 // Waiting for a ticket is not an inventory operation. Only a real business
@@ -48,6 +49,36 @@ func gatewayPoolUsageEventAt(ctx context.Context, at time.Time) time.Time {
 		return start // preserve logical order on clocks with coarse resolution
 	}
 	return at
+}
+
+// A logical request may wait between several business attempts. Only the
+// current physical attempt pins active inventory, and late send callbacks from
+// an ended attempt must not revive it or affect its replacement.
+func beginGatewayPoolUsageAttempt(ctx context.Context) (context.Context, func()) {
+	parent, _ := ctx.Value(gatewayPoolUsageActivityKey{}).(*gatewayPoolUsageActivity)
+	if parent == nil {
+		return ctx, func() {}
+	}
+	activity := &gatewayPoolUsageActivity{inventory: parent.inventory}
+	ctx = context.WithValue(ctx, gatewayPoolUsageActivityKey{}, activity)
+	return ctx, func() {
+		inventory := activity.inventory
+		inventory.mu.Lock()
+		if activity.closed {
+			inventory.mu.Unlock()
+			return
+		}
+		activity.closed = true
+		if activity.sending {
+			inventory.active--
+			inventory.generation++
+		}
+		fullUse := activity.fullUse
+		inventory.mu.Unlock()
+		if fullUse != nil {
+			fullUse.finish(time.Now().UTC())
+		}
+	}
 }
 
 func gatewayPoolUsageBlockedAt(account *Account) time.Time {
@@ -151,6 +182,13 @@ func (s *OpenAIGatewayService) beginGatewayPoolUsageRequest(ctx context.Context,
 	return ctx, func() {
 		once.Do(func() {
 			completed := gatewayPoolUsageEventAt(ctx, time.Now().UTC())
+			inventory.mu.Lock()
+			activity.closed = true
+			fullUse := activity.fullUse
+			inventory.mu.Unlock()
+			if fullUse != nil {
+				fullUse.finish(completed)
+			}
 			s.changeGatewayPoolUsage(ctx, account, identity, func(state *gatewayPoolUsageLedger) bool {
 				if completed.After(state.LastRequestCompletedAt) {
 					state.LastRequestCompletedAt = completed

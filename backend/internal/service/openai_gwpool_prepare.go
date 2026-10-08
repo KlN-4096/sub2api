@@ -21,7 +21,34 @@ func (s *openAICodexCookieStore) gatewayPoolPreparationWaiters(identity string) 
 func (s *OpenAIGatewayService) freshGatewayPoolPreparationAccount(ctx context.Context, account *Account) (*Account, error) {
 	readCtx, cancel := context.WithTimeout(ctx, gatewayPoolWarmNoteTimeout)
 	defer cancel()
-	return s.codexCookies.freshGatewayPoolAccount(readCtx, account)
+	fresh, err := s.codexCookies.freshGatewayPoolAccount(readCtx, account)
+	if err != nil && ctx.Err() == nil {
+		return nil, &gatewayPoolAttemptRetryError{cause: err}
+	}
+	if err != nil || fresh == nil {
+		return fresh, err
+	}
+	expected, _ := ctx.Value(gatewayPoolPreparationIdentityKey{}).(string)
+	if wait := gatewayPoolWaitFrom(ctx); expected == "" && wait != nil && wait.accountID == fresh.ID {
+		expected = wait.identity
+	}
+	if expected != "" {
+		current, identityErr := s.codexCookies.gatewayPoolIdentity(readCtx, fresh)
+		if identityErr != nil {
+			if gatewayPoolIdentityFailure(identityErr) {
+				return nil, identityErr
+			}
+			return nil, &gatewayPoolAttemptRetryError{cause: identityErr}
+		}
+		if current != expected {
+			return nil, errGatewayPoolPreparationOwnerChanged
+		}
+	}
+	return fresh, err
+}
+
+func gatewayPoolIdentityFailure(err error) bool {
+	return errors.Is(err, errGatewayPoolMemberIdentity) || errors.Is(err, errGatewayPoolPreparationOwnerChanged)
 }
 
 // Only the preparation worker owns progress, retry counts and verdict writes.
@@ -35,34 +62,18 @@ func (s *OpenAIGatewayService) gatewayPoolWarmUpWith(
 	if wait == nil {
 		return errOpenAIGatewayPoolWarmUnverified
 	}
-	wait.mu.Lock()
-	if wait.deadline.IsZero() {
-		wait.deadline = wait.now().Add(wait.max)
+	// A real 429 retry deadline bounds this waiter's preparation, never the
+	// shared worker's other waiters or a successful business response stream.
+	if retry := gatewayPoolRetryOnlyFrom(ctx); !retry.deadline.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, retry.deadline)
+		defer cancel()
 	}
-	deadline := wait.deadline
-	wait.mu.Unlock()
-	ctx, cancel := context.WithDeadline(ctx, deadline)
+	ctx, cancel := s.continuousGatewayPoolContext(ctx, account)
 	defer cancel()
-	_, _, err := s.codexCookies.poolPrepare.do(ctx, identity, 0, func(work context.Context) (struct{}, error) {
-		if wait := gatewayPoolWaitFrom(work); wait != nil {
-			work = context.WithValue(work, gatewayPoolPreparationSleepKey{}, wait.sleep)
-		}
-		work = context.WithValue(work, gatewayPoolWaitKey{}, (*gatewayPoolWaitState)(nil))
-		work = context.WithValue(work, gatewayPoolWaitWorkKey{}, struct{}{})
-		work, _ = withOpenAIGatewayPoolSink(work, nil)
-		work = context.WithValue(work, gatewayPoolPreparationKey{}, true)
-		// No client body or mutable early reservation belongs to shared work.
-		if account.gatewayPoolEarlyEnabled() {
-			work = context.WithValue(work, gatewayPoolEarlyIntentKey{}, &gatewayPoolEarlyIntent{
-				ctx: work, model: gatewayPoolProbeModelLuna,
-			})
-		}
-		preparation := request.Clone(work)
-		preparation.Body, preparation.GetBody = nil, nil
-		return struct{}{}, s.gatewayPoolPrepare(preparation, account, identity, model, shoot)
-	})
-	if errors.Is(err, context.DeadlineExceeded) && request.Context().Err() == nil {
-		return errOpenAIGatewayPoolWarmExhausted
+	err := s.gatewayPoolPrepareUntilReady(ctx, request, account, identity, model, shoot)
+	if failure := GatewayPoolRetryFailure(request.Context()); failure != nil {
+		return failure
 	}
 	return err
 }

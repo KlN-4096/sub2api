@@ -25,6 +25,37 @@ import (
 
 const codexBridgeTestUserHash = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
 
+func TestGatewayPoolBridgeTurnIdentitySurvivesSessionExpiryAndIsolatesAccounts(t *testing.T) {
+	account := wireProfileTestAccount(true)
+	account.Extra[openAIGatewayPoolExtraKey] = true
+	svc := &OpenAIGatewayService{}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	original := c.Request.Header.Clone()
+	inject := func(account *Account) map[string]any {
+		body := map[string]any{"model": "gpt-6-astra"}
+		restore, injected := svc.injectOpenAICompatBridgeIdentity(c, account, body, "stable-session")
+		require.True(t, injected)
+		restore()
+		require.Equal(t, original, c.Request.Header)
+		return body
+	}
+	first := inject(account)
+	key := openAICompatBridgeSessionKey(c, account, "stable-session")
+	value, ok := svc.openaiCompatBridgeSessions.Load(key)
+	require.True(t, ok)
+	session, ok := value.(openAICompatBridgeSession)
+	require.True(t, ok)
+	session.ExpiresAt = time.Now().Add(-time.Hour)
+	svc.openaiCompatBridgeSessions.Store(key, session)
+	require.Equal(t, first, inject(account), "retry keeps both session and turn after cache expiry")
+	other := *account
+	other.ID++
+	second := inject(&other)
+	require.NotEqual(t, first["client_metadata"], second["client_metadata"], "another account cannot reuse this turn")
+	require.Equal(t, first, inject(account), "switching back restores the original account's turn")
+}
+
 // codexBridgeTestBody 是一条带 Claude Code 风格 metadata.user_id 的 /v1/messages 请求：
 // 桥的会话键来自其中的 session（promptCacheKeyFromAnthropicMetadataSession）。
 func codexBridgeTestBody(session string) []byte {

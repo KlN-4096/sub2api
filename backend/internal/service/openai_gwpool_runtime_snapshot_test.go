@@ -144,7 +144,7 @@ func TestGatewayPoolRuntimeSnapshotClearsReadyWhenVerifiedTicketDies(t *testing.
 	before, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{account.ID})
 	require.NoError(t, err)
 	require.Equal(t, "ready", before[account.ID].Phase)
-	svc.codexCookies.gatewayPoolMarkStale(identity, "v", "offline")
+	svc.codexCookies.gatewayPoolMarkStale(identity, "v")
 	after, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{account.ID})
 	require.NoError(t, err)
 	require.Equal(t, "pending", after[account.ID].Phase)
