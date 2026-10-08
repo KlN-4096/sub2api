@@ -137,15 +137,15 @@ func TestGatewayPoolAdaptiveQueueReturnAndExploration(t *testing.T) {
 	require.Equal(t, "a", queue.pick(input))
 	require.Equal(t, "b", queue.pick(input[1:]))
 	scores := map[string]float64{"a": 100, "b": 10, "c": 20, "cooling": 9999}
-	require.Equal(t, "a", queue.pick(input, scores), "returned a can be selected ahead of the tail")
+	require.Equal(t, "a", queue.pick(input, gatewayPoolCandidateRanking{adaptive: scores}), "returned a can be selected ahead of the tail")
 	require.Equal(t, "c", queue.pick(input), "fallback retained FIFO, not score ordering")
 	require.Equal(t, "b", queue.pick(input), "lower-scoring b retains its exploration turn")
 	scores = map[string]float64{"b": 10, "c": 20}
-	require.Equal(t, "a", queue.pick(input, scores), "unmeasured head is not starved")
+	require.Equal(t, "a", queue.pick(input, gatewayPoolCandidateRanking{adaptive: scores}), "unmeasured head is not starved")
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Add(1)
-		go func() { defer wg.Done(); queue.pick(input, scores) }()
+		go func() { defer wg.Done(); queue.pick(input, gatewayPoolCandidateRanking{adaptive: scores}) }()
 	}
 	wg.Wait()
 	queue.mu.Lock()
@@ -243,20 +243,22 @@ func TestGatewayPoolAdaptivePickUsesRankingWithoutBypassingCooldown(t *testing.T
 	pool, err := svc.codexCookies.poolClient(account)
 	require.NoError(t, err)
 	ctx := context.WithValue(context.Background(), gatewayPoolProbeModelKey{}, "luna")
+	catalog, err := pool.Catalog(ctx, "acc-a/user-a", gatewayPoolAccountTag(account, gwpoolTestIdentity), "luna", 0)
+	require.NoError(t, err)
 	queue := svc.codexCookies.gatewayPoolCandidateQueue(gwpoolTestIdentity)
 	for i := 1; i <= gatewayPoolContactExploreEvery; i++ {
 		want := "c"
 		if i == gatewayPoolContactExploreEvery {
 			want = "a"
 		}
-		require.Equal(t, want, svc.codexCookies.gatewayPoolPick(ctx, pool, account, gwpoolTestIdentity))
+		require.Equal(t, want, svc.codexCookies.gatewayPoolPick(ctx, account, gwpoolTestIdentity, catalog.Gateways, nil))
 		if i == 1 {
 			require.Equal(t, []string{"a", "b", "c"}, queue.names,
 				"first admission must not persist the adaptive ordering")
 		}
 	}
 	require.Equal(t, "a", queue.pick(candidates[:1]))
-	require.Equal(t, "c", svc.codexCookies.gatewayPoolPick(ctx, pool, account, gwpoolTestIdentity))
+	require.Equal(t, "c", svc.codexCookies.gatewayPoolPick(ctx, account, gwpoolTestIdentity, catalog.Gateways, nil))
 	require.Equal(t, []string{"a", "b", "c"}, queue.names,
 		"multiple returning candidates must also retain fallback admission order")
 	after, burned := svc.codexCookies.gatewayPoolUsedAt(gwpoolTestIdentity, "cooling", time.Hour)

@@ -2,78 +2,57 @@
   <div v-if="isCodexAccount" class="w-[260px] min-w-[260px] max-w-[260px] space-y-2 overflow-hidden text-[11px] tabular-nums" data-testid="account-gateway-cell">
     <div v-if="usesPool" class="min-h-[60px] whitespace-normal break-words rounded-md bg-primary-50 px-2.5 py-2 text-[11px] text-primary-700 dark:bg-primary-900/20 dark:text-primary-300"
       role="status" aria-live="polite" data-testid="account-gateway-progress">
-      <p :class="{ 'text-gray-500 dark:text-gray-400': progressUnavailable }">
-        <span v-if="progress?.sequence">{{ t('admin.accounts.openai.gatewayProgress.run', { id: progress.sequence }) }} · </span>
-        {{ t(`admin.accounts.openai.gatewayProgress.${progressUnavailable && progress?.phase === 'ready' ? 'recentReady' : progress?.phase || 'idle'}`) }}
+      <p>
+        <span v-if="displayProgress?.sequence">{{ t('admin.accounts.openai.gatewayProgress.run', { id: displayProgress.sequence }) }} · </span>
+        {{ t(`admin.accounts.openai.gatewayProgress.${displayProgress?.phase || 'idle'}`) }}
       </p>
-      <p v-if="progress && progress.phase !== 'idle'" class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+      <p v-if="displayProgress && displayProgress.phase !== 'idle'" class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
         {{ t('admin.accounts.openai.gatewayProgress.count', {
-          attempt: progress.attempt, seconds: Math.floor(progress.elapsed_ms / 1000)
+          attempt: displayProgress.attempt, seconds: Math.floor(displayProgress.elapsed_ms / 1000)
         }) }}
-        <span v-if="progress.rejected"> · {{ t('admin.accounts.openai.gatewayProgress.rejected', { count: progress.rejected }) }}</span>
-        <span v-if="progress.active_requests > 1 && !progressUnavailable"> · {{ t('admin.accounts.openai.gatewayProgress.concurrent', { count: progress.active_requests }) }}</span>
+        <span v-if="displayProgress.rejected"> · {{ t('admin.accounts.openai.gatewayProgress.rejected', { count: displayProgress.rejected }) }}</span>
+        <span v-if="displayProgress.active_requests > 1"> · {{ t('admin.accounts.openai.gatewayProgress.concurrent', { count: displayProgress.active_requests }) }}</span>
       </p>
     </div>
     <!-- 没有读数也要占位：整块消失时，「没接网关池」「接了还没跑过流量」「落点读不出来」
          在页面上长得一模一样。非 Codex 上游的账号根本没有落点这回事，那才该整块消失。 -->
-    <p v-if="!current && !cells.length" class="text-[10px] text-gray-400" data-testid="account-gateway-empty">
+    <p v-if="!preparing && !current && !items.length" class="text-[10px] text-gray-400" data-testid="account-gateway-empty">
       {{ t('admin.accounts.openai.gatewayHistory.empty') }}
     </p>
       <!-- 第一行是「当前大区 · 当前网关」：整块里最要紧的一个事实。 -->
-      <div v-if="current" class="flex items-center gap-1" data-testid="account-gateway-current">
+      <div v-if="current || preparing" class="flex items-center gap-1" data-testid="account-gateway-current">
         <span class="shrink-0 text-[10px] text-gray-400">
           {{ t('admin.accounts.openai.gatewayHistory.current') }}
         </span>
-        <!-- 色和下面九宫格同一把尺子：这个 chip 原来恒为绿，而同一个落点在格子里可能是红的，
-             同一张卡上一绿一红指着同一件事。 -->
+        <!-- 当前票按真实验满/降级证据着色；下方尚未验满的候选始终保持中性。 -->
         <span
+          v-if="current"
           class="truncate rounded px-1 text-[10px] font-medium leading-4"
-          :class="TONE_CLASS[toneOf(current)]"
-          :title="titleOf(current)"
+          :class="TONE_CLASS[preparing ? 'idle' : toneOf(current)]"
+          :data-tone="preparing ? 'idle' : toneOf(current)"
+          data-testid="account-gateway-current-ticket"
+          :title="preparing ? t('admin.accounts.openai.gatewayProgress.verifying') : titleOf(current)"
         >
-          {{ verdictMark(current) }}{{ regionLabel(current.region) }} · {{ current.name }}
+          {{ preparing ? '' : verdictMark(current) }}{{ regionLabel(current.region) }} · {{ current.name }}
         </span>
-        <span class="ml-auto shrink-0 text-[10px] text-gray-400" data-testid="account-gateway-current-time">{{ safeRelativeTime(runtime?.tickets[0]?.verified_at || current.at) }}</span>
+        <span v-else class="truncate text-[10px] text-gray-400">{{ t(`admin.accounts.openai.gatewayProgress.${displayProgress?.phase}`) }}</span>
+        <span v-if="current" class="ml-auto shrink-0 text-[10px] text-gray-400" data-testid="account-gateway-current-time">{{ safeRelativeTime(currentAt) }}</span>
       </div>
       <div v-for="round in (usesPool ? activeRounds : [])" :key="round.id" class="space-y-1 text-[11px] text-gray-500 dark:text-gray-400" data-testid="account-gateway-usage-round">
         <span>{{ t('admin.accounts.openai.gatewayRuntime.counts', { full: round.full, attempted: round.attempted }) }}</span>
-        <p>{{ t('admin.accounts.openai.gatewayRuntime.active', { duration: fullUseTime(round) }) }}</p>
+        <p v-if="round.full_usage_mode === ACTIVE_USAGE_MODE" :title="t('admin.accounts.openai.gatewayRuntime.activeHint')">
+          {{ t('admin.accounts.openai.gatewayRuntime.active', { duration: fullUseTime(round) }) }}<span v-if="round.duration_incomplete">{{ t('admin.accounts.openai.gatewayRuntime.durationIncomplete') }}</span>
+        </p>
       </div>
       <div v-if="usesPool && runtime && !activeRounds.length" class="space-y-1 text-[11px] text-gray-500 dark:text-gray-400" data-testid="account-gateway-usage-idle">
         <span>{{ t('admin.accounts.openai.gatewayRuntime.counts', { full: 0, attempted: 0 }) }}</span>
         <p>{{ t('admin.accounts.openai.gatewayRuntime.active', { duration: formatUseTime(0) }) }}</p>
       </div>
-      <!-- 九个大区各自落在哪个网关。满血窗口的单位是 (账号 × 网关)，而网关 = (大区 × 账号)
-           ⇒ 这张格子回答的是「这个号现在还能去哪个大区铸没烧过的票」：窗口内打过的高亮
-           （还烧着），窗口外的淡显（那个大区又能用了）。和网关池页面那张九宫格同一把尺子。
-           窗口内再按 state-echo 判定分色：绿=验过满血、红=判过降智、黄=碰过但没判据。 -->
-      <div v-if="usesPool && cells.length" class="grid grid-cols-3 gap-x-3 border-y border-gray-100 py-2 dark:border-gray-700" data-testid="account-gateway-regions">
-        <span
-          v-for="cell in cells"
-          :key="cell.key"
-          class="flex items-center gap-0.5 truncate text-[9px] leading-4"
-          :class="
-            cell.hot
-              ? 'font-medium text-gray-600 dark:text-gray-300'
-              : 'text-gray-400 dark:text-gray-500'
-          "
-          :title="cell.title"
-          :data-testid="`account-gateway-region-${cell.key}`"
-          :data-tone="cell.tone"
-        >
-          <span class="shrink-0">{{ cell.label }}</span>
-          <!-- 判定用**字符**打头而不是只靠颜色：这一列是 9px 字号，emerald/rose 同明度，
-               红绿色盲分不出来；而 tooltip 是 title 属性，触屏上摸不到。 -->
-          <span v-if="cell.name" class="truncate rounded px-0.5" :class="TONE_CLASS[cell.tone]">
-            {{ cell.mark }}{{ cell.name }}<template v-if="cell.extra">+{{ cell.extra }}</template>
-          </span>
-          <span v-else class="text-gray-300 dark:text-gray-600">-</span>
-        </span>
-      </div>
+      <GatewayQueueCards v-if="usesPool" :snapshot="runtime?.queues" :now="now" />
       <!-- 只展示本地冷却，不把过期库存快照当成剩余候选。 -->
     <div v-if="usesPool" class="flex items-center justify-end gap-2" data-testid="account-gateway-cooldown-row">
       <p
-        v-if="cells.length"
+        v-if="items.length"
         class="mr-auto min-w-0 text-[9px] leading-3 text-gray-500 dark:text-gray-400"
         :title="t('admin.accounts.openai.gatewayHistory.windowUsageHint')"
         data-testid="account-gateway-window-usage"
@@ -87,25 +66,27 @@
       </p>
       <button type="button"
         class="inline-flex min-w-[92px] shrink-0 items-center justify-center gap-1.5 rounded-md border border-gray-200 px-2.5 py-1.5 text-[11px] text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 disabled:cursor-wait disabled:opacity-50 dark:border-dark-600 dark:text-gray-400 dark:hover:bg-dark-700 dark:hover:text-gray-200"
-        data-testid="account-gateway-retry" :disabled="retryPending" :aria-busy="retryPending || undefined"
+        data-testid="account-gateway-retry" :disabled="display.retryPending" :aria-busy="display.retryPending || undefined"
         :title="t('admin.accounts.openai.gwpoolManualRetryHint')" @click="emit('retry', account.id)">
-        <Icon name="refresh" size="xs" class="shrink-0" :class="{ 'motion-safe:animate-spin': retryPending }" aria-hidden="true" />
-        <span>{{ t(`admin.accounts.openai.${retryPending ? 'gwpoolManualRetryPending' : 'gwpoolManualRetry'}`) }}</span>
+        <Icon name="refresh" size="xs" class="shrink-0" :class="{ 'motion-safe:animate-spin': display.retryPending }"
+          :style="display.retryPending && progressPaused ? { animationPlayState: 'paused' } : undefined" aria-hidden="true" />
+        <span>{{ t(`admin.accounts.openai.${display.retryPending ? 'gwpoolManualRetryPending' : 'gwpoolManualRetry'}`) }}</span>
       </button>
     </div>
     <p v-if="usesPool && runtime" class="truncate border-t border-gray-100 pt-2 text-[10px] text-gray-500 dark:border-gray-700 dark:text-gray-400" data-testid="account-gateway-usage-history">
-      {{ t('admin.accounts.openai.gatewayRuntime.archived', { count: historyUsage.rounds, duration: formatUseTime(historyUsage.durationMS) }) }}
+      {{ historyUsage.hasDuration
+        ? t('admin.accounts.openai.gatewayRuntime.archived', { count: historyUsage.rounds, duration: formatUseTime(historyUsage.durationMS) })
+        : t('admin.accounts.openai.gatewayRuntime.archivedCounts', { count: historyUsage.rounds }) }}
+      <span v-if="historyUsage.hasDuration && historyUsage.incomplete">{{ t('admin.accounts.openai.gatewayRuntime.durationIncomplete') }}</span>
     </p>
   </div>
 </template>
 
 <script setup lang="ts">
 /**
- * 账号条目的网关落点列：当前落在哪个大区的哪个网关、九个大区各自打过哪个。
+ * 当前落点、真实满血使用与后端同源的优质/普通候选摘要。
  *
- * 读数来自 account.extra.openai_gwpool_gateways（后端
- * openai_gwpool_gateway_history.go，用量路径上带节流地写），跟着账号列表一起下发，
- * 不额外调接口 —— 和原来那块 turn-state 读数同一条管线。
+ * 跟随已有运行态快照，不额外调接口；队列缺快照时不从历史自行推测。
  *
  * **只是展示**：这条记录挂在账号行上，而真正被烧掉的单位是上游账号（同一份凭据可能挂在
  * 多个行上），各行只看得见自己发出去的那些。拿它判「这个网关还能不能用」会低估烧掉的
@@ -114,66 +95,65 @@
  * 大区同样是**池子口径**（铸这张票的出口在哪儿），不是「这一发实际落在哪个大区」：
  * 注入时两件 cookie 齐送 ⇒ 上游不回新 __oailb ⇒ 真实落点读不出来（docs 的 S1/S2）。
  */
-import { computed, ref, watch } from 'vue'
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { Account } from '@/types'
 import type { GatewayPoolProgress, GatewayPoolUsageRound } from '@/api/admin/accounts'
 import { targetsCodexUpstream } from '@/utils/turnState'
 import { formatRelativeTime } from '@/utils/format'
 import { useSharedNowTicker } from '@/composables/useNowTicker'
+import { usePausedDisplay } from '@/composables/usePausedDisplay'
 import Icon from '@/components/icons/Icon.vue'
-import { GATEWAY_REGION_KEYS, gatewayRegionDisplayKey } from '@/utils/gatewayRegionDisplay'
-
-/**
- * 九个大区，顺序照 gwpool 的 types.Regions（页面之间对着看的时候格子位置要一致）。
- * 最后那格 `''` 是「未归类」：老记录没带大区，以及被上游改派走的那些发（池子说的大区
- * 讲的是另一个网关的事，后端刻意不记）。
- */
-const REGION_KEYS = GATEWAY_REGION_KEYS
-
-/** 一个大区里列几个网关名，超出的折成 +N。正常情况恒为 1（网关 = 大区 × 账号）。 */
-const MAX_PER_REGION = 1
+import GatewayQueueCards from './GatewayQueueCards.vue'
+import { gatewayRegionDisplayKey } from '@/utils/gatewayRegionDisplay'
 
 /** 初始冷却默认 1 小时；有学习状态时优先使用每个网关自己的截止时间。 */
 const DEFAULT_WINDOW_MS = 60 * 60 * 1000
 const MAX_WINDOW_MS = 24 * 60 * 60 * 1000
 
-// Three missed 1s polls invalidate the live snapshot; history never turns green.
-const LIVE_SNAPSHOT_MAX_AGE_MS = 3_000
-
-const props = defineProps<{ account: Account; progress?: GatewayPoolProgress; progressUnavailable?: boolean; retryPending?: boolean }>()
+const props = defineProps<{ account: Account; progress?: GatewayPoolProgress; progressPaused?: boolean; retryPending?: boolean }>()
 const emit = defineEmits<{ retry: [id: number] }>()
 const { t } = useI18n()
 const wallTime = useSharedNowTicker(1000)
-const frozenTime = ref(wallTime.value)
-watch(() => props.progressUnavailable, unavailable => {
-  if (unavailable) frozenTime.value = wallTime.value
-})
-const now = computed(() => props.progressUnavailable ? frozenTime.value : wallTime.value)
-const runtime = computed(() => props.progress?.runtime)
-const snapshotFresh = computed(() => {
-  const snapshot = runtime.value
-  return !props.progressUnavailable && !!snapshot && validTimestamp(snapshot.observed_at) &&
-    now.value - Date.parse(snapshot.observed_at) <= LIVE_SNAPSHOT_MAX_AGE_MS
-})
+const display = usePausedDisplay(
+  () => ({ ...props, now: wallTime.value }),
+  () => props.progressPaused === true,
+  () => props.account.id
+)
+const displayProgress = computed(() => display.value.progress)
+const now = computed(() => display.value.now)
+const runtime = computed(() => displayProgress.value?.runtime)
+function ticketExpired(ticket: NonNullable<GatewayPoolProgress['runtime']>['tickets'][number]): boolean {
+  return validTimestamp(ticket.expires_at) && Date.parse(ticket.expires_at!) <= now.value
+}
 const liveTickets = computed(() => {
   const snapshot = runtime.value
-  if (!snapshotFresh.value || !snapshot) return []
-  return snapshot.tickets.filter((ticket) => !validTimestamp(ticket.expires_at) || Date.parse(ticket.expires_at!) > now.value)
+  if (!snapshot) return []
+  // The API only lists backend-live tickets. Missing expiry means no explicit
+  // cookie deadline, not an invented TTL; a present malformed value is unknown.
+  return snapshot.tickets.filter((ticket) => ticket.expires_at === undefined ||
+    (validTimestamp(ticket.expires_at) && !ticketExpired(ticket)))
 })
 const activeRounds = computed(() => runtime.value?.rounds.filter((round) => round.model === 'all' && !round.ended_at) || [])
+const ACTIVE_USAGE_MODE = 'business_active_v1'
 const historyUsage = computed(() => {
   const snapshot = runtime.value
   const total = {
     rounds: snapshot?.archived?.all?.rounds || 0,
-    durationMS: Math.max(0, snapshot?.archived?.all?.duration_ms || 0)
+    durationMS: Math.max(0, snapshot?.archived?.all?.active_duration_ms || 0),
+    hasDuration: snapshot?.archived?.all?.active_duration_ms !== undefined,
+    incomplete: snapshot?.archived?.all?.active_duration_incomplete || false
   }
   // Retained closed rounds and compressed archives are disjoint. Use measured
   // full-use duration, never wall time; ongoing and legacy model rounds stay out.
   for (const round of snapshot?.rounds || []) {
     if (round.model !== 'all' || !validTimestamp(round.ended_at)) continue
     total.rounds++
-    total.durationMS += Math.max(0, round.full_duration_ms || 0)
+    if (round.full_usage_mode === ACTIVE_USAGE_MODE) {
+      total.durationMS += Math.max(0, round.full_duration_ms || 0)
+      total.hasDuration = true
+      total.incomplete ||= round.duration_incomplete || false
+    }
   }
   return total
 })
@@ -181,7 +161,7 @@ function validTimestamp(value?: string): boolean {
   return !!value && Number.isFinite(Date.parse(value)) && Date.parse(value) > 0
 }
 function safeRelativeTime(value?: string): string {
-  return validTimestamp(value) ? formatRelativeTime(value!) : '—'
+  return validTimestamp(value) ? formatRelativeTime(value!, now.value) : '—'
 }
 function formatUseTime(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000))
@@ -234,8 +214,8 @@ interface GatewayItem {
   recommendedSeconds: number
 }
 
-// Green requires a current leased ticket with explicit model proofs. Red means
-// local cooldown, not a new upstream judgment; grey only permits another attempt.
+// Green requires a verified, unexpired ticket. Red requires an expired ticket
+// or an explicit degraded verdict still in cooldown; mere contact is grey.
 const TONE_CLASS = {
   full: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
   degraded: 'bg-rose-50 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300',
@@ -244,10 +224,10 @@ const TONE_CLASS = {
 
 type GatewayTone = keyof typeof TONE_CLASS
 
-const isCodexAccount = computed(() => targetsCodexUpstream(props.account))
+const isCodexAccount = computed(() => targetsCodexUpstream(display.value.account))
 
 const extra = computed(() => {
-  const base = (props.account.extra as Record<string, unknown> | undefined) ?? {}
+  const base = (display.value.account.extra as Record<string, unknown> | undefined) ?? {}
   const snapshot = runtime.value
   if (base.openai_gwpool !== true || !snapshot) return base
   // Display-only projection: never replace the account object used by editing.
@@ -263,13 +243,7 @@ const extra = computed(() => {
 /**
  * 这个号的路由 cookie 是不是由网关池下发（账号上的 `openai_gwpool` 开关）。
  *
- * **没开的号只显示落点本身，不套烧灼那一套。** 烧灼模型的三件东西对它全都不成立：
- *   - 颜色：红的含义是「窗口内碰过 ⇒ 现在打过去就是降智」，而那是针对**取票轮换**说的。
- *     没开池子的号根本不选落点，上游把它路由到哪儿就是哪儿，红色读起来像「这个号废了」。
- *     而且 state-echo 判据只在池子那条传输路径上跑 ⇒ 它的 verdict 恒为空 ⇒ toneOf 的兜底
- *     把**每一个**最近用过的落点都染成红的。这正是误导的来源。
- *   - 一小时满血预测：分子是「冷却到期的落点数」，而它没有冷却这回事。
- *   - 九宫格：它回答「这个号还能去哪个大区铸没烧过的票」，而它不铸票。
+ * 没开的号只显示落点本身；池专属的验满颜色、候选队列与冷却统计均不适用。
  */
 const usesPool = computed(() => extra.value.openai_gwpool === true)
 
@@ -315,16 +289,25 @@ const items = computed<GatewayItem[]>(() => {
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
 })
 
+const preparing = computed(() => usesPool.value && !!displayProgress.value &&
+  ['pending', 'fetching', 'verifying', 'waiting'].includes(displayProgress.value.phase))
+const currentTicket = computed(() => preparing.value
+  ? runtime.value?.tickets.find(ticket => ticket.gateway === displayProgress.value?.gateway)
+  : runtime.value?.tickets[0])
 const current = computed<GatewayItem | null>(() => {
-  const live = runtime.value?.tickets[0]
-  const name = live?.gateway || history.value.current
+  const live = currentTicket.value
+  // A rejected candidate disappears during acquisition; it must not expose
+  // history.current again between two verification attempts.
+  const name = preparing.value
+    ? (displayProgress.value?.phase === 'verifying' ? displayProgress.value.gateway : '')
+    : live?.gateway || history.value.current
   if (!name) return null
   // 时间和大区取 seen 里那条；没有就退回记录自己的那两个字段（老记录、或被裁过）。
   return (
     items.value.find((i) => i.name === name) ?? {
       name,
       at: history.value.updated_at ?? '',
-      region: live?.region || history.value.current_region || '',
+      region: live?.region || (preparing.value ? '' : history.value.current_region) || '',
       verdict: '',
       fullAt: '',
       fullHeldMs: 0,
@@ -336,68 +319,13 @@ const current = computed<GatewayItem | null>(() => {
     }
   )
 })
-
-interface RegionCell {
-  key: string
-  label: string
-  name: string
-  extra: number
-  hot: boolean
-  tone: GatewayTone
-  mark: string
-  title: string
-}
+const currentAt = computed(() => preparing.value
+  ? displayProgress.value?.updated_at
+  : currentTicket.value?.verified_at || current.value?.at)
 
 /**
- * 九个大区（外加「未归类」）各自的格子。一个大区里只该有一个网关，多出来的折成 +N 并
- * 进 tooltip —— 真出现那是漂移的证据，不该被悄悄吞掉。
- */
-const cells = computed<RegionCell[]>(() => {
-  if (!items.value.length) return []
-  const byRegion = new Map<string, GatewayItem[]>()
-  for (const item of items.value) {
-    const key = gatewayRegionDisplayKey(item.region)
-    const bucket = byRegion.get(key)
-    if (bucket) bucket.push(item)
-    else byRegion.set(key, [item])
-  }
-  return REGION_KEYS
-    .filter((key) => key !== '' || byRegion.has(key))
-    .map((key) => {
-      const bucket = byRegion.get(key) ?? []
-      const shown = bucket.slice(0, MAX_PER_REGION)
-      return {
-        key: key || 'unknown',
-        label: regionLabel(key),
-        name: shown.map((i) => shortName(i.name)).join(' '),
-        extra: bucket.length - shown.length,
-        // 外层高亮和内层的色**必须看同一条记录**：原来 hot 用 some()、tone 用 bucket[0]，
-        // 一个大区里最新那个已出窗口而旧的还在窗口内时，外层按「烧着」渲染、内层按淡显渲染。
-        // 统一按最近那一条（bucket 已按时间倒排）：一个大区正常只有一个网关，真出现多个时
-        // 最新那条才是当前状态，老的在 tooltip 里。
-        hot: !!bucket.length && isHot(bucket[0]),
-        tone: toneOf(bucket[0]),
-        mark: verdictMark(bucket[0]),
-        title: bucket.length
-          ? bucket.map(titleOf).join('\n')
-          : `${regionLabel(key)}${TITLE_SEP}${t('admin.accounts.openai.gatewayHistory.regionIdle')}`
-      }
-    })
-})
-
-/**
- * 本地冷却实时计数；池子数字只是最近一次成功保存的查询快照，不随本地到期递增。
- *
- * **free 直接读后端的 pool_free，不在这里减。** 2026-10-03 第一版写的是
- * `pool_live - used`：账本装的是过去一个窗口里碰过的网关名（票早过期的也在里面），而
- * pool_live 是此刻还有活票的，两个集合不是包含关系 ⇒ 相减能出负数，夹到 0 就渲染成
- * 「池子里还剩 0 个没用」。现网当场撞上：账本 67、可交付 62，卡片报成 0，而池子好好的。
- * 正确的数由后端 gatewayPoolPick 在遍历清单时当场数出来（那一遍本来就逐个问过本地账本）。
- *
- * pool_live=0 = 没问到清单（关了 steering、或者清单一直打不开）⇒ 只报已用，不编分母。
- * pool_live>0 时 pool_free=0 是**真的 0**（可交付的全烧过了），照报。
- *
- * 冷却到期不保证仍有票，也不保证已恢复满血。
+ * 本地冷却计数与候选队列各自独立，不能用库存减历史接触数来推算候选。
+ * 冷却到期不保证仍有票或恢复满血；两类候选只认后端有效目录投影。
  */
 const windowUsage = computed(() => {
   let used = 0
@@ -428,9 +356,12 @@ function toneOf(item: GatewayItem | null | undefined): GatewayTone {
   // 兜底会把每个最近用过的落点都染红。
   if (!usesPool.value) return 'idle'
   if (item && liveTickets.value.some((ticket) => ticket.gateway === item.name && ticket.verified_models.length > 0)) return 'full'
-  if (!snapshotFresh.value && item && runtime.value?.tickets.some((ticket) => ticket.gateway === item.name && ticket.verified_models.length > 0)) return 'idle'
-  if (!item || !isHot(item)) return 'idle'
-  return 'degraded'
+  if (!item) return 'idle'
+  const tickets = runtime.value?.tickets.filter((ticket) => ticket.gateway === item.name) ?? []
+  // A replacement awaiting verification must not inherit the previous ticket's
+  // degraded verdict just because both came from the same gateway.
+  if (tickets.length) return tickets.every(ticketExpired) ? 'degraded' : 'idle'
+  return item.verdict === 'degraded' && isHot(item) ? 'degraded' : 'idle'
 }
 
 /**
@@ -448,7 +379,6 @@ function verdictMark(item: GatewayItem | null | undefined): string {
   }
 }
 
-/** `unified-` 是恒定前缀，这一列按格子排，省掉它才塞得下大区名。 */
 function shortName(name: string): string {
   return name.startsWith('unified-') ? name.slice('unified-'.length) : name
 }

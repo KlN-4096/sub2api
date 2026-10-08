@@ -59,10 +59,24 @@ func startOpenAISSEKeepalive(c *gin.Context, interval time.Duration) func() {
 	if c == nil || c.Writer == nil || interval <= 0 {
 		return func() {}
 	}
+	priorBytes, priorCommitted := 0, false
+	if existing, ok := c.Get(openAICompactSSEKeepaliveKey); ok {
+		if current, valid := existing.(*openAICompactSSEKeepalive); valid {
+			current.mu.Lock()
+			active := !current.stopped
+			priorBytes, priorCommitted = current.bytes, current.started
+			current.mu.Unlock()
+			if active {
+				return func() {} // preparation/compact already owns the same response writer
+			}
+		}
+	}
 	originalWriter := c.Writer
 	k := &openAICompactSSEKeepalive{
-		writer: originalWriter,
-		stop:   make(chan struct{}),
+		writer:  originalWriter,
+		stop:    make(chan struct{}),
+		bytes:   priorBytes,
+		started: priorCommitted,
 	}
 	c.Set(openAICompactSSEKeepaliveKey, k)
 	wrappedWriter := &openAICompactKeepaliveWriter{ResponseWriter: originalWriter, k: k}
@@ -149,19 +163,24 @@ func StopOpenAICompactSSEKeepaliveCommitted(c *gin.Context) bool {
 	if c == nil {
 		return false
 	}
+	nativeCommitted := false
+	if value, ok := c.Get(openAIStreamKeepaliveBytesKey); ok {
+		written, _ := value.(int)
+		nativeCommitted = written > 0
+	}
 	value, ok := c.Get(openAICompactSSEKeepaliveKey)
 	if !ok {
-		return false
+		return nativeCommitted
 	}
 	k, ok := value.(*openAICompactSSEKeepalive)
 	if !ok || k == nil {
-		return false
+		return nativeCommitted
 	}
 	k.mu.Lock()
 	k.markStoppedLocked()
 	committed := k.started
 	k.mu.Unlock()
-	return committed
+	return committed || nativeCommitted
 }
 
 // OpenAICompactKeepaliveAdjustedWrittenSize 返回排除 compact 心跳注释字节后

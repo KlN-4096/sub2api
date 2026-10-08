@@ -31,7 +31,8 @@ func TestGatewayPoolFullUseIncludesAttemptInOneDurableMutation(t *testing.T) {
 	require.Len(t, state.Rounds, 1)
 	require.Equal(t, 1, state.Rounds[0].Attempted)
 	require.Equal(t, 1, state.Rounds[0].Full)
-	require.Equal(t, at, state.Rounds[0].FullStartedAt)
+	require.Equal(t, at, state.Rounds[0].Tickets[gatewayPoolUsageTicketKey("g", "v")].At)
+	require.Zero(t, state.Rounds[0].FullStartedAt)
 	require.True(t, svc.noteGatewayPoolFullUse(context.Background(), account, identity, applied, at.Add(time.Second)))
 	require.Equal(t, 1, repo.writes, "checkpoint fast path still avoids duplicate writes")
 	applied.Version = "old"

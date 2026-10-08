@@ -13,7 +13,6 @@ func TestGatewayPoolFailedProbeRetiresTicketAndContinues(t *testing.T) {
 	svc, repo, fake, account, request, _ := ticketWaitFixture(t)
 	repo.account = *account
 	fake.forceCookie = gwpoolTestPairCookie(t, "unified-84")
-	fake.listStatus = http.StatusServiceUnavailable // unknown inventory is not zero candidates
 	shooter := &gwpoolWarmShooter{replies: []gwpoolWarmReply{
 		{status: http.StatusOK, minted: "state"},
 		{err: context.DeadlineExceeded},
@@ -24,7 +23,7 @@ func TestGatewayPoolFailedProbeRetiresTicketAndContinues(t *testing.T) {
 	require.Len(t, shooter.shots, 4)
 	require.Equal(t, "unified-84", openAICodexRouteGateway(shooter.shots[2].cookie))
 	_, cooling := svc.codexCookies.gatewayPoolUsedAt(gwpoolTestIdentity, "unified-142",
-		account.gatewayPoolGatewayWindow(), account.gatewayPoolUseRecommendation())
+		account.gatewayPoolGatewayWindow())
 	require.True(t, cooling)
 	history, ok := readOpenAIGatewayHistory(&repo.account)
 	require.True(t, ok)
@@ -50,7 +49,6 @@ func TestGatewayPoolFailedProbeHonorsRecoveryThenMovesOn(t *testing.T) {
 				}
 				return gwpoolTestPairCookie(t, "unified-84")
 			}
-			fake.listStatus = http.StatusServiceUnavailable
 			sleeps := 0
 			wait.sleep = func(context.Context, time.Duration) error { sleeps++; return nil }
 			shooter := &gwpoolWarmShooter{}
@@ -88,7 +86,6 @@ func TestGatewayPoolFailedProbeProtectsNewTicketAndClearGeneration(t *testing.T)
 
 func TestGatewayPoolFailedProbeBeforeResponseStillCoolsLocally(t *testing.T) {
 	svc, repo, fake, account, request, _ := ticketWaitFixture(t)
-	fake.listStatus = http.StatusServiceUnavailable
 	fake.cookieForHit = func(hit int64) string {
 		if hit == 1 {
 			return gwpoolTestPairCookie(t, "unified-142")
@@ -98,11 +95,37 @@ func TestGatewayPoolFailedProbeBeforeResponseStillCoolsLocally(t *testing.T) {
 	shooter := &gwpoolWarmShooter{replies: []gwpoolWarmReply{{err: context.DeadlineExceeded}}}
 	require.NoError(t, svc.gatewayPoolWarmUpWith(request, account, gwpoolTestIdentity, gwpoolWarmModel, shooter.shoot))
 	require.Len(t, shooter.shots, 3)
-	require.EqualValues(t, 1, fake.releaseHits.Load(), "definitely-unsent tickets retain the existing return rule")
+	require.Zero(t, fake.releaseHits.Load(), "unsent retirement is local only")
 	_, cooling := svc.codexCookies.gatewayPoolUsedAt(gwpoolTestIdentity, "unified-142", account.gatewayPoolGatewayWindow())
 	require.True(t, cooling)
 	history, ok := readOpenAIGatewayHistory(&repo.account)
 	require.True(t, ok)
 	require.Empty(t, history.Seen["unified-142"].Verdict)
 	require.Equal(t, 3600, history.Seen["unified-142"].Cooldown.WindowSeconds)
+}
+
+func TestGatewayPoolLateWarmVerdictCannotInvalidateReplacementOnSameGateway(t *testing.T) {
+	store := &openAICodexCookieStore{}
+	account := gwpoolTestAccount(1)
+	old := openAIGatewayPoolPair{cookie: "offline", gateway: "g", version: "old"}
+	store.poolPairs.Store(gwpoolTestIdentity, old)
+	replacement := old
+	replacement.version = "new"
+	applied := OpenAIGatewayPoolApplied{AccountID: account.ID, Gateway: "g", Version: "old"}
+	full, conclusive, _, _, err := store.gatewayPoolWarmVerdict(context.Background(), account,
+		gwpoolTestIdentity, applied, old.cookie, 1, func(_ context.Context, _, state string) (int, string, error) {
+			if state == "" {
+				return http.StatusOK, "s1", nil
+			}
+			store.poolPairs.Store(gwpoolTestIdentity, replacement)
+			store.gatewayPoolMarkVerifiedFull(gwpoolTestIdentity, "new", gatewayPoolProbeModelLuna)
+			return http.StatusOK, "s2", nil
+		})
+	require.NoError(t, err)
+	require.False(t, full)
+	require.True(t, conclusive)
+	got, live := store.cachedPoolPair(gwpoolTestIdentity)
+	require.Equal(t, replacement, got, "a late old-version result cannot retire a new ticket even on the same gateway")
+	require.Equal(t, openAIGatewayPoolPairLive, live)
+	require.True(t, store.gatewayPoolVerifiedFull(gwpoolTestIdentity))
 }

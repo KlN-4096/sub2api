@@ -26,6 +26,7 @@ type openAIWSClientFrameConn struct {
 	interTurnIdleTimeout time.Duration
 	interTurnStarted     chan struct{}
 	waitingForNextTurn   atomic.Bool
+	readClient           func(context.Context, time.Duration) (coderws.MessageType, []byte, error)
 	// The relay observes upstream payloads, while clients must keep seeing the
 	// model identifier they supplied for the current turn.
 	restoreResponseModel func([]byte) []byte
@@ -608,6 +609,11 @@ func (c *openAIWSClientFrameConn) ReadFrame(ctx context.Context) (coderws.Messag
 	if c.controlCtx != nil {
 		controlCtx = c.controlCtx
 	}
+	if c.readClient != nil {
+		// The session read pump already owns the socket, including after a
+		// pool attempt hands this connection to a passthrough account.
+		return c.readClient(controlCtx, 0)
+	}
 	msgType, payload, err := readOpenAIWSClientMessageWithTimeoutStart(
 		controlCtx,
 		c.conn,
@@ -993,6 +999,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		noteTurnState: func(payload []byte) {
 			s.noteOpenAICodexTurnStateFromWSEvent(c, account, payload)
 		},
+	}
+	if hooks != nil {
+		clientFrameConn.readClient = hooks.ClientReadMessage
 	}
 	policyClientConn := &openAIWSPolicyEnforcingFrameConn{
 		inner: clientFrameConn,

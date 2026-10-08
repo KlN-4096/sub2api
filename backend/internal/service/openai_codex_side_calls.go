@@ -152,12 +152,16 @@ func (s *OpenAIGatewayService) scheduleCodexSettingsUser(c *gin.Context, account
 	if err := s.codexSideCalls.threadSeen.Add(key, true, gocache.DefaultExpiration); err != nil {
 		return // 这个线程已经查过
 	}
-	// 传副本而不是账号本体：goroutine 活过本次请求，而请求路径上还会改同一个对象
-	// （agent identity 会替换 Credentials）。当下字段不相交，但让后台协程持有可变的请求态
-	// 对象，安全性只靠"插件路由现在恰好不读那些字段"这一个偶然事实。
+	// goroutine 会活过本次请求；认证刷新与响应观察会更新请求侧的 Credentials/Extra，
+	// 不能让异步选路继续读取这两个共享 map。
+	s.dispatchCodexSideCall(chatGPTSettingsUserURL, headers, proxyURL, snapshotCodexSideCallAccount(account), key)
+}
+
+func snapshotCodexSideCallAccount(account *Account) *Account {
 	snapshot := *account
 	snapshot.Credentials = maps.Clone(account.Credentials)
-	s.dispatchCodexSideCall(chatGPTSettingsUserURL, headers, proxyURL, &snapshot, key)
+	snapshot.Extra = maps.Clone(account.Extra)
+	return &snapshot
 }
 
 // dispatchCodexSideCall 异步发一次 GET 并丢弃响应体，不阻塞推理请求。

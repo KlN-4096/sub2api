@@ -359,13 +359,13 @@ func (s *ConcurrencyService) AcquireAccountSlot(ctx context.Context, accountID i
 	if acquired {
 		return &AcquireResult{
 			Acquired: true,
-			ReleaseFunc: func() {
+			ReleaseFunc: s.renewableSlotRelease(ctx, "account", accountID, requestID, func() {
 				bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				if err := s.cache.ReleaseAccountSlot(bgCtx, accountID, requestID); err != nil {
 					logger.LegacyPrintf("service.concurrency", "Warning: failed to release account slot for %d (req=%s): %v", accountID, requestID, err)
 				}
-			},
+			}),
 		}, nil
 	}
 
@@ -398,13 +398,13 @@ func (s *ConcurrencyService) AcquireUserSlot(ctx context.Context, userID int64, 
 	if acquired {
 		return &AcquireResult{
 			Acquired: true,
-			ReleaseFunc: func() {
+			ReleaseFunc: s.renewableSlotRelease(ctx, "user", userID, requestID, func() {
 				bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				if err := s.cache.ReleaseUserSlot(bgCtx, userID, requestID); err != nil {
 					logger.LegacyPrintf("service.concurrency", "Warning: failed to release user slot for %d (req=%s): %v", userID, requestID, err)
 				}
-			},
+			}),
 		}, nil
 	}
 
@@ -439,13 +439,13 @@ func (s *ConcurrencyService) TrackAPIKeySlot(ctx context.Context, apiKeyID int64
 		return func() {}
 	}
 
-	return func() {
+	return s.renewableSlotRelease(ctx, "api_key", apiKeyID, requestID, func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := cache.ReleaseAPIKeySlot(bgCtx, apiKeyID, requestID); err != nil {
 			logger.LegacyPrintf("service.concurrency", "Warning: failed to release api key slot for %d (req=%s): %v", apiKeyID, requestID, err)
 		}
-	}
+	})
 }
 
 // GetAPIKeyConcurrencyBatch gets real-time active request counts for API keys.

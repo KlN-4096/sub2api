@@ -9,9 +9,10 @@ import (
 type gatewayPoolFirstOutputBudgetKey struct{}
 type gatewayPoolFirstOutputGuardKey struct{}
 
-// One forward attempt budget, shared by its protocol-repair retries. Preparation
+// One business attempt budget, shared by its protocol-repair retries. Preparation
 // has its own per-caller deadline; the first-output clock begins only when the
 // first real business dispatch is about to happen, not during A/B verification.
+// A replacement business attempt resets this budget, not the caller's deadline.
 type gatewayPoolFirstOutputBudget struct {
 	mu      sync.Mutex
 	started time.Time

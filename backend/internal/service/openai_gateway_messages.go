@@ -409,7 +409,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		// 既有 body/session/conversation 行为。身份头在 post-build 阶段统一恢复。
 		setOpenAICompatMessagesBridgeContext(c, true)
 	}
-	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
+	upstreamCtx, releaseUpstreamCtx := gatewayPoolUpstreamContext(ctx, account)
 	var upstreamReq *http.Request
 	if account.Platform == PlatformGrok {
 		upstreamReq, err = buildGrokResponsesRequest(upstreamCtx, c, account, responsesBody, token, grokCacheIdentity, s.cfg, s.settingService)
@@ -664,6 +664,9 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 
 	finalResponse, usage, acc, prior, err := s.readOpenAICompatBufferedTerminal(resp, c, account, "openai messages buffered", requestID)
 	if err != nil {
+		if failure := s.gatewayPoolStreamReadFailure(c, account, false, false, requestID, resp.Header, err); failure != nil {
+			return nil, failure
+		}
 		var readErr *openAICompatBufferedReadError
 		if errors.As(err, &readErr) && readErr != nil {
 			return nil, readErr.cause
@@ -672,6 +675,9 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 	}
 
 	if finalResponse == nil {
+		if failure := s.gatewayPoolStreamReadFailure(c, account, false, false, requestID, resp.Header, io.ErrUnexpectedEOF); failure != nil {
+			return nil, failure
+		}
 		writeAnthropicError(c, http.StatusBadGateway, "api_error", "Upstream stream ended without a terminal response event")
 		return nil, fmt.Errorf("upstream stream ended without terminal event")
 	}
@@ -1083,6 +1089,8 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	firstChunk := true
 	clientDisconnected := false
 	clientOutputStarted := false
+	pending := newDefaultOpenAIFirstOutputStage()
+	defer func() { _ = pending.Close() }()
 	var streamFailoverErr error
 	var streamNonFailoverErr error
 	terminalEventType := ""
@@ -1137,16 +1145,16 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	// Until the first content_block_delta the translated prelude is held, so a
 	// failure before any content reaches the client still fails over and the
 	// next attempt starts a fresh message.
-	var held strings.Builder
 	emit := func(sse string, release bool) error {
 		if !clientOutputStarted && !release {
-			_, _ = held.WriteString(sse)
-			return nil
+			_, err := pending.WriteString(sse)
+			return err
 		}
 		writeStreamHeaders()
-		if held.Len() > 0 {
-			sse = held.String() + sse
-			held.Reset()
+		if !clientOutputStarted && pending.Buffered() > 0 {
+			if err := pending.CommitTo(c.Writer); err != nil {
+				return err
+			}
 		}
 		if _, err := fmt.Fprint(c.Writer, sse); err != nil {
 			return err
@@ -1157,7 +1165,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	// A failure that does not fail over still shows the client the prelude it
 	// would have seen without holding.
 	releaseHeld := func() {
-		if held.Len() > 0 && !clientDisconnected && emit("", true) == nil {
+		if pending.Buffered() > 0 && !clientDisconnected && emit("", true) == nil {
 			c.Writer.Flush()
 		}
 	}
@@ -1378,6 +1386,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 		}
 		if err := scanner.Err(); err != nil {
 			handleScanErr(err)
+			if retry := s.gatewayPoolStreamReadFailure(c, account, clientOutputStarted, clientDisconnected, requestID, resp.Header, err); retry != nil {
+				return resultWithUsage(), retry
+			}
 			releaseHeld()
 			return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", err)
 		}
@@ -1460,6 +1471,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			}
 			if ev.err != nil {
 				handleScanErr(ev.err)
+				if retry := s.gatewayPoolStreamReadFailure(c, account, clientOutputStarted, clientDisconnected, requestID, resp.Header, ev.err); retry != nil {
+					return resultWithUsage(), retry
+				}
 				releaseHeld()
 				return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", ev.err)
 			}
@@ -1489,6 +1503,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				zap.String("model", originalModel),
 				zap.Duration("interval", streamInterval),
 			)
+			if retry := s.gatewayPoolStreamReadFailure(c, account, clientOutputStarted, clientDisconnected, requestID, resp.Header, context.DeadlineExceeded); retry != nil {
+				return resultWithUsage(), retry
+			}
 			releaseHeld()
 			return resultWithUsage(), fmt.Errorf("stream data interval timeout")
 
@@ -1529,7 +1546,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 // body would be unreadable to the client's SSE parser, so the error is written
 // as an SSE error event instead.
 func writeAnthropicError(c *gin.Context, statusCode int, errType, message string) {
-	if c.Writer.Written() && strings.HasPrefix(c.Writer.Header().Get("Content-Type"), "text/event-stream") {
+	committed := StopOpenAICompactSSEKeepaliveCommitted(c)
+	MarkResponseCommitted(c)
+	if committed || (c.Writer.Written() && strings.HasPrefix(c.Writer.Header().Get("Content-Type"), "text/event-stream")) {
 		if _, err := fmt.Fprint(c.Writer, buildAnthropicStreamErrorSSE(errType, message)); err == nil {
 			c.Writer.Flush()
 		}
