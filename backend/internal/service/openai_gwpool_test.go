@@ -2,8 +2,6 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -260,12 +258,6 @@ func (f *gwpoolFakePool) nextRawQuery(t *testing.T) string {
 		t.Fatal("池子没被请求")
 		return ""
 	}
-}
-
-// gwpoolCookieVersion 复算票号：和池子契约（SPEC 第 10 节）同一个算法，sha256(cookie) 前 12 位。
-func gwpoolCookieVersion(cookie string) string {
-	sum := sha256.Sum256([]byte(cookie))
-	return hex.EncodeToString(sum[:])[:12]
 }
 
 // attachRoute 调 AttachRoute 并丢掉还票闭包：这组用例关心的是出站 cookie 与错误。
