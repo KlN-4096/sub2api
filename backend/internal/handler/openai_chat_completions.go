@@ -21,6 +21,7 @@ import (
 // ChatCompletions handles OpenAI Chat Completions API requests.
 // POST /v1/chat/completions
 func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
+	defer service.FinishGatewayPoolWaitKeepalive(c)
 	streamStarted := false
 	defer h.recoverResponsesPanic(c, &streamStarted)
 
@@ -253,7 +254,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		if channelMapping.Mapped {
 			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
 		}
-		writerSizeBeforeForward := c.Writer.Size()
+		writerSizeBeforeForward := service.OpenAICompactKeepaliveAdjustedWrittenSize(c)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -345,7 +346,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						)
 						return
 					}
-					if c.Writer.Size() != writerSizeBeforeForward {
+					if service.OpenAICompactKeepaliveAdjustedWrittenSize(c) != writerSizeBeforeForward {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return
@@ -353,7 +354,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, nil), false, nil, err)
 					}
-					c.Request = c.Request.WithContext(h.gatewayService.PrepareGatewayPoolAccountRotation(c.Request.Context(), apiKey.GroupID, account, failoverErr))
+					c.Request = c.Request.WithContext(h.gatewayService.PrepareGatewayPoolAccountRotation(c.Request.Context(), apiKey.GroupID, account, failoverErr, c))
 					if !failoverErr.ShouldRetryNextAccount() && !failoverErr.SameAccountRetryOnly {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return

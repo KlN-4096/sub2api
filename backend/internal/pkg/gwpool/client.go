@@ -1,21 +1,12 @@
 // Package gwpool 是网关池（E:/Project/GO/gwpool，SPEC.md 第 10 节）的消费端 HTTP 客户端。
 //
-// 池子负责发现 Codex 后端网关、维护活的路由 pair（__cflb + __oailb）并下发。本包做三件事：
-// 列网关（GET /gateways）、取一张 pair（GET /cookie）、把没用过的票还回去（POST /release）。
-// 满血验证、续期全在池子那边，这里不复制任何判据；列表只用来**挑落点**——按
-// (上游账号 × 网关) 算的「烧过没」只有消费端知道。
-//
-// 刻意**没有触碰回报**：票是池子发的、满血也是池子验的——交付那一刻它自己就写了槽位的
-// last_touch，验证时写了 last_verdict。转发路径上一个降智判据都不剩（模型标签会说谎、
-// turn-state 一律 780、safety-buffering 头健康账号也带），消费端能回报的只有 "unknown"，
-// 而 unknown 回报过去只会覆盖掉池子的真判定，让刚验过满血的槽位提前被拿去烧。
-// 「这张票坏了」由取 pair 时的 force=1 承载。
+// Lists gateways, acquires one route pair at a time and submits observations.
+// Quality verification and local cooldown decisions belong to the service.
 //
 // 红线：consumer key 只进 Authorization 头，不进日志、不进错误串；cookie 全文同样不进日志。
 package gwpool
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -36,6 +27,10 @@ import (
 // 所以消费端在进分类器之前先 errors.Is 掉这个标记。
 var ErrPool = errors.New("gwpool")
 
+// Temporary directory failure is unknown supply, never proof of exhaustion.
+// Keep it distinct from authentication/protocol errors and ticket shortages.
+var ErrCatalogUnavailable = fmt.Errorf("%w: directory temporarily unavailable", ErrPool)
+
 // ErrNoSlot 是「这一次没给票」。消费端据此走失败路径，**不得退回降级的 cookie 回放**
 // （用户原则：宁可 503 也不放降智）。结构化失败（*PoolError）全部 Unwrap 到它：九个错误码
 // 讲的都是同一件事——这一发没拿到票；**为什么**没拿到由 Code 承载，分流看码不看状态码。
@@ -52,9 +47,9 @@ const (
 	CodeMintFailed       = "mint_failed"       //
 	CodePublicClosed     = "public_closed"     // 匿名此刻不开放
 	CodeDegraded         = "degraded"          //
-	// CodeConsumerRejected 是**我们自己**的 consumer key 不被受理（/cookie 与 /release 的认证失败
-	// 都走它）。与 CodeUpstreamRejected 分开：那个讲的是池子的上游被 OpenAI 否决。
-	CodeConsumerRejected = "consumer_rejected"
+	// CodeConsumerRejected is rejection of our consumer key, not the upstream credential.
+	CodeConsumerRejected    = "consumer_rejected"
+	CodeConsumerRateLimited = "consumer_rate_limited"
 	// CodeBadRequest 是出站请求本身不合法（400 参数不合法 / 404 点名的账号不存在，池子把两者
 	// 合成一个：对调用方是同一件事「你的请求错了，改了再来」）。池子**刻意不给**
 	// retry_after_seconds —— 重试不会变好。
@@ -66,7 +61,7 @@ const (
 var knownCodes = map[string]struct{}{
 	CodeNoGateway: {}, CodeAllCooling: {}, CodeNoLivePair: {}, CodeRateLimited: {},
 	CodeNoExit: {}, CodeUpstreamRejected: {}, CodeMintFailed: {}, CodePublicClosed: {},
-	CodeDegraded: {}, CodeConsumerRejected: {}, CodeBadRequest: {},
+	CodeDegraded: {}, CodeConsumerRejected: {}, CodeConsumerRateLimited: {}, CodeBadRequest: {},
 }
 
 // PoolError 是池子结构化的「这次没给票」：{"error":{"code":…,"retry_after_seconds":…}}。
@@ -127,10 +122,6 @@ const (
 	// 项数上限导出：调用方要按它裁自己那本账（裁掉哪些由它定，这里只保证不发非法请求）。
 	MaxExcludeItems   = 64
 	maxExcludeItemLen = 64
-	// MaxCookieCount 是 ?count= 的契约上限（池子的 cookieBatchMax）。超限池子**拒掉整条
-	// 请求**（400，不是钳到 5），所以出站前自己先钳 —— 多要几张的代价是多烧几个槽位，
-	// 而整条被拒的代价是一张都拿不到。导出给调用方算批量大小。
-	MaxCookieCount = 5
 	// min_remaining 的契约钳位区间（池子那边也钳，这里先钳是为了别发一个必然被改写的值）。
 	minRemainingFloor = 30 * time.Second
 	minRemainingCeil  = time.Hour
@@ -139,11 +130,6 @@ const (
 	// ⇒ 消费端的到点落在几十年后 ⇒ 缓存永远 live ⇒ 满血窗口过了还在拿烧掉的路由跑业务，
 	// 而且池子再也不被调用（连 gwpool_pair_taken 都不再出现），没有任何人看得见。
 	maxValidFor = 3900 * time.Second
-	// maxWait 是 wait 的契约上限。
-	maxWait = 30 * time.Second
-	// waitSafetyMargin 是 wait 与本次调用死线之间必须留的余量：池子等满 wait 之后还要把响应
-	// 写回来。给 0 等于「池子刚要回复、这边已经断了」。
-	waitSafetyMargin = time.Second
 )
 
 // Pair 是 /cookie 的一次下发。
@@ -162,7 +148,8 @@ type Pair struct {
 	Cookie string
 	// ValidFor is advisory, never a quality or cookie-expiry decision.
 	ValidFor time.Duration
-	// Absolute route deadline calculated by the pool; zero means unknown.
+	// Advisory deadline calculated by the pool with unspecified provenance.
+	// It must not be used as a hard credential-expiry boundary.
 	RouteExpiresAt time.Time
 	// PairRemaining 是**这张 pair 自己**的剩余寿命（池子的 pair_remaining_s = __cflb 的死期
 	// 减现在）。和 ValidFor 是两根轴：ValidFor = min(满血窗口剩余, pair 剩余)，绝大多数时候
@@ -175,8 +162,8 @@ type Pair struct {
 	// 纯读数——消费端的逻辑本来就是「自己判这张不行了就 force 换一张」，不按这个字段分流。
 	TTLIsAdvisory bool
 	// Version 是**这一张具体的票**的不透明稳定身份（池子的 cookie_version）。两个用处：
-	// 还票（Release）与「这张不行，别再给我」（CookieRequest.ExcludeVersions）。
-	// 池子没报 / 报了畸形值时为空串——那只是少了这两个能力，不是丢弃这张票的理由。
+	// Exact-version local cleanup and CookieRequest.ExcludeVersions.
+	// Missing or malformed versions cannot support exact-version cleanup.
 	Version string
 }
 
@@ -185,51 +172,26 @@ type Pair struct {
 // 为什么是结构体而不是继续加位置参数：七项里五项可选，`Cookie(ctx, acct, gw, true, nil, nil, 0, 0)`
 // 在调用点读不出任何意思。
 type CookieRequest struct {
-	// Account 是**这一发真正要用的那个上游账号**（access_token 里的 chatgpt_account_id）。
-	// 一把 consumer key 可以替多个上游账号取票，而满血窗口是 (上游账号 × 网关) 的 ⇒ 不报它的话
-	// 池子会把槽位记在**上传者**那一行上，白白划掉一个对本账号还满血的落点。空串 = 按上传者记。
-	// 跨账号取到的票 verified_full 恒为 false（池子手上没有那个账号的凭据，验不了），
-	// 这是契约里的硬限制，**不是丢弃这张票的理由**。
+	// Account is the complete upstream member identity, used only for rate
+	// limiting and telemetry at the pool. Both Account and Gateway are required.
 	Account string
-	// Gateway 点名落点，空 = 池子按自己的调度选。
+	// Gateway is chosen locally; the pool must not substitute another route.
 	Gateway string
-	// Force 表示「我现在租着的那张不行了」：池子保证给一个**不同**的网关，换不出来就报
-	// no_live_pair / all_cooling（不会把原来那张再发一遍）。
-	Force bool
-	// Exclude 是「这些网关我已经烧过了，别给我」。消费端的本地账本按 (上游账号 × 网关) 记，
-	// 比池子按 consumer key 记的那本准；带上去之后**裸取也能避开烧过的落点**。
-	// 最近烧的放前面：超过 64 项时尾部会被裁掉。
+	// Exclude explicitly rejects named gateways, without delegating selection.
 	Exclude []string
-	// ExcludeVersions 是「这几张具体的票不行」。比 Force 精确：Force 只说「换个网关」。
+	// ExcludeVersions rejects these exact ticket versions.
 	ExcludeVersions []string
 	// MinRemaining 是能接受的最低剩余寿命。0 = 用池子配的 DeliverFloor。
 	MinRemaining time.Duration
-	// Wait 是愿意等池子现铸多久。池子只在「没有活票 / 池子空」这两种可等待的失败上等。
-	// **它会被钳到本次调用的死线之内**（见 Cookie）：池子还在等、这边先超时等于白等一场。
-	Wait time.Duration
-	// Count 是一次要几张（池子的 ?count=，1..MaxCookieCount）。0 / 1 = 一张，不带这个参数。
-	//
-	// 只有 Cookies 看它；Cookie 恒取一张。要它是为了省往返：验满血那条路是
-	// 「取一张 → 验 → 不满血再取一张」，每轮一个 HTTP 往返，而池子内部可能顺带现铸
-	// （取票超时默认 25s）。一发拿够之后那 N−1 个往返就没了。
-	//
-	// 代价：拿到的每一张都在池子侧烧掉一个 (账号 × 网关) 槽位。**没发出过字节的剩余票
-	// 必须还回去**（Release），不然批量就是把「可能只烧 1 张」变成「必烧 N 张」，
-	// 而供给是个位数张/小时。
-	Count int
 }
 
-// query 把参数编成 /cookie 的查询串。budget 是本次调用还剩多少时间（≤0 = 没有死线）。
-func (r CookieRequest) query(budget time.Duration) url.Values {
+func (r CookieRequest) query() url.Values {
 	query := url.Values{}
 	if account := strings.TrimSpace(r.Account); account != "" {
 		query.Set("account", account)
 	}
 	if gateway := strings.TrimSpace(r.Gateway); gateway != "" {
 		query.Set("gateway", gateway)
-	}
-	if r.Force {
-		query.Set("force", "1")
 	}
 	if list := joinExcludes(r.Exclude); list != "" {
 		query.Set("exclude", list)
@@ -239,20 +201,6 @@ func (r CookieRequest) query(budget time.Duration) url.Values {
 	}
 	if r.MinRemaining > 0 {
 		query.Set("min_remaining", strconv.Itoa(int(clampDuration(r.MinRemaining, minRemainingFloor, minRemainingCeil).Seconds())))
-	}
-	// count 只在真的要多张时才带：带 count=1 会让池子回批量形状（{tickets:[...]}），
-	// 而单取那条路解的是扁平形状。少发一个参数比两边各写一套解析可靠。
-	if r.Count > 1 {
-		query.Set("count", strconv.Itoa(min(r.Count, MaxCookieCount)))
-	}
-	// wait 的两道钳位：契约上限 30s，以及本次调用的剩余预算。后者**必须是代码**而不是注释——
-	// 调用方把 wait 算错（或配了一个更短的取票超时）时，不该出现「池子等 25s、客户端 8s 就断」。
-	wait := clampDuration(r.Wait, 0, maxWait)
-	if budget > 0 && wait > budget-waitSafetyMargin {
-		wait = budget - waitSafetyMargin
-	}
-	if wait > 0 {
-		query.Set("wait", strconv.Itoa(int(wait.Seconds())))
 	}
 	return query
 }
@@ -286,7 +234,7 @@ func clampDuration(value, low, high time.Duration) time.Duration {
 
 // sanitizeOpaque 收口池子给的不透明字符串（cookie_version、错误码）：**这是信任边界**。
 // 它们会进 URL query、JSON 体、数据库和页面，所以控制字符一律判废（返回空串 = 当池子没报），
-// 超长同样判废而不是截断——截断出来的 version 还回去是另一张票。
+// 超长同样判废而不是截断，不能将截断后的 version 用于精确匹配。
 func sanitizeOpaque(value string, maxLen int) string {
 	value = strings.TrimSpace(value)
 	if value == "" || len(value) > maxLen {
@@ -305,15 +253,16 @@ type Gateway struct {
 	Name string
 	// PairReady：这个网关有活 pair，且剩余寿命够交付。
 	PairReady bool
-	// UsedByYou：池子记着你这个账号在这个网关上烧过。它只覆盖池子自己那本账，
-	// 按凭证域身份算的那本在消费端（见 service 层的本地账本）。
-	UsedByYou bool
-	// LastUsedAt 是池子记的「你上次碰它」的时刻。零值 = 没碰过，也是最优候选。
-	LastUsedAt        time.Time
+	// AvailableUntil bounds metadata freshness only, not route quality.
+	AvailableUntil    time.Time
 	Cooldown          *CooldownRecommendation
 	Contacts          []ContactStats
 	Priority          *GatewayPriority
 	DatacenterCountry string
+}
+
+func (g Gateway) ReadyAt(now time.Time) bool {
+	return g.PairReady && (g.AvailableUntil.IsZero() || now.Before(g.AvailableUntil))
 }
 
 type GatewayPriority struct {
@@ -340,6 +289,7 @@ type Client struct {
 	base        *url.URL
 	consumerKey string
 	http        *http.Client
+	catalog     catalogCache
 }
 
 // New 建客户端。baseURL 的合法性由配置期的 config.ValidateAbsoluteHTTPURL 负责；这里解不开就
@@ -387,12 +337,11 @@ func (c *Client) Cookie(ctx context.Context, request CookieRequest) (Pair, error
 	if c == nil {
 		return Pair{}, fmt.Errorf("%w: client is nil", ErrPool)
 	}
-	var budget time.Duration
-	if deadline, ok := ctx.Deadline(); ok {
-		budget = time.Until(deadline)
+	if sanitizeOpaque(request.Account, 128) == "" || sanitizeOpaque(request.Gateway, maxGatewayLen) == "" {
+		return Pair{}, &PoolError{Code: CodeBadRequest}
 	}
 	endpoint := c.endpoint("cookie")
-	if encoded := request.query(budget).Encode(); encoded != "" {
+	if encoded := request.query().Encode(); encoded != "" {
 		endpoint += "?" + encoded
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -417,89 +366,7 @@ func (c *Client) Cookie(ctx context.Context, request CookieRequest) (Pair, error
 	return payload.pair()
 }
 
-// Cookies 一次取**最多** request.Count 张票，每张是不同的落点。
-//
-// 语义照池子那边：拿到一张就算成功，凑不满照样成功（返回的切片短一点）。调用方必须按
-// len(返回值) 办事，别按 Count 办 —— 这是「少等」而不是「保量」的特性。
-//
-// Count ≤ 1 时直接走 Cookie：少发一个参数，响应也是扁平形状。
-//
-// **老池子兼容是承重的，不是防御性检查。** 没升级的池子会把 ?count= 当未知参数静默忽略、
-// 回扁平形状（线上 2026-10-03 那个构建就是）。只解 {tickets:[...]} 的版本会把它读成
-// 「0 张票」⇒ 明明交付成功、槽位真烧了，调用方却当失败重试 ⇒ 每发业务请求白烧一个槽位。
-// 所以这里两种形状一起解：tickets 为空而扁平那份有 cookie ⇒ 按一张处理。
-func (c *Client) Cookies(ctx context.Context, request CookieRequest) ([]Pair, error) {
-	if c == nil {
-		return nil, fmt.Errorf("%w: client is nil", ErrPool)
-	}
-	if request.Count <= 1 {
-		pair, err := c.Cookie(ctx, request)
-		if err != nil {
-			return nil, err
-		}
-		return []Pair{pair}, nil
-	}
-	var budget time.Duration
-	if deadline, ok := ctx.Deadline(); ok {
-		budget = time.Until(deadline)
-	}
-	endpoint := c.endpoint("cookie")
-	if encoded := request.query(budget).Encode(); encoded != "" {
-		endpoint += "?" + encoded
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, fmt.Errorf("%w: build cookie request: %w", ErrPool, err)
-	}
-	resp, err := c.do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
-	if resp.StatusCode != http.StatusOK {
-		return nil, refusal(resp)
-	}
-	// 内嵌 cookiePayload：批量形状的 tickets[] 和扁平形状在同一个对象上一起解出来。
-	var payload struct {
-		cookiePayload
-		Tickets []cookiePayload `json:"tickets"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("%w: decode cookie response: %w", ErrPool, err)
-	}
-	raw := payload.Tickets
-	if len(raw) == 0 {
-		raw = []cookiePayload{payload.cookiePayload} // 老池子：忽略了 count，回的是一张
-	}
-	// 钳住张数：池子最多给 MaxCookieCount 张，更多只可能来自畸形响应，而每一项都要进出站头。
-	if len(raw) > MaxCookieCount {
-		raw = raw[:MaxCookieCount]
-	}
-	pairs := make([]Pair, 0, len(raw))
-	for i, item := range raw {
-		pair, err := item.pair()
-		if err != nil {
-			// **已经拿到的那几张照用。** 整批丢掉等于把真交付了的槽位白烧掉，而池子那边
-			// 已经记了账；一张都没解出来才算失败。
-			if len(pairs) == 0 && i == len(raw)-1 {
-				return nil, err
-			}
-			continue
-		}
-		pairs = append(pairs, pair)
-	}
-	if len(pairs) == 0 {
-		return nil, fmt.Errorf("%w: cookie response carried no usable ticket", ErrPool)
-	}
-	return pairs, nil
-}
-
-// cookiePayload 是 /cookie 一张票的线上形状。**批量响应里的每一项是同一个形状**
-// （池子的 batchResponse.tickets[]），所以单取和批量共用这一份解析与校验 —— 分两份写
-// 必然走散，而走散的那一半是信任边界。
+// cookiePayload is the single-ticket wire response.
 type cookiePayload struct {
 	Gateway           string    `json:"gateway"`
 	DatacenterCountry string    `json:"datacenter_country"`
@@ -542,44 +409,6 @@ func (p cookiePayload) pair() (Pair, error) {
 	}, nil
 }
 
-// Release 把一张**一个字节都没发出去**的票还给池子，让它把槽位还给我们自己
-// （池子只在交付后 DeliverTTL 内受理，太晚 / 找不到 / 已还过都是 409）。
-//
-// 调用方把它当**尽力而为**：失败只记日志，不影响主流程。版本串为空（池子没报 cookie_version）
-// 时直接返回——没有身份就还不了，这不是错误。
-func (c *Client) Release(ctx context.Context, version string) error {
-	if c == nil {
-		return fmt.Errorf("%w: client is nil", ErrPool)
-	}
-	version = sanitizeOpaque(version, maxVersionLen)
-	if version == "" {
-		return nil
-	}
-	body, err := json.Marshal(map[string]string{"cookie_version": version})
-	if err != nil {
-		return fmt.Errorf("%w: build release request: %w", ErrPool, err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint("release"), bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("%w: build release request: %w", ErrPool, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.do(req)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
-	// 409 = 太晚 / 找不到 / 已还过。它和「网络不通」对调用方是同一回事（记日志走人），
-	// 所以不给它单独的 sentinel。
-	if resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("%w: release returned HTTP %d", ErrPool, resp.StatusCode)
-	}
-	return nil
-}
-
 // refusal 把非 200 的响应读成 *PoolError。
 //
 // **这是信任边界**：错误体和 Retry-After 都是外部输入，而 code 决定「要不要停取票」、
@@ -614,13 +443,8 @@ func refusal(resp *http.Response) error {
 	return out
 }
 
-// Gateways 列出池子眼里的网关，给消费端自己挑一个落点。
-//
-// 调度仍在池子那边，这里只读它的账：**挑不挑得出来都不影响能不能取到票**，列不出来就裸取
-// （由池子按调度选）。所以任何失败都原样返回错误让调用方退化，不包装成一个「空列表」假装成功。
-//
-// account 与 Cookie 的那个同义、同样必须带：used_by_you / last_used_at 报的是**那个上游账号的**
-// 槽位历史，不报就变成上传者的历史（见 Cookie 的说明）。空串 = 按上传者算。
+// Gateways returns a short-lived metadata snapshot. Selection and cooldown are
+// local; any failed refresh is unknown supply, never a successful empty list.
 func (c *Client) Gateways(ctx context.Context, account string, accountTag ...string) ([]Gateway, error) {
 	tag := ""
 	if len(accountTag) > 0 {
@@ -630,6 +454,11 @@ func (c *Client) Gateways(ctx context.Context, account string, accountTag ...str
 }
 
 func (c *Client) GatewaysForModel(ctx context.Context, account, accountTag, model string) ([]Gateway, error) {
+	catalog, err := c.Catalog(ctx, account, accountTag, model, 0)
+	return catalog.Gateways, err
+}
+
+func (c *Client) fetchGateways(ctx context.Context, account, accountTag, model string) ([]Gateway, error) {
 	if c == nil {
 		return nil, fmt.Errorf("%w: client is nil", ErrPool)
 	}
@@ -652,13 +481,18 @@ func (c *Client) GatewaysForModel(ctx context.Context, account, accountTag, mode
 		req.Header.Set(cooldownAccountHeader, accountTag)
 	}
 	req.Header.Set(cooldownMaxHeader, strconv.Itoa(CooldownMaxSeconds))
+	started := c.catalog.timeNow()
 	resp, err := c.do(req)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(ErrCatalogUnavailable, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: gateways request returned HTTP %d", ErrPool, resp.StatusCode)
+		cause := ErrPool
+		if resp.StatusCode >= http.StatusInternalServerError {
+			cause = ErrCatalogUnavailable
+		}
+		return nil, fmt.Errorf("%w: gateways request returned HTTP %d", cause, resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxListBytes+1))
 	if err != nil {
@@ -671,12 +505,9 @@ func (c *Client) GatewaysForModel(ctx context.Context, account, accountTag, mode
 		// Account 是池子回显的「这次是替谁问的」，用来自检有没有报对账号。
 		Account  string `json:"account"`
 		Gateways []struct {
-			Name      string `json:"name"`
-			PairReady bool   `json:"pair_ready"`
-			UsedByYou bool   `json:"used_by_you"`
-			// 收成字符串再自己解：池子在「没碰过」时给的是缺省，但给成空串 / null 时
-			// time.Time 会连带让**整份列表**解码失败，而这个字段只用来排序。
-			LastUsedAt        string                  `json:"last_used_at"`
+			Name              string                  `json:"name"`
+			PairReady         bool                    `json:"pair_ready"`
+			ValidForS         int                     `json:"valid_for_s"`
 			Cooldown          *CooldownRecommendation `json:"cooldown"`
 			Contacts          []ContactStats          `json:"contacts"`
 			Priority          *GatewayPriority        `json:"priority"`
@@ -686,6 +517,9 @@ func (c *Client) GatewaysForModel(ctx context.Context, account, accountTag, mode
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("%w: decode gateways response: %w", ErrPool, err)
 	}
+	if payload.Gateways == nil {
+		return nil, fmt.Errorf("%w: gateways response requires an explicit array", ErrPool)
+	}
 	// 自检：回显的身份必须就是报上去的那个，不然 used_by_you / last_used_at 是**别人的**历史，
 	// 拿它挑落点等于瞎挑。回显为空 = 池子还没报这个字段，不作数（标识不进错误串）。
 	if account != "" && payload.Account != "" && payload.Account != account {
@@ -693,12 +527,10 @@ func (c *Client) GatewaysForModel(ctx context.Context, account, accountTag, mode
 	}
 	gateways := make([]Gateway, 0, len(payload.Gateways))
 	for _, item := range payload.Gateways {
-		name := strings.TrimSpace(item.Name)
+		name := sanitizeOpaque(item.Name, maxGatewayLen)
 		if name == "" {
-			continue // 没名字就点不了名。
+			return nil, fmt.Errorf("%w: gateways response contains an unnamed entry", ErrPool)
 		}
-		// 解不开当没碰过（零值）：排序用的字段不值得为格式问题废掉整张列表。
-		lastUsedAt, _ := time.Parse(time.RFC3339, strings.TrimSpace(item.LastUsedAt))
 		if item.Cooldown != nil && !item.Cooldown.Valid() {
 			item.Cooldown = nil
 		}
@@ -711,11 +543,16 @@ func (c *Client) GatewaysForModel(ctx context.Context, account, accountTag, mode
 				contacts = append(contacts, row)
 			}
 		}
+		var availableUntil time.Time
+		if item.ValidForS > 0 {
+			availableUntil = started.Add(clampDuration(time.Duration(item.ValidForS)*time.Second, 0, maxValidFor))
+		}
 		gateways = append(gateways, Gateway{
 			Name: name, PairReady: item.PairReady,
-			UsedByYou: item.UsedByYou, LastUsedAt: lastUsedAt, Cooldown: item.Cooldown,
-			Contacts: contacts,
-			Priority: item.Priority, DatacenterCountry: datacenterCountry(item.DatacenterCountry),
+			AvailableUntil: availableUntil,
+			Cooldown:       item.Cooldown,
+			Contacts:       contacts,
+			Priority:       item.Priority, DatacenterCountry: datacenterCountry(item.DatacenterCountry),
 		})
 	}
 	return gateways, nil

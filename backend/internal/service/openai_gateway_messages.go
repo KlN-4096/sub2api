@@ -385,7 +385,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		// 既有 body/session/conversation 行为。身份头在 post-build 阶段统一恢复。
 		setOpenAICompatMessagesBridgeContext(c, true)
 	}
-	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
+	upstreamCtx, releaseUpstreamCtx := gatewayPoolUpstreamContext(ctx, account)
 	var upstreamReq *http.Request
 	if account.Platform == PlatformGrok {
 		upstreamReq, err = buildGrokResponsesRequest(upstreamCtx, c, account, responsesBody, token, grokCacheIdentity, s.cfg, s.settingService)
@@ -640,6 +640,9 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 
 	finalResponse, usage, acc, prior, err := s.readOpenAICompatBufferedTerminal(resp, c, account, "openai messages buffered", requestID)
 	if err != nil {
+		if failure := s.gatewayPoolStreamReadFailure(c, account, false, false, requestID, resp.Header, err); failure != nil {
+			return nil, failure
+		}
 		var readErr *openAICompatBufferedReadError
 		if errors.As(err, &readErr) && readErr != nil {
 			return nil, readErr.cause
@@ -648,6 +651,9 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 	}
 
 	if finalResponse == nil {
+		if failure := s.gatewayPoolStreamReadFailure(c, account, false, false, requestID, resp.Header, io.ErrUnexpectedEOF); failure != nil {
+			return nil, failure
+		}
 		writeAnthropicError(c, http.StatusBadGateway, "api_error", "Upstream stream ended without a terminal response event")
 		return nil, fmt.Errorf("upstream stream ended without terminal event")
 	}
@@ -1044,6 +1050,8 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	firstChunk := true
 	clientDisconnected := false
 	clientOutputStarted := false
+	pending := newDefaultOpenAIFirstOutputStage()
+	defer func() { _ = pending.Close() }()
 	var streamFailoverErr error
 	var streamNonFailoverErr error
 	terminalEventType := ""
@@ -1213,7 +1221,21 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 					)
 					continue
 				}
+				if account.UsesGatewayPool() && !clientOutputStarted &&
+					!openAIStreamDataStartsClientOutput(payload, eventType) && !isTerminalEvent {
+					if _, err := pending.WriteString(sse); err != nil {
+						streamNonFailoverErr = err
+						return true
+					}
+					continue
+				}
 				writeStreamHeaders()
+				if !clientOutputStarted && pending.Buffered() > 0 {
+					if err := pending.CommitTo(c.Writer); err != nil {
+						clientDisconnected = true
+						return true
+					}
+				}
 				if _, err := fmt.Fprint(c.Writer, sse); err != nil {
 					clientDisconnected = true
 					logger.L().Info("openai messages stream: client disconnected, continuing to drain upstream for billing",
@@ -1224,7 +1246,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				clientOutputStarted = true
 			}
 		}
-		if len(events) > 0 && !clientDisconnected {
+		if len(events) > 0 && !clientDisconnected && clientOutputStarted {
 			c.Writer.Flush()
 		}
 		return isTerminalEvent
@@ -1312,6 +1334,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 		}
 		if err := scanner.Err(); err != nil {
 			handleScanErr(err)
+			if retry := s.gatewayPoolStreamReadFailure(c, account, clientOutputStarted, clientDisconnected, requestID, resp.Header, err); retry != nil {
+				return resultWithUsage(), retry
+			}
 			return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", err)
 		}
 		if frame, ok := parser.Finish(); ok {
@@ -1385,6 +1410,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			}
 			if ev.err != nil {
 				handleScanErr(ev.err)
+				if retry := s.gatewayPoolStreamReadFailure(c, account, clientOutputStarted, clientDisconnected, requestID, resp.Header, ev.err); retry != nil {
+					return resultWithUsage(), retry
+				}
 				return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", ev.err)
 			}
 			lastDataAt = time.Now()
@@ -1413,6 +1441,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				zap.String("model", originalModel),
 				zap.Duration("interval", streamInterval),
 			)
+			if retry := s.gatewayPoolStreamReadFailure(c, account, clientOutputStarted, clientDisconnected, requestID, resp.Header, context.DeadlineExceeded); retry != nil {
+				return resultWithUsage(), retry
+			}
 			return resultWithUsage(), fmt.Errorf("stream data interval timeout")
 
 		case <-keepaliveCh:
@@ -1424,7 +1455,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			}
 			// Send Anthropic-format ping event
 			writeStreamHeaders()
-			if _, err := fmt.Fprint(c.Writer, "event: ping\ndata: {\"type\":\"ping\"}\n\n"); err != nil {
+			n, err := fmt.Fprint(c.Writer, "event: ping\ndata: {\"type\":\"ping\"}\n\n")
+			recordOpenAIStreamKeepaliveBytes(c, n)
+			if err != nil {
 				// Client disconnected
 				logger.L().Info("openai messages stream: client disconnected during keepalive",
 					zap.String("request_id", requestID),
@@ -1432,7 +1465,6 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				clientDisconnected = true
 				continue
 			}
-			clientOutputStarted = true
 			c.Writer.Flush()
 		}
 	}
@@ -1440,6 +1472,13 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 
 // writeAnthropicError writes an error response in Anthropic Messages API format.
 func writeAnthropicError(c *gin.Context, statusCode int, errType, message string) {
+	committed := StopOpenAICompactSSEKeepaliveCommitted(c)
+	MarkResponseCommitted(c)
+	if committed {
+		_, _ = fmt.Fprint(c.Writer, buildAnthropicStreamErrorSSE(errType, message))
+		c.Writer.Flush()
+		return
+	}
 	c.JSON(statusCode, gin.H{
 		"type": "error",
 		"error": gin.H{

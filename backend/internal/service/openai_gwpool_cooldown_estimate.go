@@ -14,7 +14,23 @@ type GatewayPoolCooldownEstimate struct {
 
 func (s *openAICodexCookieStore) gatewayPoolCooldownEstimate(identity string, account *Account, history openAIGatewayHistory, now time.Time) GatewayPoolCooldownEstimate {
 	result := GatewayPoolCooldownEstimate{ResumeGateways: account.gatewayPoolResumeGateways()}
-	deadlines := make([]time.Time, 0, len(history.Seen))
+	projected := s.gatewayPoolDisplayCooldownDeadlines(identity, account, history, now)
+	deadlines := make([]time.Time, 0, len(projected))
+	for _, until := range projected {
+		if !until.IsZero() {
+			deadlines = append(deadlines, until)
+		}
+	}
+	if len(deadlines) == 0 {
+		return result // no local cooldown to wait for
+	}
+	sort.Slice(deadlines, func(i, j int) bool { return deadlines[i].Before(deadlines[j]) })
+	result.EligibleAt = deadlines[min(result.ResumeGateways, len(deadlines))-1]
+	return result
+}
+
+func (s *openAICodexCookieStore) gatewayPoolDisplayCooldownDeadlines(identity string, account *Account, history openAIGatewayHistory, now time.Time) map[string]time.Time {
+	deadlines := make(map[string]time.Time, len(history.Seen))
 	window := account.gatewayPoolGatewayWindow()
 	base := gatewayPoolCooldownBase(window)
 	clearAt := s.gatewayPoolCooldownClearAt(identity)
@@ -40,25 +56,19 @@ func (s *openAICodexCookieStore) gatewayPoolCooldownEstimate(identity string, ac
 			c := seen.Cooldown.clone()
 			c.clearCooldown(reset.ClearedAt, base)
 			c.resetBackoff(reset.LastAt, touched, base)
-			s.refreshGatewayPoolCooldown(&c, identity, gateway, window, touched, now, account.gatewayPoolUseRecommendation())
+			s.refreshGatewayPoolCooldown(&c, identity, window, touched, now)
 			until = c.Until
 			if touchedUntil := touched.Add(time.Duration(c.WindowSeconds) * time.Second); !c.Cleared && !touched.IsZero() && touchedUntil.After(until) {
 				until = touchedUntil
 			}
 		} else if !touched.IsZero() {
-			initial, _ := s.gatewayPoolInitialCooldown(identity, gateway, window, account.gatewayPoolUseRecommendation())
-			until = touched.Add(time.Duration(initial) * time.Second)
+			until = touched.Add(time.Duration(base) * time.Second)
 		} else if !seen.At.IsZero() && !clearAt.IsZero() {
 			until = clearAt
 		}
 		if !until.IsZero() {
-			deadlines = append(deadlines, until)
+			deadlines[gateway] = until
 		}
 	}
-	if len(deadlines) == 0 {
-		return result // no local cooldown to wait for
-	}
-	sort.Slice(deadlines, func(i, j int) bool { return deadlines[i].Before(deadlines[j]) })
-	result.EligibleAt = deadlines[min(result.ResumeGateways, len(deadlines))-1]
-	return result
+	return deadlines
 }

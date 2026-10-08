@@ -390,7 +390,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			actualModel = reqModel
 		}
 		SetOpsUpstreamModel(c, actualModel)
-		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
+		upstreamCtx, releaseUpstreamCtx := gatewayPoolUpstreamContext(ctx, account)
 		upstreamReq, buildErr := s.buildUpstreamRequestOpenAIPassthrough(upstreamCtx, c, account, body, token)
 		releaseUpstreamCtx()
 		if buildErr != nil {
@@ -661,7 +661,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	body = rewriteCodexWebSearchUserLocation(c, account, body)
 
 	openAIGatewayPoolSinkFrom(ctx).noteModel(gjson.GetBytes(body, "model").String())
-	if account.UsesGatewayPool() && account.gatewayPoolGuardEnabled() {
+	if account.UsesGatewayPool() {
 		ctx = context.WithValue(ctx, gatewayPoolConfirmBodyKey{}, gatewayPoolConfirmBody(body))
 	}
 

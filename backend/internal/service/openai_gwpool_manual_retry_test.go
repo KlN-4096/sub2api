@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,34 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGatewayPoolManualClearEndpointNeverStartsNetworkWork(t *testing.T) {
+	ctx := context.Background()
+	svc, base, identity := cooldownResetService(t, time.Now().UTC())
+	repo := &gatewayManualRestRepo{gatewayPoolAccountsRepo: base}
+	svc.accountRepo = repo
+	fake := newGwpoolFakePool(t, "", 150)
+	fake.refuseStatus, fake.refuseCode = http.StatusForbidden, gwpool.CodeConsumerRejected
+	for _, row := range repo.rows {
+		fake.configure(&row.account)
+	}
+	upstream := &gwpoolEchoUpstream{}
+	svc.httpUpstream = upstream
+	result, err := svc.RetryGatewayPool(ctx, 1)
+	require.NoError(t, err)
+	require.Equal(t, "cleared", result.State)
+	require.Zero(t, fake.hits.Load())
+	require.Zero(t, fake.listHits.Load())
+	require.Zero(t, fake.releaseHits.Load())
+	require.Empty(t, upstream.sentBodies)
+	for _, id := range []int64{1, 2} {
+		account, readErr := repo.GetByID(ctx, id)
+		require.NoError(t, readErr)
+		history, _ := readOpenAIGatewayHistory(account)
+		require.False(t, history.CooldownReset.ClearedAt.IsZero())
+		require.False(t, readGatewayPoolRest(account, gatewayPoolLedgerTag(identity)).Active)
+	}
+}
 
 func TestGatewayPoolManualClearPersistsAndKeepsLiveTicket(t *testing.T) {
 	ctx, now := context.Background(), time.Now().UTC()
@@ -62,7 +91,7 @@ func TestGatewayPoolManualClearRejectsFetchStartedBeforeClear(t *testing.T) {
 	require.NoError(t, err)
 	done := make(chan error, 1)
 	go func() {
-		_, err := svc.codexCookies.gatewayPoolTakeBatch(ctx, pool, account, identity, false, nil, 1, 0)
+		_, _, err := svc.codexCookies.gatewayPoolTakePair(ctx, pool, account, identity, nil)
 		done <- err
 	}()
 	select {
@@ -100,6 +129,7 @@ func TestGatewayPoolManualClearKeepsInFlightAuthenticationRefusal(t *testing.T) 
 			svc, repo, identity := cooldownResetService(t, time.Now().UTC())
 			account, _ := repo.GetByID(ctx, 1)
 			fake := newGwpoolFakePool(t, "", 150)
+			fake.listGateways = []gwpoolFakeGateway{{Name: "unified-new", PairReady: true}}
 			fake.refuseStatus, fake.refuseCode, fake.refuseRetryAfter = 503, code, 60
 			entered, release := make(chan struct{}), make(chan struct{})
 			fake.beforeCookie = func() { close(entered); <-release }
@@ -108,7 +138,7 @@ func TestGatewayPoolManualClearKeepsInFlightAuthenticationRefusal(t *testing.T) 
 			require.NoError(t, err)
 			done := make(chan error, 1)
 			go func() {
-				_, err := svc.codexCookies.gatewayPoolTakeBatch(ctx, pool, account, identity, false, nil, 1, 0)
+				_, _, err := svc.codexCookies.gatewayPoolTakePair(ctx, pool, account, identity, nil)
 				done <- err
 			}()
 			select {
@@ -133,7 +163,7 @@ func TestGatewayPoolManualClearKeepsInFlightAuthenticationRefusal(t *testing.T) 
 }
 
 type gatewayManualRestRepo struct {
-	*gatewayEarlyAccountsRepo
+	*gatewayPoolAccountsRepo
 	failID int64
 }
 
@@ -157,7 +187,7 @@ func (r *gatewayManualRestRepo) ClearGatewayPoolRest(ctx context.Context, id int
 func TestGatewayPoolManualClearRestRetriesPartiallyCommittedClones(t *testing.T) {
 	ctx, now := context.Background(), time.Now().UTC()
 	svc, base, identity := cooldownResetService(t, now)
-	repo := &gatewayManualRestRepo{gatewayEarlyAccountsRepo: base, failID: 2}
+	repo := &gatewayManualRestRepo{gatewayPoolAccountsRepo: base, failID: 2}
 	svc.accountRepo = repo
 	for _, id := range []int64{1, 2} {
 		account, _ := repo.GetByID(ctx, id)

@@ -104,11 +104,11 @@ func TestGatewayPoolSharedVerificationCallerCancellation(t *testing.T) {
 func TestGatewayPoolProbeFlightsCancelOnlyAfterLastWaiter(t *testing.T) {
 	var flights gatewayPoolProbeFlights
 	started, stopped := make(chan struct{}), make(chan struct{})
-	work := func(ctx context.Context) (gatewayPoolEarlyVerdict, error) {
+	work := func(ctx context.Context) (gatewayPoolProbeResult, error) {
 		close(started)
 		<-ctx.Done()
 		close(stopped)
-		return gatewayPoolEarlyVerdict{}, ctx.Err()
+		return gatewayPoolProbeResult{}, ctx.Err()
 	}
 	firstCtx, cancelFirst := context.WithCancel(context.Background())
 	secondCtx, cancelSecond := context.WithCancel(context.Background())
@@ -177,10 +177,10 @@ func TestGatewayPoolProbeInventoryIsRegisteredBeforeWorkerRuns(t *testing.T) {
 	go func() {
 		defer close(done)
 		_, _ = store.poolWarm.do(ctx, "ticket", time.Second,
-			func(context.Context) (gatewayPoolEarlyVerdict, error) {
+			func(context.Context) (gatewayPoolProbeResult, error) {
 				close(started)
 				<-release
-				return gatewayPoolEarlyVerdict{}, nil
+				return gatewayPoolProbeResult{}, nil
 			}, func() func() {
 				finish := store.gatewayPoolInventoryOperation("identity")
 				close(registered)
@@ -190,12 +190,12 @@ func TestGatewayPoolProbeInventoryIsRegisteredBeforeWorkerRuns(t *testing.T) {
 	}()
 	<-registered
 	<-done
-	_, pending := store.gatewayPoolInventorySnapshot("identity", gwpoolTestAccount(1))
+	_, pending := store.gatewayPoolInventorySnapshot("identity")
 	require.True(t, pending)
 	<-started
 	close(release)
 	require.Eventually(t, func() bool {
-		_, pending := store.gatewayPoolInventorySnapshot("identity", gwpoolTestAccount(1))
+		_, pending := store.gatewayPoolInventorySnapshot("identity")
 		return !pending
 	}, time.Second, time.Millisecond)
 }

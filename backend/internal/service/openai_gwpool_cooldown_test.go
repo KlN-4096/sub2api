@@ -100,7 +100,7 @@ func TestGatewayPoolCooldownRejectsInvalidPersistedState(t *testing.T) {
 	require.Empty(t, c.Successes)
 }
 
-func TestGatewayPoolCooldownCannotBeBypassedByBareTakeOrSpares(t *testing.T) {
+func TestGatewayPoolCooldownCannotBeBypassedByBareTakeOrConcurrentFetch(t *testing.T) {
 	t.Run("legacy steering opt-out and pool ignores exclude", func(t *testing.T) {
 		fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 		account := fake.account(1)
@@ -112,20 +112,21 @@ func TestGatewayPoolCooldownCannotBeBypassedByBareTakeOrSpares(t *testing.T) {
 		require.ErrorIs(t, err, gwpool.ErrNoSlot)
 		require.Empty(t, headers.Get("Cookie"))
 	})
-	t.Run("spare became cooling on another account row", func(t *testing.T) {
-		fake := newGwpoolFakePool(t, "", 150)
-		fake.batchGateways = []string{"unified-11", "unified-22", "unified-33"}
+
+	t.Run("candidate becomes cooling while fetch is in flight", func(t *testing.T) {
+		fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-22"), 150)
+		fake.listGateways = []gwpoolFakeGateway{{Name: "unified-22", PairReady: true}}
 		account := fake.account(1)
 		store := &openAICodexCookieStore{}
-		require.NoError(t, attachRoute(context.Background(), store, account, gwpoolTestURL, http.Header{}))
-		cached, _ := store.cachedPoolPair(gwpoolTestIdentity)
-		store.gatewayPoolMarkStale(gwpoolTestIdentity, cached.version, cached.gateway)
-		store.gatewayPoolMarkUsed(gwpoolTestIdentity, "unified-22")
+		fake.beforeCookie = func() { store.gatewayPoolMarkUsed(gwpoolTestIdentity, "unified-22") }
 		headers := http.Header{}
-		require.NoError(t, attachRoute(context.Background(), store, account, gwpoolTestURL, headers))
-		require.Equal(t, "unified-33", openAICodexRouteGateway(headers.Get("Cookie")))
-		require.EqualValues(t, 1, fake.hits.Load(), "仍应使用架子上另一张可用票")
+		err := attachRoute(context.Background(), store, account, gwpoolTestURL, headers)
+		require.ErrorIs(t, err, gwpool.ErrNoSlot)
+		require.Empty(t, headers.Get("Cookie"))
+		require.EqualValues(t, 1, fake.hits.Load())
+		require.Zero(t, fake.releaseHits.Load())
 	})
+
 }
 
 func TestGatewayPoolCooldownDoesNotLearnFromErrorsOrSparseTraffic(t *testing.T) {
@@ -145,13 +146,14 @@ func TestGatewayPoolCooldownDoesNotLearnFromErrorsOrSparseTraffic(t *testing.T) 
 	require.Equal(t, 3600, successfulGatewayPoolCooldown(3600, 3601))
 }
 
-func TestGatewayPoolCooldownPersistsAndScopesByUpstreamAccount(t *testing.T) {
+func TestGatewayPoolCooldownPersistsAndScopesByUpstreamMember(t *testing.T) {
 	store := &openAICodexCookieStore{}
-	identity := "chatgpt:acct-a:user:one"
+	identity := "gwpool-member:acct-a/one"
 	require.True(t, store.beginGatewayPoolAttempt(identity, "unified-142", time.Hour))
 	store.observeGatewayPoolCooldown(identity, "unified-142", openAIGatewayVerdictDegraded, time.Hour, time.Time{})
-	require.False(t, store.beginGatewayPoolAttempt("chatgpt:acct-a:user:two", "unified-142", time.Hour))
-	require.True(t, store.beginGatewayPoolAttempt("chatgpt:acct-b", "unified-142", time.Hour))
+	require.False(t, store.beginGatewayPoolAttempt(identity, "unified-142", time.Hour))
+	require.True(t, store.beginGatewayPoolAttempt("gwpool-member:acct-a/two", "unified-142", time.Hour))
+	require.True(t, store.beginGatewayPoolAttempt("gwpool-member:acct-b/one", "unified-142", time.Hour))
 	require.True(t, store.beginGatewayPoolAttempt(identity, "unified-143", time.Hour))
 	c, ok := store.cooldownEntry(identity, "unified-142")
 	require.True(t, ok)

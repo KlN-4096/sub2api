@@ -16,6 +16,6 @@ func (s *openAICodexCookieStore) retireGatewayPoolFailedProbe(identity string, a
 	if pair.version != applied.Version {
 		return false
 	}
-	_, retired := s.gatewayPoolMarkStaleMatched(identity, applied.Version, applied.Gateway, true)
+	_, retired := s.gatewayPoolMarkStaleMatched(identity, applied.Version)
 	return retired
 }
