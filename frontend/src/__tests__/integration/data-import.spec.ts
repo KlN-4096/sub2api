@@ -69,6 +69,27 @@ describe('ImportDataModal', () => {
     expect(showError).toHaveBeenCalledWith('admin.accounts.dataImportSelectFile')
   })
 
+  it('deduplicates identical exported records and rejects overlapping submissions', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    let finish!: (value: any) => void
+    vi.mocked(adminAPI.accounts.importData).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const wrapper = mountModal()
+    const input = wrapper.find('input[type="file"]')
+    const data = JSON.stringify({ exported_at: '', proxies: [], accounts: [{ name: 'offline-a' }] })
+    setInputFiles(input.element, [makeJsonFile('one.json', data), makeJsonFile('two.json', data)])
+    await input.trigger('change')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+    expect(adminAPI.accounts.importData).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(adminAPI.accounts.importData).mock.calls[0]?.[0].data.accounts).toHaveLength(1)
+    finish({ proxy_created: 0, proxy_reused: 0, proxy_failed: 0, account_created: 1, account_failed: 0 })
+    await flushPromises()
+    expect(showSuccess).toHaveBeenCalledWith('admin.accounts.dataImportSuccess')
+    wrapper.unmount()
+  })
+
   it('无效 JSON 时按文件名提示解析失败', async () => {
     const { adminAPI } = await import('@/api/admin')
     const wrapper = mountModal()

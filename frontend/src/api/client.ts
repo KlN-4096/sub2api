@@ -265,11 +265,15 @@ apiClient.interceptors.response.use(
       })
     }
 
-    // Network error
+    // A timeout is not proof that a write failed. Preserve that distinction for
+    // bulk imports instead of encouraging a blind resubmission.
+    const timedOut = error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT'
     return Promise.reject({
       status: 0,
       code: error.code || 'ERR_NETWORK',
-      message: 'Network error. Please check your connection.'
+      message: timedOut
+        ? 'Request timed out. The result is unconfirmed; check the current state before retrying.'
+        : 'Network error. Please check your connection.'
     })
   }
 )

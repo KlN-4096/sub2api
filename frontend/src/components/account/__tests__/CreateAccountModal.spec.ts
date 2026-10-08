@@ -9,6 +9,7 @@ const {
   showWarningMock,
   importCodexSessionMock,
   createOpenAICodexPATMock,
+  refreshOpenAITokenMock,
   authIsSimpleMode,
 } = vi.hoisted(() => ({
   createAccountMock: vi.fn(),
@@ -17,6 +18,7 @@ const {
   showWarningMock: vi.fn(),
   importCodexSessionMock: vi.fn(),
   createOpenAICodexPATMock: vi.fn(),
+  refreshOpenAITokenMock: vi.fn(),
   authIsSimpleMode: { value: true },
 }))
 
@@ -45,6 +47,7 @@ vi.mock('@/api/admin', () => ({
       checkMixedChannelRisk: vi.fn().mockResolvedValue({ has_risk: false }),
       importCodexSession: importCodexSessionMock,
       createOpenAICodexPAT: createOpenAICodexPATMock,
+      refreshOpenAIToken: refreshOpenAITokenMock,
     },
     settings: {
       getWebSearchEmulationConfig: vi.fn().mockResolvedValue({ enabled: false, providers: [] }),
@@ -84,9 +87,10 @@ const OAuthAuthorizationFlowStub = defineComponent({
     showAgentIdentityOption: Boolean,
     showCodexPatOption: Boolean,
     initialInputMethod: String,
+    loading: Boolean,
   },
-  data: () => ({ inputMethod: 'manual' }),
-  emits: ['import-codex-session', 'import-codex-pat'],
+  data: () => ({ inputMethod: 'manual', refreshToken: '' }),
+  emits: ['import-codex-session', 'import-codex-pat', 'validate-refresh-token'],
   template: `
     <div>
       <button data-testid="import-codex-session" @click="$emit('import-codex-session', 'session-json')">session</button>
@@ -210,9 +214,82 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
       warnings: [],
     })
     createOpenAICodexPATMock.mockReset().mockResolvedValue({})
+    refreshOpenAITokenMock.mockReset().mockResolvedValue({ access_token: 'offline-at', refresh_token: 'offline-rotated-rt' })
   })
 
   afterEach(() => vi.useRealTimers())
+
+  it('keeps batch RT loading until account writes finish, deduplicates and rejects a second submission', async () => {
+    const wrapper = await openCodexImportStep()
+    const flow = wrapper.findComponent(OAuthAuthorizationFlowStub)
+    const releases: Array<() => void> = []
+    createAccountMock.mockImplementation(() => new Promise(resolve => {
+      releases.push(() => resolve({ id: releases.length }))
+    }))
+    flow.vm.$emit('validate-refresh-token', 'offline-rt-a\noffline-rt-b\noffline-rt-a\noffline-rt-c\noffline-rt-d')
+    await flushPromises()
+    expect(refreshOpenAITokenMock).toHaveBeenCalledTimes(3)
+    expect(createAccountMock).toHaveBeenCalledTimes(3)
+    expect(flow.props('loading')).toBe(true)
+    const back = wrapper.findAll('button').find(button => button.text() === 'common.back')!
+    expect(back.attributes('disabled')).toBeDefined()
+    await back.trigger('click')
+    expect(wrapper.findComponent(OAuthAuthorizationFlowStub).exists()).toBe(true)
+    expect(flow.props('loading')).toBe(true)
+    flow.vm.$emit('validate-refresh-token', 'offline-rt-a')
+    await flushPromises()
+    expect(refreshOpenAITokenMock).toHaveBeenCalledTimes(3)
+    releases[1]!()
+    await flushPromises()
+    expect(refreshOpenAITokenMock).toHaveBeenCalledTimes(4)
+    releases[0]!(); releases[2]!(); releases[3]!()
+    await flushPromises()
+    expect(createAccountMock).toHaveBeenCalledTimes(4)
+    expect(wrapper.emitted('created')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('retains rotated credentials when account creation returns an invalid success receipt', async () => {
+    const wrapper = await openCodexImportStep()
+    const flow = wrapper.findComponent(OAuthAuthorizationFlowStub)
+    refreshOpenAITokenMock.mockResolvedValue({ access_token: 'offline-at', refresh_token: 'offline-rotated' })
+    createAccountMock.mockResolvedValue('<html>offline proxy failure</html>')
+    flow.vm.$emit('validate-refresh-token', 'offline-original')
+    await flushPromises()
+    expect(wrapper.emitted('created')).toBeUndefined()
+    expect(wrapper.emitted('close')).toBeUndefined()
+    expect(flow.vm.refreshToken).toBe('offline-rotated')
+    createAccountMock.mockResolvedValue({ id: 99 })
+    flow.vm.$emit('validate-refresh-token', 'offline-rotated')
+    await flushPromises()
+    expect(refreshOpenAITokenMock).toHaveBeenCalledTimes(1)
+    expect(createAccountMock).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('retains only failed RT items and reuses an already refreshed credential on create retry', async () => {
+    const wrapper = await openCodexImportStep()
+    const flow = wrapper.findComponent(OAuthAuthorizationFlowStub)
+    refreshOpenAITokenMock
+      .mockResolvedValueOnce({ access_token: 'offline-at-a', refresh_token: 'offline-rotated-a' })
+      .mockRejectedValueOnce({ status: 502, message: 'offline upstream refusal' })
+      .mockResolvedValueOnce({ access_token: 'offline-at-c', refresh_token: 'offline-rotated-c' })
+    createAccountMock.mockImplementation(payload => payload.credentials.access_token === 'offline-at-c'
+      ? Promise.reject({ status: 503, message: 'offline store unavailable' })
+      : Promise.resolve({ id: 42 }))
+    flow.vm.$emit('validate-refresh-token', 'offline-rt-a\noffline-rt-b\noffline-rt-c')
+    await flushPromises()
+    expect(flow.props('loading')).toBe(false)
+    expect(flow.vm.refreshToken).toBe('offline-rt-b\noffline-rotated-c')
+    expect(createAccountMock).toHaveBeenCalledTimes(2)
+    createAccountMock.mockResolvedValue({ id: 43 })
+    refreshOpenAITokenMock.mockResolvedValue({ access_token: 'offline-at-b', refresh_token: 'offline-rotated-b' })
+    flow.vm.$emit('validate-refresh-token', flow.vm.refreshToken)
+    await flushPromises()
+    expect(refreshOpenAITokenMock).toHaveBeenCalledTimes(4)
+    expect(createAccountMock).toHaveBeenCalledTimes(4)
+    wrapper.unmount()
+  })
 
   it('sets month and year expiry presets without submitting the account form', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
