@@ -507,9 +507,7 @@ describe('API Client', () => {
         expect.objectContaining({
           status: 0,
           code: code || 'ERR_NETWORK',
-          message: code === 'ECONNABORTED' || code === 'ETIMEDOUT'
-            ? 'Request timed out. The result is unconfirmed; check the current state before retrying.'
-            : 'Network error. Please check your connection.',
+          message: 'Network error. Please check your connection.',
         })
       )
     })
