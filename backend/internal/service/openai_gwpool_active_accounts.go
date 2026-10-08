@@ -106,7 +106,7 @@ func (r *gatewayPoolRounds) admit(group int64, candidates []string, present map[
 	}
 	state.active = slices.DeleteFunc(state.active, func(domain string) bool {
 		_, exhausted := state.exhausted[domain]
-		return exhausted || (complete && !known[domain])
+		return (exhausted && !state.continuousDomain(domain)) || (complete && !known[domain])
 	})
 	if len(state.active) > limit {
 		state.active = state.active[:limit] // does not cancel already dispatched work
@@ -115,7 +115,7 @@ func (r *gatewayPoolRounds) admit(group int64, candidates []string, present map[
 		if len(state.active) >= limit {
 			break
 		}
-		if _, exhausted := state.exhausted[domain]; domain != "" && !exhausted && !slices.Contains(state.active, domain) {
+		if _, exhausted := state.exhausted[domain]; domain != "" && (!exhausted || state.continuousDomain(domain)) && !slices.Contains(state.active, domain) {
 			state.active = append(state.active, domain)
 		}
 	}

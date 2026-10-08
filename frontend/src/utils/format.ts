@@ -8,14 +8,14 @@ import { i18n, getLocale } from '@/i18n'
 /**
  * 格式化相对时间
  * @param date 日期字符串或 Date 对象
+ * @param now 当前展示时间（毫秒）；暂停展示时可传冻结的时间
  * @returns 相对时间字符串，如 "5m ago", "2h ago", "3d ago"
  */
-export function formatRelativeTime(date: string | Date | null | undefined): string {
+export function formatRelativeTime(date: string | Date | null | undefined, now = Date.now()): string {
   if (!date) return i18n.global.t('common.time.never')
 
-  const now = new Date()
   const past = new Date(date)
-  const diffMs = now.getTime() - past.getTime()
+  const diffMs = now - past.getTime()
 
   // 处理未来时间或无效日期
   if (diffMs < 0 || isNaN(diffMs)) return i18n.global.t('common.time.never')
@@ -389,12 +389,11 @@ export function formatCompactNumber(
  * @param targetDate 目标日期字符串或 Date 对象
  * @returns 倒计时字符串，如 "2h 41m", "3d 5h", "15m"
  */
-export function formatCountdown(targetDate: string | Date | null | undefined): string | null {
+export function formatCountdown(targetDate: string | Date | null | undefined, now = Date.now()): string | null {
   if (!targetDate) return null
 
-  const now = new Date()
   const target = new Date(targetDate)
-  const diffMs = target.getTime() - now.getTime()
+  const diffMs = target.getTime() - now
 
   // 如果目标时间已过或无效
   if (diffMs <= 0 || isNaN(diffMs)) return null
@@ -423,8 +422,8 @@ export function formatCountdown(targetDate: string | Date | null | undefined): s
  * @param targetDate 目标日期字符串或 Date 对象
  * @returns 完整的倒计时字符串，如 "2h 41m to lift", "2小时41分钟后解除"
  */
-export function formatCountdownWithSuffix(targetDate: string | Date | null | undefined): string | null {
-  const countdown = formatCountdown(targetDate)
+export function formatCountdownWithSuffix(targetDate: string | Date | null | undefined, now = Date.now()): string | null {
+  const countdown = formatCountdown(targetDate, now)
   if (!countdown) return null
   return i18n.global.t('common.time.countdown.withSuffix', { time: countdown })
 }

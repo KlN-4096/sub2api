@@ -2,12 +2,10 @@ package service
 
 import (
 	"sync"
-	"time"
 )
 
-// The pool marks a batch delivered before these tickets are actually tried.
-// Rotation must consider local inventory and concurrent fetch/probe transitions,
-// not treat the pool's UsedByYou flag as proof of consumption.
+// Rotation considers the current ticket and concurrent fetch/probe transitions,
+// never treating the pool's UsedByYou flag as proof of local consumption.
 type gatewayPoolInventoryState struct {
 	mu         sync.Mutex
 	generation uint64
@@ -16,7 +14,7 @@ type gatewayPoolInventoryState struct {
 }
 
 func (s *openAICodexCookieStore) gatewayPoolInventory(identity string) *gatewayPoolInventoryState {
-	value, _ := s.poolInventory.LoadOrStore(gatewayPoolLedgerIdentity(identity), &gatewayPoolInventoryState{})
+	value, _ := s.poolInventory.LoadOrStore(identity, &gatewayPoolInventoryState{})
 	state, _ := value.(*gatewayPoolInventoryState)
 	return state
 }
@@ -35,15 +33,14 @@ func (s *openAICodexCookieStore) gatewayPoolInventoryOperation(identity string) 
 	}
 }
 
-// No network and no ticket consumption. active serializes this inspection with
-// batch cursor mutation; the generation lets callers reject a listing observed
+// No network and no ticket consumption. The generation rejects a listing observed
 // across an intervening fetch/probe, including one that has already completed.
-func (s *openAICodexCookieStore) gatewayPoolInventorySnapshot(identity string, account *Account) (generation uint64, pending bool) {
-	generation, active, candidates := s.gatewayPoolInventoryCandidates(identity, account)
+func (s *openAICodexCookieStore) gatewayPoolInventorySnapshot(identity string) (generation uint64, pending bool) {
+	generation, active, candidates := s.gatewayPoolInventoryCandidates(identity)
 	return generation, active || len(candidates) > 0
 }
 
-func (s *openAICodexCookieStore) gatewayPoolInventoryCandidates(identity string, account *Account) (generation uint64, active bool, candidates map[string]struct{}) {
+func (s *openAICodexCookieStore) gatewayPoolInventoryCandidates(identity string) (generation uint64, active bool, candidates map[string]struct{}) {
 	state := s.gatewayPoolInventory(identity)
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -51,29 +48,12 @@ func (s *openAICodexCookieStore) gatewayPoolInventoryCandidates(identity string,
 	if state.active > 0 {
 		return state.generation, true, candidates
 	}
-	domain := gatewayPoolLedgerIdentity(identity)
+	domain := identity
 	s.poolPairs.Range(func(key, _ any) bool {
 		other, ok := key.(string)
-		if ok && gatewayPoolLedgerIdentity(other) == domain {
+		if ok && other == domain {
 			if pair, live := s.cachedPoolPair(other); live == openAIGatewayPoolPairLive {
 				candidates[pair.gateway] = struct{}{}
-			}
-		}
-		return true
-	})
-	s.poolSpare.Range(func(key, value any) bool {
-		other, ok := key.(string)
-		if !ok || gatewayPoolLedgerIdentity(other) != domain {
-			return true
-		}
-		if batch, valid := value.(*gatewayPoolTicketBatch); valid {
-			for _, pair := range batch.pairs[batch.idx:] {
-				if pair.cookie == "" || pair.invalidated || pair.routeExpired(time.Now()) {
-					continue
-				}
-				if _, cooling := s.gatewayPoolUsedAt(identity, pair.gateway, account.gatewayPoolGatewayWindow(), account.gatewayPoolUseRecommendation()); !cooling {
-					candidates[pair.gateway] = struct{}{}
-				}
 			}
 		}
 		return true

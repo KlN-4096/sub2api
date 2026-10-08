@@ -14,8 +14,8 @@ const (
 	gatewayPoolAdaptiveWindowLimit = 3 * time.Minute
 )
 
-// Catalog Contacts are scoped by the pool to caller + account tag, unlike
-// global Priority. Duplicate strata are ambiguous, never additive evidence.
+// Contacts may be retained local measurements or pool fallback. The rank caller
+// already replaced qualified local strata; duplicate strata remain ambiguous.
 func gatewayPoolPersonalStats(candidate gwpool.Gateway, model, source, interval string) (gwpool.ContactStats, bool) {
 	var result gwpool.ContactStats
 	found := false

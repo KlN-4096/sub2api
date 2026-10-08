@@ -23,6 +23,7 @@ type gatewayPoolRound struct {
 	current    string
 	active     []string
 	resting    map[string]time.Time
+	continuous map[int64]string
 }
 
 func (r *gatewayPoolRounds) groupLocked(group int64) *gatewayPoolRound {
@@ -46,16 +47,18 @@ func (r *gatewayPoolRounds) rest(group int64, identity string, until time.Time) 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	state := r.groupLocked(group)
-	domain := gatewayPoolLedgerIdentity(identity)
+	domain := identity
 	state.resting[domain] = until
 	state.exhausted[domain] = struct{}{}
-	state.retire(domain)
+	if !state.continuousDomain(domain) {
+		state.retire(domain)
+	}
 }
 
 func (r *gatewayPoolRounds) recovered(identity string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	domain := gatewayPoolLedgerIdentity(identity)
+	domain := identity
 	for _, state := range r.groups {
 		delete(state.resting, domain)
 		delete(state.exhausted, domain)
@@ -74,9 +77,11 @@ func (r *gatewayPoolRounds) exhaust(group int64, identity string, generation uin
 	state := r.groupLocked(group)
 	// A confirmation started before a concurrent reset cannot exhaust the new round.
 	if identity != "" && state.generation == generation {
-		domain := gatewayPoolLedgerIdentity(identity)
+		domain := identity
 		state.exhausted[domain] = struct{}{}
-		state.retire(domain)
+		if !state.continuousDomain(domain) {
+			state.retire(domain)
+		}
 	}
 }
 
@@ -84,8 +89,8 @@ func (r *gatewayPoolRounds) claim(group int64, identity string, limits ...int) b
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	state := r.groupLocked(group)
-	domain := gatewayPoolLedgerIdentity(identity)
-	if _, exhausted := state.exhausted[domain]; exhausted {
+	domain := identity
+	if _, exhausted := state.exhausted[domain]; exhausted && !state.continuousDomain(domain) {
 		return false
 	}
 	limit := gatewayPoolActiveAccountsDefault
@@ -118,7 +123,7 @@ func (r *gatewayPoolRounds) touch(identity string, at time.Time) {
 	if r.touched == nil {
 		r.touched = map[string]time.Time{}
 	}
-	key := gatewayPoolLedgerIdentity(identity)
+	key := identity
 	if at.After(r.touched[key]) {
 		r.touched[key] = at
 	}
@@ -127,14 +132,48 @@ func (r *gatewayPoolRounds) touch(identity string, at time.Time) {
 func (r *gatewayPoolRounds) lastTouch(identity string) time.Time {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.touched[gatewayPoolLedgerIdentity(identity)]
+	return r.touched[identity]
 }
 
 func (r *gatewayPoolRounds) blocked(group int64, identity string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	_, blocked := r.groupLocked(group).exhausted[gatewayPoolLedgerIdentity(identity)]
-	return blocked
+	state := r.groupLocked(group)
+	domain := identity
+	_, blocked := state.exhausted[domain]
+	return blocked && !state.continuousDomain(domain)
+}
+
+func (state *gatewayPoolRound) continuousDomain(domain string) bool {
+	for _, current := range state.continuous {
+		if current == domain {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *gatewayPoolRounds) setContinuousAccount(group, accountID int64, identity string, enabled bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state := r.groupLocked(group)
+	if state.continuous == nil {
+		state.continuous = map[int64]string{}
+	}
+	if enabled {
+		state.continuous[accountID] = identity
+	} else {
+		delete(state.continuous, accountID)
+	}
+}
+
+func (r *gatewayPoolRounds) reconcileContinuous(group int64, accounts map[int64]string, complete bool) {
+	if !complete {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.groupLocked(group).continuous = accounts
 }
 
 // Eligibility is computed without per-request exclusions, so an attempted or
@@ -144,8 +183,8 @@ func (r *gatewayPoolRounds) snapshot(group int64, domains map[int64]string, comp
 	defer r.mu.Unlock()
 	state := r.groupLocked(group)
 	all := complete && len(domains) > 0
-	for _, domain := range domains {
-		if _, exhausted := state.exhausted[domain]; !exhausted {
+	for id, domain := range domains {
+		if _, exhausted := state.exhausted[domain]; !exhausted || state.continuous[id] == domain {
 			all = false
 		}
 	}
@@ -160,7 +199,7 @@ func (r *gatewayPoolRounds) snapshot(group int64, domains map[int64]string, comp
 	}
 	excluded := map[int64]struct{}{}
 	for id, domain := range domains {
-		if _, exhausted := state.exhausted[domain]; exhausted {
+		if _, exhausted := state.exhausted[domain]; exhausted && state.continuous[id] != domain {
 			excluded[id] = struct{}{}
 		}
 	}
@@ -203,13 +242,16 @@ func (s *OpenAIGatewayService) gatewayPoolRoundSelectionAllowed(ctx context.Cont
 	if !gatewayPoolRotationAccount(account, *group) {
 		return true
 	}
-	if !account.IsSchedulable() {
+	if !gatewayPoolWaitHealth(account) {
 		return false
 	}
 	if allowed, err := s.gatewayPoolResumeAllowed(ctx, account, true); err != nil || !allowed {
 		return false
 	}
 	identity, err := s.codexCookies.gatewayPoolIdentity(ctx, account)
+	if err == nil {
+		s.codexCookies.poolRounds.setContinuousAccount(*group, account.ID, identity, account.GatewayPoolContinuousWaitEnabled())
+	}
 	if err != nil || s.codexCookies.poolRounds.blocked(*group, identity) {
 		return false
 	}
@@ -218,7 +260,7 @@ func (s *OpenAIGatewayService) gatewayPoolRoundSelectionAllowed(ctx context.Cont
 	if s.codexCookies.gatewayPoolVerifiedFull(identity) {
 		return bound || s.codexCookies.poolRounds.claim(*group, identity, s.gatewayPoolActiveAccountLimit(ctx, group))
 	}
-	if s.gatewayPoolNoRemainingRoutes(ctx, account) &&
+	if !account.GatewayPoolContinuousWaitEnabled() && s.gatewayPoolNoRemainingRoutes(ctx, account) &&
 		s.codexCookies.gatewayPoolLocalResumeAt(identity, account).After(time.Now()) {
 		s.codexCookies.poolRounds.exhaust(*group, identity, s.codexCookies.poolRounds.generation(*group))
 		s.restGatewayPoolAccount(ctx, account, identity, *group)

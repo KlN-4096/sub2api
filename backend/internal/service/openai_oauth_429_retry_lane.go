@@ -2,6 +2,8 @@ package service
 
 import (
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -19,7 +21,7 @@ func (s *OpenAIGatewayService) reserveOpenAIOAuth429Retry(account *Account, head
 
 func (s *OpenAIGatewayService) reserveOpenAIOAuth429RetryAt(account *Account, headers http.Header, deadline, now time.Time) (time.Duration, bool) {
 	delay := openAIOAuth429SameAccountRetryDelay(headers, deadline)
-	key := gatewayPoolLedgerIdentity(openAIGatewayPoolAccountKeyLegacy(account))
+	key := openAIOAuth429RetryIdentity(account)
 	if deadline.IsZero() || !now.Before(deadline) {
 		return 0, false
 	}
@@ -41,4 +43,18 @@ func (s *OpenAIGatewayService) reserveOpenAIOAuth429RetryAt(account *Account, he
 		}
 		return slot.Sub(now), true
 	}
+}
+
+// Provider 429 reservations retain their existing workspace scope. Gateway
+// quality cooldowns are independently partitioned by member credentials.
+func openAIOAuth429RetryIdentity(account *Account) string {
+	identity := codexAccountIdentityNamespace(account)
+	if rest, ok := strings.CutPrefix(identity, "chatgpt:"); ok {
+		workspace, _, _ := strings.Cut(rest, ":")
+		return "chatgpt:" + workspace
+	}
+	if identity == "" && account != nil {
+		return "id:" + strconv.FormatInt(account.ID, 10)
+	}
+	return identity
 }

@@ -14,23 +14,29 @@ type gatewayPoolProbeFlights struct {
 	calls map[string]*gatewayPoolProbeFlight
 }
 
+type gatewayPoolProbeResult struct {
+	full, conclusive, sent bool
+	firstSent              time.Time
+	err                    error
+}
+
 type gatewayPoolProbeFlight struct {
 	done      chan struct{}
 	cancel    context.CancelFunc
 	waiters   int
 	abandoned bool
 	finished  bool
-	result    gatewayPoolEarlyVerdict
+	result    gatewayPoolProbeResult
 }
 
 func (g *gatewayPoolProbeFlights) do(
 	ctx context.Context, key string, timeout time.Duration,
-	probe func(context.Context) (gatewayPoolEarlyVerdict, error),
+	probe func(context.Context) (gatewayPoolProbeResult, error),
 	register ...func() func(),
-) (gatewayPoolEarlyVerdict, error) {
+) (gatewayPoolProbeResult, error) {
 	for {
 		if err := ctx.Err(); err != nil {
-			return gatewayPoolEarlyVerdict{sent: true}, err
+			return gatewayPoolProbeResult{sent: true}, err
 		}
 		g.mu.Lock()
 		if g.calls == nil {
@@ -44,7 +50,7 @@ func (g *gatewayPoolProbeFlights) do(
 			// still unwinding. This time still counts against the caller.
 			select {
 			case <-ctx.Done():
-				return gatewayPoolEarlyVerdict{sent: true}, ctx.Err()
+				return gatewayPoolProbeResult{sent: true}, ctx.Err()
 			case <-done:
 				continue
 			}
@@ -91,7 +97,7 @@ func (g *gatewayPoolProbeFlights) do(
 		if err := ctx.Err(); err != nil {
 			// The shared transport may already have sent; cancellation is
 			// never permission to return another caller's ticket to the pool.
-			return gatewayPoolEarlyVerdict{sent: true}, err
+			return gatewayPoolProbeResult{sent: true}, err
 		}
 		return result, result.err
 	}

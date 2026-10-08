@@ -34,10 +34,23 @@ describe('gateway capacity snapshot', () => {
     expect(badge().props('current')).toBe('—')
     await wrapper.setProps({ gatewayProgress: snapshot(0) })
     expect(badge().props('current')).toBe(0)
-    await wrapper.setProps({ gatewayProgress: snapshot(7), gatewayProgressUnavailable: true })
+    await wrapper.setProps({ gatewayProgress: snapshot(7) })
     expect(badge().props('current')).toBe(7)
-    expect(badge().props('colorClass')).toContain('bg-gray-100')
+    expect(badge().props('colorClass')).toContain('bg-yellow-100')
     wrapper.unmount()
+  })
+
+  it('freezes the complete capacity display during blur and replaces it on resume', async () => {
+    const wrapper = mount(AccountCapacityCell, { props: { account, gatewayProgress: snapshot(7) } })
+    try {
+      const frame = wrapper.html()
+      await wrapper.setProps({ progressPaused: true })
+      await wrapper.setProps({ account: { ...account, concurrency: 9 }, gatewayProgress: snapshot(100) })
+      expect(wrapper.html()).toBe(frame)
+      await wrapper.setProps({ progressPaused: false })
+      expect(wrapper.findComponent(CapacityBadge).props('current')).toBe(100)
+      expect(wrapper.findComponent(CapacityBadge).props('colorClass')).toContain('bg-red-100')
+    } finally { wrapper.unmount() }
   })
 
   it('leaves non-pool capacity behavior unchanged', () => {

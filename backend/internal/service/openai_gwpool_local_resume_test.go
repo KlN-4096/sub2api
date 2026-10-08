@@ -137,7 +137,7 @@ func TestGatewayPoolLocalTimerRestoresDeadlineWithoutBusinessOrPoolRequests(t *t
 func TestGatewayPoolLocalMaintenanceDailyResetReleasesRestImmediately(t *testing.T) {
 	ctx, now := context.Background(), time.Now().UTC()
 	svc, base, identity := cooldownResetService(t, now)
-	repo := &gatewayManualRestRepo{gatewayEarlyAccountsRepo: base}
+	repo := &gatewayManualRestRepo{gatewayPoolAccountsRepo: base}
 	svc.accountRepo = repo
 	for _, id := range []int64{1, 2} {
 		account, err := repo.GetByID(ctx, id)
