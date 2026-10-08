@@ -16,28 +16,32 @@
     </div>
     <!-- 没有读数也要占位：整块消失时，「没接网关池」「接了还没跑过流量」「落点读不出来」
          在页面上长得一模一样。非 Codex 上游的账号根本没有落点这回事，那才该整块消失。 -->
-    <p v-if="!current && !cells.length" class="text-[10px] text-gray-400" data-testid="account-gateway-empty">
+    <p v-if="!preparing && !current && !cells.length" class="text-[10px] text-gray-400" data-testid="account-gateway-empty">
       {{ t('admin.accounts.openai.gatewayHistory.empty') }}
     </p>
       <!-- 第一行是「当前大区 · 当前网关」：整块里最要紧的一个事实。 -->
-      <div v-if="current" class="flex items-center gap-1" data-testid="account-gateway-current">
+      <div v-if="current || preparing" class="flex items-center gap-1" data-testid="account-gateway-current">
         <span class="shrink-0 text-[10px] text-gray-400">
           {{ t('admin.accounts.openai.gatewayHistory.current') }}
         </span>
         <!-- 色和下面九宫格同一把尺子：这个 chip 原来恒为绿，而同一个落点在格子里可能是红的，
              同一张卡上一绿一红指着同一件事。 -->
         <span
+          v-if="current"
           class="truncate rounded px-1 text-[10px] font-medium leading-4"
-          :class="TONE_CLASS[toneOf(current)]"
-          :title="titleOf(current)"
+          :class="TONE_CLASS[preparing ? 'idle' : toneOf(current)]"
+          :title="preparing ? t('admin.accounts.openai.gatewayProgress.verifying') : titleOf(current)"
         >
-          {{ verdictMark(current) }}{{ regionLabel(current.region) }} · {{ current.name }}
+          {{ preparing ? '' : verdictMark(current) }}{{ regionLabel(current.region) }} · {{ current.name }}
         </span>
-        <span class="ml-auto shrink-0 text-[10px] text-gray-400" data-testid="account-gateway-current-time">{{ safeRelativeTime(runtime?.tickets[0]?.verified_at || current.at) }}</span>
+        <span v-else class="truncate text-[10px] text-gray-400">{{ t(`admin.accounts.openai.gatewayProgress.${progress?.phase}`) }}</span>
+        <span v-if="current" class="ml-auto shrink-0 text-[10px] text-gray-400" data-testid="account-gateway-current-time">{{ safeRelativeTime(currentAt) }}</span>
       </div>
       <div v-for="round in (usesPool ? activeRounds : [])" :key="round.id" class="space-y-1 text-[11px] text-gray-500 dark:text-gray-400" data-testid="account-gateway-usage-round">
         <span>{{ t('admin.accounts.openai.gatewayRuntime.counts', { full: round.full, attempted: round.attempted }) }}</span>
-        <p>{{ t('admin.accounts.openai.gatewayRuntime.active', { duration: fullUseTime(round) }) }}</p>
+        <p v-if="round.full_usage_mode === ACTIVE_USAGE_MODE" :title="t('admin.accounts.openai.gatewayRuntime.activeHint')">
+          {{ t('admin.accounts.openai.gatewayRuntime.active', { duration: fullUseTime(round) }) }}<span v-if="round.duration_incomplete">{{ t('admin.accounts.openai.gatewayRuntime.durationIncomplete') }}</span>
+        </p>
       </div>
       <div v-if="usesPool && runtime && !activeRounds.length" class="space-y-1 text-[11px] text-gray-500 dark:text-gray-400" data-testid="account-gateway-usage-idle">
         <span>{{ t('admin.accounts.openai.gatewayRuntime.counts', { full: 0, attempted: 0 }) }}</span>
@@ -94,7 +98,10 @@
       </button>
     </div>
     <p v-if="usesPool && runtime" class="truncate border-t border-gray-100 pt-2 text-[10px] text-gray-500 dark:border-gray-700 dark:text-gray-400" data-testid="account-gateway-usage-history">
-      {{ t('admin.accounts.openai.gatewayRuntime.archived', { count: historyUsage.rounds, duration: formatUseTime(historyUsage.durationMS) }) }}
+      {{ historyUsage.hasDuration
+        ? t('admin.accounts.openai.gatewayRuntime.archived', { count: historyUsage.rounds, duration: formatUseTime(historyUsage.durationMS) })
+        : t('admin.accounts.openai.gatewayRuntime.archivedCounts', { count: historyUsage.rounds }) }}
+      <span v-if="historyUsage.hasDuration && historyUsage.incomplete">{{ t('admin.accounts.openai.gatewayRuntime.durationIncomplete') }}</span>
     </p>
   </div>
 </template>
@@ -141,39 +148,47 @@ const MAX_WINDOW_MS = 24 * 60 * 60 * 1000
 // Three missed 1s polls invalidate the live snapshot; history never turns green.
 const LIVE_SNAPSHOT_MAX_AGE_MS = 3_000
 
-const props = defineProps<{ account: Account; progress?: GatewayPoolProgress; progressUnavailable?: boolean; retryPending?: boolean }>()
+const props = defineProps<{ account: Account; progress?: GatewayPoolProgress; progressUnavailable?: boolean; progressPaused?: boolean; retryPending?: boolean }>()
 const emit = defineEmits<{ retry: [id: number] }>()
 const { t } = useI18n()
 const wallTime = useSharedNowTicker(1000)
 const frozenTime = ref(wallTime.value)
-watch(() => props.progressUnavailable, unavailable => {
-  if (unavailable) frozenTime.value = wallTime.value
+const displayFrozen = computed(() => props.progressUnavailable || props.progressPaused)
+watch(displayFrozen, frozen => {
+  if (frozen) frozenTime.value = wallTime.value
 })
-const now = computed(() => props.progressUnavailable ? frozenTime.value : wallTime.value)
+const now = computed(() => displayFrozen.value ? frozenTime.value : wallTime.value)
 const runtime = computed(() => props.progress?.runtime)
 const snapshotFresh = computed(() => {
   const snapshot = runtime.value
   return !props.progressUnavailable && !!snapshot && validTimestamp(snapshot.observed_at) &&
-    now.value - Date.parse(snapshot.observed_at) <= LIVE_SNAPSHOT_MAX_AGE_MS
+    wallTime.value - Date.parse(snapshot.observed_at) <= LIVE_SNAPSHOT_MAX_AGE_MS
 })
 const liveTickets = computed(() => {
   const snapshot = runtime.value
   if (!snapshotFresh.value || !snapshot) return []
-  return snapshot.tickets.filter((ticket) => !validTimestamp(ticket.expires_at) || Date.parse(ticket.expires_at!) > now.value)
+  return snapshot.tickets.filter((ticket) => !validTimestamp(ticket.expires_at) || Date.parse(ticket.expires_at!) > wallTime.value)
 })
 const activeRounds = computed(() => runtime.value?.rounds.filter((round) => round.model === 'all' && !round.ended_at) || [])
+const ACTIVE_USAGE_MODE = 'business_active_v1'
 const historyUsage = computed(() => {
   const snapshot = runtime.value
   const total = {
     rounds: snapshot?.archived?.all?.rounds || 0,
-    durationMS: Math.max(0, snapshot?.archived?.all?.duration_ms || 0)
+    durationMS: Math.max(0, snapshot?.archived?.all?.active_duration_ms || 0),
+    hasDuration: snapshot?.archived?.all?.active_duration_ms !== undefined,
+    incomplete: snapshot?.archived?.all?.active_duration_incomplete || false
   }
   // Retained closed rounds and compressed archives are disjoint. Use measured
   // full-use duration, never wall time; ongoing and legacy model rounds stay out.
   for (const round of snapshot?.rounds || []) {
     if (round.model !== 'all' || !validTimestamp(round.ended_at)) continue
     total.rounds++
-    total.durationMS += Math.max(0, round.full_duration_ms || 0)
+    if (round.full_usage_mode === ACTIVE_USAGE_MODE) {
+      total.durationMS += Math.max(0, round.full_duration_ms || 0)
+      total.hasDuration = true
+      total.incomplete ||= round.duration_incomplete || false
+    }
   }
   return total
 })
@@ -315,16 +330,25 @@ const items = computed<GatewayItem[]>(() => {
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
 })
 
+const preparing = computed(() => usesPool.value && !!props.progress &&
+  ['pending', 'fetching', 'verifying', 'waiting'].includes(props.progress.phase))
+const currentTicket = computed(() => preparing.value
+  ? runtime.value?.tickets.find(ticket => ticket.gateway === props.progress?.gateway)
+  : runtime.value?.tickets[0])
 const current = computed<GatewayItem | null>(() => {
-  const live = runtime.value?.tickets[0]
-  const name = live?.gateway || history.value.current
+  const live = currentTicket.value
+  // A rejected candidate disappears during acquisition; it must not expose
+  // history.current again between two verification attempts.
+  const name = preparing.value
+    ? (props.progress?.phase === 'verifying' ? props.progress.gateway : '')
+    : live?.gateway || history.value.current
   if (!name) return null
   // 时间和大区取 seen 里那条；没有就退回记录自己的那两个字段（老记录、或被裁过）。
   return (
     items.value.find((i) => i.name === name) ?? {
       name,
       at: history.value.updated_at ?? '',
-      region: live?.region || history.value.current_region || '',
+      region: live?.region || (preparing.value ? '' : history.value.current_region) || '',
       verdict: '',
       fullAt: '',
       fullHeldMs: 0,
@@ -336,6 +360,9 @@ const current = computed<GatewayItem | null>(() => {
     }
   )
 })
+const currentAt = computed(() => preparing.value
+  ? props.progress?.updated_at
+  : currentTicket.value?.verified_at || current.value?.at)
 
 interface RegionCell {
   key: string
@@ -394,7 +421,7 @@ const cells = computed<RegionCell[]>(() => {
  * 「池子里还剩 0 个没用」。现网当场撞上：账本 67、可交付 62，卡片报成 0，而池子好好的。
  * 正确的数由后端 gatewayPoolPick 在遍历清单时当场数出来（那一遍本来就逐个问过本地账本）。
  *
- * pool_live=0 = 没问到清单（关了 steering、或者清单一直打不开）⇒ 只报已用，不编分母。
+ * pool_live=0 = 没问到清单（如清单一直打不开）⇒ 只报已用，不编分母。
  * pool_live>0 时 pool_free=0 是**真的 0**（可交付的全烧过了），照报。
  *
  * 冷却到期不保证仍有票，也不保证已恢复满血。

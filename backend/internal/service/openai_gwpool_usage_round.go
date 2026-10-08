@@ -21,8 +21,9 @@ const (
 )
 
 type gatewayPoolUsageTicket struct {
-	At            time.Time `json:"at"`
-	Full          bool      `json:"full"`
+	At   time.Time `json:"at"`
+	Full bool      `json:"full"`
+	// Legacy held-ticket timing is decoded/re-encoded verbatim, never updated.
 	UseStartedAt  time.Time `json:"use_started_at,omitzero"`
 	UseObservedAt time.Time `json:"use_observed_at,omitzero"`
 	UseEndedAt    time.Time `json:"use_ended_at,omitzero"`
@@ -45,15 +46,19 @@ type GatewayPoolUsageRound struct {
 	FullDurationMS     int64                             `json:"full_duration_ms"`
 	FullActiveUntil    []time.Time                       `json:"full_active_until,omitempty"`
 	DurationIncomplete bool                              `json:"duration_incomplete,omitempty"`
+	ActiveUsage        *gatewayPoolActiveUsage           `json:"active_usage,omitempty"`
+	FullUsageMode      string                            `json:"full_usage_mode,omitempty"`
 }
 
 type GatewayPoolUsageArchive struct {
-	Rounds             int64 `json:"rounds"`
-	Attempted          int64 `json:"attempted"`
-	Full               int64 `json:"full"`
-	DurationMS         int64 `json:"duration_ms"`
-	Incomplete         bool  `json:"incomplete,omitempty"`
-	DurationIncomplete bool  `json:"duration_incomplete,omitempty"`
+	Rounds             int64  `json:"rounds"`
+	Attempted          int64  `json:"attempted"`
+	Full               int64  `json:"full"`
+	DurationMS         int64  `json:"duration_ms"`
+	Incomplete         bool   `json:"incomplete,omitempty"`
+	DurationIncomplete bool   `json:"duration_incomplete,omitempty"`
+	ActiveDurationMS   *int64 `json:"active_duration_ms,omitempty"`
+	ActiveIncomplete   bool   `json:"active_duration_incomplete,omitempty"`
 }
 
 type gatewayPoolUsageLedger struct {
@@ -95,7 +100,7 @@ func readGatewayPoolUsage(account *Account, tag string) gatewayPoolUsageLedger {
 	previous := state
 	previous.Previous = nil
 	state = gatewayPoolUsageLedger{Tag: tag}
-	if previous.Tag != "" {
+	if previous.Tag != "" || len(previous.Rounds) > 0 || len(previous.Archived) > 0 {
 		state.Previous = &previous
 	}
 	return state
@@ -167,10 +172,17 @@ func (s *OpenAIGatewayService) changeGatewayPoolUsage(ctx context.Context, accou
 			state.Previous = previous
 		}
 	}
-	settled := state.settleFullUsage(s.codexCookies.gatewayPoolUsageLive(identity), s.codexCookies.gatewayPoolUsageSession(), time.Now())
 	boundary := state.applyGatewayPoolBlock(blockedAt)
-	if !change(&state) && !settled && !boundary {
+	mutated := change(&state)
+	activeTracker := s.codexCookies.activeUsageTracker(identity)
+	activeEvents := activeTracker.snapshot()
+	mutated = state.bindActiveUsage(activeEvents) || mutated
+	observedAt := time.Now().UTC()
+	activeEvents = activeTracker.snapshot()
+	activeChanged := state.syncActiveUsage(activeEvents, s.codexCookies.gatewayPoolUsageSession(), observedAt)
+	if !mutated && !boundary && !activeChanged {
 		s.codexCookies.poolUsageCache.Store(tag, &state)
+		activeTracker.acknowledge(activeEvents, &state)
 		return true
 	}
 	state.prune()
@@ -190,6 +202,7 @@ func (s *OpenAIGatewayService) changeGatewayPoolUsage(ctx context.Context, accou
 		return false
 	}
 	s.codexCookies.poolUsageCache.Store(tag, &state)
+	activeTracker.acknowledge(activeEvents, &state)
 	return true
 }
 
@@ -303,12 +316,6 @@ func (r *gatewayPoolUsageLedger) end(at time.Time, reasons ...string) bool {
 			continue
 		}
 		round.EndedAt, round.EndReason = at, reason
-		for key, ticket := range round.Tickets {
-			if !ticket.UseStartedAt.IsZero() && (ticket.UseEndedAt.IsZero() || ticket.UseEndedAt.After(at)) {
-				ticket.UseEndedAt = at
-				round.Tickets[key] = ticket
-			}
-		}
 		r.ClosedBefore[round.Model] = at
 		changed = true
 	}
@@ -331,7 +338,14 @@ func (r *gatewayPoolUsageLedger) prune() {
 		total.Attempted += int64(round.Attempted)
 		total.Full += int64(round.Full)
 		if round.Model == gatewayPoolUsageSharedModel {
-			total.DurationMS += round.fullUseDuration(round.EndedAt)
+			total.DurationMS += round.legacyFullUseDuration()
+			if round.ActiveUsage != nil {
+				if total.ActiveDurationMS == nil {
+					total.ActiveDurationMS = new(int64)
+				}
+				*total.ActiveDurationMS += round.ActiveUsage.duration(round.EndedAt)
+				total.ActiveIncomplete = total.ActiveIncomplete || round.ActiveUsage.Incomplete
+			}
 		} else if duration := round.EndedAt.Sub(round.StartedAt).Milliseconds(); duration > 0 {
 			total.DurationMS += duration // legacy wall-clock data remains separate
 		}
@@ -384,7 +398,7 @@ func (s *OpenAIGatewayService) finishGatewayPoolUsageIfExhausted(ctx context.Con
 	if err != nil {
 		return
 	}
-	generation, active, candidates := s.codexCookies.gatewayPoolInventoryCandidates(identity, fresh)
+	generation, active, candidates := s.codexCookies.gatewayPoolInventoryCandidates(identity)
 	if active || len(candidates) != 0 {
 		return
 	}
@@ -395,22 +409,19 @@ func (s *OpenAIGatewayService) finishGatewayPoolUsageIfExhausted(ctx context.Con
 	if err != nil {
 		return
 	}
-	listedAt := time.Now()
 	gateways, err := pool.Gateways(ctx, gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(fresh, identity))
 	if err != nil {
 		return
 	}
 	for _, gateway := range gateways {
-		s.codexCookies.noteGatewayPoolRecommendationAt(identity, gateway.Name, gateway.Cooldown, listedAt)
-		_, cooling := s.codexCookies.gatewayPoolUsedAt(identity, gateway.Name, fresh.gatewayPoolGatewayWindow(), fresh.gatewayPoolUseRecommendation())
+		_, cooling := s.codexCookies.gatewayPoolUsedAt(identity, gateway.Name, fresh.gatewayPoolGatewayWindow())
 		if gateway.PairReady && !cooling {
 			return
 		}
 	}
-	// An unreserved experimental early opportunity is not a normal candidate
-	// or work in flight. Its next foreground attempt starts a new cycle.
+	// Only fresh eligible candidates or work in flight can keep the cycle open.
 	s.changeGatewayPoolUsage(ctx, fresh, identity, func(state *gatewayPoolUsageLedger) bool {
-		after, busy, remaining := s.codexCookies.gatewayPoolInventoryCandidates(identity, fresh)
+		after, busy, remaining := s.codexCookies.gatewayPoolInventoryCandidates(identity)
 		if after != generation || busy || len(remaining) != 0 {
 			return false
 		}

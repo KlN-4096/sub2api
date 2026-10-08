@@ -2189,7 +2189,7 @@ func TestOpenAIWSHTTPBridgeKeepsContinuationFramesOnHTTPWithoutPreviousResponseI
 		ginCtx.Request = req
 
 		firstBudget := &gatewayPoolWaitHolder{state: &gatewayPoolWaitState{
-			max: time.Minute, waited: time.Minute, deadline: time.Now().Add(-time.Minute),
+			accountID: account.ID,
 		}}
 		ginCtx.Set(gatewayPoolWaitGinKey, firstBudget)
 		hooks := &OpenAIWSIngressHooks{BeforeTurn: func(turn int) error {

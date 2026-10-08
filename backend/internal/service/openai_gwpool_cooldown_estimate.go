@@ -40,14 +40,13 @@ func (s *openAICodexCookieStore) gatewayPoolCooldownEstimate(identity string, ac
 			c := seen.Cooldown.clone()
 			c.clearCooldown(reset.ClearedAt, base)
 			c.resetBackoff(reset.LastAt, touched, base)
-			s.refreshGatewayPoolCooldown(&c, identity, gateway, window, touched, now, account.gatewayPoolUseRecommendation())
+			s.refreshGatewayPoolCooldown(&c, identity, window, touched, now)
 			until = c.Until
 			if touchedUntil := touched.Add(time.Duration(c.WindowSeconds) * time.Second); !c.Cleared && !touched.IsZero() && touchedUntil.After(until) {
 				until = touchedUntil
 			}
 		} else if !touched.IsZero() {
-			initial, _ := s.gatewayPoolInitialCooldown(identity, gateway, window, account.gatewayPoolUseRecommendation())
-			until = touched.Add(time.Duration(initial) * time.Second)
+			until = touched.Add(time.Duration(base) * time.Second)
 		} else if !seen.At.IsZero() && !clearAt.IsZero() {
 			until = clearAt
 		}

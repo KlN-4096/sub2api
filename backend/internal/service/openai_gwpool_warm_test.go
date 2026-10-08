@@ -18,7 +18,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 )
 
-func TestGatewayPoolProbeModelOnlyOverridesProbeRequests(t *testing.T) {
+func TestGatewayPoolLunaProbesPreserveBusinessModelAndState(t *testing.T) {
 	for _, selected := range []string{"", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "business"} {
 		t.Run("selection="+selected, func(t *testing.T) {
 			fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
@@ -40,16 +40,9 @@ func TestGatewayPoolProbeModelOnlyOverridesProbeRequests(t *testing.T) {
 			resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", account)
 			require.NoError(t, err)
 			require.NoError(t, resp.Body.Close())
-			require.Len(t, upstream.sentBodies, 3, "only selected-model mint/echo and the unchanged business request")
-			want := selected
-			if want == "" {
-				want = "gpt-6-luna"
-			}
-			if want == "business" {
-				want = "gpt-6-astra"
-			}
-			require.Equal(t, want, gjson.Get(upstream.sentBodies[0], "model").String())
-			require.Equal(t, want, gjson.Get(upstream.sentBodies[1], "model").String())
+			require.Len(t, upstream.sentBodies, 3, "Luna A/B and the unchanged business request")
+			require.Equal(t, "gpt-6-luna", gjson.Get(upstream.sentBodies[0], "model").String())
+			require.Equal(t, "gpt-6-luna", gjson.Get(upstream.sentBodies[1], "model").String())
 			require.Equal(t, gwpoolEchoBody1, upstream.sentBodies[2])
 			require.Equal(t, []string{"", "probe-state", "business-state"}, upstream.sentState,
 				"probe state never leaks into the business model")
@@ -131,7 +124,7 @@ func TestWarmUpSpendsNothingOnAVerifiedLivePair(t *testing.T) {
 	// 第二发走**生产那条快路**（gatewayPoolWarmUp，不是注入 shooter 的那个）：票验过 + 还 Live
 	// ⇒ 一发都不打、也不再问池子。
 	//
-	// 压缩请求从 sink 读取模型；快路必须匹配验证模型，不能沿用其它模型的判据。
+	// 验满票跨业务模型复用；不需要从压缩正文读取模型才能准入。
 	before := fake.hits.Load()
 	acct.Extra[openAIGatewayPoolProbeModelExtraKey] = gwpoolWarmModel
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("\x28\xb5\x2f\xfd not json"))
@@ -139,7 +132,7 @@ func TestWarmUpSpendsNothingOnAVerifiedLivePair(t *testing.T) {
 	ctx, sink := withOpenAIGatewayPoolSink(req.Context(), nil)
 	sink.noteModel(gwpoolWarmModel)
 	require.NoError(t, svc.gatewayPoolWarmUp(req.WithContext(ctx), "", acct),
-		"同模型验过 + Live ⇒ 快路直接放行")
+		"验过 + Live ⇒ 跨模型快路直接放行")
 	require.Empty(t, upstream.sentBodies, "窗口内不许再验")
 	require.Equal(t, before, fake.hits.Load(), "窗口内不许再取票")
 }
@@ -191,6 +184,7 @@ func TestWarmUpRunsStateEchoWithTheSamePair(t *testing.T) {
 // 判成降智 ⇒ 标 Stale + 记账本 ⇒ 下一张票换网关；换到满血的那张才放业务请求进去。
 func TestWarmUpRotatesPastADegradedGatewayAndServesTheFullOne(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	fake.listGateways = []gwpoolFakeGateway{{Name: "unified-142", PairReady: true}, {Name: "unified-84", PairReady: true}}
 	fake.forceCookie = gwpoolTestPairCookie(t, "unified-84") // force=1 取到的那张落在另一个网关
 	svc := &OpenAIGatewayService{}
 	shooter := &gwpoolWarmShooter{replies: []gwpoolWarmReply{
@@ -231,7 +225,8 @@ func TestWarmUpFailsClosedWhenNoTicketVerifiesFull(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	shooter := &gwpoolWarmShooter{}
 	// 每一发 B 都回一张不同的新票 ⇒ 恒判降智。
-	for i := 0; i < gatewayPoolWarmMaxTickets; i++ {
+	const candidateCount = 7
+	for i := 0; i < candidateCount; i++ {
 		fake.listGateways = append(fake.listGateways, gwpoolFakeGateway{Name: fmt.Sprintf("unified-%d", 141+i), PairReady: true})
 		shooter.replies = append(shooter.replies,
 			gwpoolWarmReply{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
@@ -246,7 +241,7 @@ func TestWarmUpFailsClosedWhenNoTicketVerifiesFull(t *testing.T) {
 	require.ErrorIs(t, err, gwpool.ErrPool,
 		"必须包着 ErrPool：classifyUpstreamTransportError 据此豁免「按代理持久故障停调度」")
 	require.Equal(t, gatewayPoolWarmExhaustedClientMsg, gatewayPoolClientMessage(err))
-	require.Len(t, shooter.shots, 2*gatewayPoolWarmMaxTickets, "上限是硬的：不许无限试下去")
+	require.Len(t, shooter.shots, 2*candidateCount, "当前候选试尽后必须停止")
 	_, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
 	require.NotEqual(t, openAIGatewayPoolPairLive, state, "不许留一张没验过的票给业务请求")
 }
@@ -278,7 +273,7 @@ func TestWarmUpBlocksInconclusiveShotsWithoutCallingThemDegraded(t *testing.T) {
 				"没验出满血就不许标成验过，否则下一发连内嵌判据都跳了")
 			// 还不还槽位按「有没有确证送达上游」判，**不能指望业务请求那条路去还**：
 			// 那边的 gatewayPoolPair 命中「缓存里还 Live」的早返回 ⇒ 这次调用没向池子取票 ⇒
-			// release 恒为 nil ⇒ gatewayPoolReleasesUnsent 在 queue 档上是个空操作。
+			// release 恒为 nil ⇒ gatewayPoolDefinitelyUnsent 在 queue 档上是个空操作。
 			_, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
 			if sent {
 				require.Zero(t, fake.releaseHits.Load(), "发出去过的票不许还回共享池")
@@ -286,7 +281,7 @@ func TestWarmUpBlocksInconclusiveShotsWithoutCallingThemDegraded(t *testing.T) {
 				// 而供给是个位数张/小时。业务请求照常复用它。
 				require.Equal(t, openAIGatewayPoolPairLive, state, "没下结论不许判坏这张票")
 			} else {
-				require.Equal(t, int64(1), fake.releaseHits.Load(), "一个字节都没出去的票要还回池子")
+				require.Zero(t, fake.releaseHits.Load(), "未发送清理只在本地执行")
 				// 还回去了就不许再留在缓存里：业务请求复用一张已经还给别人的票，
 				// 等于两个消费者同时用同一个落点。
 				require.NotEqual(t, openAIGatewayPoolPairLive, state, "还掉的票不许还留着 Live")
@@ -410,7 +405,7 @@ func TestWarmProbeReportsWhetherTheTicketReachedUpstream(t *testing.T) {
 	require.True(t, sent, "A 已经打到上游了，窗口真的烧了")
 }
 
-// 垫话的模型必须和业务请求一致（state 绑在 账号 × 模型 × 这张票 上）；读不出来就不预热。
+// 业务统计仍读取原模型；这不是固定 Luna 探针的模型来源。
 func TestGatewayPoolWarmModelReadsTheRequestBody(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
 	require.NoError(t, err)
@@ -429,31 +424,27 @@ func TestGatewayPoolWarmModelReadsTheRequestBody(t *testing.T) {
 	}
 }
 
-// 预热是**无条件**的：三个删掉的档位键全配成最松那组值，照样跑预热、照样 fail closed。
-//
-// 2026-10-03 删掉档位之前，这条测的是「别的档一发垫话都不打」。现在反过来钉：没有任何配置
-// 能让业务请求绕过预热。读不出 model 这条是最锋利的探针 —— 它是预热**自己**的失败形态
-// （errOpenAIGatewayPoolWarmNoModel），别的层产不出来，所以看到它就等于看到预热跑了；
-// 而且这一发连票都没取、上游一个请求都没打，断言不依赖任何假出站链。
+// 旧档位不能绕过固定 Luna 的 A/B 验票。
 func TestWarmUpRunsWithoutAnyModeConfigured(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-	upstream := &gwpoolErrorUpstream{}
+	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
+		{status: http.StatusOK, minted: "probe-state"}, {status: http.StatusOK},
+	}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	acct := fake.account(1)
 	acct.Extra["openai_gwpool_guard"] = "off"
 	acct.Extra["openai_gwpool_state_echo"] = false
 	acct.Extra["openai_gwpool_degraded_retries"] = 0
-	acct.Extra[openAIGatewayPoolProbeModelExtraKey] = gatewayPoolProbeModelBusiness
+	acct.Extra[openAIGatewayPoolProbeModelExtraKey] = "business"
 
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 	require.NoError(t, err)
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ctx, _ := withOpenAIGatewayPoolSink(req.Context(), ginCtx)
-	resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", acct)
-	require.ErrorIs(t, err, errOpenAIGatewayPoolWarmNoModel)
-	require.Nil(t, resp)
-	require.Zero(t, upstream.calls, "预热拦下来的请求一个字节都不许出去")
-	require.Zero(t, fake.hits.Load(), "也不该向池子取票")
+	require.NoError(t, svc.gatewayPoolWarmUp(req.WithContext(ctx), "", acct))
+	require.Len(t, upstream.sentBodies, 2)
+	require.Equal(t, "gpt-6-luna", gjson.Get(upstream.sentBodies[0], "model").String())
+	require.EqualValues(t, 1, fake.hits.Load())
 }
 
 // 同一身份的并发预热只跑**一遍**判据。
@@ -546,14 +537,12 @@ func TestWarmUpRefusesToProbeWithoutTheBoundProxy(t *testing.T) {
 	require.Zero(t, fake.hits.Load(), "连票都不该取")
 }
 
-// 读不出本轮模型 ⇒ **fail closed**，不许静默退回 retry 档。
-//
-// 判据的 turn-state 绑在 (账号 × 模型 × 这张票) 上，不知道模型就没法验。悄悄降级会把运营方选的
-// 「绝不把降智交给客户端」抹掉，而唯一线索是一条日志。已知触发条件：双开账号（出站体被 zstd
-// 压过，裸解 JSON 必然失败）× 0.156 之前的客户端（turn-metadata 头里也不补 model）。
-func TestWarmUpFailsClosedWhenTheModelIsUnreadable(t *testing.T) {
+// 压缩业务正文没有可读模型，不妨碍独立的固定 Luna 验票。
+func TestWarmUpUsesLunaWhenTheBusinessModelIsUnreadable(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-	upstream := &gwpoolEchoUpstream{}
+	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
+		{status: http.StatusOK, minted: "probe-state"}, {status: http.StatusOK},
+	}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 
 	// 压过的体：既不是合法 JSON，头里也没有 turn-metadata。
@@ -562,13 +551,15 @@ func TestWarmUpFailsClosedWhenTheModelIsUnreadable(t *testing.T) {
 	ctx, _ := withOpenAIGatewayPoolSink(req.Context(), nil)
 
 	account := gwpoolWarmAccount(fake)
-	account.Extra[openAIGatewayPoolProbeModelExtraKey] = gatewayPoolProbeModelBusiness
+	account.Extra[openAIGatewayPoolProbeModelExtraKey] = "business"
 	err = svc.gatewayPoolWarmUp(req.WithContext(ctx), "", account)
-	require.ErrorIs(t, err, errOpenAIGatewayPoolWarmNoModel)
-	require.ErrorIs(t, err, gwpool.ErrPool, "必须包着 ErrPool，否则这条会被当成账号故障停调度")
-	require.Equal(t, gatewayPoolWarmNoModelClientMsg, gatewayPoolClientMessage(err))
-	require.Empty(t, upstream.sentBodies, "不知道模型就一发都不许打")
-	require.Zero(t, fake.hits.Load())
+	require.NoError(t, err)
+	require.Len(t, upstream.sentBodies, 2)
+	for _, body := range upstream.sentBodies {
+		require.Equal(t, "gpt-6-luna", gjson.Get(body, "model").String())
+		require.NotContains(t, body, "not json")
+	}
+	require.EqualValues(t, 1, fake.hits.Load())
 }
 
 // 模型的三个来源按可靠度排序：本次请求的网关池 sink（buildUpstreamRequest 在**压缩之前**从明文
@@ -631,18 +622,17 @@ func TestWarmUpIgnoresNonInferenceRequests(t *testing.T) {
 	require.Zero(t, fake.hits.Load())
 }
 
-func TestWarmUpBudgetsAreIndependentBetweenBusinessRequests(t *testing.T) {
+func TestWarmUpCancellationIsIndependentBetweenBusinessRequests(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 	account := fake.account(1)
 	svc := &OpenAIGatewayService{}
-	first := svc.gatewayPoolWaitContext(context.Background(), account)
+	firstCtx, cancel := context.WithCancel(context.Background())
+	first := svc.gatewayPoolWaitContext(firstCtx, account)
 	second := svc.gatewayPoolWaitContext(context.Background(), account)
-	state := gatewayPoolWaitFrom(first)
-	state.mu.Lock()
-	state.deadline = time.Now().Add(-time.Second)
-	state.mu.Unlock()
-	require.ErrorIs(t, gatewayPoolPreparationDeadlineError(first), errOpenAIGatewayPoolWarmExhausted)
-	require.NoError(t, gatewayPoolPreparationDeadlineError(second))
+	cancel()
+	require.ErrorIs(t, first.Err(), context.Canceled)
+	require.NoError(t, second.Err())
+	require.NotSame(t, gatewayPoolWaitFrom(first), gatewayPoolWaitFrom(second))
 }
 
 func TestWarmUpShorterCallerDeadlineDoesNotStartBusiness(t *testing.T) {
@@ -667,28 +657,12 @@ func TestWarmUpShorterCallerDeadlineDoesNotStartBusiness(t *testing.T) {
 	require.False(t, svc.codexCookies.gatewayPoolVerifiedFull(gwpoolTestIdentity))
 }
 
-// 试票上限是账号旋钮：缺省 5，越界回缺省，封顶 8。
-//
-// 它是**供给闸**：每张票烧掉一个 (上游账号 × 网关) 单位，而那个单位的再生预算约 25 张/小时
-// （已知网关数 ÷ 4 小时冷却）。做成旋钮是因为供给在涨，合适的值跟着它走。
-func TestWarmTicketsIsAnAccountKnobWithACeiling(t *testing.T) {
-	tickets := func(raw any) int {
-		return (&Account{Extra: map[string]any{openAIGatewayPoolWarmTicketsExtraKey: raw}}).gatewayPoolWarmTickets()
-	}
-	require.Equal(t, gatewayPoolWarmMaxTickets, (&Account{}).gatewayPoolWarmTickets(), "缺省 = 5")
-	require.Equal(t, gatewayPoolWarmMaxTickets, (*Account)(nil).gatewayPoolWarmTickets())
-	require.Equal(t, 1, tickets(1))
-	require.Equal(t, 3, tickets(3.0), "extra 是 JSONB，从库里读回来是 float64")
-	require.Equal(t, 3, tickets("3"), "getExtraInt 认数字字符串，和别的秒旋钮同口径")
-	require.Equal(t, gatewayPoolWarmMaxTicketsCeiling, tickets(gatewayPoolWarmMaxTicketsCeiling))
-	for _, raw := range []any{0, -1, 99, "nope", true, nil} {
-		require.Equalf(t, gatewayPoolWarmMaxTickets, tickets(raw), "越界/畸形值回缺省：%v", raw)
-	}
-}
-
 // Legacy saved limits cannot truncate the shared candidate queue.
 func TestWarmUpIgnoresTheLegacyTicketCount(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
+	for i := 1; i <= 5; i++ {
+		fake.listGateways = append(fake.listGateways, gwpoolFakeGateway{Name: fmt.Sprintf("unified-%d", 140+i), PairReady: true})
+	}
 	fake.cookieForHit = func(hit int64) string {
 		return gwpoolTestPairCookie(t, fmt.Sprintf("unified-%d", 140+hit))
 	}

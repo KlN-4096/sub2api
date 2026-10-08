@@ -99,7 +99,7 @@ const (
 
 // gwpoolEchoRun 跑一发 doOpenAIUpstream：挂 sink（判据与注入标记都挂在它上面）、按真客户端形态
 // 带上客户端回带的那张票。sent 为空 = 这一发没送票。
-func gwpoolEchoRun(t *testing.T, svc *OpenAIGatewayService, acct *Account, sent string) (*gin.Context, *http.Response, error) {
+func gwpoolEchoRun(t *testing.T, svc *OpenAIGatewayService, acct *Account, sent string, logical ...bool) (*gin.Context, *http.Response, error) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader(gwpoolEchoBody1))
 	require.NoError(t, err)
@@ -110,7 +110,12 @@ func gwpoolEchoRun(t *testing.T, svc *OpenAIGatewayService, acct *Account, sent 
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ctx, _ := withOpenAIGatewayPoolSink(req.Context(), ginCtx)
 	gwpoolEchoSeedVerified(t, svc, acct)
-	resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", acct)
+	// Classify a single attempt here; replacement and replay are tested separately.
+	forward := svc.doOpenAIUpstreamAttempt
+	if len(logical) > 0 && logical[0] {
+		forward = svc.doOpenAIUpstream
+	}
+	resp, err := forward(req.WithContext(ctx), "", acct)
 	return ginCtx, resp, err
 }
 
@@ -142,7 +147,7 @@ func gwpoolEchoSeedVerified(t *testing.T, svc *OpenAIGatewayService, acct *Accou
 		}
 	}
 	pair, _ := svc.codexCookies.cachedPoolPair(identity)
-	svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, pair.version, acct.gatewayPoolProbeModel("gpt-6-astra"))
+	svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, pair.version, gatewayPoolProbeModelLuna)
 }
 
 // ---------------------------------------------------------------------------
@@ -391,7 +396,7 @@ func TestDegradedRouteDoesNotFanOutAcrossAccounts(t *testing.T) {
 	require.True(t, plain.ShouldRetryNextAccount())
 }
 
-// 标 Stale 认两件事：票号对得上，或者**落点**对得上。
+// Mark stale only on the exact ticket version.
 func TestGatewayPoolMarkStaleOnlyTouchesTheNamedTicket(t *testing.T) {
 	store := &openAICodexCookieStore{}
 	live := openAIGatewayPoolPair{
@@ -401,25 +406,21 @@ func TestGatewayPoolMarkStaleOnlyTouchesTheNamedTicket(t *testing.T) {
 	store.poolPairs.Store(gwpoolTestIdentity, live)
 
 	// 票号和落点都对不上 ⇒ 缓存里确实是另一张票了，不许动。
-	store.gatewayPoolMarkStale(gwpoolTestIdentity, "tkt-1", "unified-999")
+	store.gatewayPoolMarkStale(gwpoolTestIdentity, "tkt-1")
 	_, state := store.cachedPoolPair(gwpoolTestIdentity)
 	require.Equal(t, openAIGatewayPoolPairLive, state, "票号和落点都对不上 ⇒ 不许动")
 
-	store.gatewayPoolMarkStale(gwpoolTestIdentity, "tkt-2", "unified-142")
+	store.gatewayPoolMarkStale(gwpoolTestIdentity, "tkt-2")
 	cached, state := store.cachedPoolPair(gwpoolTestIdentity)
 	require.Equal(t, openAIGatewayPoolPairStale, state)
 	require.Equal(t, "tkt-2", cached.version, "票号要留着做 exclude_versions")
 
-	store.gatewayPoolMarkStale("", "tkt-2", "unified-142") // 空身份：静默返回，不 panic
-	require.NotPanics(t, func() { (*openAICodexCookieStore)(nil).gatewayPoolMarkStale("x", "y", "z") })
+	store.gatewayPoolMarkStale("", "tkt-2") // 空身份：静默返回，不 panic
+	require.NotPanics(t, func() { (*openAICodexCookieStore)(nil).gatewayPoolMarkStale("x", "y") })
 }
 
-// 票号在手上这一份之后被换掉时，标 Stale 不能静默失效。
-//
-// 时序：请求 B 读走缓存里那张 pair（tkt-1）之后被判降智，而此时缓存里已经换成了 tkt-2
-// （并发重新取票）。只比票号的话 B 这一标就白标了——`until` 不清零、cachedPoolPair 继续判
-// Live ⇒ 刚被判死的那条路由在窗口剩余时间里每一发都照走。所以落点对得上也要认。
-func TestGatewayPoolMarkStaleFallsBackToGatewayWhenTicketChanged(t *testing.T) {
+// Replacement on the same gateway is still a different ticket.
+func TestGatewayPoolMarkStalePreservesReplacementOnSameGateway(t *testing.T) {
 	store := &openAICodexCookieStore{}
 	store.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
 		cookie: "__cflb=a", gateway: "unified-142", version: "tkt-2", // 缓存里已经换成 tkt-2
@@ -427,11 +428,10 @@ func TestGatewayPoolMarkStaleFallsBackToGatewayWhenTicketChanged(t *testing.T) {
 	})
 
 	// B 手上还是换票前那张 tkt-1，但判死的是 unified-142 这个落点。
-	store.gatewayPoolMarkStale(gwpoolTestIdentity, "tkt-1", "unified-142")
+	store.gatewayPoolMarkStale(gwpoolTestIdentity, "tkt-1")
 
 	cached, state := store.cachedPoolPair(gwpoolTestIdentity)
-	require.Equal(t, openAIGatewayPoolPairStale, state,
-		"换过票号就标不上了 ⇒ 被判死的路由会继续出站")
+	require.Equal(t, openAIGatewayPoolPairLive, state, "late old-version verdict must preserve replacement")
 	require.Equal(t, "tkt-2", cached.version, "要排掉的是缓存里现持的那张票号")
 }
 
@@ -513,7 +513,7 @@ func TestStateEchoRecordsBothVerdictsOnTheAppliedSnapshot(t *testing.T) {
 		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 		ctx, sink := withOpenAIGatewayPoolSink(req.Context(), ginCtx)
 		gwpoolEchoSeedVerified(t, svc, fake.account(1))
-		resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", fake.account(1))
+		resp, err := svc.doOpenAIUpstreamAttempt(req.WithContext(ctx), "", fake.account(1))
 		require.NoError(t, err)
 		require.NotNil(t, resp)
 		_ = resp.Body.Close()
@@ -561,7 +561,7 @@ func TestStateEchoRecordsBothVerdictsOnTheAppliedSnapshot(t *testing.T) {
 		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 		ctx, sink := withOpenAIGatewayPoolSink(req.Context(), ginCtx)
 		gwpoolEchoSeedVerified(t, svc, fake.account(1))
-		resp, err := svc.doOpenAIUpstream(req.WithContext(ctx), "", fake.account(1))
+		resp, err := svc.doOpenAIUpstreamAttempt(req.WithContext(ctx), "", fake.account(1))
 		require.NoError(t, err)
 		require.NotNil(t, resp)
 		_ = resp.Body.Close()

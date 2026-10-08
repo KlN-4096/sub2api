@@ -57,7 +57,7 @@ describe('gateway progress polling', () => {
     wrapper.unmount()
   })
 
-  it('retains the snapshot on blur, revokes live status and resumes without a blank frame', async () => {
+  it('pauses on blur without fabricating a failure and resumes with one complete snapshot', async () => {
     vi.useFakeTimers()
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
     const focus = vi.mocked(document.hasFocus)
@@ -74,7 +74,8 @@ describe('gateway progress polling', () => {
     focus.mockReturnValue(false)
     window.dispatchEvent(new Event('blur'))
     await flushPromises()
-    expect(state!.unavailable.value).toBe(true)
+    expect(state!.paused.value).toBe(true)
+    expect(state!.unavailable.value).toBe(false)
     expect(state!.progress.value[1]).toEqual(first)
     await vi.advanceTimersByTimeAsync(5000)
     expect(getGatewayPoolProgress).toHaveBeenCalledTimes(1)
@@ -82,11 +83,13 @@ describe('gateway progress polling', () => {
     window.dispatchEvent(new Event('focus'))
     await flushPromises()
     expect(state!.progress.value[1]).toEqual(first)
-    expect(state!.unavailable.value).toBe(true)
+    expect(state!.paused.value).toBe(true)
+    expect(state!.unavailable.value).toBe(false)
     resolveNext({ 1: { ...first, attempt: 3 } })
     await flushPromises()
     expect(state!.progress.value[1].attempt).toBe(3)
     expect(state!.unavailable.value).toBe(false)
+    expect(state!.paused.value).toBe(false)
     wrapper.unmount()
   })
 

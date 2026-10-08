@@ -24,13 +24,15 @@ func (s *openAICodexCookieStore) gatewayPoolCandidateQueue(identity string) *gat
 	return queue
 }
 
-func (q *gatewayPoolCandidateQueue) pick(eligible []gwpool.Gateway, adaptive ...map[string]float64) string {
+func (q *gatewayPoolCandidateQueue) pick(eligible []gwpool.Gateway, policy ...gatewayPoolCandidateRanking) string {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	ready := make(map[string]bool, len(eligible))
+	catalog := make(map[string]gwpool.Gateway, len(eligible))
 	for _, candidate := range eligible {
 		if candidate.Name != "" {
 			ready[candidate.Name] = true
+			catalog[candidate.Name] = candidate
 		}
 	}
 	names := make([]string, 0, len(ready))
@@ -51,12 +53,12 @@ func (q *gatewayPoolCandidateQueue) pick(eligible []gwpool.Gateway, adaptive ...
 		return ""
 	}
 	selected := names[0]
-	if len(adaptive) > 0 && len(adaptive[0]) >= 2 {
+	if len(policy) > 0 {
 		ordered := make([]gwpool.Gateway, 0, len(names))
 		for _, name := range names {
-			ordered = append(ordered, gwpool.Gateway{Name: name})
+			ordered = append(ordered, catalog[name])
 		}
-		selected = rankGatewayPoolAdaptive(ordered, adaptive[0])[0].Name
+		selected = policy[0].order(ordered)[0].Name
 	}
 	// Rotate in the untouched FIFO, not the score order: baseline exploration
 	// can still reach a lower-scoring or unmeasured candidate.
