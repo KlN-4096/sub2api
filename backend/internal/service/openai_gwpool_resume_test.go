@@ -73,7 +73,7 @@ func TestGatewayPoolResumeWaitsFor50LocalCooldownsAfterExhaustion(t *testing.T) 
 	repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*account}}}
 	svc := &OpenAIGatewayService{accountRepo: repo}
 	require.False(t, svc.gatewayPoolNoRemainingRoutes(context.Background(), account), "nine candidates are not exhausted")
-	fake.listGateways = nil
+	fake.listGateways = []gwpoolFakeGateway{}
 	require.True(t, svc.gatewayPoolNoRemainingRoutes(context.Background(), account))
 	seedGatewayPoolLocalReady(svc, 9, 50)
 	svc.restGatewayPoolAccount(context.Background(), account, gwpoolTestIdentity, 7)

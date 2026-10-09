@@ -286,8 +286,14 @@ func TestGatewayPoolUsageAbandonedFetchSettlesAfterStrictZero(t *testing.T) {
 	}()
 	<-started
 	require.ErrorIs(t, <-done, context.DeadlineExceeded)
-	_, pending := svc.codexCookies.gatewayPoolInventorySnapshot(identity)
-	require.True(t, pending)
+	// The canceled fetch may already have left the inventory operation. Its
+	// cleanup must still wait for a fresh successful directory before ending
+	// usage; whether its goroutine has exited is not a business invariant.
+	before, err := repo.GetByID(context.Background(), 1)
+	require.NoError(t, err)
+	state := readGatewayPoolUsage(before, gatewayPoolLedgerTag(identity))
+	require.Len(t, state.Rounds, 1)
+	require.True(t, state.Rounds[0].EndedAt.IsZero(), "cancellation alone is not confirmed exhaustion")
 	releaseOnce.Do(func() { close(release) })
 	require.Eventually(t, func() bool {
 		fresh, _ := repo.GetByID(context.Background(), 1)

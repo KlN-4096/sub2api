@@ -42,10 +42,14 @@ func TestGatewayPoolFreshSelectionRespectsLatestCatalogAndLocalRules(t *testing.
 			ctx := context.WithValue(context.Background(), gatewayPoolProbeModelKey{}, "luna")
 			pool, err := svc.codexCookies.poolClient(account)
 			require.NoError(t, err)
-			picked := svc.codexCookies.gatewayPoolPick(ctx, pool, account, gwpoolTestIdentity)
+			catalog, err := pool.Catalog(ctx, "acc-a/user-a", gatewayPoolAccountTag(account, gwpoolTestIdentity), "luna", 0)
+			if mode == "list-failure" {
+				require.Error(t, err, "unreadable inventory is not an empty successful directory")
+				return
+			}
+			require.NoError(t, err)
+			picked := svc.codexCookies.gatewayPoolPick(ctx, account, gwpoolTestIdentity, catalog.Gateways, nil)
 			switch mode {
-			case "list-failure":
-				require.Empty(t, picked, "listing failure permits bare acquisition, not invented exhaustion")
 			case "cooling":
 				require.Equal(t, "low", picked, "pool priority cannot bypass local cooldown")
 			default:

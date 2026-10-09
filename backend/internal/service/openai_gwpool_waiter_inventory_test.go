@@ -10,7 +10,7 @@ import (
 
 func TestGatewayPoolPreparingWaiterCannotMaskExhaustion(t *testing.T) {
 	fake := newGwpoolFakePool(t, "offline", 150)
-	fake.listGateways = nil // true exhaustion, not the retired low-count threshold
+	fake.listGateways = []gwpoolFakeGateway{} // true exhaustion, not the retired low-count threshold
 	account := gwpoolTestAccount(1)
 	account.Extra[openAIGatewayPoolRotationMinGatewaysExtraKey] = 10
 	fake.configure(account)

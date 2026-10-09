@@ -215,7 +215,11 @@ func TestGatewayPoolDoesNotBackOffOnWaitableCodes(t *testing.T) {
 				require.ErrorIs(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, http.Header{}),
 					gwpool.ErrNoSlot)
 			}
-			require.EqualValues(t, 2, fake.hits.Load(), "不退避 ⇒ 下一发照常取票")
+			wantHits := int64(2)
+			if code == gwpool.CodeNoLivePair || code == gwpool.CodeNoGateway {
+				wantHits = 4 // each logical attempt refreshes once after precise stock loss
+			}
+			require.EqualValues(t, wantHits, fake.hits.Load(), "不退避 ⇒ 下一发照常取票")
 			require.Zero(t, gwpoolBackoffLeft(store))
 		})
 	}
@@ -245,7 +249,7 @@ func TestGatewayPoolBareRetryDependsOnErrorCode(t *testing.T) {
 			require.EqualValues(t, tc.wantHits, fake.hits.Load(), tc.wantRetry)
 			require.Contains(t, fake.nextQuery(t), "gateway=unified-167", "第一次是点名")
 			if tc.wantHits > 1 {
-				require.NotContains(t, fake.nextQuery(t), "gateway=", "第二次是裸取")
+				require.Contains(t, fake.nextQuery(t), "gateway=unified-167", "刷新后仍必须明确点名")
 			}
 		})
 	}
@@ -279,11 +283,9 @@ func TestGatewayPoolAsksForUsableLifetimeAndWait(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "30", query.Get("min_remaining"), "use the lowest supported pool delivery floor, never impose an extra local 60s filter")
 
-	wait, err := strconv.Atoi(query.Get("wait"))
-	require.NoError(t, err, "wait 必须带，不然池子不会等现铸")
-	require.Positive(t, wait)
-	require.Less(t, float64(wait), acct.gatewayPoolFetchTimeout().Seconds(),
-		"wait 必须小于取票超时，否则池子还在等、这边先超时")
+	require.Empty(t, query.Get("wait"), "等待只在客户端进行")
+	require.Empty(t, query.Get("force"), "换票只由客户端选择")
+	require.Equal(t, "unified-142", query.Get("gateway"))
 
 	// 取票超时配小 ⇒ wait 跟着变小甚至不带（钳位是代码而不是注释）。
 	acct.Extra[openAIGatewayPoolFetchTimeoutExtraKey] = 1
@@ -610,7 +612,8 @@ func TestGatewayPoolAppliedMarkerIsPerRequest(t *testing.T) {
 	require.ErrorIs(t, err, gwpool.ErrNoSlot)
 	result := &OpenAIForwardResult{}
 	sink.publish(result)
-	require.Equal(t, OpenAIGatewayPoolApplied{}, result.GatewayPoolApplied)
+	require.Equal(t, OpenAIGatewayPoolApplied{PoolLive: 1, PoolFree: 1}, result.GatewayPoolApplied,
+		"目录统计不等于已注入，身份/票/版本必须保持空值")
 	_, fromPool, _, _ = svc.routePairInUse(noSlotAcct, http.Header{}, result.GatewayPoolApplied)
 	require.False(t, fromPool)
 }
@@ -657,8 +660,8 @@ func TestGatewayPoolSeedsExcludeFromThePersistedLandingRecord(t *testing.T) {
 
 	headers := http.Header{}
 	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, headers))
-	require.Equal(t, gwpoolTestCookieQuery+"&exclude=unified-167", fake.nextQuery(t),
-		"窗口内那条要补回 exclude；出了窗口的那条不许补")
+	require.Equal(t, gwpoolTestCookieQuery+"&gateway=unified-142", fake.nextQuery(t),
+		"持久冷却只用于本地筛选，再明确点名")
 	require.True(t, store.gatewayPoolUsedRecently(gwpoolTestIdentity, "unified-167", time.Hour+time.Minute))
 }
 

@@ -199,12 +199,15 @@ func (s *OpenAIGatewayService) gatewayPoolWaitContext(ctx context.Context, accou
 }
 
 func gatewayPoolRetryableShortage(err error) (*gwpool.PoolError, bool) {
+	if errors.Is(err, gwpool.ErrCatalogUnavailable) {
+		return &gwpool.PoolError{}, true
+	}
 	var poolErr *gwpool.PoolError
 	if !errors.As(err, &poolErr) {
 		return nil, false
 	}
 	switch poolErr.Code {
-	case gwpool.CodeNoGateway, gwpool.CodeNoLivePair, gwpool.CodeAllCooling:
+	case gwpool.CodeNoGateway, gwpool.CodeNoLivePair, gwpool.CodeAllCooling, gwpool.CodeConsumerRateLimited:
 		return poolErr, true
 	default:
 		return nil, false
@@ -246,7 +249,7 @@ func (s *OpenAIGatewayService) attachGatewayPoolRouteWithWait(
 		}
 		// Fresh exhaustion is actionable immediately. Waiting on a dead queue
 		// for every request would prevent the normal account-rest transition.
-		if shared {
+		if shared && poolErr.Code != gwpool.CodeConsumerRateLimited {
 			if identity, ok := ctx.Value(gatewayPoolPreparationIdentityKey{}).(string); ok {
 				s.applyGatewayPoolPreparationPolicies(ctx, identity)
 			}
