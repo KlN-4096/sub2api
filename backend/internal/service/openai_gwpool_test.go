@@ -54,6 +54,7 @@ const (
 type gwpoolFakeGateway struct {
 	Name       string                  `json:"name"`
 	PairReady  bool                    `json:"pair_ready"`
+	ValidForS  int                     `json:"valid_for_s,omitempty"`
 	UsedByYou  bool                    `json:"used_by_you"`
 	LastUsedAt string                  `json:"last_used_at,omitempty"`
 	Contacts   []gwpool.ContactStats   `json:"contacts,omitempty"`
