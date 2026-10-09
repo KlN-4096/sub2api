@@ -18,14 +18,32 @@ type gatewayPoolCandidateRanking struct {
 	candidates []gwpool.Gateway // unscored FIFO admission baseline
 	quality    map[string]float64
 	adaptive   map[string]float64
+	preferred  map[string]bool // measured same-member/model/current-idle majority
+	explore    bool
 	deferUS    bool
 }
 
-// Apply scores to this pick only, not to the FIFO's stored order. US deferral
-// is final and soft: an all-US eligible set remains usable.
+// Rebuild two logical queues at each pick. A recovered quality candidate can
+// bypass the ordinary backlog; bounded exploration still rotates the ordinary
+// FIFO. Scores never overwrite the stored FIFO. US deferral remains final/soft.
 func (r gatewayPoolCandidateRanking) order(candidates []gwpool.Gateway) []gwpool.Gateway {
-	out := rankGatewayPoolAdaptive(candidates, r.quality)
-	out = rankGatewayPoolAdaptive(out, r.adaptive)
+	rank := func(group []gwpool.Gateway) []gwpool.Gateway {
+		return rankGatewayPoolAdaptive(rankGatewayPoolAdaptive(group, r.quality), r.adaptive)
+	}
+	var preferred, ordinary []gwpool.Gateway
+	for _, candidate := range candidates {
+		if r.preferred[candidate.Name] {
+			preferred = append(preferred, candidate)
+		} else {
+			ordinary = append(ordinary, candidate)
+		}
+	}
+	var out []gwpool.Gateway
+	if r.explore {
+		out = append(ordinary, preferred...)
+	} else {
+		out = append(rank(preferred), rank(ordinary)...)
+	}
 	if r.deferUS {
 		out = append([]gwpool.Gateway(nil), out...)
 		sort.SliceStable(out, func(i, j int) bool {
@@ -68,6 +86,9 @@ func (s *openAICodexCookieStore) gatewayPoolRankCandidates(ctx context.Context, 
 		local = gatewayPoolLocalContactStats(state, model, source, now)
 	}
 	effective := gatewayPoolPreferLocalContacts(candidates, local)
+	if freshComplete {
+		ranking.preferred = gatewayPoolPreferredCandidates(effective, state, model, source, now)
+	}
 	quality := gatewayPoolQualityScores(effective, state, local, model, source, now)
 	if len(quality) == 0 {
 		return ranking
@@ -78,6 +99,7 @@ func (s *openAICodexCookieStore) gatewayPoolRankCandidates(ctx context.Context, 
 		panic("gwpool contact pick counter has an invalid type")
 	}
 	if counter.Add(1)%gatewayPoolContactExploreEvery == 0 {
+		ranking.explore = true
 		return ranking
 	}
 	ranking.quality = quality
