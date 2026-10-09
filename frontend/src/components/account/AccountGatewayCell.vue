@@ -2,16 +2,16 @@
   <div v-if="isCodexAccount" class="w-[260px] min-w-[260px] max-w-[260px] space-y-2 overflow-hidden text-[11px] tabular-nums" data-testid="account-gateway-cell">
     <div v-if="usesPool" class="min-h-[60px] whitespace-normal break-words rounded-md bg-primary-50 px-2.5 py-2 text-[11px] text-primary-700 dark:bg-primary-900/20 dark:text-primary-300"
       role="status" aria-live="polite" data-testid="account-gateway-progress">
-      <p :class="{ 'text-gray-500 dark:text-gray-400': progressUnavailable }">
-        <span v-if="progress?.sequence">{{ t('admin.accounts.openai.gatewayProgress.run', { id: progress.sequence }) }} · </span>
-        {{ t(`admin.accounts.openai.gatewayProgress.${progressUnavailable && progress?.phase === 'ready' ? 'recentReady' : progress?.phase || 'idle'}`) }}
+      <p>
+        <span v-if="displayProgress?.sequence">{{ t('admin.accounts.openai.gatewayProgress.run', { id: displayProgress.sequence }) }} · </span>
+        {{ t(`admin.accounts.openai.gatewayProgress.${displayProgress?.phase || 'idle'}`) }}
       </p>
-      <p v-if="progress && progress.phase !== 'idle'" class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+      <p v-if="displayProgress && displayProgress.phase !== 'idle'" class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
         {{ t('admin.accounts.openai.gatewayProgress.count', {
-          attempt: progress.attempt, seconds: Math.floor(progress.elapsed_ms / 1000)
+          attempt: displayProgress.attempt, seconds: Math.floor(displayProgress.elapsed_ms / 1000)
         }) }}
-        <span v-if="progress.rejected"> · {{ t('admin.accounts.openai.gatewayProgress.rejected', { count: progress.rejected }) }}</span>
-        <span v-if="progress.active_requests > 1 && !progressUnavailable"> · {{ t('admin.accounts.openai.gatewayProgress.concurrent', { count: progress.active_requests }) }}</span>
+        <span v-if="displayProgress.rejected"> · {{ t('admin.accounts.openai.gatewayProgress.rejected', { count: displayProgress.rejected }) }}</span>
+        <span v-if="displayProgress.active_requests > 1"> · {{ t('admin.accounts.openai.gatewayProgress.concurrent', { count: displayProgress.active_requests }) }}</span>
       </p>
     </div>
     <!-- 没有读数也要占位：整块消失时，「没接网关池」「接了还没跑过流量」「落点读不出来」
@@ -34,7 +34,7 @@
         >
           {{ preparing ? '' : verdictMark(current) }}{{ regionLabel(current.region) }} · {{ current.name }}
         </span>
-        <span v-else class="truncate text-[10px] text-gray-400">{{ t(`admin.accounts.openai.gatewayProgress.${progress?.phase}`) }}</span>
+        <span v-else class="truncate text-[10px] text-gray-400">{{ t(`admin.accounts.openai.gatewayProgress.${displayProgress?.phase}`) }}</span>
         <span v-if="current" class="ml-auto shrink-0 text-[10px] text-gray-400" data-testid="account-gateway-current-time">{{ safeRelativeTime(currentAt) }}</span>
       </div>
       <div v-for="round in (usesPool ? activeRounds : [])" :key="round.id" class="space-y-1 text-[11px] text-gray-500 dark:text-gray-400" data-testid="account-gateway-usage-round">
@@ -91,10 +91,11 @@
       </p>
       <button type="button"
         class="inline-flex min-w-[92px] shrink-0 items-center justify-center gap-1.5 rounded-md border border-gray-200 px-2.5 py-1.5 text-[11px] text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 disabled:cursor-wait disabled:opacity-50 dark:border-dark-600 dark:text-gray-400 dark:hover:bg-dark-700 dark:hover:text-gray-200"
-        data-testid="account-gateway-retry" :disabled="retryPending" :aria-busy="retryPending || undefined"
+        data-testid="account-gateway-retry" :disabled="display.retryPending" :aria-busy="display.retryPending || undefined"
         :title="t('admin.accounts.openai.gwpoolManualRetryHint')" @click="emit('retry', account.id)">
-        <Icon name="refresh" size="xs" class="shrink-0" :class="{ 'motion-safe:animate-spin': retryPending }" aria-hidden="true" />
-        <span>{{ t(`admin.accounts.openai.${retryPending ? 'gwpoolManualRetryPending' : 'gwpoolManualRetry'}`) }}</span>
+        <Icon name="refresh" size="xs" class="shrink-0" :class="{ 'motion-safe:animate-spin': display.retryPending }"
+          :style="display.retryPending && progressPaused ? { animationPlayState: 'paused' } : undefined" aria-hidden="true" />
+        <span>{{ t(`admin.accounts.openai.${display.retryPending ? 'gwpoolManualRetryPending' : 'gwpoolManualRetry'}`) }}</span>
       </button>
     </div>
     <p v-if="usesPool && runtime" class="truncate border-t border-gray-100 pt-2 text-[10px] text-gray-500 dark:border-gray-700 dark:text-gray-400" data-testid="account-gateway-usage-history">
@@ -121,13 +122,14 @@
  * 大区同样是**池子口径**（铸这张票的出口在哪儿），不是「这一发实际落在哪个大区」：
  * 注入时两件 cookie 齐送 ⇒ 上游不回新 __oailb ⇒ 真实落点读不出来（docs 的 S1/S2）。
  */
-import { computed, ref, watch } from 'vue'
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { Account } from '@/types'
 import type { GatewayPoolProgress, GatewayPoolUsageRound } from '@/api/admin/accounts'
 import { targetsCodexUpstream } from '@/utils/turnState'
 import { formatRelativeTime } from '@/utils/format'
 import { useSharedNowTicker } from '@/composables/useNowTicker'
+import { usePausedDisplay } from '@/composables/usePausedDisplay'
 import Icon from '@/components/icons/Icon.vue'
 import { GATEWAY_REGION_KEYS, gatewayRegionDisplayKey } from '@/utils/gatewayRegionDisplay'
 
@@ -145,29 +147,28 @@ const MAX_PER_REGION = 1
 const DEFAULT_WINDOW_MS = 60 * 60 * 1000
 const MAX_WINDOW_MS = 24 * 60 * 60 * 1000
 
-// Three missed 1s polls invalidate the live snapshot; history never turns green.
-const LIVE_SNAPSHOT_MAX_AGE_MS = 3_000
-
-const props = defineProps<{ account: Account; progress?: GatewayPoolProgress; progressUnavailable?: boolean; progressPaused?: boolean; retryPending?: boolean }>()
+const props = defineProps<{ account: Account; progress?: GatewayPoolProgress; progressPaused?: boolean; retryPending?: boolean }>()
 const emit = defineEmits<{ retry: [id: number] }>()
 const { t } = useI18n()
 const wallTime = useSharedNowTicker(1000)
-const frozenTime = ref(wallTime.value)
-const displayFrozen = computed(() => props.progressUnavailable || props.progressPaused)
-watch(displayFrozen, frozen => {
-  if (frozen) frozenTime.value = wallTime.value
-})
-const now = computed(() => displayFrozen.value ? frozenTime.value : wallTime.value)
-const runtime = computed(() => props.progress?.runtime)
-const snapshotFresh = computed(() => {
-  const snapshot = runtime.value
-  return !props.progressUnavailable && !!snapshot && validTimestamp(snapshot.observed_at) &&
-    wallTime.value - Date.parse(snapshot.observed_at) <= LIVE_SNAPSHOT_MAX_AGE_MS
-})
+const display = usePausedDisplay(
+  () => ({ ...props, now: wallTime.value }),
+  () => props.progressPaused === true,
+  () => props.account.id
+)
+const displayProgress = computed(() => display.value.progress)
+const now = computed(() => display.value.now)
+const runtime = computed(() => displayProgress.value?.runtime)
+function ticketExpired(ticket: NonNullable<GatewayPoolProgress['runtime']>['tickets'][number]): boolean {
+  return validTimestamp(ticket.expires_at) && Date.parse(ticket.expires_at!) <= now.value
+}
 const liveTickets = computed(() => {
   const snapshot = runtime.value
-  if (!snapshotFresh.value || !snapshot) return []
-  return snapshot.tickets.filter((ticket) => !validTimestamp(ticket.expires_at) || Date.parse(ticket.expires_at!) > wallTime.value)
+  if (!snapshot) return []
+  // The API only lists backend-live tickets. Missing expiry means no explicit
+  // cookie deadline, not an invented TTL; a present malformed value is unknown.
+  return snapshot.tickets.filter((ticket) => ticket.expires_at === undefined ||
+    (validTimestamp(ticket.expires_at) && !ticketExpired(ticket)))
 })
 const activeRounds = computed(() => runtime.value?.rounds.filter((round) => round.model === 'all' && !round.ended_at) || [])
 const ACTIVE_USAGE_MODE = 'business_active_v1'
@@ -196,7 +197,7 @@ function validTimestamp(value?: string): boolean {
   return !!value && Number.isFinite(Date.parse(value)) && Date.parse(value) > 0
 }
 function safeRelativeTime(value?: string): string {
-  return validTimestamp(value) ? formatRelativeTime(value!) : '—'
+  return validTimestamp(value) ? formatRelativeTime(value!, now.value) : '—'
 }
 function formatUseTime(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000))
@@ -249,8 +250,8 @@ interface GatewayItem {
   recommendedSeconds: number
 }
 
-// Green requires a current leased ticket with explicit model proofs. Red means
-// local cooldown, not a new upstream judgment; grey only permits another attempt.
+// Green requires a verified, unexpired ticket. Red requires an expired ticket
+// or an explicit degraded verdict still in cooldown; mere contact is grey.
 const TONE_CLASS = {
   full: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
   degraded: 'bg-rose-50 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300',
@@ -259,10 +260,10 @@ const TONE_CLASS = {
 
 type GatewayTone = keyof typeof TONE_CLASS
 
-const isCodexAccount = computed(() => targetsCodexUpstream(props.account))
+const isCodexAccount = computed(() => targetsCodexUpstream(display.value.account))
 
 const extra = computed(() => {
-  const base = (props.account.extra as Record<string, unknown> | undefined) ?? {}
+  const base = (display.value.account.extra as Record<string, unknown> | undefined) ?? {}
   const snapshot = runtime.value
   if (base.openai_gwpool !== true || !snapshot) return base
   // Display-only projection: never replace the account object used by editing.
@@ -330,17 +331,17 @@ const items = computed<GatewayItem[]>(() => {
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
 })
 
-const preparing = computed(() => usesPool.value && !!props.progress &&
-  ['pending', 'fetching', 'verifying', 'waiting'].includes(props.progress.phase))
+const preparing = computed(() => usesPool.value && !!displayProgress.value &&
+  ['pending', 'fetching', 'verifying', 'waiting'].includes(displayProgress.value.phase))
 const currentTicket = computed(() => preparing.value
-  ? runtime.value?.tickets.find(ticket => ticket.gateway === props.progress?.gateway)
+  ? runtime.value?.tickets.find(ticket => ticket.gateway === displayProgress.value?.gateway)
   : runtime.value?.tickets[0])
 const current = computed<GatewayItem | null>(() => {
   const live = currentTicket.value
   // A rejected candidate disappears during acquisition; it must not expose
   // history.current again between two verification attempts.
   const name = preparing.value
-    ? (props.progress?.phase === 'verifying' ? props.progress.gateway : '')
+    ? (displayProgress.value?.phase === 'verifying' ? displayProgress.value.gateway : '')
     : live?.gateway || history.value.current
   if (!name) return null
   // 时间和大区取 seen 里那条；没有就退回记录自己的那两个字段（老记录、或被裁过）。
@@ -361,7 +362,7 @@ const current = computed<GatewayItem | null>(() => {
   )
 })
 const currentAt = computed(() => preparing.value
-  ? props.progress?.updated_at
+  ? displayProgress.value?.updated_at
   : currentTicket.value?.verified_at || current.value?.at)
 
 interface RegionCell {
@@ -455,9 +456,12 @@ function toneOf(item: GatewayItem | null | undefined): GatewayTone {
   // 兜底会把每个最近用过的落点都染红。
   if (!usesPool.value) return 'idle'
   if (item && liveTickets.value.some((ticket) => ticket.gateway === item.name && ticket.verified_models.length > 0)) return 'full'
-  if (!snapshotFresh.value && item && runtime.value?.tickets.some((ticket) => ticket.gateway === item.name && ticket.verified_models.length > 0)) return 'idle'
-  if (!item || !isHot(item)) return 'idle'
-  return 'degraded'
+  if (!item) return 'idle'
+  const tickets = runtime.value?.tickets.filter((ticket) => ticket.gateway === item.name) ?? []
+  // A replacement awaiting verification must not inherit the previous ticket's
+  // degraded verdict just because both came from the same gateway.
+  if (tickets.length) return tickets.every(ticketExpired) ? 'degraded' : 'idle'
+  return item.verdict === 'degraded' && isHot(item) ? 'degraded' : 'idle'
 }
 
 /**

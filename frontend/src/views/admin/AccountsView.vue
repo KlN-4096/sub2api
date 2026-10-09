@@ -285,13 +285,14 @@
             </div>
           </template>
           <template #cell-capacity="{ row }">
-            <AccountCapacityCell :account="row" :gateway-progress="gatewayProgress[row.id]" :gateway-progress-unavailable="gatewayProgressUnavailable" />
+            <AccountCapacityCell :account="row" :gateway-progress="gatewayProgress[row.id]" :progress-paused="row.extra?.openai_gwpool === true && gatewayProgressPaused" />
           </template>
           <template #cell-status="{ row }">
             <div class="flex items-center gap-1.5">
               <AccountStatusIndicator :account="row"
-                :gateway-pool-rest="gatewayProgressUnavailable ? undefined : gatewayProgress[row.id]?.runtime?.rest"
-                :gateway-pool-rest-pending="row.extra?.openai_gwpool === true && (gatewayProgressUnavailable || !gatewayProgress[row.id]?.runtime?.rest)"
+                :gateway-pool-rest="gatewayProgress[row.id]?.runtime?.rest"
+                :gateway-pool-rest-pending="row.extra?.openai_gwpool === true && !gatewayProgress[row.id]?.runtime?.rest"
+                :progress-paused="row.extra?.openai_gwpool === true && gatewayProgressPaused"
                 @show-temp-unsched="handleShowTempUnsched" />
             </div>
           </template>
@@ -338,7 +339,7 @@
             </div>
           </template>
           <template #cell-gateway="{ row }">
-            <AccountGatewayCell :account="row" :progress="gatewayProgress[row.id]" :progress-unavailable="gatewaySnapshotUnavailable" :progress-paused="gatewayProgressPaused"
+            <AccountGatewayCell :account="row" :progress="gatewayProgress[row.id]" :progress-paused="row.extra?.openai_gwpool === true && gatewayProgressPaused"
               :retry-pending="retryingGatewayAccounts.has(row.id)" @retry="retryGatewayPool" />
           </template>
           <template #cell-proxy="{ row }">
@@ -1143,14 +1144,11 @@ const {
   }
 })
 
-const { progress: gatewayProgress, unavailable: gatewaySnapshotUnavailable, paused: gatewayProgressPaused } = useGatewayPoolProgress(computed(() =>
+const { progress: gatewayProgress, paused: gatewayProgressPaused } = useGatewayPoolProgress(computed(() =>
   hiddenColumns.has('gateway') && hiddenColumns.has('capacity') && hiddenColumns.has('status') ? [] : accounts.value
     .filter(account => account.extra?.openai_gwpool === true)
     .map(account => account.id)
 ))
-// Capacity/rest admission still requires live data; the gateway card can retain
-// a paused display without mistaking an intentional blur for a read failure.
-const gatewayProgressUnavailable = computed(() => gatewaySnapshotUnavailable.value || gatewayProgressPaused.value)
 
 const {
   selectedSet,
