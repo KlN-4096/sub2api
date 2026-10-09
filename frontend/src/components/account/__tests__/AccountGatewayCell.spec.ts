@@ -65,7 +65,7 @@ it('验证候选与取票空档不回跳历史票，验满后显示新票', asyn
   }
 })
 
-it('暂停只冻结同份冷却读数，恢复快照到达才更新，过期票仍撤绿', async () => {
+it('失焦保留最后一帧，跨过票到期与相对时间边界也不变，恢复快照才更新', async () => {
   vi.useFakeTimers()
   const now = Date.now()
   const at = new Date(now).toISOString()
@@ -83,20 +83,57 @@ it('暂停只冻结同份冷却读数，恢复快照到达才更新，过期票�
   }
   const w = mount(AccountGatewayCell, { props: { account: account(history), progress } })
   try {
-    const count = w.get('[data-testid="account-gateway-window-usage"]').text()
-    const status = w.get('[data-testid="account-gateway-progress"] p').attributes('class')
-    expect(count).toContain('"used":1,"cooled":1')
+    const frame = w.html()
+    expect(w.get('[data-testid="account-gateway-window-usage"]').text()).toContain('"used":1,"cooled":1')
     await w.setProps({ progressPaused: true })
+    expect(w.html()).toBe(frame)
     await vi.advanceTimersByTimeAsync(1000)
-    expect(w.get('[data-testid="account-gateway-region-east-asia"]').attributes('data-tone')).not.toBe('full')
-    await vi.advanceTimersByTimeAsync(19_000)
-    expect(w.get('[data-testid="account-gateway-window-usage"]').text()).toBe(count)
-    expect(w.get('[data-testid="account-gateway-progress"] p').attributes('class')).toBe(status)
-    expect(w.get('[data-testid="account-gateway-region-east-asia"]').attributes('data-tone')).toBe('idle')
+    expect(w.html()).toBe(frame)
+    await vi.advanceTimersByTimeAsync(69_000)
+    // Parent refreshes and a failed focus refresh must not alter the paused frame.
+    await w.setProps({
+      account: account({ current: 'unified-999' }),
+      progress: { ...progress, phase: 'verifying', gateway: 'unified-999', attempt: 9 }
+    })
+    expect(w.html()).toBe(frame)
     await w.setProps({ progressPaused: false, progress: { ...progress, runtime: {
       ...progress.runtime!, observed_at: new Date(Date.now()).toISOString(), tickets: []
     } } })
     expect(w.get('[data-testid="account-gateway-window-usage"]').text()).toContain('"used":0,"cooled":2')
+    expect(w.get('[data-testid="account-gateway-region-east-asia"]').attributes('data-tone')).toBe('idle')
+    expect(w.html()).not.toBe(frame)
+  } finally {
+    w.unmount()
+    vi.useRealTimers()
+  }
+})
+
+it('有焦点时慢刷新不因三秒快照年龄来回撤绿，但票真正到期仍更新', async () => {
+  vi.useFakeTimers()
+  const now = Date.now()
+  const at = new Date(now).toISOString()
+  const progress: GatewayPoolProgress = {
+    phase: 'ready', attempt: 1, limit: 0, rejected: 0, elapsed_ms: 0,
+    active_requests: 0, started_at: at, updated_at: at,
+    runtime: { observed_at: at, history: {
+      current: 'unified-11', seen: { 'unified-11': { at, region: 'east-asia' } }
+    }, rounds: [], archived: null, tickets: [{
+      gateway: 'unified-11', region: 'east-asia', verified_at: at,
+      verified_models: ['gpt-6-luna'], expires_at: new Date(now + 10_000).toISOString()
+    }] }
+  }
+  const w = mount(AccountGatewayCell, { props: { account: account({}), progress } })
+  const tone = () => w.get('[data-testid="account-gateway-region-east-asia"]').attributes('data-tone')
+  try {
+    expect(tone()).toBe('full')
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(tone()).toBe('full')
+    await w.setProps({ progress: { ...progress, runtime: {
+      ...progress.runtime!, observed_at: new Date(Date.now()).toISOString()
+    } } })
+    expect(tone()).toBe('full')
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(tone()).not.toBe('full')
   } finally {
     w.unmount()
     vi.useRealTimers()
@@ -120,9 +157,16 @@ it('手动重试只发出账号动作，清冷却墓碑不被最近历史染红'
   expect(w.get('[data-testid="account-gateway-retry"]').attributes('disabled')).toBeDefined()
   expect(retry.attributes('aria-busy')).toBe('true')
   expect(retry.text()).toBe('admin.accounts.openai.gwpoolManualRetryPending')
+  await w.setProps({ progressPaused: true })
+  expect(retry.get('svg').attributes('style')).toContain('animation-play-state: paused')
+  expect(retry.get('svg').classes()).toContain('motion-safe:animate-spin')
+  await w.setProps({ progressPaused: false, retryPending: false })
+  expect(retry.get('svg').attributes('style') ?? '').not.toContain('paused')
+  expect(retry.get('svg').classes()).not.toContain('motion-safe:animate-spin')
+  w.unmount()
 })
 
-it('完整快照覆盖陈旧落点但不修改编辑账号，失焦保留数字且撤绿冻结', async () => {
+it('完整快照覆盖陈旧落点但不修改编辑账号，刷新间隙不改变有效票颜色', async () => {
   vi.useFakeTimers()
   const at = new Date().toISOString()
   const acc = account({ current: 'old', seen: { old: { at, region: 'east-asia' } } })
@@ -144,15 +188,52 @@ it('完整快照覆盖陈旧落点但不修改编辑账号，失焦保留数字�
   expect((acc.extra?.openai_gwpool_gateways as { current: string }).current).toBe('old')
   expect(wrapper.get('[data-testid="account-gateway-region-east-asia"]').attributes('data-tone')).toBe('full')
   const duration = wrapper.get('[data-testid="account-gateway-usage-round"]').text()
-  await wrapper.setProps({ progressUnavailable: true })
   await vi.advanceTimersByTimeAsync(20_000)
   expect(wrapper.get('[data-testid="account-gateway-usage-round"]').text()).toBe(duration)
-  expect(wrapper.get('[data-testid="account-gateway-region-east-asia"]').attributes('data-tone')).toBe('idle')
+  expect(wrapper.get('[data-testid="account-gateway-region-east-asia"]').attributes('data-tone')).toBe('full')
   wrapper.unmount()
   vi.useRealTimers()
 })
 
-it('网关落点在没有历史时也显示真实验证进度，失败不继续假装寻找', async () => {
+it('只有明确判降或已到期票显示红，单纯近期碰过与历史满血显示灰', () => {
+  const w = render(account({ seen: {
+    recent: { at: isoAgo(1), region: 'us-east' },
+    historical: { at: isoAgo(1), region: 'east-asia', verdict: 'full' },
+    invalid: { at: isoAgo(1), region: 'europe', verdict: 'degraded' }
+  } }))
+  try {
+    expect(tone(w, 'us-east')).toBe('idle')
+    expect(tone(w, 'east-asia')).toBe('idle')
+    expect(tone(w, 'europe')).toBe('degraded')
+  } finally { w.unmount() }
+})
+
+it('同网关新票待验证不能沿用旧票的判降红色，验证成功后才变绿', async () => {
+  const at = new Date().toISOString()
+  const history = { current: 'g', seen: { g: { at, region: 'east-asia', verdict: 'degraded' } } }
+  const progress: GatewayPoolProgress = {
+    phase: 'idle', attempt: 0, limit: 0, rejected: 0, elapsed_ms: 0, active_requests: 0,
+    started_at: at, updated_at: at, runtime: {
+      observed_at: at, history, rounds: [], archived: null,
+      tickets: [{ gateway: 'g', region: 'east-asia', verified_models: [] }]
+    }
+  }
+  const w = mount(AccountGatewayCell, { props: { account: account(history), progress } })
+  try {
+    expect(tone(w, 'east-asia')).toBe('idle')
+    await w.setProps({ progress: { ...progress, runtime: { ...progress.runtime!,
+      tickets: [{ ...progress.runtime!.tickets[0], verified_models: ['gpt-6-luna'] }]
+    } } })
+    expect(tone(w, 'east-asia')).toBe('full')
+    // Missing expiry is allowed by the live-ticket contract; malformed expiry is not.
+    await w.setProps({ progress: { ...progress, runtime: { ...progress.runtime!,
+      tickets: [{ ...progress.runtime!.tickets[0], verified_models: ['gpt-6-luna'], expires_at: 'invalid' }]
+    } } })
+    expect(tone(w, 'east-asia')).toBe('idle')
+  } finally { w.unmount() }
+})
+
+it('网关落点在没有历史时也显示真实验证进度，空快照显示空状态', async () => {
   const wrapper = mount(AccountGatewayCell, { props: { account: account(undefined), progress: {
     phase: 'verifying', attempt: 2, limit: 5, rejected: 1, elapsed_ms: 8200,
     started_at: new Date().toISOString(), updated_at: new Date().toISOString(), active_requests: 1
@@ -160,7 +241,7 @@ it('网关落点在没有历史时也显示真实验证进度，失败不继续�
   expect(wrapper.get('[data-testid="account-gateway-progress"]').text()).toContain('"attempt":2,"seconds":8')
   expect(wrapper.get('[data-testid="account-gateway-progress"]').classes()).toContain('whitespace-normal')
   expect(wrapper.get('[data-testid="account-gateway-progress"]').classes()).toContain('break-words')
-  await wrapper.setProps({ progress: undefined, progressUnavailable: true })
+  await wrapper.setProps({ progress: undefined })
   expect(wrapper.find('[data-testid="account-gateway-progress"]').exists()).toBe(true)
   expect(wrapper.find('[data-testid="account-gateway-progress-unavailable"]').exists()).toBe(false)
   expect(wrapper.get('[data-testid="account-gateway-cell"]').classes()).toContain('w-[260px]')
@@ -191,7 +272,7 @@ it('验证编号使用周期内sequence，结束隐藏旧进度，新周期从1�
 
 it('失联仍保留已观测时长，归档同排展示且不混入旧模型墙钟', () => {
   const wrapper = mount(AccountGatewayCell, { props: {
-    account: account(undefined), progressUnavailable: true,
+    account: account(undefined),
     progress: {
       phase: 'idle', attempt: 0, limit: 8, rejected: 0, elapsed_ms: 0,
       started_at: '', updated_at: '', active_requests: 0,
@@ -258,12 +339,12 @@ const markedOf = (w: ReturnType<typeof render>, region: string) =>
     .map((s) => s.text())
     .at(-1)
 
-/** 判定字符：'✓ ' = 验过满血，'! ' = 窗口内碰过（现在打就是降智），'' = 已过窗口。 */
+/** 判定字符：'✓ ' = 有效已验票，'! ' = 明确无效，'' = 其它/未知状态。 */
 const markOf = (w: ReturnType<typeof render>, region: string) =>
   (markedOf(w, region) ?? '').match(/^[✓!] /)?.[0] ?? ''
 
-/** 「还烧着」= 本地账本窗口内碰过 = 格子不是淡显的那一档。 */
-const isHot = (w: ReturnType<typeof render>, region: string) => tone(w, region) !== 'idle'
+/** 冷却统计与票颜色分开，近期接触本身不是明确无效证据。 */
+const isHot = (w: ReturnType<typeof render>, region: string) => cell(w, region).classes().includes('font-medium')
 
 /** 格子的状态色：full / degraded / idle（见 AccountGatewayCell 的 TONE_CLASS）。 */
 const tone = (w: ReturnType<typeof render>, region: string) => cell(w, region).attributes('data-tone')
@@ -371,7 +452,7 @@ describe('AccountGatewayCell', () => {
       }
     }, { openai_gwpool_gateway_window_s: undefined }))
     expect(tone(w, 'east-asia')).toBe('idle')
-    expect(tone(w, 'us-east')).toBe('degraded')
+    expect(tone(w, 'us-east')).toBe('idle')
     const title = cell(w, 'us-east').attributes('title') ?? ''
     expect(title).toContain('-75s-')
     expect(title).toContain('regionHot:{"minutes":119}')
@@ -516,14 +597,14 @@ describe('AccountGatewayCell', () => {
         updated_at: isoAgo(60)
       })
     )
-    expect(tone(w, 'east-asia')).toBe('degraded')
+    expect(tone(w, 'east-asia')).toBe('idle')
     expect(tone(w, 'us-west')).toBe('degraded')
-    expect(tone(w, 'us-east')).toBe('degraded') // 碰过没判据 = 窗口已经烧了
+    expect(tone(w, 'us-east')).toBe('degraded') // 与 us-west 同属北美，展示最新的明确判降记录。
     expect(tone(w, 'oceania')).toBe('idle')
     expect(cell(w, 'europe').text()).toContain('-')
 
     // 色退化成装饰（9px 字号 + 红绿色盲 + title 在触屏上摸不到）时信息仍然读得出来。
-    expect(markOf(w, 'east-asia')).toBe('! ')
+    expect(markOf(w, 'east-asia')).toBe('')
     expect(markOf(w, 'us-west')).toBe('! ')
     expect(markOf(w, 'us-east')).toBe('! ')
     expect(markOf(w, 'oceania')).toBe('')
@@ -545,12 +626,12 @@ describe('AccountGatewayCell', () => {
         updated_at: isoAgo(60)
       })
     )
-    expect(tone(w, 'east-asia')).toBe('degraded')
+    expect(tone(w, 'east-asia')).toBe('idle')
     expect(cell(w, 'east-asia').attributes('title')).toContain('gatewayHistory.verdicts.fullExpired')
     expect(w.get('[data-testid="account-gateway-current"] span[title]').attributes('title')).toContain('gatewayHistory.verdicts.fullExpired')
   })
 
-  it('活票按真实租约及已验模型显示，快照失效即撤绿', async () => {
+  it('活票按真实租约及已验模型显示，不由快照时间戳决定颜色', async () => {
     const progress = {
       phase: 'idle' as const, attempt: 0, limit: 0, rejected: 0, elapsed_ms: 0,
       started_at: '', updated_at: '', active_requests: 0,
@@ -570,10 +651,12 @@ describe('AccountGatewayCell', () => {
     expect(w.get('[data-testid="account-gateway-usage-round"]').text()).toContain('"full":3,"attempted":8')
     expect(w.find('[data-testid="account-gateway-progress"]').exists()).toBe(true)
     await w.setProps({ progress: { ...progress, runtime: { ...progress.runtime, observed_at: isoAgo(10) } } })
-    expect(tone(w, 'east-asia')).toBe('idle')
-    await w.setProps({ progress, progressUnavailable: true })
+    expect(tone(w, 'east-asia')).toBe('full')
+    await w.setProps({ progress: { ...progress, runtime: { ...progress.runtime, observed_at: 'invalid' } } })
+    expect(tone(w, 'east-asia')).toBe('full')
+    await w.setProps({ progress })
     expect(w.find('[data-testid="account-gateway-live"]').exists()).toBe(false)
-    expect(tone(w, 'east-asia')).toBe('idle')
+    expect(tone(w, 'east-asia')).toBe('full')
     w.unmount()
   })
 
@@ -675,7 +758,7 @@ describe('AccountGatewayCell', () => {
         updated_at: isoAgo(60)
       })
     )
-    expect(tone(w, 'east-asia')).toBe('degraded')
+    expect(tone(w, 'east-asia')).toBe('idle')
     expect(cell(w, 'east-asia').attributes('title')).toContain('gatewayHistory.verdicts.none')
   })
 
