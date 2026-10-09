@@ -8,8 +8,8 @@ import (
 
 // Only names are queued, never a stockpile of live route credentials. Each pick
 // reconciles a fresh catalog + local cooldown projection. The FIFO remains the
-// exploration/fallback baseline; measured candidates may exchange positions for
-// this pick only. A cancelled caller does not reset the baseline order.
+// exploration/fallback baseline; ranking splits it into dynamic quality/ordinary
+// queues for this pick only. A cancelled caller does not reset the baseline order.
 type gatewayPoolCandidateQueue struct {
 	mu    sync.Mutex
 	names []string
