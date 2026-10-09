@@ -130,6 +130,7 @@ const DataTableStub = {
         <slot name="cell-tokens" :row="row" />
         <slot name="cell-latency" :row="row" />
         <slot name="cell-cost" :row="row" />
+        <slot name="cell-latency" :row="row" />
         <slot name="cell-request_id" :row="row" />
         <slot name="cell-upstream_request_id" :row="row" />
         <slot name="cell-turn_state" :row="row" />
@@ -168,8 +169,8 @@ const baseImageRow = {
 }
 
 describe('admin UsageTable tooltip', () => {
-  it('shows output TPS in the latency cell using total duration', () => {
-    const row = { ...baseImageRow, image_count: 0, billing_mode: 'token', output_tokens: 1000, duration_ms: 20_000, first_token_ms: 10_000 }
+  it('shows sync TPS using total duration, with missing and image data unavailable', () => {
+    const row = { ...baseImageRow, request_type: 'sync', stream: false, image_count: 0, billing_mode: 'token', output_tokens: 1000, duration_ms: 20_000, first_token_ms: 10_000 }
     const wrapper = mount(UsageTable, {
       props: {
         data: [row, { ...row, request_id: 'no-duration', duration_ms: null }, { ...row, request_id: 'image', image_count: 1 }],
@@ -178,8 +179,44 @@ describe('admin UsageTable tooltip', () => {
       },
       global: { stubs: { DataTable: DataTableStub, EmptyState: true, Icon: true, Teleport: true } },
     })
-    expect(wrapper.findAll('[data-testid="output-tps"]').map(cell => cell.text())).toEqual(['50.0 tok/s', '—', '—'])
-    expect(wrapper.text()).toContain('Output TPS')
+    expect(wrapper.findAll('[data-testid="usage-tps"]').map(cell => cell.text())).toEqual(['50.00', '—', '—'])
+    expect(wrapper.text()).toContain('TPS')
+    wrapper.unmount()
+  })
+
+  it('shows aligned TPS as the third latency row in both usage views', () => {
+    for (const showAccountBilling of [true, false]) {
+      const wrapper = mount(UsageTable, {
+        props: {
+          data: [{
+            ...baseImageRow,
+            billing_mode: 'token',
+            image_count: 0,
+            output_tokens: 100,
+            request_type: 'stream',
+            stream: true,
+            duration_ms: 7000,
+            first_token_ms: 2000,
+          }],
+          columns: [],
+          showAccountBilling,
+        },
+        global: { stubs: { DataTable: DataTableStub, EmptyState: true, Icon: true, Teleport: true } },
+      })
+      const tps = wrapper.get('[data-testid="usage-tps"]')
+      expect(tps.text()).toBe('20.00')
+      expect(tps.attributes('title')).toBe('usage.tpsDescription')
+      expect(tps.element.parentElement!.classList.contains('text-left')).toBe(true)
+      const cells = Array.from(tps.element.parentElement!.children)
+      expect(cells).toHaveLength(6)
+      expect(cells[4].textContent).toBe('TPS')
+      expect(cells[4].getAttribute('title')).toBe('usage.tpsDescription')
+      for (const index of [1, 3, 5]) {
+        expect(cells[index].classList.contains('text-right')).toBe(true)
+        expect(cells[index].classList.contains('tabular-nums')).toBe(true)
+      }
+      wrapper.unmount()
+    }
   })
 
   beforeEach(() => {
