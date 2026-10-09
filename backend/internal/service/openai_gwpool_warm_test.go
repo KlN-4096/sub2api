@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -185,7 +186,7 @@ func TestWarmUpRunsStateEchoWithTheSamePair(t *testing.T) {
 func TestWarmUpRotatesPastADegradedGatewayAndServesTheFullOne(t *testing.T) {
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
 	fake.listGateways = []gwpoolFakeGateway{{Name: "unified-142", PairReady: true}, {Name: "unified-84", PairReady: true}}
-	fake.forceCookie = gwpoolTestPairCookie(t, "unified-84") // force=1 取到的那张落在另一个网关
+	fake.forceCookie = gwpoolTestPairCookie(t, "unified-84") // 点名第二个网关时交付的票
 	svc := &OpenAIGatewayService{}
 	shooter := &gwpoolWarmShooter{replies: []gwpoolWarmReply{
 		{status: http.StatusOK, minted: gwpoolEchoFreshTicket},
@@ -200,11 +201,19 @@ func TestWarmUpRotatesPastADegradedGatewayAndServesTheFullOne(t *testing.T) {
 	require.Equal(t, "unified-84", openAICodexRouteGateway(shooter.shots[2].cookie),
 		"第二张票必须落在另一个网关上")
 
-	// 换票必须带 force=1 + 点名排除被判死那一张，否则池子可能把同一个落点再发回来。
-	require.NotContains(t, fake.nextQuery(t), "force=1", "第一次取票是常规取票")
-	forced := fake.nextQuery(t)
-	require.Contains(t, forced, "force=1")
-	require.Contains(t, forced, "exclude_versions=tkt-1")
+	// 客户端明确选择不同网关，并排除旧票；不再让池端代选或等待。
+	first, err := url.ParseQuery(fake.nextRawQuery(t))
+	require.NoError(t, err)
+	second, err := url.ParseQuery(fake.nextRawQuery(t))
+	require.NoError(t, err)
+	require.Equal(t, "unified-142", first.Get("gateway"))
+	require.Equal(t, "unified-84", second.Get("gateway"))
+	require.Equal(t, "tkt-1", second.Get("exclude_versions"))
+	for _, query := range []url.Values{first, second} {
+		for _, retired := range []string{"force", "wait", "count"} {
+			require.False(t, query.Has(retired), "旧参数不得进入新取票协议：%s", retired)
+		}
+	}
 
 	// 缓存里留下的是满血那张 ⇒ 紧接着业务请求那一发原样复用它。
 	pair, state := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
