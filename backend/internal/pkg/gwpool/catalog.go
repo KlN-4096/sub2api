@@ -21,11 +21,23 @@ type Catalog struct {
 }
 
 type catalogKey struct{ account, tag, model string }
+
+func makeCatalogKey(account, tag, model string) catalogKey {
+	key := catalogKey{strings.TrimSpace(account), tag, sanitizeOpaque(model, 128)}
+	if !validCooldownTag(key.tag) {
+		key.tag = ""
+	}
+	return key
+}
+
 type catalogEntry struct {
 	value  Catalog
 	until  time.Time
 	used   time.Time
 	flight *catalogFlight
+	// A canceled refresh leaves business reuse unchanged, but its old snapshot
+	// cannot claim a settled display until a new refresh succeeds.
+	displayUnknown bool
 }
 type catalogFlight struct {
 	done    chan struct{}
@@ -58,10 +70,7 @@ func (c *Client) Catalog(ctx context.Context, account, tag, model string, after 
 	if err := ctx.Err(); err != nil {
 		return Catalog{}, err
 	}
-	key := catalogKey{strings.TrimSpace(account), tag, sanitizeOpaque(model, 128)}
-	if !validCooldownTag(key.tag) {
-		key.tag = ""
-	}
+	key := makeCatalogKey(account, tag, model)
 	cache := &c.catalog
 	cache.mu.Lock()
 	now := cache.timeNow()
@@ -109,6 +118,7 @@ func (c *Client) Catalog(ctx context.Context, account, tag, model string, after 
 			flight.cancel()
 			if entry.flight == flight {
 				entry.flight = nil
+				entry.displayUnknown = true
 			}
 		}
 		cache.mu.Unlock()
@@ -127,10 +137,7 @@ func (c *Client) FreshCatalog(ctx context.Context, account, tag, model string) (
 	if c == nil {
 		return Catalog{}, fmt.Errorf("%w: client is nil", ErrPool)
 	}
-	key := catalogKey{strings.TrimSpace(account), tag, sanitizeOpaque(model, 128)}
-	if !validCooldownTag(key.tag) {
-		key.tag = ""
-	}
+	key := makeCatalogKey(account, tag, model)
 	c.catalog.mu.Lock()
 	var after uint64
 	if entry := c.catalog.entries[key]; entry != nil {
@@ -138,6 +145,21 @@ func (c *Client) FreshCatalog(ctx context.Context, account, tag, model string) (
 	}
 	c.catalog.mu.Unlock()
 	return c.Catalog(ctx, account, tag, model, after)
+}
+
+// PeekCatalog is display-only: no network, refresh, TTL extension, LRU touch,
+// or new cache entry. In-flight, missing and expired snapshots remain unknown.
+func (c *Client) PeekCatalog(account, tag, model string) (Catalog, time.Time, bool) {
+	if c == nil {
+		return Catalog{}, time.Time{}, false
+	}
+	c.catalog.mu.Lock()
+	defer c.catalog.mu.Unlock()
+	entry := c.catalog.entries[makeCatalogKey(account, tag, model)]
+	if entry == nil || entry.flight != nil || entry.displayUnknown || entry.value.Generation == 0 || !c.catalog.timeNow().Before(entry.until) {
+		return Catalog{}, time.Time{}, false
+	}
+	return cloneCatalog(entry.value), entry.until, true
 }
 
 func (c *Client) refreshCatalog(ctx context.Context, key catalogKey, entry *catalogEntry, flight *catalogFlight, started time.Time) {
@@ -155,6 +177,7 @@ func (c *Client) refreshCatalog(ctx context.Context, key catalogKey, entry *cata
 		c.catalog.generation++
 		flight.value = Catalog{Gateways: gateways, Generation: c.catalog.generation}
 		entry.value = flight.value
+		entry.displayUnknown = false
 		// Age starts before the network call, never on cache access. Missing or
 		// expired lifetimes make a response non-cacheable, not immortal.
 		entry.until = started.Add(catalogFreshness)

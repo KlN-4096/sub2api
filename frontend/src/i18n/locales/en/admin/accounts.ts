@@ -292,7 +292,7 @@ export default {
         ungrouped: 'Ungrouped',
         hint: 'Displayed as "group / base score / sticky bonus". The base score is computed within the current filtered candidate set and includes priority, load, queue depth, error rate, first-token latency, reset window, quota headroom, billing rate, and related factors. The sticky bonus applies only when sticky weighting is enabled for previous_response_id or session_hash. Higher scores are preferred.'
       },
-      gatewayColumnHint: 'Landing gateways come from the route tickets delivered by the gateway pool (gwpool). The full-strength window applies to (upstream account × gateway), and a gateway is determined by (region × account), so this column is laid out by the nine regions: the first line is the current region and gateway, and each cell below is the gateway most recently landed on in that region. Amber means the gateway was used within the local ledger window (4 hours by default, adjustable in the gateway pool settings of that account) and is still cooling; grey means the window has elapsed and that region is usable again. Note that both the region and the gateway name are what the pool claimed on delivery, not the upstream landing point actually observed.',
+      gatewayColumnHint: 'Shows the current route ticket, measured full-strength usage and quality/ordinary candidate queues. Green is reserved for a live verified ticket; candidates remain neutral. Queue classification comes from backend evidence for the same member and model, using cached metadata and local cooldowns only. Missing or expired metadata displays — without fetching tickets or probing. Region and gateway names are the pool delivery labels, not proof of the actual upstream landing point.',
       usageWindowsHint: '"5h / 7d" are the upstream account\'s official rolling usage windows (e.g. OpenAI ChatGPT, Claude). They are imposed by the upstream provider on the account itself — not configured by sub2api, and unrelated to the models you map. Usage resets automatically once each window rolls over, and the limit cannot be lifted from within sub2api. Purple/amber rows are the Codex turn-states currently in effect for this account (one per model); the countdown is the remainder of the one-hour validity from minting, and amber means the ticket looks degraded.',
       ollamaCloud: {
         title: 'Ollama Cloud usage',
@@ -644,6 +644,18 @@ export default {
       // OpenAI specific hints
       openai: {
         gwpoolCredentialScope: 'The same upstream credentials share verification and a ledger. Different workspace members stay isolated. Local observations and cooldown rules take priority; pool data is advisory.',
+        gatewayQueues: {
+          title: 'Candidate queues',
+          quality: 'Quality',
+          ordinary: 'Ordinary',
+          qualityHint: 'Quality queue: reliable same-member/model observations at the actual idle interval favor full-strength outcomes. Preferred for rotation, not proof of faster recovery.',
+          ordinaryHint: 'Ordinary queue: lower-yield or insufficiently measured candidates retain bounded exploration opportunities.',
+          hint: 'Read-only fresh metadata, excluding local cooldowns and the current or retired ticket gateway. Counts are candidates, not verified tickets; up to 3 names are shown, without promising the next selection order. Missing metadata displays —. No extra acquisition or probing.',
+          candidateHint: '{name} · Candidate, not yet verified',
+          more: '{count} more candidates',
+          empty: 'No candidates',
+          unknown: 'No snapshot'
+        },
         gatewayRuntime: {
           durationHours: '{hours}h {minutes}m {seconds}s',
           live: 'Verified · {gateway} · probe models: {models}',

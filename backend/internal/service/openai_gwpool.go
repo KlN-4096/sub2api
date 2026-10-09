@@ -148,13 +148,10 @@ func (s *openAICodexCookieStore) poolClient(account *Account) (*gwpool.Client, e
 	// 取较小者，给小了就把账号配的「取票超时」悄悄截短（2026-10-02 前写死 5s 正是这个毛病）。
 	// 真正的分别限时还是由各自的 ctx 做（列网关 2s、取票 8s）。
 	// 不用内建 max：这个包的测试里有个 func max(a, b int) int 盖住了它。
-	timeout := account.gatewayPoolFetchTimeout()
-	if listTimeout := account.gatewayPoolListTimeout(); listTimeout > timeout {
-		timeout = listTimeout
-	}
+	timeout := gatewayPoolClientTimeout(account)
 	// \x00 当分隔符：base_url 过了 URL 校验，不可能含 NUL，拼不出歧义键。
 	// 超时必须进键：客户端自带 http.Client，不进键的话改了超时拿回来的还是旧的那个。
-	cacheKey := baseURL + "\x00" + consumerKey + "\x00" + timeout.String()
+	cacheKey := gatewayPoolClientCacheKey(account)
 	if cached, ok := s.poolClients.Load(cacheKey); ok {
 		if client, ok := cached.(*gwpool.Client); ok {
 			return client, nil
@@ -170,6 +167,18 @@ func (s *openAICodexCookieStore) poolClient(account *Account) (*gwpool.Client, e
 		return client, nil
 	}
 	return nil, fmt.Errorf("%w: account %d gateway pool client cache is corrupt", gwpool.ErrPool, account.ID)
+}
+
+func gatewayPoolClientCacheKey(account *Account) string {
+	return account.gatewayPoolBaseURL() + "\x00" + account.gatewayPoolConsumerKey() + "\x00" + gatewayPoolClientTimeout(account).String()
+}
+
+func gatewayPoolClientTimeout(account *Account) time.Duration {
+	timeout := account.gatewayPoolFetchTimeout()
+	if listTimeout := account.gatewayPoolListTimeout(); listTimeout > timeout {
+		timeout = listTimeout
+	}
+	return timeout
 }
 
 // UsesGatewayPool 报告这个账号的 Codex 路由 cookie 由网关池下发。
