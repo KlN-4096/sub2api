@@ -266,12 +266,12 @@ func (s *OpenAIGatewayService) gatewayPoolNoRemainingRoutes(ctx context.Context,
 	}
 	listCtx, cancel := context.WithTimeout(ctx, account.gatewayPoolListTimeout())
 	defer cancel()
-	gateways, err := pool.Gateways(listCtx, gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(account, identity))
+	catalog, err := pool.FreshCatalog(listCtx, gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(account, identity), "")
 	if err != nil {
 		return false // unreadable state is not a zero inventory
 	}
-	for _, gateway := range gateways {
-		if !gateway.PairReady {
+	for _, gateway := range catalog.Gateways {
+		if !gateway.ReadyAt(time.Now()) {
 			continue
 		}
 		_, cooling := s.codexCookies.gatewayPoolUsedAt(identity, gateway.Name, account.gatewayPoolGatewayWindow())

@@ -81,7 +81,7 @@ func TestGatewayPoolRotationOnlyAfterFreshCompleteExhaustion(t *testing.T) {
 	}{
 		{"historical pool use does not block candidates", []gwpoolFakeGateway{{Name: "unified-142", PairReady: true, UsedByYou: true}}, 0, false, false},
 		{"candidate still available", []gwpoolFakeGateway{{Name: "unified-142", PairReady: true, UsedByYou: true}, {Name: "unified-143", PairReady: true}}, 0, false, false},
-		{"successful empty supply is zero", nil, 0, true, false},
+		{"successful empty supply is zero", []gwpoolFakeGateway{}, 0, true, false},
 		{"list failure is not exhaustion", nil, http.StatusBadGateway, false, false},
 		{"local cooling independent of pool", []gwpoolFakeGateway{{Name: "unified-142", PairReady: true}}, 0, true, true},
 		{"nonready listing has zero candidates", []gwpoolFakeGateway{{Name: "unified-142", PairReady: false, UsedByYou: true}}, 0, true, false},

@@ -409,13 +409,13 @@ func (s *OpenAIGatewayService) finishGatewayPoolUsageIfExhausted(ctx context.Con
 	if err != nil {
 		return
 	}
-	gateways, err := pool.Gateways(ctx, gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(fresh, identity))
+	catalog, err := pool.FreshCatalog(ctx, gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(fresh, identity), "")
 	if err != nil {
 		return
 	}
-	for _, gateway := range gateways {
+	for _, gateway := range catalog.Gateways {
 		_, cooling := s.codexCookies.gatewayPoolUsedAt(identity, gateway.Name, fresh.gatewayPoolGatewayWindow())
-		if gateway.PairReady && !cooling {
+		if gateway.ReadyAt(time.Now()) && !cooling {
 			return
 		}
 	}

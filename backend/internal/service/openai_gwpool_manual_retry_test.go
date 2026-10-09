@@ -91,7 +91,7 @@ func TestGatewayPoolManualClearRejectsFetchStartedBeforeClear(t *testing.T) {
 	require.NoError(t, err)
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := svc.codexCookies.gatewayPoolTakePair(ctx, pool, account, identity, false, nil)
+		_, _, err := svc.codexCookies.gatewayPoolTakePair(ctx, pool, account, identity, nil)
 		done <- err
 	}()
 	select {
@@ -129,6 +129,7 @@ func TestGatewayPoolManualClearKeepsInFlightAuthenticationRefusal(t *testing.T) 
 			svc, repo, identity := cooldownResetService(t, time.Now().UTC())
 			account, _ := repo.GetByID(ctx, 1)
 			fake := newGwpoolFakePool(t, "", 150)
+			fake.listGateways = []gwpoolFakeGateway{{Name: "unified-new", PairReady: true}}
 			fake.refuseStatus, fake.refuseCode, fake.refuseRetryAfter = 503, code, 60
 			entered, release := make(chan struct{}), make(chan struct{})
 			fake.beforeCookie = func() { close(entered); <-release }
@@ -137,7 +138,7 @@ func TestGatewayPoolManualClearKeepsInFlightAuthenticationRefusal(t *testing.T) 
 			require.NoError(t, err)
 			done := make(chan error, 1)
 			go func() {
-				_, _, err := svc.codexCookies.gatewayPoolTakePair(ctx, pool, account, identity, false, nil)
+				_, _, err := svc.codexCookies.gatewayPoolTakePair(ctx, pool, account, identity, nil)
 				done <- err
 			}()
 			select {

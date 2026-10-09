@@ -69,12 +69,14 @@ func TestGatewayPoolLocalEvidenceOverridesPoolAndExistingQueue(t *testing.T) {
 			pool, err := svc.codexCookies.poolClient(account)
 			require.NoError(t, err)
 			ctx := context.WithValue(context.Background(), gatewayPoolProbeModelKey{}, gatewayPoolProbeModelLuna)
+			catalog, err := pool.Catalog(ctx, "acc-a/user-a", gatewayPoolAccountTag(account, gwpoolTestIdentity), gatewayPoolProbeModelLuna, 0)
+			require.NoError(t, err)
 			for i := 1; i <= gatewayPoolContactExploreEvery; i++ {
 				want := "good"
 				if i == gatewayPoolContactExploreEvery {
 					want = "bad"
 				}
-				require.Equal(t, want, svc.codexCookies.gatewayPoolPick(ctx, pool, account, gwpoolTestIdentity))
+				require.Equal(t, want, svc.codexCookies.gatewayPoolPick(ctx, account, gwpoolTestIdentity, catalog.Gateways, nil))
 			}
 			require.Zero(t, fake.hits.Load(), "ranking/exploration must never acquire or probe a ticket")
 			require.False(t, svc.codexCookies.gatewayPoolUsedRecently(gwpoolTestIdentity, "good", time.Hour))

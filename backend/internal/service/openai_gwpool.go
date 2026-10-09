@@ -14,7 +14,6 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -50,8 +49,7 @@ const (
 	// Each pool fetch is bounded independently of the logical candidate search.
 	// A shared fetch is cancelled when its final waiter leaves.
 	openAIGatewayPoolFetchTimeout = 10 * time.Second
-	// openAIGatewayPoolListTimeout 兜住那次「列网关」。它是**优化**，绝不能吃掉取票的预算：
-	// 列不出来就退回池子自己挑，所以给一个远小于 FetchTimeout 的额度。
+	// A directory failure is unknown inventory, never permission for bare fetch.
 	openAIGatewayPoolListTimeout = 2 * time.Second
 	// openAIGatewayPoolGatewayWindowExtraKey 是本地账本的保留窗口（秒）。缺省 / 非正数走默认值。
 	//
@@ -62,12 +60,6 @@ const (
 	// it asks the server for its stricter 300s default; values below 30 clamp
 	// to 30 there. Returned remaining/valid_for never impose a local deadline.
 	openAIGatewayPoolMinRemaining = 30 * time.Second
-	// openAIGatewayPoolWait 是取票时愿意等池子现铸多久（池子的 wait，契约上限 30s）。
-	//
-	// 直接报上限、由 gwpool 自己钳到本次调用的剩余预算（它那边有 ctx 死线，算得比这里准）：
-	// 等不到就是这一发失败，所以「能等多久就等多久」永远不比「等得更少」差。
-	// 不做成账号旋钮：真正要调的是取票超时（openai_gwpool_fetch_timeout_s），wait 跟着它走。
-	openAIGatewayPoolWait = 30 * time.Second
 	// openAIGatewayPoolDefaultBackoff 是池子说了「该退避」但没给 retry_after_seconds 时的时长。
 	//
 	// 1 分钟只为掐死重试环：没有退避时，客户端那种「失败就重发」的循环每轮都会在池子侧触发一次
@@ -324,6 +316,10 @@ var gatewayPoolHopelessCodes = map[string]struct{}{
 // 2026-10-02 现场：池子回 consumer_rejected（owner 拆分后 key 变了），客户端却收到
 // 「没有满血槽位……稍后重试即可」，而那一刻池子有 51 个空闲网关、一个槽位都不缺。
 func gatewayPoolClientMessage(err error) string {
+	var refused *gwpool.PoolError
+	if errors.As(err, &refused) && refused.Code == gwpool.CodeConsumerRateLimited {
+		return "网关池取票频率受限，请按 Retry-After 重试 / Gateway ticket request rate limited; retry after Retry-After"
+	}
 	switch {
 	case err == nil:
 		return ""
@@ -773,6 +769,8 @@ func gatewayPoolBackoff(err error) (time.Duration, string) {
 		// 不退避也不会打出风暴：这个闸是池子进程内的滑动窗口，满了**一发上游都不发**，
 		// 拒绝是即时的，代价只有一次 HTTP 往返。相反，退避期里池子刚补上的票我们拿不到。
 		return 0, refused.Code
+	case gwpool.CodeConsumerRateLimited:
+		fallback = time.Second
 	case gwpool.CodeNoExit,
 		gwpool.CodeUpstreamRejected, gwpool.CodeConsumerRejected:
 		// 这几个的 retry_after 是**全局**的：整池出口熔断、凭据被否决，
@@ -789,36 +787,21 @@ func gatewayPoolBackoff(err error) (time.Duration, string) {
 	return fallback, refused.Code
 }
 
-// gatewayPoolRetriesBare 报告「点名的那个没取到」之后值不值得再裸取一次。
-// no_exit 不值得：池子的出口全熔断，换哪个网关都是同一个错。退避中的码同理（见 gatewayPoolBackoff）。
-func gatewayPoolRetriesBare(err error) bool {
-	backoff, _ := gatewayPoolBackoff(err)
-	return backoff == 0 && errors.Is(err, gwpool.ErrNoSlot)
+func gatewayPoolMissingTicket(err error) bool {
+	var refused *gwpool.PoolError
+	return errors.As(err, &refused) &&
+		(refused.Code == gwpool.CodeNoLivePair || refused.Code == gwpool.CodeNoGateway)
 }
 
-// gatewayPoolPick 挑这一发该点名哪个落点。空串 = 挑不出来，退回裸取（池子自己挑）。
-//
-// 只挑本地冷却已到期且池子允许交付的落点。不能在“全都冷却中”时把最旧的从 exclude 摘掉，
-// 否则自适应退避只是显示数字，真实出站仍会提前重试。
-//
-// 池子不知道「烧过」是按 (上游账号 × 网关) 算的——它只看自己那本账，所以池子的
-// pair_ready 与本地账本共同准入；used_by_you只是历史提示，真实池端保护由/cookie执行。
+// gatewayPoolPick makes a local decision from metadata and current local CD.
+// It never uses the pool's historical consumer touches to rank or admit a route.
 func (s *openAICodexCookieStore) gatewayPoolPick(
 	ctx context.Context,
-	pool *gwpool.Client,
 	account *Account,
 	identity string,
+	gateways []gwpool.Gateway,
+	blocked map[string]bool,
 ) string {
-	listCtx, cancel := context.WithTimeout(ctx, account.gatewayPoolListTimeout())
-	defer cancel()
-	model, _ := ctx.Value(gatewayPoolProbeModelKey{}).(string)
-	gateways, err := pool.GatewaysForModel(listCtx, gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(account, identity), model)
-	if err != nil {
-		// 列表是优化不是闸门：池子没加这个端点 / 临时打不开时照常裸取。绝不能因为列不出来
-		// 就让这一发失败——接这个端点之前的行为就是兜底。
-		slog.Debug("gwpool_gateways_unavailable", "account_id", account.ID, "error", err)
-		return ""
-	}
 	s.noteGatewayPoolCountries(account, gateways)
 	if s.poolCooldownPersist != nil {
 		defer s.poolCooldownPersist(ctx, account, identity)
@@ -844,7 +827,7 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 	for _, candidate := range gateways {
 		s.noteGatewayPoolFeedbackPolicy(account, identity, candidate.Name, candidate.Cooldown)
 		_, burned := s.gatewayPoolUsedAt(identity, candidate.Name, window)
-		if !candidate.PairReady {
+		if !candidate.ReadyAt(time.Now()) || blocked[candidate.Name] {
 			continue
 		}
 		if !burned {
@@ -858,14 +841,11 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 	// 成对下发，卡片才能把 free=0（全烧过了）和「没问到清单」分开。
 	openAIGatewayPoolSinkFrom(ctx).notePoolCounts(len(gateways), free)
 	if len(eligible) > 0 {
-		// Baseline remains least recently used. Only comparable measured candidates
-		// may exchange positions, and every fifth pick retains this baseline.
-		sort.SliceStable(eligible, func(i, j int) bool { return eligible[i].LastUsedAt.Before(eligible[j].LastUsedAt) })
+		// FIFO and measured local ranking are owned here, not by pool history.
 		ranking := s.gatewayPoolRankCandidates(ctx, account, identity, eligible)
 		return s.gatewayPoolCandidateQueue(identity).pick(ranking.candidates, ranking)
 	}
 	s.gatewayPoolCandidateQueue(identity).pick(nil)
-	// 冷却期是硬闸；裸取返回也必须经过单张准入的同一道本地闸。
 	return ""
 }
 
@@ -911,7 +891,6 @@ func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *A
 	}
 	// Confirmed rejection or the route credential's own deadline rotates.
 	// Crossing valid_for_s alone never changes the cached ticket.
-	force := state == openAIGatewayPoolPairStale
 	waitCtx, waitCancel := context.WithTimeout(ctx, account.gatewayPoolFetchTimeout())
 	defer waitCancel()
 	if err := waitCtx.Err(); err != nil {
@@ -925,12 +904,11 @@ func (s *openAICodexCookieStore) gatewayPoolPair(ctx context.Context, account *A
 		callCtx, cancel := context.WithTimeout(fetchCtx, account.gatewayPoolFetchTimeout())
 		defer cancel()
 		var excludeVersions []string
-		// 手里那张转成 stale = 「这张具体的票不行了」。exclude_versions 正是这句话的精确表达，
-		// 比 force（只说「换个网关」）准；两者一起带（force 仍然要，池子据它保证换网关）。
-		if force && cached.version != "" {
+		// Reject the retired ticket explicitly; choose its replacement locally.
+		if state == openAIGatewayPoolPairStale && cached.version != "" {
 			excludeVersions = []string{cached.version}
 		}
-		pair, resetAt, err := s.gatewayPoolTakePair(callCtx, pool, account, identity, force, excludeVersions)
+		pair, resetAt, err := s.gatewayPoolTakePair(callCtx, pool, account, identity, excludeVersions)
 		if err != nil {
 			return gatewayPoolFetchResult{}, err
 		}
@@ -968,45 +946,56 @@ func (s *openAICodexCookieStore) gatewayPoolTakePair(
 	pool *gwpool.Client,
 	account *Account,
 	identity string,
-	force bool,
 	excludeVersions []string,
 ) (pair openAIGatewayPoolPair, resetAt time.Time, err error) {
-	// 先把落库的落点记录补回内存账本：重启后它是空的，而下面两处（挑落点的过滤、裸取的
-	// exclude）全靠它。不补的话刚烧过的网关会被原样发回来，见 gatewayPoolHydrateUsed。
+	// Hydrate persisted local cooldown before selecting any candidate.
 	if err := s.hydrateGatewayPoolSharedHistory(ctx, account, identity); err != nil {
 		return pair, resetAt, fmt.Errorf("%w: unable to read current gateway cooldown", gwpool.ErrPool)
 	}
 	resetAt = s.gatewayPoolCooldownResetAt(identity)
-	// 自己挑落点：池子按它发的 consumer key 记账，认不出「同一份凭据挂在多个账号行上」，
-	// 所以这里按凭证域身份的本地账本再滤一道。挑不出来时 Gateway 为空 = 由池子按调度选
-	// （接 /gateways 之前的行为，永远是兜底）。
-	// 列表与取票同在调用方的 singleflight 里 ⇒ 同身份并发只列一次，不另加一层缓存。
-	steer := s.gatewayPoolPick(ctx, pool, account, identity)
-	// 本地账本里还在窗口内的网关：点名时它是多余的（挑的时候已经滤过），
-	// **裸取时它是唯一能把这份知识用上的地方**。
-	exclude := s.gatewayPoolBurnedGateways(identity, account.gatewayPoolGatewayWindow(), gwpool.MaxExcludeItems)
+	blocked := make(map[string]bool)
+	if stale, state := s.cachedPoolPair(identity); state == openAIGatewayPoolPairStale {
+		blocked[stale.gateway] = true
+		if stale.version != "" && !slices.Contains(excludeVersions, stale.version) {
+			excludeVersions = append(excludeVersions, stale.version)
+		}
+	}
 	request := gwpool.CookieRequest{
-		// Account = 这一发真正要用的那个上游账号（池子的 ?account=）：池子按它记槽位，
-		// 不报就记在 consumer key 上传者的头上。
 		Account:         gatewayPoolUpstreamAccountID(identity),
-		Gateway:         steer,
-		Force:           force,
-		Exclude:         exclude,
 		ExcludeVersions: excludeVersions,
 		MinRemaining:    openAIGatewayPoolMinRemaining,
-		Wait:            openAIGatewayPoolWait,
 	}
-	got, err := pool.Cookie(ctx, request)
-	if steer != "" && gatewayPoolRetriesBare(err) && resetAt.Equal(s.gatewayPoolCooldownResetAt(identity)) {
-		// 点名的那个在「列表」与「取票」之间被别人租走了。这一发什么都没交付、没烧任何
-		// 槽位，所以退回裸取一次——不然自己挑网关反而把本来能成的请求打成失败。
-		//
-		// **只退一次，绝不能改成循环重试**：裸取的失败意味着池子现在真的一张都没有，
-		// 重试只会在供给见底时把每个业务请求放大成一串池子请求（风暴）。
-		// 「点名失败就换一个候选再点」同理不做：候选都是同一张列表来的，它过期了就全过期。
-		// 该退避的错误码（no_exit 等）走不到这里：换网关只是把同一个错重复一遍。
-		request.Gateway = ""
+	model, _ := ctx.Value(gatewayPoolProbeModelKey{}).(string)
+	var generation uint64
+	var got gwpool.Pair
+	var steer string
+	const maxDirectoryAttempts = 2
+	for attempt := range maxDirectoryAttempts {
+		listCtx, cancel := context.WithTimeout(ctx, account.gatewayPoolListTimeout())
+		catalog, listErr := pool.Catalog(listCtx, request.Account, gatewayPoolAccountTag(account, identity), model, generation)
+		cancel()
+		if listErr != nil {
+			if ctx.Err() == nil && errors.Is(listErr, context.DeadlineExceeded) {
+				listErr = errors.Join(gwpool.ErrCatalogUnavailable, listErr)
+			}
+			err = listErr
+			break // unreadable inventory is not exhaustion
+		}
+		generation = catalog.Generation
+		steer = s.gatewayPoolPick(ctx, account, identity, catalog.Gateways, blocked)
+		if !resetAt.Equal(s.gatewayPoolCooldownResetAt(identity)) {
+			return pair, resetAt, errGatewayPoolGenerationChanged
+		}
+		if steer == "" {
+			err = &gwpool.PoolError{Code: gwpool.CodeAllCooling}
+			continue // only the second, freshly refreshed directory confirms zero
+		}
+		request.Gateway = steer
 		got, err = pool.Cookie(ctx, request)
+		if !gatewayPoolMissingTicket(err) || attempt == maxDirectoryAttempts-1 {
+			break
+		}
+		// The next iteration demands a newer directory, then chooses explicitly.
 	}
 	if err != nil {
 		// 池子明说了「先别来」就按身份记下来：只对本次请求生效的退避挡不住重试环，
@@ -1017,7 +1006,7 @@ func (s *openAICodexCookieStore) gatewayPoolTakePair(
 				"code", code, "backoff_s", int(backoff.Seconds()))
 		}
 		var refused *gwpool.PoolError
-		candidateFailure := gatewayPoolRetriesBare(err) ||
+		candidateFailure := gatewayPoolMissingTicket(err) ||
 			(errors.As(err, &refused) && refused.Code == gwpool.CodeAllCooling)
 		if candidateFailure && !resetAt.Equal(s.gatewayPoolCooldownResetAt(identity)) {
 			return pair, resetAt, errGatewayPoolGenerationChanged
@@ -1037,8 +1026,8 @@ func (s *openAICodexCookieStore) gatewayPoolTakePair(
 		return pair, resetAt, fmt.Errorf("%w: cookie response carried no route pair", gwpool.ErrPool)
 	}
 	gateway := strings.TrimSpace(got.Gateway)
-	if gateway == "" {
-		gateway = openAICodexRouteGateway(cookie)
+	if gateway != steer || slices.Contains(excludeVersions, got.Version) {
+		return pair, resetAt, fmt.Errorf("%w: pool returned an unrequested route or rejected version", gwpool.ErrPool)
 	}
 	now := time.Now()
 	country := got.DatacenterCountry
@@ -1067,7 +1056,7 @@ func (s *openAICodexCookieStore) gatewayPoolTakePair(
 	}
 	slog.Info("gwpool_pair_taken", "account_id", account.ID, "gateway", gateway,
 		"steered_to", steer, "excluded", len(request.Exclude),
-		"valid_for_s", int(got.ValidFor.Seconds()), "forced", force)
+		"valid_for_s", int(got.ValidFor.Seconds()))
 	if account.IsOpenAITurnStatePairModeEnabled() {
 		slog.Warn("gwpool_overrides_turn_state_pair_mode", "account_id", account.ID, "gateway", gateway)
 	}

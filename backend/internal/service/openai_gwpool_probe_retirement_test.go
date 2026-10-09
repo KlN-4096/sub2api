@@ -13,7 +13,6 @@ func TestGatewayPoolFailedProbeRetiresTicketAndContinues(t *testing.T) {
 	svc, repo, fake, account, request, _ := ticketWaitFixture(t)
 	repo.account = *account
 	fake.forceCookie = gwpoolTestPairCookie(t, "unified-84")
-	fake.listStatus = http.StatusServiceUnavailable // unknown inventory is not zero candidates
 	shooter := &gwpoolWarmShooter{replies: []gwpoolWarmReply{
 		{status: http.StatusOK, minted: "state"},
 		{err: context.DeadlineExceeded},
@@ -50,7 +49,6 @@ func TestGatewayPoolFailedProbeHonorsRecoveryThenMovesOn(t *testing.T) {
 				}
 				return gwpoolTestPairCookie(t, "unified-84")
 			}
-			fake.listStatus = http.StatusServiceUnavailable
 			sleeps := 0
 			wait.sleep = func(context.Context, time.Duration) error { sleeps++; return nil }
 			shooter := &gwpoolWarmShooter{}
@@ -88,7 +86,6 @@ func TestGatewayPoolFailedProbeProtectsNewTicketAndClearGeneration(t *testing.T)
 
 func TestGatewayPoolFailedProbeBeforeResponseStillCoolsLocally(t *testing.T) {
 	svc, repo, fake, account, request, _ := ticketWaitFixture(t)
-	fake.listStatus = http.StatusServiceUnavailable
 	fake.cookieForHit = func(hit int64) string {
 		if hit == 1 {
 			return gwpoolTestPairCookie(t, "unified-142")

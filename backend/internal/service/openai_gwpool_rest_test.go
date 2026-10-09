@@ -17,7 +17,7 @@ func TestGatewayPoolRotationThresholdCountsInFlightAndKeepsVerifiedWindow(t *tes
 	fake.configure(account)
 	svc := rotationService(account)
 	require.False(t, svc.gatewayPoolNoRemainingRoutes(context.Background(), account), "one candidate remains despite the retired stop threshold")
-	fake.listGateways = nil
+	fake.listGateways = []gwpoolFakeGateway{}
 	require.True(t, svc.gatewayPoolNoRemainingRoutes(context.Background(), account))
 	current := openAIGatewayPoolPair{gateway: "unified-143", version: "current", cookie: "offline", until: time.Now().Add(2 * time.Minute)}
 	finish := svc.codexCookies.gatewayPoolInventoryOperation(gwpoolTestIdentity)

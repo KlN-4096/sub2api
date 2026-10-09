@@ -54,7 +54,7 @@ func TestGatewayPoolContinuousWaitRetriesEmptyPoolWithoutBusinessOrRest(t *testi
 			return err
 		}
 		fake.refuseStatus = 0
-		fake.listGateways = []gwpoolFakeGateway{{Name: fake.gateway, PairReady: true}}
+		fake.listGateways = []gwpoolFakeGateway{{Name: "unified-142", PairReady: true}}
 		return nil
 	}
 	shots := 0
@@ -255,6 +255,7 @@ func TestGatewayPoolContinuousWaitHealthyFollowerSurvivesOwnerSwitch(t *testing.
 
 func TestGatewayPoolContinuousWaitOrdinaryFollowerReceivesExhaustion(t *testing.T) {
 	svc, _, fake, accounts := continuousWaitClones(t, false)
+	fake.listGateways = []gwpoolFakeGateway{}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	listed, resume, sleeping := make(chan struct{}), make(chan struct{}), make(chan struct{}, 1)

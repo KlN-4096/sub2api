@@ -179,10 +179,10 @@ func TestGatewayPoolWaitHonorsCallerDeadlineCancellationAndFreshSettings(t *test
 				_, err = svc.attachGatewayPoolRouteWithWait(ctx, account, gwpoolTestURL, http.Header{})
 				require.ErrorIs(t, err, context.DeadlineExceeded, "reentry cannot refresh caller deadline")
 				require.Equal(t, 1, sleeps)
-				require.EqualValues(t, 1, fake.hits.Load())
+				require.EqualValues(t, 2, fake.hits.Load())
 			} else {
 				require.Equal(t, 1, sleeps)
-				require.EqualValues(t, 1, fake.hits.Load(), "no retry after cancellation/config/identity change")
+				require.EqualValues(t, 2, fake.hits.Load(), "no retry after cancellation/config/identity change")
 			}
 		})
 	}

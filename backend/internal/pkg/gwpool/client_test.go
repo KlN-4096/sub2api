@@ -13,6 +13,7 @@ import (
 )
 
 // 测试一律打 httptest 假池子，**绝不打真实上游**。
+func testCookieRequest() CookieRequest { return CookieRequest{Account: "acc-a", Gateway: "g"} }
 
 func TestClientCookieReturnsPair(t *testing.T) {
 	var gotAuth, gotPath, gotQuery string
@@ -25,7 +26,7 @@ func TestClientCookieReturnsPair(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	pair, err := New(srv.URL+"/", "ck-secret", 0).Cookie(context.Background(), CookieRequest{})
+	pair, err := New(srv.URL+"/", "ck-secret", 0).Cookie(context.Background(), testCookieRequest())
 	if err != nil {
 		t.Fatalf("cookie: %v", err)
 	}
@@ -35,8 +36,8 @@ func TestClientCookieReturnsPair(t *testing.T) {
 	if gotPath != "/cookie" {
 		t.Fatalf("path = %q", gotPath)
 	}
-	if gotQuery != "" {
-		t.Fatalf("空 gateway 不该拼查询串, got %q", gotQuery)
+	if gotQuery != "account=acc-a&gateway=g" {
+		t.Fatalf("explicit member and gateway required, got %q", gotQuery)
 	}
 	if pair.Gateway != "unified-142" || pair.Cookie != "__cflb=lb; __oailb=jwt" {
 		t.Fatalf("pair = %+v", pair)
@@ -60,8 +61,7 @@ func TestClientGatewaysListsCandidates(t *testing.T) {
 		_, _ = io.WriteString(w, `{"account":"acc-a","live":2,"target":6,"gateways":[`+
 			`{"name":"unified-167","pair_ready":true,"valid_for_s":2400,`+
 			`"used_by_you":false,"last_used_at":"2026-10-01T12:00:00Z"},`+
-			`{"name":"unified-126","pair_ready":true,"used_by_you":true},`+
-			`{"name":"  ","pair_ready":true}]}`)
+			`{"name":"unified-126","pair_ready":true,"used_by_you":true}]}`)
 	}))
 	defer srv.Close()
 
@@ -80,16 +80,10 @@ func TestClientGatewaysListsCandidates(t *testing.T) {
 		t.Fatalf("query = %q", gotQuery)
 	}
 	if len(gateways) != 2 {
-		t.Fatalf("没名字的那项点不了名，应当丢掉: %+v", gateways)
+		t.Fatalf("目录项数量不正确: %+v", gateways)
 	}
-	if got := gateways[0]; got.Name != "unified-167" || !got.PairReady || got.UsedByYou {
+	if got := gateways[0]; got.Name != "unified-167" || !got.PairReady {
 		t.Fatalf("gateways[0] = %+v", got)
-	}
-	if !gateways[0].LastUsedAt.Equal(time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)) {
-		t.Fatalf("last_used_at = %v", gateways[0].LastUsedAt)
-	}
-	if got := gateways[1]; !got.UsedByYou || !got.LastUsedAt.IsZero() {
-		t.Fatalf("gateways[1] = %+v（缺省 last_used_at 应当是零值 = 没碰过）", got)
 	}
 }
 
@@ -149,11 +143,11 @@ func TestClientCookieCarriesAccount(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{Account: "acc-a", Gateway: "unified-167", Force: true})
+	pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{Account: "acc-a", Gateway: "unified-167"})
 	if err != nil {
 		t.Fatalf("cookie: %v", err)
 	}
-	if gotQuery != "account=acc-a&force=1&gateway=unified-167" {
+	if gotQuery != "account=acc-a&gateway=unified-167" {
 		t.Fatalf("query = %q", gotQuery)
 	}
 	if pair.VerifiedFull {
@@ -210,53 +204,28 @@ func TestClientGatewaysToleratesUnparsableLastUsedAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gateways: %v", err)
 	}
-	if len(gateways) != 2 || !gateways[0].LastUsedAt.IsZero() || !gateways[1].LastUsedAt.IsZero() {
-		t.Fatalf("解不开的时刻当零值（没碰过）: %+v", gateways)
+	if len(gateways) != 2 {
+		t.Fatalf("旧统计字段不得影响目录: %+v", gateways)
 	}
 }
 
-// force=1 = 「我租着的那张不行了，给一个不同的网关」。参数要和 gateway 共存。
-func TestClientCookieForcesRotation(t *testing.T) {
-	queries := make(chan string, 3)
+func TestClientCookieRequiresExplicitMemberAndGateway(t *testing.T) {
+	hits := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		queries <- r.URL.RawQuery
-		_, _ = io.WriteString(w, `{"gateway":"unified-84","cookie":"__cflb=a","valid_for_s":150}`)
+		hits++
+		w.WriteHeader(500)
 	}))
 	defer srv.Close()
 	client := New(srv.URL, "k", 0)
-
-	if _, err := client.Cookie(context.Background(), CookieRequest{}); err != nil {
-		t.Fatalf("cookie: %v", err)
-	}
-	if got := <-queries; got != "" {
-		t.Fatalf("正常路径不该带 force: %q", got)
-	}
-	if _, err := client.Cookie(context.Background(), CookieRequest{Force: true}); err != nil {
-		t.Fatalf("cookie force: %v", err)
-	}
-	if got := <-queries; got != "force=1" {
-		t.Fatalf("force 查询串 = %q", got)
-	}
-	if _, err := client.Cookie(context.Background(), CookieRequest{Gateway: "unified-84", Force: true}); err != nil {
-		t.Fatalf("cookie force+gateway: %v", err)
-	}
-	if got := <-queries; got != "force=1&gateway=unified-84" {
-		t.Fatalf("force+gateway 查询串 = %q", got)
-	}
-}
-
-// force=1 换不出来时池子回 503，**不会把原来那张再发一遍** ⇒ 这边只认 ErrNoSlot。
-func TestClientCookieForceNoSlot(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("force") == "1" {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
+	for _, request := range []CookieRequest{{}, {Account: "member"}, {Gateway: "g"}} {
+		_, err := client.Cookie(context.Background(), request)
+		var refused *PoolError
+		if !errors.As(err, &refused) || refused.Code != CodeBadRequest {
+			t.Fatalf("missing explicit identity/route accepted: %v", err)
 		}
-		_, _ = io.WriteString(w, `{"gateway":"unified-84","cookie":"__cflb=a","valid_for_s":150}`)
-	}))
-	defer srv.Close()
-	if _, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{Force: true}); !errors.Is(err, ErrNoSlot) {
-		t.Fatalf("want ErrNoSlot, got %v", err)
+	}
+	if hits != 0 {
+		t.Fatalf("invalid requests reached the pool: %d", hits)
 	}
 }
 
@@ -268,10 +237,10 @@ func TestClientCookiePassesGateway(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{Gateway: "unified-84"}); err != nil {
+	if _, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{Account: "acc-a", Gateway: "unified-84"}); err != nil {
 		t.Fatalf("cookie: %v", err)
 	}
-	if gotQuery != "gateway=unified-84" {
+	if gotQuery != "account=acc-a&gateway=unified-84" {
 		t.Fatalf("query = %q", gotQuery)
 	}
 }
@@ -283,7 +252,7 @@ func TestClientCookieNoSlot(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{})
+	_, err := New(srv.URL, "k", 0).Cookie(context.Background(), testCookieRequest())
 	if !errors.Is(err, ErrNoSlot) {
 		t.Fatalf("want ErrNoSlot, got %v", err)
 	}
@@ -306,7 +275,7 @@ func TestClientCookieRejectsUnusablePayloads(t *testing.T) {
 				_, _ = io.WriteString(w, tc.body)
 			}))
 			defer srv.Close()
-			if _, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{}); err == nil {
+			if _, err := New(srv.URL, "k", 0).Cookie(context.Background(), testCookieRequest()); err == nil {
 				t.Fatal("want error")
 			}
 		})
@@ -337,10 +306,10 @@ func TestClientJoinsEndpointPath(t *testing.T) {
 	defer srv.Close()
 
 	client := New(srv.URL+"/pool?x=1", "k", 0)
-	if _, err := client.Cookie(context.Background(), CookieRequest{}); err != nil {
+	if _, err := client.Cookie(context.Background(), testCookieRequest()); err != nil {
 		t.Fatalf("cookie: %v", err)
 	}
-	if got := <-paths; got != "/pool/cookie?" {
+	if got := <-paths; got != "/pool/cookie?account=acc-a&gateway=g" {
 		t.Fatalf("cookie endpoint = %q", got)
 	}
 }
@@ -367,7 +336,7 @@ func TestClientCookieRejectsControlCharacters(t *testing.T) {
 		t.Fatalf("解码后的 cookie 必须带控制字符: %q", probe.Cookie)
 	}
 
-	_, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{})
+	_, err := New(srv.URL, "k", 0).Cookie(context.Background(), testCookieRequest())
 	if err == nil {
 		t.Fatal("want error")
 	}
@@ -383,7 +352,7 @@ func TestClientErrorsWrapErrPool(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	client := New(srv.URL, "k", 0)
-	_, err := client.Cookie(context.Background(), CookieRequest{})
+	_, err := client.Cookie(context.Background(), testCookieRequest())
 	if !errors.Is(err, ErrPool) {
 		t.Fatalf("cookie HTTP 500 must wrap ErrPool: %v", err)
 	}
@@ -392,7 +361,7 @@ func TestClientErrorsWrapErrPool(t *testing.T) {
 	}
 	srv.Close()
 	// 传输错误（池子没起/换了端口）同样要带标记，它正是会被误判成代理故障的那一类。
-	if _, err := client.Cookie(context.Background(), CookieRequest{}); !errors.Is(err, ErrPool) {
+	if _, err := client.Cookie(context.Background(), testCookieRequest()); !errors.Is(err, ErrPool) {
 		t.Fatalf("transport error must wrap ErrPool: %v", err)
 	}
 }
@@ -413,7 +382,7 @@ func TestClientErrorsCarryNoConsumerKey(t *testing.T) {
 	}))
 	srv.Close() // 关掉：逼出传输错误
 	client := New(srv.URL, key, 0)
-	_, err := client.Cookie(context.Background(), CookieRequest{})
+	_, err := client.Cookie(context.Background(), testCookieRequest())
 	if err == nil {
 		t.Fatal("want transport error")
 	}
@@ -442,10 +411,10 @@ func TestNewAppliesCallTimeout(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := New(srv.URL, "k", 100*time.Millisecond).Cookie(context.Background(), CookieRequest{}); err == nil {
+	if _, err := New(srv.URL, "k", 100*time.Millisecond).Cookie(context.Background(), testCookieRequest()); err == nil {
 		t.Fatal("上限 100ms 时这次 300ms 的调用必须超时")
 	}
-	if _, err := New(srv.URL, "k", 3*time.Second).Cookie(context.Background(), CookieRequest{}); err != nil {
+	if _, err := New(srv.URL, "k", 3*time.Second).Cookie(context.Background(), testCookieRequest()); err != nil {
 		t.Fatalf("上限 3s 时这次 300ms 的调用不该失败: %v", err)
 	}
 }
