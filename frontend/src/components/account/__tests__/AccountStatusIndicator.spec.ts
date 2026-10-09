@@ -70,6 +70,23 @@ function makeAccount(overrides: Partial<Account>): Account {
 }
 
 describe('AccountStatusIndicator', () => {
+  it('freezes status and deadlines during blur, including parent updates', async () => {
+    vi.useFakeTimers()
+    const account = makeAccount({ platform: 'openai', extra: { openai_gwpool: true },
+      overload_until: new Date(Date.now() + 60_000).toISOString() })
+    const wrapper = mount(AccountStatusIndicator, { props: { account, gatewayPoolRest: { active: false } } })
+    try {
+      const frame = wrapper.html()
+      await wrapper.setProps({ progressPaused: true })
+      await vi.advanceTimersByTimeAsync(90_000)
+      await wrapper.setProps({ account: { ...account, overload_until: null }, gatewayPoolRest: { active: true } })
+      expect(wrapper.html()).toBe(frame)
+      await wrapper.setProps({ progressPaused: false })
+      expect(wrapper.text()).toContain('admin.accounts.tempUnschedulable.poolRestPending')
+      expect(wrapper.text()).not.toContain('admin.accounts.status.overloaded')
+    } finally { wrapper.unmount(); vi.useRealTimers() }
+  })
+
   it('keeps real pool rest visible after recheck expiry or generic block clearing', async () => {
     const account = makeAccount({ platform: 'openai', extra: { openai_gwpool: true },
       temp_unschedulable_until: '2020-01-01T00:00:00Z',
