@@ -71,6 +71,18 @@ export async function list(
   return data
 }
 
+export interface GatewayPoolQueueGroup {
+  count: number
+  gateways: string[]
+}
+
+export interface GatewayPoolQueueView {
+  model: string
+  valid_until: string
+  quality: GatewayPoolQueueGroup
+  ordinary: GatewayPoolQueueGroup
+}
+
 export interface GatewayPoolProgress {
   run_id?: string
   sequence?: number
@@ -96,6 +108,7 @@ export interface GatewayPoolProgress {
     current_concurrency?: number | null
     concurrency_limit?: number
     cooldown_estimate?: { resume_gateways: number; eligible_at?: string }
+    queues?: GatewayPoolQueueView | null
     rest?: { active: boolean; changed_at?: string; started_at?: string; resume_at?: string; next_check?: string; reason?: string }
   }
 }

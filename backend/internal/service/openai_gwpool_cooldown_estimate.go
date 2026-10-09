@@ -14,7 +14,23 @@ type GatewayPoolCooldownEstimate struct {
 
 func (s *openAICodexCookieStore) gatewayPoolCooldownEstimate(identity string, account *Account, history openAIGatewayHistory, now time.Time) GatewayPoolCooldownEstimate {
 	result := GatewayPoolCooldownEstimate{ResumeGateways: account.gatewayPoolResumeGateways()}
-	deadlines := make([]time.Time, 0, len(history.Seen))
+	projected := s.gatewayPoolDisplayCooldownDeadlines(identity, account, history, now)
+	deadlines := make([]time.Time, 0, len(projected))
+	for _, until := range projected {
+		if !until.IsZero() {
+			deadlines = append(deadlines, until)
+		}
+	}
+	if len(deadlines) == 0 {
+		return result // no local cooldown to wait for
+	}
+	sort.Slice(deadlines, func(i, j int) bool { return deadlines[i].Before(deadlines[j]) })
+	result.EligibleAt = deadlines[min(result.ResumeGateways, len(deadlines))-1]
+	return result
+}
+
+func (s *openAICodexCookieStore) gatewayPoolDisplayCooldownDeadlines(identity string, account *Account, history openAIGatewayHistory, now time.Time) map[string]time.Time {
+	deadlines := make(map[string]time.Time, len(history.Seen))
 	window := account.gatewayPoolGatewayWindow()
 	base := gatewayPoolCooldownBase(window)
 	clearAt := s.gatewayPoolCooldownClearAt(identity)
@@ -51,13 +67,8 @@ func (s *openAICodexCookieStore) gatewayPoolCooldownEstimate(identity string, ac
 			until = clearAt
 		}
 		if !until.IsZero() {
-			deadlines = append(deadlines, until)
+			deadlines[gateway] = until
 		}
 	}
-	if len(deadlines) == 0 {
-		return result // no local cooldown to wait for
-	}
-	sort.Slice(deadlines, func(i, j int) bool { return deadlines[i].Before(deadlines[j]) })
-	result.EligibleAt = deadlines[min(result.ResumeGateways, len(deadlines))-1]
-	return result
+	return deadlines
 }

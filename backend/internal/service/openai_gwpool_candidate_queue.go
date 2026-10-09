@@ -27,37 +27,16 @@ func (s *openAICodexCookieStore) gatewayPoolCandidateQueue(identity string) *gat
 func (q *gatewayPoolCandidateQueue) pick(eligible []gwpool.Gateway, policy ...gatewayPoolCandidateRanking) string {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	ready := make(map[string]bool, len(eligible))
-	catalog := make(map[string]gwpool.Gateway, len(eligible))
-	for _, candidate := range eligible {
-		if candidate.Name != "" {
-			ready[candidate.Name] = true
-			catalog[candidate.Name] = candidate
-		}
+	ordered := gatewayPoolReconcileCandidates(q.names, eligible)
+	q.names = make([]string, len(ordered))
+	for i, candidate := range ordered {
+		q.names[i] = candidate.Name
 	}
-	names := make([]string, 0, len(ready))
-	for _, name := range q.names {
-		if ready[name] {
-			names = append(names, name)
-			ready[name] = false
-		}
-	}
-	for _, candidate := range eligible {
-		if ready[candidate.Name] {
-			names = append(names, candidate.Name)
-			ready[candidate.Name] = false
-		}
-	}
-	q.names = names
-	if len(names) == 0 {
+	if len(ordered) == 0 {
 		return ""
 	}
-	selected := names[0]
+	selected := ordered[0].Name
 	if len(policy) > 0 {
-		ordered := make([]gwpool.Gateway, 0, len(names))
-		for _, name := range names {
-			ordered = append(ordered, catalog[name])
-		}
 		selected = policy[0].order(ordered)[0].Name
 	}
 	// Rotate in the untouched FIFO, not the score order: baseline exploration
@@ -69,6 +48,42 @@ func (q *gatewayPoolCandidateQueue) pick(eligible []gwpool.Gateway, policy ...ga
 		}
 	}
 	return selected
+}
+
+// Reconcile a private view without rotating, admitting work, or storing names.
+func (q *gatewayPoolCandidateQueue) preview(eligible []gwpool.Gateway) []gwpool.Gateway {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return gatewayPoolReconcileCandidates(q.names, eligible)
+}
+
+func gatewayPoolReconcileCandidates(queued []string, eligible []gwpool.Gateway) []gwpool.Gateway {
+	ready := make(map[string]bool, len(eligible))
+	catalog := make(map[string]gwpool.Gateway, len(eligible))
+	for _, candidate := range eligible {
+		if candidate.Name != "" {
+			ready[candidate.Name] = true
+			catalog[candidate.Name] = candidate
+		}
+	}
+	names := make([]string, 0, len(ready))
+	for _, name := range queued {
+		if ready[name] {
+			names = append(names, name)
+			ready[name] = false
+		}
+	}
+	for _, candidate := range eligible {
+		if ready[candidate.Name] {
+			names = append(names, candidate.Name)
+			ready[candidate.Name] = false
+		}
+	}
+	ordered := make([]gwpool.Gateway, 0, len(names))
+	for _, name := range names {
+		ordered = append(ordered, catalog[name])
+	}
+	return ordered
 }
 
 func (q *gatewayPoolCandidateQueue) reset() {
