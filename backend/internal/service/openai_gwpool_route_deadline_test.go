@@ -46,7 +46,7 @@ func TestGatewayPoolAcquisitionUsesCookieExpiryNotPoolEstimate(t *testing.T) {
 			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/gateways" {
-					_, _ = w.Write([]byte(`{"gateways":[]}`))
+					_, _ = w.Write([]byte(`{"gateways":[{"name":"unified-11","pair_ready":true}]}`))
 					return
 				}
 				require.Equal(t, "/cookie", r.URL.Path)

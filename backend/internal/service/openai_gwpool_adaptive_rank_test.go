@@ -243,20 +243,22 @@ func TestGatewayPoolAdaptivePickUsesRankingWithoutBypassingCooldown(t *testing.T
 	pool, err := svc.codexCookies.poolClient(account)
 	require.NoError(t, err)
 	ctx := context.WithValue(context.Background(), gatewayPoolProbeModelKey{}, "luna")
+	catalog, err := pool.Catalog(ctx, "acc-a/user-a", gatewayPoolAccountTag(account, gwpoolTestIdentity), "luna", 0)
+	require.NoError(t, err)
 	queue := svc.codexCookies.gatewayPoolCandidateQueue(gwpoolTestIdentity)
 	for i := 1; i <= gatewayPoolContactExploreEvery; i++ {
 		want := "c"
 		if i == gatewayPoolContactExploreEvery {
 			want = "a"
 		}
-		require.Equal(t, want, svc.codexCookies.gatewayPoolPick(ctx, pool, account, gwpoolTestIdentity))
+		require.Equal(t, want, svc.codexCookies.gatewayPoolPick(ctx, account, gwpoolTestIdentity, catalog.Gateways, nil))
 		if i == 1 {
 			require.Equal(t, []string{"a", "b", "c"}, queue.names,
 				"first admission must not persist the adaptive ordering")
 		}
 	}
 	require.Equal(t, "a", queue.pick(candidates[:1]))
-	require.Equal(t, "c", svc.codexCookies.gatewayPoolPick(ctx, pool, account, gwpoolTestIdentity))
+	require.Equal(t, "c", svc.codexCookies.gatewayPoolPick(ctx, account, gwpoolTestIdentity, catalog.Gateways, nil))
 	require.Equal(t, []string{"a", "b", "c"}, queue.names,
 		"multiple returning candidates must also retain fallback admission order")
 	after, burned := svc.codexCookies.gatewayPoolUsedAt(gwpoolTestIdentity, "cooling", time.Hour)

@@ -77,7 +77,7 @@ type gwpoolFakePool struct {
 	forceStatus  int
 	listHits     atomic.Int64
 	listQueries  chan string
-	listGateways []gwpoolFakeGateway // 空 = 空列表，消费端挑不出来
+	listGateways []gwpoolFakeGateway // nil infers stock; a non-nil empty slice means zero inventory
 	listStatus   int                 // 非 0 时 /gateways 直接回这个状态码
 	onList       func()              // fixed callback for concurrent inventory regressions
 	// refuseStatus / refuseCode / refuseRetryAfter 让 /cookie 回结构化拒绝（2026-10-02 契约）。
@@ -112,7 +112,8 @@ func newGwpoolFakePool(t *testing.T, cookie string, validForS int) *gwpoolFakePo
 				fake.beforeCookie()
 			}
 			fake.queries <- r.URL.RawQuery
-			forced := r.URL.Query().Get("force") == "1"
+			forced := r.URL.Query().Get("exclude_versions") != "" ||
+				(fake.forceCookie != "" && r.URL.Query().Get("gateway") == openAICodexRouteGateway(fake.forceCookie))
 			if fake.refuseStatus != 0 {
 				if fake.refuseRetryAfter > 0 {
 					w.Header().Set("Retry-After", strconv.Itoa(fake.refuseRetryAfter))
@@ -170,10 +171,33 @@ func newGwpoolFakePool(t *testing.T, cookie string, validForS int) *gwpoolFakePo
 				w.WriteHeader(fake.listStatus)
 				return
 			}
+			// Default fixtures advertise the route they can deliver. An explicit
+			// empty slice models zero inventory; nil means infer fixture stock.
+			gateways := fake.listGateways
+			if gateways == nil {
+				cookie := fake.cookie
+				if fake.cookieForHit != nil {
+					cookie = fake.cookieForHit(fake.hits.Load() + 1)
+				}
+				name := fake.gateway
+				if name == "" {
+					name = openAICodexRouteGateway(cookie)
+				}
+				if name == "" && cookie != "" {
+					name = "unified-fixture"
+				}
+				gateways = []gwpoolFakeGateway{}
+				if name != "" {
+					gateways = append(gateways, gwpoolFakeGateway{Name: name, PairReady: true})
+				}
+				if next := openAICodexRouteGateway(fake.forceCookie); next != "" && next != name {
+					gateways = append(gateways, gwpoolFakeGateway{Name: next, PairReady: true})
+				}
+			}
 			// 回显 account（真池子的自检字段）：报错给别人时消费端据此弃用这张列表。
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"account": r.URL.Query().Get("account"), "live": len(fake.listGateways),
-				"target": 6, "gateways": fake.listGateways,
+				"account": r.URL.Query().Get("account"), "live": len(gateways),
+				"target": 6, "gateways": gateways,
 			})
 		case "/release":
 			fake.releaseHits.Add(1)
@@ -807,7 +831,10 @@ func TestGatewayPoolFetchSurvivesCallerCancel(t *testing.T) {
 	release := make(chan struct{})
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 只有 /cookie 走屏障：/gateways（挑网关）回 404 ⇒ 退回裸取，与这条用例无关。
+		if r.URL.Path == "/gateways" {
+			_, _ = io.WriteString(w, `{"gateways":[{"name":"unified-142","pair_ready":true}]}`)
+			return
+		}
 		if r.URL.Path != "/cookie" {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -815,7 +842,7 @@ func TestGatewayPoolFetchSurvivesCallerCancel(t *testing.T) {
 		hits.Add(1)
 		arrived <- struct{}{}
 		<-release
-		_, _ = io.WriteString(w, `{"gateway":"unified-142","cookie":"`+poolCookie+`","valid_for_s":150}`)
+		_, _ = io.WriteString(w, `{"gateway":"unified-142","cookie":"`+poolCookie+`","cookie_version":"v1","valid_for_s":150}`)
 	}))
 	defer srv.Close()
 
@@ -888,7 +915,7 @@ func TestGatewayPoolForcesRotationAfterRouteExpiry(t *testing.T) {
 	headers := http.Header{}
 	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, headers))
 	require.Equal(t, first, headers.Get("Cookie"))
-	require.Equal(t, gwpoolTestCookieQuery, fake.nextQuery(t), "正常路径不带 force")
+	require.Equal(t, gwpoolTestCookieQuery+"&gateway=unified-142", fake.nextQuery(t), "所有请求都点名")
 
 	// 把确证凭据截止拨到过去；池参考 valid_for_s 不参与这个判据。
 	store.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
@@ -899,7 +926,7 @@ func TestGatewayPoolForcesRotationAfterRouteExpiry(t *testing.T) {
 	require.Equal(t, fake.forceCookie, rotated.Get("Cookie"), "到期后要换成池子新给的那张")
 	// force 说「换个网关」，exclude_versions 说「这张具体的票不行」，exclude 是本地账本里还在
 	// 窗口内的那些 —— 三样一起带，池子才知道换什么、避开什么。
-	require.Equal(t, gwpoolTestCookieQuery+"&exclude=unified-142&exclude_versions=tkt-1&force=1",
+	require.Equal(t, gwpoolTestCookieQuery+"&exclude_versions=tkt-1&gateway=unified-84",
 		fake.nextQuery(t))
 	require.EqualValues(t, 2, fake.hits.Load())
 	require.Zero(t, fake.releaseHits.Load(), "expired credential rotation never calls remote release")
@@ -910,7 +937,7 @@ func TestGatewayPoolForcesRotationAfterRouteExpiry(t *testing.T) {
 func TestGatewayPoolForceNoSlotFailsClosed(t *testing.T) {
 	stale := gwpoolTestPairCookie(t, "unified-142")
 	fake := newGwpoolFakePool(t, stale, 150)
-	fake.forceStatus = http.StatusServiceUnavailable
+	fake.listGateways = []gwpoolFakeGateway{}
 	store := &openAICodexCookieStore{}
 	acct := fake.account(1)
 	// 罐里有一张能回放的：也不许用。
@@ -923,10 +950,8 @@ func TestGatewayPoolForceNoSlotFailsClosed(t *testing.T) {
 		err := attachRoute(context.Background(), store, acct, gwpoolTestURL, headers)
 		require.ErrorIs(t, err, gwpool.ErrNoSlot)
 		require.Empty(t, headers.Get("Cookie"), "失败时一个 cookie 都不许写出去")
-		require.Equal(t, gwpoolTestCookieQuery+"&exclude_versions=tkt-stale&force=1",
-			fake.nextQuery(t), "过期那张还在缓存里，下一发仍要换、仍要点名排除它")
 	}
-	require.EqualValues(t, 2, fake.hits.Load(), "一次失败一次请求，不许自动重试")
+	require.Zero(t, fake.hits.Load(), "没有可用点名候选，不许裸取或复用过期票")
 }
 
 // ---------------------------------------------------------------------------
@@ -995,14 +1020,14 @@ func TestGatewayPoolPicksLeastRecentlyUsedCandidate(t *testing.T) {
 				{Name: "unified-183", PairReady: true, LastUsedAt: "2026-10-01T06:00:00Z"},
 				{Name: "unified-165", PairReady: true, LastUsedAt: "2026-10-01T11:00:00Z"},
 			},
-			want: gwpoolTestCookieQuery + "&gateway=unified-183",
+			want: gwpoolTestCookieQuery + "&gateway=unified-167",
 		},
 		"从没碰过的优先": {
 			gateways: []gwpoolFakeGateway{
 				{Name: "unified-167", PairReady: true, LastUsedAt: "2026-10-01T06:00:00Z"},
 				{Name: "unified-183", PairReady: true},
 			},
-			want: gwpoolTestCookieQuery + "&gateway=unified-183",
+			want: gwpoolTestCookieQuery + "&gateway=unified-167",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1030,11 +1055,10 @@ func TestGatewayPoolFallsBackToBareTakeWhenListUnavailable(t *testing.T) {
 			store := &openAICodexCookieStore{}
 
 			headers := http.Header{}
-			require.NoError(t, attachRoute(context.Background(), store, fake.account(1), gwpoolTestURL, headers))
-			require.Equal(t, poolCookie, headers.Get("Cookie"), "列不出来也必须照常拿到票")
-			require.Equal(t, gwpoolTestCookieQuery, fake.nextQuery(t), "退回裸取：不带 gateway")
+			require.Error(t, attachRoute(context.Background(), store, fake.account(1), gwpoolTestURL, headers))
+			require.Empty(t, headers.Get("Cookie"), "未知库存不能裸取或注入旧票")
 			require.EqualValues(t, 1, fake.listHits.Load())
-			require.EqualValues(t, 1, fake.hits.Load())
+			require.Zero(t, fake.hits.Load())
 		})
 	}
 }
@@ -1062,8 +1086,8 @@ func TestGatewayPoolRotatesToTheOldestBurntCandidateInsteadOfBareTake(t *testing
 	headers := http.Header{}
 	require.NoError(t, attachRoute(context.Background(), store, fake.account(1), gwpoolTestURL, headers))
 	require.Equal(t, poolCookie, headers.Get("Cookie"))
-	require.Equal(t, gwpoolTestCookieQuery+"&exclude=unified-167&gateway=unified-84", fake.nextQuery(t),
-		"点名碰得最早那个，并把它自己从 exclude 里摘掉；别的烧过的照旧带着")
+	require.Equal(t, gwpoolTestCookieQuery+"&gateway=unified-84", fake.nextQuery(t),
+		"本地筛掉冷却的候选，只把确定落点交给池子")
 }
 
 // 一个有活 pair 的候选都没有 ⇒ 仍然裸取，账本带成 exclude。
@@ -1078,10 +1102,10 @@ func TestGatewayPoolFallsBackToBareTakeWhenNothingIsSteerable(t *testing.T) {
 	store.gatewayPoolMarkUsed(gwpoolTestIdentity, "unified-167")
 
 	headers := http.Header{}
-	require.NoError(t, attachRoute(context.Background(), store, fake.account(1), gwpoolTestURL, headers))
-	require.Equal(t, poolCookie, headers.Get("Cookie"), "挑不出来也要拿到票，落点交给池子")
-	require.Equal(t, gwpoolTestCookieQuery+"&exclude=unified-167", fake.nextQuery(t),
-		"挑不出来就不许点名，但账本要带成 exclude —— 裸取恰恰是最需要它的时候")
+	require.ErrorIs(t, attachRoute(context.Background(), store, fake.account(1), gwpoolTestURL, headers), gwpool.ErrNoSlot)
+	require.Empty(t, headers.Get("Cookie"))
+	require.Zero(t, fake.hits.Load(), "没有候选绝不裸取")
+	require.EqualValues(t, 2, fake.listHits.Load(), "耗尽需刷新确认")
 }
 
 // 点名的那个在「列表」与「取票」之间被别人租走（503）⇒ 退回裸取一次。
@@ -1109,10 +1133,10 @@ func TestGatewayPoolRetriesBareWhenSteeredTakeHasNoSlot(t *testing.T) {
 	acct.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = gwpoolTestConsumerKey
 
 	headers := http.Header{}
-	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, headers))
-	require.Equal(t, poolCookie, headers.Get("Cookie"))
+	require.ErrorIs(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, headers), gwpool.ErrNoSlot)
+	require.Empty(t, headers.Get("Cookie"))
 	require.EqualValues(t, 1, steered.Load())
-	require.EqualValues(t, 1, bare.Load(), "点名失败只退回裸取一次，不许自动重试点名")
+	require.Zero(t, bare.Load(), "未分类的失败不能触发裸取")
 }
 
 // 本地账本的键是**上游账号**而不是本地账号行 ID：同一份 Codex 凭据挂在多个 sub2api 账号行上时，
@@ -1146,7 +1170,7 @@ func TestGatewayPoolLedgerIsKeyedByCredentialIdentityNotRowID(t *testing.T) {
 	rotated := http.Header{}
 	require.NoError(t, attachRoute(context.Background(), store, fake.account(35), gwpoolTestURL, rotated))
 	require.Equal(t, second, rotated.Get("Cookie"))
-	require.Equal(t, gwpoolTestCookieQuery+"&exclude=unified-167&force=1&gateway=unified-183",
+	require.Equal(t, gwpoolTestCookieQuery+"&gateway=unified-183",
 		fake.nextQuery(t), "另一个本地行不许再去碰 167：点名避开它，exclude 也要带上它")
 
 	// 同 workspace 不同成员凭据分别记账，不继承上一成员的冷却。
@@ -1263,7 +1287,10 @@ func TestGatewayPoolPairDedupesConcurrentFetches(t *testing.T) {
 	arrived := make(chan struct{}, 1)
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 只有 /cookie 走屏障：/gateways（挑网关）回 404 ⇒ 退回裸取，与这条用例无关。
+		if r.URL.Path == "/gateways" {
+			_, _ = io.WriteString(w, `{"gateways":[{"name":"unified-142","pair_ready":true}]}`)
+			return
+		}
 		if r.URL.Path != "/cookie" {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -1271,7 +1298,7 @@ func TestGatewayPoolPairDedupesConcurrentFetches(t *testing.T) {
 		hits.Add(1)
 		arrived <- struct{}{}
 		<-release
-		_, _ = io.WriteString(w, `{"gateway":"unified-142","cookie":"`+poolCookie+`","valid_for_s":150}`)
+		_, _ = io.WriteString(w, `{"gateway":"unified-142","cookie":"`+poolCookie+`","cookie_version":"v1","valid_for_s":150}`)
 	}))
 	defer srv.Close()
 
