@@ -7,13 +7,15 @@ interface UsageTpsRow extends UsageRequestTypeLike {
   first_token_ms?: number | null
   billing_mode?: string | null
   image_count?: number
+  image_output_tokens?: number | null
 }
 
 /** Average output rate; streaming excludes time to first token, not reasoning tokens. */
 export function usageTps(row: UsageTpsRow): number | null {
   const type = resolveUsageRequestType(row)
   const mode = getDisplayBillingMode({ billing_mode: row.billing_mode, image_count: row.image_count ?? 0 })
-  if (type === 'probe' || type === 'gwpool_degraded' || mode === 'image' || mode === 'video') return null
+  if (type === 'probe' || type === 'gwpool_degraded' || mode === 'image' || mode === 'video' ||
+      (row.image_count ?? 0) > 0 || (row.image_output_tokens ?? 0) > 0) return null
   const tokens = row.output_tokens
   const duration = row.duration_ms
   if (tokens == null || !Number.isFinite(tokens) || tokens < 0 ||
