@@ -273,6 +273,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketRawRelay(
 					OutputTokens:             turn.Usage.OutputTokens,
 					CacheCreationInputTokens: turn.Usage.CacheCreationInputTokens,
 					CacheReadInputTokens:     turn.Usage.CacheReadInputTokens,
+					ImageInputTokens:         turn.Usage.ImageInputTokens,
 					ImageOutputTokens:        turn.Usage.ImageOutputTokens,
 				}
 				result.UpstreamResponseModel = turn.ResponseModel

@@ -25,6 +25,7 @@ describe('usage TPS', () => {
     { first_token_ms: NaN }, { first_token_ms: Infinity },
     { request_type: 'probe' }, { request_type: 'gwpool_degraded' },
     { billing_mode: 'image' }, { billing_mode: 'video' }, { image_count: 1 },
+    { billing_mode: 'token', image_count: 1 }, { image_output_tokens: 100 },
   ])('does not invent a rate from missing or inapplicable data: %j', patch => {
     expect(usageTps({ ...row, ...patch })).toBeNull()
     expect(formatUsageTps({ ...row, ...patch })).toBe('—')
