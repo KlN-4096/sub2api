@@ -652,7 +652,6 @@ export default {
           ordinaryHint: 'Ordinary queue: lower-yield or insufficiently measured candidates retain bounded exploration opportunities.',
           hint: 'The dispatch policy projects attempt order, including exploration and regional soft deferral. Excludes cooldowns and the current ticket; up to 3 names per queue. New inventory or verdicts can change the order. Expiry keeps the last snapshot, without acquisition or probing.',
           next: 'Next est. · {name}',
-          orderHint: 'Projected verification order under this snapshot, including exploration. Inventory, cooldown and cancellation are checked again before sending.',
           stale: 'Last snapshot',
           staleHint: 'Metadata has expired or refresh is unfinished. The last successful directory remains visible, but does not confirm current inventory.',
           candidateHint: '{name} · Candidate, not yet verified',
@@ -662,9 +661,13 @@ export default {
         },
         gatewayUsed: {
           title: 'Used · {count}',
+          label: 'Used',
+          coolingCount: '{count} cooling',
+          cooledCount: '{count} cooled',
+          heldFull: 'full {duration}',
           hint: 'The current ticket appears above. Up to two summary rows combine consecutive confirmed degraded tickets and retain measured full-strength history. Counts are deduplicated ticket records; incomplete history shows “at least”. Unknown results are not degraded. Duration is a measured full-strength window, not business-active time or the cycle total. All history retains per-gateway details; cooled does not guarantee availability or full strength.',
-          degradedTickets: '{count} degraded tickets',
-          degradedTicketsAtLeast: 'At least {count} degraded tickets',
+          degradedTickets: '{count} degraded in a row',
+          degradedTicketsAtLeast: 'At least {count} degraded in a row',
           allHistory: 'All history',
           allRegions: 'All regions',
           order: 'Live first · Latest use',
@@ -681,20 +684,22 @@ export default {
         gatewayRuntime: {
           live: 'Verified · {gateway} · probe models: {models}',
           unverified: 'not verified',
-          counts: 'Full/attempts: {full}/{attempted}',
-          active: 'Cycle full-use {duration}',
+          noTicket: 'No live ticket',
+          verifiedAt: 'verified {time}',
+          cycleFull: 'Cycle full',
+          totalFull: 'Total full',
+          cycleTickets: '{full}/{attempted}',
+          totalRounds: '{count} rounds',
+          incompleteHint: 'Some duration unobserved; actual is at least this value',
           activeHint: 'Counts active business intervals on verified tickets, with overlaps counted once. Excludes idle time, ticket preparation, verification and retry waits. Legacy durations are hidden.',
           history: 'Usage history',
           ended: '{full}/{attempted} tickets · full-strength use {duration} · ended {end}',
-          archived: 'Total full-use {duration} · {count} rounds',
-          archivedCounts: 'History: {count} rounds',
           legacy: 'Legacy · {model} · {full}/{attempted} tickets',
           legacyArchived: 'Legacy archive · {model} · {count} rounds · {full}/{attempted} tickets',
-          durationIncomplete: ' (some duration unobserved)',
           incomplete: ' (counts are lower bounds)'
         },
         gatewayProgress: {
-          run: '#{id}',
+          run: 'probe {id}',
           idle: 'Idle',
           pending: 'Pending',
           count: 'Tried {attempt} tickets · {seconds}s',
@@ -829,7 +834,7 @@ export default {
         codexImageToolBadgeDisabled: 'No hosted injection',
         codexImageToolBadgeBlock: 'Client image tools stripped',
         gwpool: 'Use the gateway pool for Codex routing',
-        gwpoolManualRetry: 'Clear cooldowns',
+        gwpoolManualRetry: 'Clear CD',
         gwpoolManualRetryPending: 'Processing…',
         gwpoolManualRetryHint: 'Clear only local cooldowns, backoff and pool rest. Keep live tickets and history. No ticket fetch or probe is sent; prepare when business traffic arrives. Authentication and upstream rate limits remain.',
         gwpoolManualRetryFailed: 'Failed to clear local cooldowns',
@@ -896,7 +901,6 @@ export default {
           feedbackTotals: 'Reports: {sent} sent, {pending} pending, {failed} permanent failures, {discarded} discarded',
           runtimeHint: 'Cumulative probe attempts only, not business traffic. Unknown is not degraded. These are not a business success rate or measured tokens/cost. Up to 64 queued reports, retained for 7 days while enabled.',
           empty: 'Gateway -',
-          current: 'Current',
           seen: '{n} used',
           // The tooltip's five segments are region-gateway-fullTime-state-verdict, each
           // carrying only the VALUE and no label: operators scan a column vertically, and
@@ -922,7 +926,6 @@ export default {
           // Two independent numbers, NO subtraction: "landings" comes from this row's ledger
           // (gateway names touched over the past window), "left in pool" is the current
           // deliverable listing reconciled against that ledger. The two sets do not nest.
-          windowUsage: 'Cooling {used} · cooled down {cooled}',
           // Without the pool listing, report only the landings: inventing a number is worse.
           poolSnapshot: 'Last inventory snapshot: {free} (not live)',
           windowUsageHint:

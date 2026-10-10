@@ -9,7 +9,7 @@ vi.mock('vue-i18n', async importOriginal => ({
 afterEach(() => vi.useRealTimers())
 function items(count = 102) {
   return Array.from({ length: count }, (_, index) => ({
-    name: `unified-${index}`, label: String(index), region: index % 2 ? 'europe' : 'east-asia',
+    name: `unified-${index}`, region: index % 2 ? 'europe' : 'east-asia',
     title: `detail-${index}`, duration: '43s', status: 'CD 44m', tone: 'degraded' as const
   }))
 }
@@ -43,6 +43,7 @@ describe('gateway history hover', () => {
       expect(wrapper.find(selector('panel')).exists()).toBe(true)
       expect(wrapper.get(selector('page')).text()).toBe('1/26 · 102')
       expect(wrapper.findAll(selector('entry'))).toHaveLength(4)
+      expect(wrapper.findAll(selector('entry'))[0].text()).toContain('unified-0')
       expect(wrapper.get(selector('prev')).attributes('disabled')).toBeDefined()
       for (let page = 1; page < 26; page++) await wrapper.get(selector('next')).trigger('click')
       expect(wrapper.get(selector('page')).text()).toBe('26/26 · 102')

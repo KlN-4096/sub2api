@@ -763,13 +763,12 @@ export default {
         gwpoolCredentialScope: '同一套上游凭据共享验票和账本；同一工作区的不同成员独立记账。本地实测和冷却规则优先，池端数据仅供参考。',
         gatewayQueues: {
           title: '候选队列',
-          quality: '快速队列',
-          ordinary: '普通队列',
+          quality: '快速',
+          ordinary: '普通',
           qualityHint: '快速队列：现有质量评分高于中性分0.5的候选，动态收益用于队内排序。表示优先尝试，不代表已经验满或响应更快。',
           ordinaryHint: '普通队列：低收益或证据不足的候选，保留有限探索机会，不永久排除。',
           hint: '按同一调度规则预览候选，排除本地冷却和当前票。序号包含探索轮次与地区软降权，每组最多展示3个；库存或判定变化会更新顺序。过期保留上次目录，不额外取票或探测。',
           next: '预计下一 · {name}',
-          orderHint: '序号是按当前快照预计的验票顺序，已计入探索轮次；实际发送前仍检查库存、冷却和请求取消。',
           stale: '上次快照',
           staleHint: '目录已过期或刷新尚未成功，保留最后成功的目录供查看；不能据此确认当前库存。',
           candidateHint: '{name} · 候选，尚未验满',
@@ -779,9 +778,13 @@ export default {
         },
         gatewayUsed: {
           title: '已使用 · {count}',
+          label: '已使用',
+          coolingCount: '{count} 冷却中',
+          cooledCount: '{count} 已冷却',
+          heldFull: '满血 {duration}',
           hint: '当前票在上方显示，外层合并连续明确判降票并保留有满血时长的历史，最多两行。张数按票级记录去重，历史不完整时标“至少”；未知不算降智。时长为实测满血窗口，不是业务耗时或当前周期累计。全部历史保留逐网关明细；已冷却不保证有票或满血。',
-          degradedTickets: '{count}张降智票',
-          degradedTicketsAtLeast: '至少{count}张降智票',
+          degradedTickets: '连续{count}张降智票',
+          degradedTicketsAtLeast: '至少连续{count}张降智票',
           allHistory: '全部历史',
           allRegions: '全部大区',
           order: '当前置顶 · 使用倒序',
@@ -798,24 +801,26 @@ export default {
         gatewayRuntime: {
           live: '已验证 · {gateway} · 验证模型：{models}',
           unverified: '尚未验证',
-          counts: '满血/尝试：{full}/{attempted}',
-          active: '周期满血时长 {duration}',
+          noTicket: '暂无可用票',
+          verifiedAt: '{time}验满',
+          cycleFull: '本轮满血用时',
+          totalFull: '累计满血用时',
+          cycleTickets: '{full}/{attempted}张',
+          totalRounds: '{count}轮',
+          incompleteHint: '部分时长未观测，实际不少于此值',
           activeHint: '仅统计已验满票承载业务的活跃区间，并发去重；不含空闲、找票、验证和重试等待。旧口径时长不再展示。',
           history: '使用历史',
           ended: '{full}/{attempted}张 · 满血使用 {duration} · {end}结束',
-          archived: '累计满血 {duration} · {count}轮',
-          archivedCounts: '历史记录 {count}轮',
           legacy: '旧统计 · {model} · {full}/{attempted}张',
           legacyArchived: '旧归档 · {model} · {count}轮 · {full}/{attempted}张',
-          durationIncomplete: '（部分时长未观测）',
           incomplete: '（计数为下界）'
         },
         gatewayProgress: {
-          run: '#{id}',
+          run: '第{id}次验票',
           idle: '暂无验证',
           pending: '待准备',
           count: '已试{attempt}张 · 用时{seconds}秒',
-          elapsed: '{seconds}s',
+          elapsed: '用时{seconds}s',
           lastCount: '上次试票 {attempt} / {limit} 张 · 用时{seconds}秒',
           fetching: '取票中',
           verifying: '验票中',
@@ -1003,7 +1008,6 @@ export default {
           feedbackTotals: '反馈：已发送 {sent}，待重试 {pending}，永久失败 {failed}，已丢弃 {discarded}',
           runtimeHint: '仅累计验证请求尝试，不含业务请求；未知不算降级，不代表业务满血率或实际 token/金额。待发送最多 64 条，启用期间保留 7 天。',
           empty: '网关 -',
-          current: '当前',
           seen: '打过 {n} 个',
           // tooltip 的五段是「区域-网关名-满血时间-状态-判定」，每段只放**值**不带标签：
           // 运营方竖着扫一列看，每行重复一遍「窗口内打过，仍在冷却」会把真正要比的那几个
@@ -1022,7 +1026,6 @@ export default {
           legend: '✓ 当前票已验证 · ! 本地冷却中 · 灰 可再试；历史满血不代表当前可用',
           // 两个数各报各的，**不做减法**：历史落点来自本地账本（过去一个窗口碰过的网关名），
           // 池子剩余是「此刻可交付的清单」现对本地账本得出的，两个集合不是包含关系。
-          windowUsage: '冷却中 {used} · 冷却完毕 {cooled}',
           poolSnapshot: '最近库存快照：{free}（非实时）',
           windowUsageHint:
             '「冷却中」和「冷却完毕」按本行历史中各网关的冷却截止时间实时计算；时间未知不计入完毕。' +

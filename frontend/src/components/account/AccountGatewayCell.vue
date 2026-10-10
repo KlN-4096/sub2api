@@ -1,100 +1,121 @@
 <template>
-  <div v-if="isCodexAccount" class="w-[260px] min-w-[260px] max-w-[260px] space-y-1.5 overflow-hidden text-[11px] tabular-nums" data-testid="account-gateway-cell">
-    <div v-if="usesPool" class="truncate rounded-md bg-primary-50 px-2.5 py-1.5 text-[11px] text-primary-700 dark:bg-primary-900/20 dark:text-primary-300"
-      role="status" aria-live="polite" :title="progressHint" data-testid="account-gateway-progress">
-        <span v-if="displayProgress?.sequence">{{ t('admin.accounts.openai.gatewayProgress.run', { id: displayProgress.sequence }) }} · </span>
-        {{ t(`admin.accounts.openai.gatewayProgress.${displayProgress?.phase || 'idle'}`) }}
-        <span v-if="displayProgress && displayProgress.phase !== 'idle'"> · {{ t('admin.accounts.openai.gatewayProgress.elapsed', {
-          seconds: Math.floor(displayProgress.elapsed_ms / 1000)
-        }) }}</span>
+  <div v-if="isCodexAccount" class="w-[260px] min-w-[260px] max-w-[260px] space-y-1.5 overflow-hidden text-[11px] leading-4 tabular-nums text-gray-500 dark:text-gray-400" data-testid="account-gateway-cell">
+    <!-- 焦点块只放当前票：绿只给有效已验满票；验证中中性转圈，取票空档不回退历史票。
+         ✓ / ! 是字符而非纯颜色，颜色退化成装饰后判定仍读得出来。 -->
+    <div v-if="current || preparing" class="flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 ring-1 ring-inset" :class="HERO_CLASS[heroTone]"
+      data-testid="account-gateway-current">
+      <span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center" aria-hidden="true" data-testid="account-gateway-current-mark">
+        <span v-if="heroTone === 'full'" class="text-[12px] font-bold leading-none text-emerald-600 dark:text-emerald-400">✓</span>
+        <span v-else-if="heroTone === 'degraded'" class="flex h-3 w-3 items-center justify-center rounded-full bg-rose-500 text-[9px] font-bold leading-none text-white">!</span>
+        <span v-else-if="heroTone === 'active'" class="h-2.5 w-2.5 rounded-full border-[1.5px] border-primary-500 border-t-transparent motion-safe:animate-spin"
+          :style="progressPaused ? { animationPlayState: 'paused' } : undefined" />
+        <span v-else-if="heroTone === 'warn'" class="h-1.5 w-1.5 rounded-full bg-amber-500" />
+        <span v-else class="h-1.5 w-1.5 rounded-full bg-gray-400 dark:bg-gray-500" />
+      </span>
+      <template v-if="current">
+        <span class="flex min-w-0 items-center gap-1.5" :data-tone="ticketTone" data-testid="account-gateway-current-ticket"
+          :title="preparing ? t('admin.accounts.openai.gatewayProgress.verifying') : titleOf(current)">
+          <span class="min-w-0 truncate text-[12px] font-semibold">{{ current.name }}</span>
+          <span class="min-w-0 shrink-[4] truncate text-[10px] opacity-75">{{ regionLabel(current.region) }}</span>
+        </span>
+        <span class="ml-auto shrink-0 text-[10px] opacity-70" data-testid="account-gateway-current-time">{{ ticketTone === 'full'
+          ? t('admin.accounts.openai.gatewayRuntime.verifiedAt', { time: safeRelativeTime(currentAt) }) : safeRelativeTime(currentAt) }}</span>
+      </template>
+      <span v-else class="truncate text-[11px] font-medium">{{ t('admin.accounts.openai.gatewayRuntime.noTicket') }}</span>
     </div>
     <!-- 没有读数也要占位：整块消失时，「没接网关池」「接了还没跑过流量」「落点读不出来」
          在页面上长得一模一样。非 Codex 上游的账号根本没有落点这回事，那才该整块消失。 -->
-    <p v-if="!preparing && !current && !items.length" class="text-[10px] text-gray-400" data-testid="account-gateway-empty">
-      {{ t('admin.accounts.openai.gatewayHistory.empty') }}
-    </p>
-      <!-- 第一行是「当前大区 · 当前网关」：整块里最要紧的一个事实。 -->
-      <div v-if="current || preparing" class="flex items-center gap-1" data-testid="account-gateway-current">
-        <span class="shrink-0 text-[10px] text-gray-400">
-          {{ t('admin.accounts.openai.gatewayHistory.current') }}
+    <div v-else class="truncate rounded-md bg-gray-50 px-2 py-1 text-[11px] text-gray-400 ring-1 ring-inset ring-gray-200 dark:bg-dark-800 dark:text-gray-500 dark:ring-dark-600"
+      data-testid="account-gateway-empty">
+      {{ usesPool ? t('admin.accounts.openai.gatewayRuntime.noTicket') : t('admin.accounts.openai.gatewayHistory.empty') }}
+    </div>
+
+    <!-- 状态行：阶段按语义着色（进行中主色脉冲 / 等待与耗尽琥珀 / 其余中性）。
+         清空冷却只清本地冷却与退避、不保证有票或满血，所以只是小号灰边按钮，任何状态都不加强调。 -->
+    <div v-if="usesPool" class="flex min-w-0 items-center gap-2 text-[10px]" data-testid="account-gateway-status-row">
+      <span class="flex min-w-0 items-center gap-1.5" role="status" aria-live="polite" :title="progressHint" data-testid="account-gateway-progress">
+        <span class="h-1.5 w-1.5 shrink-0 rounded-full" aria-hidden="true"
+          :class="[PHASE_DOT[phaseTone], phaseTone === 'active' ? 'motion-safe:animate-pulse' : '']"
+          :style="phaseTone === 'active' && progressPaused ? { animationPlayState: 'paused' } : undefined" />
+        <span class="truncate" :class="PHASE_TEXT[phaseTone]">
+          <span class="font-medium">{{ t(`admin.accounts.openai.gatewayProgress.${phase}`) }}</span>
+          <span v-if="displayProgress?.sequence" class="text-gray-400 dark:text-gray-500"> · {{ t('admin.accounts.openai.gatewayProgress.run', { id: displayProgress.sequence }) }}</span>
+          <span v-if="displayProgress && phase !== 'idle'" class="text-gray-400 dark:text-gray-500"> · {{ t('admin.accounts.openai.gatewayProgress.elapsed', {
+            seconds: Math.floor(displayProgress.elapsed_ms / 1000)
+          }) }}</span>
         </span>
-        <!-- 当前票按真实验满/降级证据着色；下方尚未验满的候选始终保持中性。 -->
-        <span
-          v-if="current"
-          class="truncate rounded px-1 text-[10px] font-medium leading-4"
-          :class="TONE_CLASS[preparing ? 'idle' : toneOf(current)]"
-          :data-tone="preparing ? 'idle' : toneOf(current)"
-          data-testid="account-gateway-current-ticket"
-          :title="preparing ? t('admin.accounts.openai.gatewayProgress.verifying') : titleOf(current)"
-        >
-          {{ preparing ? '' : verdictMark(current) }}{{ regionLabel(current.region) }} · {{ current.name }}
-        </span>
-        <span v-else class="truncate text-[10px] text-gray-400">{{ t(`admin.accounts.openai.gatewayProgress.${displayProgress?.phase}`) }}</span>
-        <span v-if="current" class="ml-auto shrink-0 text-[10px] text-gray-400" data-testid="account-gateway-current-time">{{ safeRelativeTime(currentAt) }}</span>
-      </div>
-      <div v-for="round in (usesPool ? activeRounds : [])" :key="round.id" class="flex items-center justify-between gap-2 whitespace-nowrap text-[10px] text-gray-500 dark:text-gray-400" data-testid="account-gateway-usage-round">
-        <span class="shrink-0 text-left">{{ t('admin.accounts.openai.gatewayRuntime.counts', { full: round.full, attempted: round.attempted }) }}</span>
-        <span v-if="round.full_usage_mode === ACTIVE_USAGE_MODE" class="min-w-0 truncate text-right" :title="t('admin.accounts.openai.gatewayRuntime.activeHint')">
-          {{ t('admin.accounts.openai.gatewayRuntime.active', { duration: fullUseTime(round) }) }}<span v-if="round.duration_incomplete">{{ t('admin.accounts.openai.gatewayRuntime.durationIncomplete') }}</span>
-        </span>
-      </div>
-      <div v-if="usesPool && runtime && !activeRounds.length" class="flex items-center justify-between gap-2 whitespace-nowrap text-[10px] text-gray-500 dark:text-gray-400" data-testid="account-gateway-usage-idle">
-        <span class="shrink-0 text-left">{{ t('admin.accounts.openai.gatewayRuntime.counts', { full: 0, attempted: 0 }) }}</span>
-        <span class="min-w-0 truncate text-right">{{ t('admin.accounts.openai.gatewayRuntime.active', { duration: formatUseTime(0) }) }}</span>
-      </div>
-      <GatewayQueueCards v-if="usesPool" :snapshot="runtime?.queues" :now="now" />
-      <section v-if="usesPool && usedItems.length" class="space-y-1.5" data-testid="account-gateway-used">
-        <div class="flex items-center justify-between gap-2 text-[10px] text-gray-500 dark:text-gray-400">
-          <span :title="t('admin.accounts.openai.gatewayUsed.hint')">{{ t('admin.accounts.openai.gatewayUsed.title', { count: usedItems.length }) }}</span>
-          <GatewayUsedHistory :key="display.account.id" :items="usedHistoryDetails" />
-        </div>
-        <div class="space-y-1">
-          <template v-for="(row, index) in recentUsedSummary" :key="row.key">
-          <div v-if="row.kind === 'degraded'" class="flex items-center gap-2 text-[10px] leading-4" data-testid="gateway-used-degraded">
-            <span class="whitespace-nowrap border-l-2 border-gray-200 pl-1.5 text-gray-400 dark:border-gray-600">{{ index === 0 ? t('admin.accounts.openai.gatewayUsed.recent') : t('admin.accounts.openai.gatewayUsed.earlier') }}</span>
-            <span class="text-rose-600 dark:text-rose-300">{{ t(`admin.accounts.openai.gatewayUsed.${row.atLeast ? 'degradedTicketsAtLeast' : 'degradedTickets'}`, { count: row.count }) }}</span>
-          </div>
-          <div v-else
-            class="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 text-[10px] leading-4"
-            :title="usedTitleOf(row.item)" :data-tone="toneOf(row.item)"
-            :data-gateway="row.item.name" data-testid="gateway-used-recent">
-            <span class="whitespace-nowrap border-l-2 border-gray-200 pl-1.5 text-gray-400 dark:border-gray-600">{{ recentLabel(index) }}</span>
-            <span class="flex min-w-0 items-center gap-1"><span class="truncate">#{{ shortName(row.item.name) }}</span><span class="shrink-0 text-gray-400">· <span data-testid="gateway-used-duration">{{ fullHeldOf(row.item) }}</span></span></span>
-            <span class="whitespace-nowrap text-right" :class="toneOf(row.item) === 'degraded' ? 'text-rose-600 dark:text-rose-300' : 'text-gray-500 dark:text-gray-400'" data-testid="gateway-used-status">{{ usedStatus(row.item) }}</span>
-          </div>
-          </template>
-        </div>
-      </section>
-      <!-- 只展示本地冷却，不把过期库存快照当成剩余候选。 -->
-    <div v-if="usesPool" class="flex items-center justify-end gap-2" data-testid="account-gateway-cooldown-row">
-      <p
-        v-if="items.length"
-        class="mr-auto min-w-0 text-[9px] leading-3 text-gray-500 dark:text-gray-400"
-        :title="t('admin.accounts.openai.gatewayHistory.windowUsageHint')"
-        data-testid="account-gateway-window-usage"
-      >
-        {{
-          t('admin.accounts.openai.gatewayHistory.windowUsage', {
-            used: windowUsage.used,
-            cooled: windowUsage.cooled
-          })
-        }}
-      </p>
+      </span>
       <button type="button"
-        class="inline-flex min-w-[92px] shrink-0 items-center justify-center gap-1.5 rounded-md border border-gray-200 px-2.5 py-1.5 text-[11px] text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 disabled:cursor-wait disabled:opacity-50 dark:border-dark-600 dark:text-gray-400 dark:hover:bg-dark-700 dark:hover:text-gray-200"
+        class="ml-auto inline-flex h-5 shrink-0 items-center gap-1 rounded border border-gray-200 px-1.5 text-[10px] text-gray-500 transition-colors hover:border-gray-300 hover:bg-gray-50 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 disabled:cursor-wait disabled:opacity-50 dark:border-dark-600 dark:text-gray-400 dark:hover:bg-dark-700 dark:hover:text-gray-200"
         data-testid="account-gateway-retry" :disabled="display.retryPending" :aria-busy="display.retryPending || undefined"
         :title="t('admin.accounts.openai.gwpoolManualRetryHint')" @click="emit('retry', account.id)">
-        <Icon name="refresh" size="xs" class="shrink-0" :class="{ 'motion-safe:animate-spin': display.retryPending }"
+        <Icon name="refresh" size="xs" class="h-3 w-3 shrink-0" :class="{ 'motion-safe:animate-spin': display.retryPending }"
           :style="display.retryPending && progressPaused ? { animationPlayState: 'paused' } : undefined" aria-hidden="true" />
         <span>{{ t(`admin.accounts.openai.${display.retryPending ? 'gwpoolManualRetryPending' : 'gwpoolManualRetry'}`) }}</span>
       </button>
     </div>
-    <p v-if="usesPool && runtime" class="truncate border-t border-gray-100 pt-2 text-[10px] text-gray-500 dark:border-gray-700 dark:text-gray-400" data-testid="account-gateway-usage-history">
-      {{ historyUsage.hasDuration
-        ? t('admin.accounts.openai.gatewayRuntime.archived', { count: historyUsage.rounds, duration: formatUseTime(historyUsage.durationMS) })
-        : t('admin.accounts.openai.gatewayRuntime.archivedCounts', { count: historyUsage.rounds }) }}
-      <span v-if="historyUsage.hasDuration && historyUsage.incomplete">{{ t('admin.accounts.openai.gatewayRuntime.durationIncomplete') }}</span>
-    </p>
+
+    <!-- 本轮 / 累计满血用时：只计已验满票承载业务的活跃时长，不是墙钟。 -->
+    <div v-if="usesPool && runtime" class="grid grid-cols-2 gap-1.5">
+      <div class="rounded-md bg-gray-50 px-2 py-1 dark:bg-dark-800/70" data-testid="account-gateway-usage-round"
+        :title="cycleTile.incomplete ? t('admin.accounts.openai.gatewayRuntime.incompleteHint') : t('admin.accounts.openai.gatewayRuntime.activeHint')">
+        <div class="flex items-center justify-between gap-1 text-[10px] text-gray-400 dark:text-gray-500">
+          <span>{{ t('admin.accounts.openai.gatewayRuntime.cycleFull') }}</span>
+          <span class="font-medium text-gray-600 dark:text-gray-300" data-testid="gateway-cycle-tickets">{{ t('admin.accounts.openai.gatewayRuntime.cycleTickets', { full: cycleTile.full, attempted: cycleTile.attempted }) }}</span>
+        </div>
+        <div class="text-[12px] font-semibold text-gray-800 dark:text-gray-100" data-testid="gateway-cycle-duration">{{ cycleTile.duration }}</div>
+      </div>
+      <div class="rounded-md bg-gray-50 px-2 py-1 dark:bg-dark-800/70" data-testid="account-gateway-usage-history"
+        :title="historyUsage.incomplete ? t('admin.accounts.openai.gatewayRuntime.incompleteHint') : t('admin.accounts.openai.gatewayRuntime.activeHint')">
+        <div class="flex items-center justify-between gap-1 text-[10px] text-gray-400 dark:text-gray-500">
+          <span>{{ t('admin.accounts.openai.gatewayRuntime.totalFull') }}</span>
+          <span class="font-medium text-gray-600 dark:text-gray-300" data-testid="gateway-total-rounds">{{ t('admin.accounts.openai.gatewayRuntime.totalRounds', { count: historyUsage.rounds }) }}</span>
+        </div>
+        <div class="text-[12px] font-semibold text-gray-800 dark:text-gray-100" data-testid="gateway-total-duration">
+          {{ historyUsage.hasDuration ? `${historyUsage.incomplete ? '≥' : ''}${formatUseTime(historyUsage.durationMS)}` : '—' }}
+        </div>
+      </div>
+    </div>
+
+    <GatewayQueueCards v-if="usesPool" :snapshot="runtime?.queues" :now="now" />
+
+    <!-- 已使用：琥珀 = 冷却（计数 / 条 / 剩余分钟同色），玫红 = 降智，其余中性灰。
+         只展示本地冷却，不把过期库存快照当成剩余候选。 -->
+    <section v-if="usesPool && (items.length || recentUsedSummary.length)" class="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1"
+      data-testid="account-gateway-used">
+      <div v-if="items.length" class="col-span-2 flex min-w-0 items-center justify-between gap-2 text-[10px]">
+        <span class="flex min-w-0 items-center gap-1 truncate text-gray-400 dark:text-gray-500"
+          :title="`${t('admin.accounts.openai.gatewayUsed.hint')}\n${t('admin.accounts.openai.gatewayHistory.windowUsageHint')}`" data-testid="account-gateway-window-usage">
+          <span>{{ t('admin.accounts.openai.gatewayUsed.label') }}</span>
+          <span class="font-medium text-gray-700 dark:text-gray-200">{{ usedItems.length }}</span>
+          <span>·</span>
+          <span class="text-amber-700 dark:text-amber-300" data-testid="gateway-window-cooling">{{ t('admin.accounts.openai.gatewayUsed.coolingCount', { count: windowUsage.used }) }}</span>
+          <span>·</span>
+          <span data-testid="gateway-window-cooled">{{ t('admin.accounts.openai.gatewayUsed.cooledCount', { count: windowUsage.cooled }) }}</span>
+        </span>
+        <GatewayUsedHistory v-if="usedItems.length" :key="display.account.id" :items="usedHistoryDetails" />
+      </div>
+      <div v-if="windowUsage.used + windowUsage.cooled" class="col-span-2 flex h-[3px] min-w-0 gap-px overflow-hidden rounded-full" aria-hidden="true">
+        <span v-if="windowUsage.used" class="bg-amber-300 dark:bg-amber-500/60" :style="{ flexGrow: windowUsage.used }" />
+        <span v-if="windowUsage.cooled" class="bg-gray-200 dark:bg-dark-600" :style="{ flexGrow: windowUsage.cooled }" />
+      </div>
+      <template v-for="(row, index) in recentUsedSummary" :key="row.key">
+        <span class="text-[10px] text-gray-400 dark:text-gray-500">{{ row.kind === 'degraded'
+          ? t(`admin.accounts.openai.gatewayUsed.${index === 0 ? 'recent' : 'earlier'}`) : recentLabel(index) }}</span>
+        <div v-if="row.kind === 'degraded'" class="flex min-w-0 items-center gap-1 text-[10px] text-rose-600 dark:text-rose-300" data-testid="gateway-used-degraded">
+          <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-rose-400" aria-hidden="true" />
+          <span class="truncate">{{ t(`admin.accounts.openai.gatewayUsed.${row.atLeast ? 'degradedTicketsAtLeast' : 'degradedTickets'}`, { count: row.count }) }}</span>
+        </div>
+        <div v-else class="flex min-w-0 items-center justify-between gap-2 text-[10px]" :title="usedTitleOf(row.item)"
+          :data-tone="toneOf(row.item)" :data-gateway="row.item.name" data-testid="gateway-used-recent">
+          <span class="flex min-w-0 items-center gap-1">
+            <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-gray-300 dark:bg-gray-600" aria-hidden="true" />
+            <span class="truncate"><span class="text-gray-700 dark:text-gray-200">{{ row.item.name }}</span><span class="text-gray-400 dark:text-gray-500"> · <span data-testid="gateway-used-duration">{{ usedDuration(row.item) }}</span></span></span>
+          </span>
+          <span class="shrink-0" :class="usedStatusClass(row.item)" data-testid="gateway-used-status">{{ usedStatus(row.item) }}</span>
+        </div>
+      </template>
+    </section>
   </div>
 </template>
 
@@ -243,13 +264,7 @@ interface GatewayItem {
 
 // Green requires a verified, unexpired ticket. Red requires an expired ticket
 // or an explicit degraded verdict still in cooldown; mere contact is grey.
-const TONE_CLASS = {
-  full: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
-  degraded: 'bg-rose-50 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300',
-  idle: 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
-} as const
-
-type GatewayTone = keyof typeof TONE_CLASS
+type GatewayTone = 'full' | 'degraded' | 'idle'
 
 const isCodexAccount = computed(() => targetsCodexUpstream(display.value.account))
 
@@ -341,7 +356,7 @@ function usedStatus(item: GatewayItem): string {
 const usedHistoryDetails = computed(() => [...usedItems.value]
   .sort((a, b) => Number(toneOf(b) === 'full') - Number(toneOf(a) === 'full'))
   .map(item => ({
-    name: item.name, label: shortName(item.name), region: gatewayRegionDisplayKey(item.region),
+    name: item.name, region: gatewayRegionDisplayKey(item.region),
     title: usedTitleOf(item), duration: toneOf(item) === 'full' ? '—' : fullHeldOf(item),
     status: usedStatus(item), tone: toneOf(item)
   })))
@@ -419,21 +434,6 @@ function toneOf(item: GatewayItem | null | undefined): GatewayTone {
   // degraded verdict just because both came from the same gateway.
   if (tickets.length) return tickets.every(ticketExpired) ? 'degraded' : 'idle'
   return item.verdict === 'degraded' && isHot(item) ? 'degraded' : 'idle'
-}
-
-/**
- * 判定的字符前缀：颜色退化成装饰之后，信息仍然读得出来。
- * 带一个空格 —— 不带的话渲染成 `✓US · unified-107`，前缀和大区名糊在一起。
- */
-function verdictMark(item: GatewayItem | null | undefined): string {
-  switch (toneOf(item)) {
-    case 'full':
-      return '✓ '
-    case 'degraded':
-      return '! '
-    default:
-      return ''
-  }
 }
 
 function shortName(name: string): string {
@@ -517,5 +517,56 @@ function historyTitleOf(item: GatewayItem): string {
     TITLE_SEP
   )
   return gatewayRegionDisplayKey(item.region) === item.region ? summary : `${summary} · ${item.region || '—'}`
+}
+
+// Status row colors follow the phase only; the ticket color stays in the focal block.
+type PhaseTone = 'active' | 'warn' | 'calm'
+const PHASE_TONE: Partial<Record<GatewayPoolProgress['phase'], PhaseTone>> = {
+  pending: 'active', fetching: 'active', verifying: 'active', waiting: 'warn', exhausted: 'warn'
+}
+const PHASE_DOT: Record<PhaseTone, string> = {
+  active: 'bg-primary-500', warn: 'bg-amber-500', calm: 'bg-gray-300 dark:bg-gray-600'
+}
+const PHASE_TEXT: Record<PhaseTone, string> = {
+  active: 'text-primary-700 dark:text-primary-300', warn: 'text-amber-700 dark:text-amber-300', calm: 'text-gray-600 dark:text-gray-300'
+}
+const phase = computed(() => displayProgress.value?.phase || 'idle')
+const phaseTone = computed<PhaseTone>(() => PHASE_TONE[phase.value] ?? 'calm')
+
+// A candidate under verification is neutral even if its gateway has older verdicts.
+const ticketTone = computed<GatewayTone>(() => current.value && !preparing.value ? toneOf(current.value) : 'idle')
+type HeroTone = GatewayTone | 'active' | 'warn'
+const HERO_CLASS: Record<HeroTone, string> = {
+  full: 'bg-emerald-50 text-emerald-900 ring-emerald-200/80 dark:bg-emerald-900/25 dark:text-emerald-100 dark:ring-emerald-800/60',
+  degraded: 'bg-rose-50 text-rose-900 ring-rose-200/80 dark:bg-rose-900/25 dark:text-rose-100 dark:ring-rose-800/60',
+  active: 'bg-gray-50 text-gray-800 ring-gray-200 dark:bg-dark-800 dark:text-gray-100 dark:ring-dark-600',
+  warn: 'bg-amber-50 text-amber-900 ring-amber-200/80 dark:bg-amber-900/20 dark:text-amber-100 dark:ring-amber-800/50',
+  idle: 'bg-gray-50 text-gray-700 ring-gray-200 dark:bg-dark-800 dark:text-gray-200 dark:ring-dark-600'
+}
+const heroTone = computed<HeroTone>(() => {
+  if (!usesPool.value) return 'idle'
+  if (preparing.value) return phase.value === 'waiting' ? 'warn' : 'active'
+  if (ticketTone.value !== 'idle') return ticketTone.value
+  return phase.value === 'exhausted' ? 'warn' : 'idle'
+})
+
+// Between cycles the tile shows zeros instead of disappearing; legacy rounds keep counts only.
+const cycleTile = computed(() => {
+  const round = activeRounds.value[0]
+  if (!round) return { full: 0, attempted: 0, duration: formatUseTime(0), incomplete: false }
+  return {
+    full: round.full, attempted: round.attempted, incomplete: !!round.duration_incomplete,
+    duration: round.full_usage_mode === ACTIVE_USAGE_MODE ? `${round.duration_incomplete ? '≥' : ''}${fullUseTime(round)}` : '—'
+  }
+})
+
+function usedDuration(item: GatewayItem): string {
+  return item.fullHeldMs > 0 ? t('admin.accounts.openai.gatewayUsed.heldFull', { duration: fullHeldOf(item) }) : fullHeldOf(item)
+}
+
+// Remaining cooldown shares the caption's amber; cooled is neutral; only a live ticket is green.
+function usedStatusClass(item: GatewayItem): string {
+  if (toneOf(item) === 'full') return 'text-emerald-700 dark:text-emerald-300'
+  return isHot(item) ? 'text-amber-700 dark:text-amber-300' : 'text-gray-400 dark:text-gray-500'
 }
 </script>
