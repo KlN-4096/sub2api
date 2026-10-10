@@ -17,7 +17,7 @@ import (
 
 const (
 	openAIGatewayPoolContactsExtraKey = "openai_gwpool_contacts"
-	gatewayPoolContactRoundLimit      = 64
+	gatewayPoolContactRoundLimit      = 300
 	gatewayPoolContactGatewayLimit    = 512
 	gatewayPoolContactAliasLimit      = 8
 )
