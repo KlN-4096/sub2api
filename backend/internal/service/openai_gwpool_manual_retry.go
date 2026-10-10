@@ -193,6 +193,7 @@ func (s *OpenAIGatewayService) clearGatewayPoolManualRest(ctx context.Context, a
 	// An inactive owner does not prove every clone's block was cleared: a
 	// previous attempt may have committed one row before another write failed.
 	state.Active, state.NextCheck, state.ResumeAt = false, time.Time{}, time.Time{}
+	state.QualityGateways = nil
 	state.advance(time.Now().UTC())
 	repo, ok := s.accountRepo.(gatewayPoolClearRestRepository)
 	if !ok {
