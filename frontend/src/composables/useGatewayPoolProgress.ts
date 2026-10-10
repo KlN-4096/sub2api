@@ -10,7 +10,7 @@ const MAX_ACCOUNTS = 200
 export function useGatewayPoolProgress(ids: ComputedRef<number[]>) {
   const progress = ref<Record<number, GatewayPoolProgress>>({})
   const paused = ref(true)
-  let timer: ReturnType<typeof setTimeout> | undefined
+  let timer: ReturnType<typeof setInterval> | undefined
   let controller: AbortController | undefined
   let mounted = false
   let generation = 0
@@ -22,7 +22,7 @@ export function useGatewayPoolProgress(ids: ComputedRef<number[]>) {
 
   function stop() {
     generation++
-    clearTimeout(timer)
+    clearInterval(timer)
     controller?.abort()
   }
   function refresh() {
@@ -35,12 +35,15 @@ export function useGatewayPoolProgress(ids: ComputedRef<number[]>) {
     // rows into a different target set.
     progress.value = Object.fromEntries(Object.entries(progress.value).filter(([id]) => visible.has(Number(id))))
     refreshPending = active()
-    if (!inFlight && refreshPending) void poll()
+    if (refreshPending) {
+      // Fixed UI cadence, independent of response latency. poll skips busy ticks.
+      timer = setInterval(() => { void poll() }, POLL_MS)
+      if (!inFlight) void poll()
+    }
   }
   const refreshVisibility = () => refresh()
   async function poll() {
     if (inFlight || !active()) return
-    clearTimeout(timer)
     inFlight = true
     refreshPending = false
     const current = generation
@@ -67,10 +70,7 @@ export function useGatewayPoolProgress(ids: ComputedRef<number[]>) {
       clearTimeout(timeout)
       controller = undefined
       inFlight = false
-      if (active()) {
-        if (refreshPending) void poll()
-        else timer = setTimeout(poll, POLL_MS)
-      }
+      if (active() && refreshPending) void poll()
     }
   }
   watch(() => ids.value.join(','), () => refresh())
