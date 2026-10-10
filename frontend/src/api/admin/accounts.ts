@@ -74,11 +74,15 @@ export async function list(
 export interface GatewayPoolQueueGroup {
   count: number
   gateways: string[]
+  positions?: number[]
 }
 
 export interface GatewayPoolQueueView {
   model: string
   valid_until: string
+  observed_at?: string
+  stale?: boolean
+  next_gateway?: string
   quality: GatewayPoolQueueGroup
   ordinary: GatewayPoolQueueGroup
 }
