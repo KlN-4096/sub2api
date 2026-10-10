@@ -12,15 +12,17 @@ import (
 const (
 	gatewayPoolContactMinResults   = 5
 	gatewayPoolContactExploreEvery = 5
+	gatewayPoolNeutralQualityScore = 0.5
 )
 
 type gatewayPoolCandidateRanking struct {
 	candidates []gwpool.Gateway // unscored FIFO admission baseline
 	quality    map[string]float64
 	adaptive   map[string]float64
-	preferred  map[string]bool // measured same-member/model/current-idle majority
+	preferred  map[string]bool // existing quality score strictly above neutral
 	explore    bool
 	deferUS    bool
+	scored     bool // this choice advances the existing exploration counter
 }
 
 // Rebuild two logical queues at each pick. A recovered quality candidate can
@@ -54,10 +56,6 @@ func (r gatewayPoolCandidateRanking) order(candidates []gwpool.Gateway) []gwpool
 }
 
 func (s *openAICodexCookieStore) gatewayPoolRankCandidates(ctx context.Context, account *Account, identity string, candidates []gwpool.Gateway) gatewayPoolCandidateRanking {
-	ranking := gatewayPoolCandidateRanking{candidates: candidates}
-	if len(candidates) < 2 {
-		return ranking
-	}
 	model, _ := ctx.Value(gatewayPoolProbeModelKey{}).(string)
 	source, now := gatewayPoolProbeSource(ctx), time.Now()
 	state := gatewayPoolContacts{}
@@ -80,17 +78,17 @@ func (s *openAICodexCookieStore) gatewayPoolRankCandidates(ctx context.Context, 
 			}
 		}
 	}
-	ranking.deferUS = gatewayPoolUSBackoffActive(state.LastUSAt, now)
-	var local map[string][]gwpool.ContactStats
-	if freshComplete {
-		local = gatewayPoolLocalContactStats(state, model, source, now)
+	projection := gatewayPoolRankProjection{
+		state: state, model: model, source: source, now: now, complete: freshComplete,
+		retryAfter: func(gateway string) time.Duration {
+			if cooldown, ok := s.cooldownEntry(identity, gateway); ok {
+				return time.Duration(cooldown.WindowSeconds) * time.Second
+			}
+			return time.Duration(gatewayPoolCooldownBase(fresh.gatewayPoolGatewayWindow())) * time.Second
+		},
 	}
-	effective := gatewayPoolPreferLocalContacts(candidates, local)
-	if freshComplete {
-		ranking.preferred = gatewayPoolPreferredCandidates(effective, state, model, source, now)
-	}
-	quality := gatewayPoolQualityScores(effective, state, local, model, source, now)
-	if len(quality) == 0 {
+	ranking := projection.rank(candidates)
+	if !ranking.scored {
 		return ranking
 	}
 	value, _ := s.poolContactPicks.LoadOrStore(gatewayPoolLedgerTag(identity), &atomic.Uint64{})
@@ -98,21 +96,68 @@ func (s *openAICodexCookieStore) gatewayPoolRankCandidates(ctx context.Context, 
 	if !ok {
 		panic("gwpool contact pick counter has an invalid type")
 	}
-	if counter.Add(1)%gatewayPoolContactExploreEvery == 0 {
-		ranking.explore = true
-		return ranking
-	}
-	ranking.quality = quality
-	if freshComplete {
-		ranking.adaptive = gatewayPoolAdaptiveScores(effective, state, model, source, now,
-			func(gateway string) time.Duration {
-				if cooldown, ok := s.cooldownEntry(identity, gateway); ok {
-					return time.Duration(cooldown.WindowSeconds) * time.Second
-				}
-				return time.Duration(gatewayPoolCooldownBase(fresh.gatewayPoolGatewayWindow())) * time.Second
-			})
+	ranking.explore = counter.Add(1)%gatewayPoolContactExploreEvery == 0
+	if ranking.explore {
+		ranking.quality, ranking.adaptive = nil, nil
 	}
 	return ranking
+}
+
+// The same pure projection powers dispatch and its read-only preview. Only the
+// dispatch caller above advances the real exploration counter.
+type gatewayPoolRankProjection struct {
+	state      gatewayPoolContacts
+	model      string
+	source     string
+	now        time.Time
+	complete   bool
+	retryAfter func(string) time.Duration
+}
+
+func (p gatewayPoolRankProjection) rank(candidates []gwpool.Gateway) gatewayPoolCandidateRanking {
+	var local map[string][]gwpool.ContactStats
+	if p.complete {
+		local = gatewayPoolLocalContactStats(p.state, p.model, p.source, p.now)
+	}
+	effective := gatewayPoolPreferLocalContacts(candidates, local)
+	ranking := gatewayPoolCandidateRanking{
+		candidates: candidates, preferred: make(map[string]bool),
+		quality: gatewayPoolQualityScores(effective, p.state, local, p.model, p.source, p.now),
+		deferUS: gatewayPoolUSBackoffActive(p.state.LastUSAt, p.now),
+	}
+	for name, score := range ranking.quality {
+		if score > gatewayPoolNeutralQualityScore {
+			ranking.preferred[name] = true
+		}
+	}
+	ranking.scored = len(candidates) > 1 && len(ranking.quality) > 0
+	if p.complete {
+		ranking.adaptive = gatewayPoolAdaptiveScores(effective, p.state, p.model, p.source, p.now, p.retryAfter)
+	}
+	return ranking
+}
+
+// Forecast the attempt order under this snapshot, removing each selected
+// candidate locally. Inventory/verdict changes can revise the next forecast.
+func (p gatewayPoolRankProjection) visitPreview(candidates []gwpool.Gateway, picks uint64, visit func(int, gwpool.Gateway) bool) {
+	remaining := append([]gwpool.Gateway(nil), candidates...)
+	for position := 0; len(remaining) > 0; position++ {
+		ranking := p.rank(remaining)
+		if ranking.scored {
+			picks++
+			ranking.explore = picks%gatewayPoolContactExploreEvery == 0
+		}
+		next := ranking.order(remaining)[0]
+		if !visit(position, next) {
+			return
+		}
+		for i, candidate := range remaining {
+			if candidate.Name == next.Name {
+				remaining = append(remaining[:i], remaining[i+1:]...)
+				break
+			}
+		}
+	}
 }
 
 const gatewayPoolUSSoftBackoff = 4 * time.Hour

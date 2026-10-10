@@ -17,6 +17,16 @@ func (s *OpenAIGatewayService) gatewayPoolRestDisplay(account *Account, identity
 	if account.GatewayPoolContinuousWaitEnabled() {
 		return GatewayPoolRestView{}
 	}
+	state := s.codexCookies.gatewayPoolRestSnapshot(account, identity, peers)
+	view := GatewayPoolRestView{Active: state.Active, ChangedAt: state.ChangedAt, StartedAt: state.StartedAt,
+		ResumeAt: state.ResumeAt, NextCheck: state.NextCheck}
+	if view.Active {
+		view.Reason = gatewayPoolRestReason(account, state.QualityGateways...)
+	}
+	return view
+}
+
+func (s *openAICodexCookieStore) gatewayPoolRestSnapshot(account *Account, identity string, peers []Account) gatewayPoolRestState {
 	tag := gatewayPoolLedgerTag(identity)
 	state := readGatewayPoolRest(account, tag)
 	adopt := func(other gatewayPoolRestState) {
@@ -27,15 +37,10 @@ func (s *OpenAIGatewayService) gatewayPoolRestDisplay(account *Account, identity
 	for i := range peers {
 		adopt(readGatewayPoolRest(&peers[i], tag))
 	}
-	if cached, ok := s.codexCookies.poolRestState.Load(tag); ok {
+	if cached, ok := s.poolRestState.Load(tag); ok {
 		if other, valid := cached.(gatewayPoolRestState); valid {
 			adopt(other)
 		}
 	}
-	view := GatewayPoolRestView{Active: state.Active, ChangedAt: state.ChangedAt, StartedAt: state.StartedAt,
-		ResumeAt: state.ResumeAt, NextCheck: state.NextCheck}
-	if view.Active {
-		view.Reason = gatewayPoolRestReason(account)
-	}
-	return view
+	return state
 }

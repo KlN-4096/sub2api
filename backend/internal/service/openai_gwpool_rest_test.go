@@ -51,7 +51,7 @@ func TestGatewayPoolRestDoesNotShortenOtherBlockOrDisableAccount(t *testing.T) {
 	account.TempUnschedulableUntil = &later
 	account.TempUnschedulableReason = "auth"
 	svc := rotationService(account)
-	svc.restGatewayPoolAccount(context.Background(), account, gwpoolTestIdentity, 7)
+	require.NoError(t, svc.restGatewayPoolAccount(context.Background(), account, gwpoolTestIdentity, 7))
 	fresh, err := svc.accountRepo.GetByID(context.Background(), account.ID)
 	require.NoError(t, err)
 	require.Equal(t, later, *fresh.TempUnschedulableUntil)

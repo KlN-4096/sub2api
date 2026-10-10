@@ -50,7 +50,7 @@ const (
 	// A shared fetch is cancelled when its final waiter leaves.
 	openAIGatewayPoolFetchTimeout = 10 * time.Second
 	// A directory failure is unknown inventory, never permission for bare fetch.
-	openAIGatewayPoolListTimeout = 2 * time.Second
+	openAIGatewayPoolListTimeout = 5 * time.Second
 	// openAIGatewayPoolGatewayWindowExtraKey 是本地账本的保留窗口（秒）。缺省 / 非正数走默认值。
 	//
 	// 没进 openAIGatewayPoolConfigExtraKeys：它没有跨字段约束，写什么都不会让账号配到一个

@@ -76,7 +76,7 @@ func TestGatewayPoolResumeWaitsFor50LocalCooldownsAfterExhaustion(t *testing.T) 
 	fake.listGateways = []gwpoolFakeGateway{}
 	require.True(t, svc.gatewayPoolNoRemainingRoutes(context.Background(), account))
 	seedGatewayPoolLocalReady(svc, 9, 50)
-	svc.restGatewayPoolAccount(context.Background(), account, gwpoolTestIdentity, 7)
+	require.NoError(t, svc.restGatewayPoolAccount(context.Background(), account, gwpoolTestIdentity, 7))
 	for _, count := range []int{10, 49, 50} {
 		gatewayPoolRestDue(t, svc, repo, 1, gwpoolTestIdentity)
 		fake.listGateways = gatewayPoolReadyList(count)
@@ -271,7 +271,7 @@ func TestGatewayPoolResumeFirstRestPersistsTogetherWithTemporaryBlock(t *testing
 	}
 	svc := &OpenAIGatewayService{accountRepo: repo}
 	seedGatewayPoolLocalReady(svc, 0, 50)
-	svc.restGatewayPoolAccount(context.Background(), account, gwpoolTestIdentity, 7)
+	require.NoError(t, svc.restGatewayPoolAccount(context.Background(), account, gwpoolTestIdentity, 7))
 	fresh, err := repo.GetByID(context.Background(), account.ID)
 	require.NoError(t, err)
 	require.NotNil(t, fresh.TempUnschedulableUntil)
@@ -292,7 +292,7 @@ func TestGatewayPoolResumeFailedAtomicRestDoesNotLeavePartialTemporaryBlock(t *t
 	}
 	svc := &OpenAIGatewayService{accountRepo: repo}
 	seedGatewayPoolLocalReady(svc, 0, 50)
-	svc.restGatewayPoolAccount(context.Background(), account, gwpoolTestIdentity, 7)
+	require.Error(t, svc.restGatewayPoolAccount(context.Background(), account, gwpoolTestIdentity, 7))
 	fresh, err := repo.GetByID(context.Background(), account.ID)
 	require.NoError(t, err)
 	require.Nil(t, fresh.TempUnschedulableUntil, "a block must not be acknowledged without the durable resume gate")

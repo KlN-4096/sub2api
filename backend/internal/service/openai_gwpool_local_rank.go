@@ -114,30 +114,6 @@ func gatewayPoolPreferLocalContacts(candidates []gwpool.Gateway, local map[strin
 	return out
 }
 
-// Tier admission uses qualified member-scoped repeat observations at the actual
-// idle interval. Cross-member Priority and unknown's neutral score cannot grant
-// preferred status. This is a reuse heuristic, never proof of faster recovery.
-func gatewayPoolPreferredCandidates(candidates []gwpool.Gateway, state gatewayPoolContacts,
-	model, source string, now time.Time,
-) map[string]bool {
-	if model == "" || source != "foreground" || state.HistoryTruncated {
-		return nil
-	}
-	preferred := make(map[string]bool)
-	for _, candidate := range candidates {
-		last := state.Seen[candidate.Name].LastAt
-		if !candidate.PairReady || last.IsZero() || last.After(now) || now.Sub(last) > gatewayPoolContactMaxGap {
-			continue
-		}
-		stats, ok := gatewayPoolPersonalStats(candidate, model, source,
-			gwpool.ContactInterval(true, int64(now.Sub(last)/time.Second)))
-		if ok && stats.Full > stats.Refreshed {
-			preferred[candidate.Name] = true
-		}
-	}
-	return preferred
-}
-
 // Rates use the current actual idle stratum. Qualified local measurements win
 // over both pool Priority and pool Contacts. Pool data is only a fallback.
 func gatewayPoolQualityScores(candidates []gwpool.Gateway, state gatewayPoolContacts,
@@ -181,7 +157,7 @@ func gatewayPoolQualityScores(candidates []gwpool.Gateway, state gatewayPoolCont
 		if row, ok := evidence[candidate.Name]; ok {
 			scores[candidate.Name] = gatewayPoolRankScore(row, prior)
 		} else if global {
-			scores[candidate.Name] = 0.5 // existing global fallback, never an invented failure
+			scores[candidate.Name] = gatewayPoolNeutralQualityScore // unknown is neutral, not a failure
 		}
 	}
 	return scores
