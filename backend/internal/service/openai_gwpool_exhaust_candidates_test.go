@@ -99,7 +99,7 @@ func TestGatewayPoolExhaustCandidatesStopsAtLastFailureInsteadOfWaitingForCooldo
 	require.ErrorIs(t, err, errGatewayPoolWarmAttemptsFinished)
 	require.Equal(t, 2, shots)
 	require.True(t, svc.gatewayPoolNoRemainingRoutes(ctx, account))
-	svc.restGatewayPoolAccount(ctx, account, gwpoolTestIdentity, 7)
+	require.NoError(t, svc.restGatewayPoolAccount(ctx, account, gwpoolTestIdentity, 7))
 	fresh, err := repo.GetByID(ctx, account.ID)
 	require.NoError(t, err)
 	require.True(t, readGatewayPoolRest(fresh, gatewayPoolLedgerTag(gwpoolTestIdentity)).Active)

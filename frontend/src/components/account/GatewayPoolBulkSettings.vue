@@ -64,7 +64,7 @@ const fields: Field[] = [
   { key: 'openai_gwpool_gateway_window_s', label: 'gwpoolGatewayWindow', type: 'number', default: 3600, max: 86400 },
   { key: 'openai_gwpool_cooldown_reset_hours', label: 'gwpoolCooldownResetHours', hint: 'gwpoolCooldownResetDesc', type: 'number', default: 24, min: 0, max: cooldownResetMaxHours },
   { key: 'openai_gwpool_fetch_timeout_s', label: 'gwpoolFetchTimeout', type: 'number', default: 10, max: 86400 },
-  { key: 'openai_gwpool_list_timeout_s', label: 'gwpoolListTimeout', type: 'number', default: 2, max: 86400 }
+  { key: 'openai_gwpool_list_timeout_s', label: 'gwpoolListTimeout', type: 'number', default: 5, max: 86400 }
 ]
 const selected = (key: string) => Object.prototype.hasOwnProperty.call(props.modelValue, key)
 function set(key: string, value: Value) {
