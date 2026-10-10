@@ -1,31 +1,22 @@
 package service
 
-import (
-	"sort"
-	"time"
-)
+import "time"
 
 // Display-only local cooldown estimate. It neither predicts pool inventory nor
-// changes the bounded rest recheck deadline.
+// changes the durable rest latch.
 type GatewayPoolCooldownEstimate struct {
 	ResumeGateways int       `json:"resume_gateways"`
 	EligibleAt     time.Time `json:"eligible_at,omitzero"`
 }
 
-func (s *openAICodexCookieStore) gatewayPoolCooldownEstimate(identity string, account *Account, history openAIGatewayHistory, now time.Time) GatewayPoolCooldownEstimate {
+func (s *openAICodexCookieStore) gatewayPoolCooldownEstimate(identity string, account *Account, history openAIGatewayHistory, now time.Time, peers ...Account) GatewayPoolCooldownEstimate {
 	result := GatewayPoolCooldownEstimate{ResumeGateways: account.gatewayPoolResumeGateways()}
 	projected := s.gatewayPoolDisplayCooldownDeadlines(identity, account, history, now)
-	deadlines := make([]time.Time, 0, len(projected))
-	for _, until := range projected {
-		if !until.IsZero() {
-			deadlines = append(deadlines, until)
-		}
+	var qualityGateways []string
+	if state := s.gatewayPoolRestSnapshot(account, identity, peers); state.Active && !account.GatewayPoolContinuousWaitEnabled() {
+		qualityGateways = state.QualityGateways
 	}
-	if len(deadlines) == 0 {
-		return result // no local cooldown to wait for
-	}
-	sort.Slice(deadlines, func(i, j int) bool { return deadlines[i].Before(deadlines[j]) })
-	result.EligibleAt = deadlines[min(result.ResumeGateways, len(deadlines))-1]
+	result.EligibleAt = gatewayPoolRecoveryDeadline(projected, result.ResumeGateways, qualityGateways)
 	return result
 }
 
