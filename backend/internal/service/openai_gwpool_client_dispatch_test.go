@@ -47,8 +47,12 @@ func TestGatewayPoolClientDispatchDirectoryTimeoutIsUnknownAndRetryable(t *testi
 	gatewayPoolWaitFrom(ctx).sleep = func(context.Context, time.Duration) error { sleeps++; return nil }
 	_, err := svc.attachGatewayPoolRouteWithWait(ctx, account, gwpoolTestURL, http.Header{})
 	require.NoError(t, err, "directory timeout must not terminate a still-live request")
-	require.Equal(t, 1, sleeps)
+	require.Zero(t, sleeps, "a directory timeout must retry without an extra queue sleep")
 	require.EqualValues(t, 2, lists.Load())
+}
+
+func TestGatewayPoolClientDispatchDefaultDirectoryTimeoutIsFiveSeconds(t *testing.T) {
+	require.Equal(t, 5*time.Second, gwpoolTestAccount(1).gatewayPoolListTimeout())
 }
 
 func TestGatewayPoolClientDispatchMalformedCatalogIsNotExhaustion(t *testing.T) {

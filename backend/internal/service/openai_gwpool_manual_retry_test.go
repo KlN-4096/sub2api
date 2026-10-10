@@ -191,7 +191,8 @@ func TestGatewayPoolManualClearRestRetriesPartiallyCommittedClones(t *testing.T)
 	svc.accountRepo = repo
 	for _, id := range []int64{1, 2} {
 		account, _ := repo.GetByID(ctx, id)
-		state := gatewayPoolRestState{Tag: gatewayPoolLedgerTag(identity), Active: true, ChangedAt: now, NextCheck: now.Add(time.Minute)}
+		state := gatewayPoolRestState{Tag: gatewayPoolLedgerTag(identity), Active: true, ChangedAt: now, NextCheck: now.Add(time.Minute),
+			QualityGateways: []string{"quality-before-clear"}}
 		require.NoError(t, repo.UpdateExtra(ctx, id, map[string]any{gatewayPoolRestStateKey: state}))
 		repo.rows[id].account.TempUnschedulableReason = gatewayPoolRestReason(account)
 		repo.rows[id].account.TempUnschedulableUntil = &state.NextCheck
@@ -205,6 +206,7 @@ func TestGatewayPoolManualClearRestRetriesPartiallyCommittedClones(t *testing.T)
 	second, _ := repo.GetByID(ctx, 2)
 	require.Nil(t, second.TempUnschedulableUntil)
 	require.False(t, readGatewayPoolRest(second, gatewayPoolLedgerTag(identity)).Active)
+	require.Empty(t, readGatewayPoolRest(second, gatewayPoolLedgerTag(identity)).QualityGateways)
 }
 
 func TestGatewayPoolManualClearRejectsLateTouchAndHistory(t *testing.T) {
