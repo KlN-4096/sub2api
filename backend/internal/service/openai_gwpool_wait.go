@@ -247,6 +247,19 @@ func (s *OpenAIGatewayService) attachGatewayPoolRouteWithWait(
 		if err == nil || (state == nil && !shared) || !shortage || ctx.Err() != nil {
 			return release, err
 		}
+		if errors.Is(err, gwpool.ErrCatalogUnavailable) && errors.Is(err, context.DeadlineExceeded) {
+			// The bounded directory request already waited. Retry immediately;
+			// neither an extra sleep nor an unrelated exhaustion query helps.
+			fresh, readErr := s.freshGatewayPoolPreparationAccount(ctx, account)
+			if readErr != nil {
+				return release, readErr
+			}
+			if !gatewayPoolWaitAccountMatches(fresh, account) {
+				return release, errGatewayPoolPreparationOwnerChanged
+			}
+			waited = true
+			continue
+		}
 		// Fresh exhaustion is actionable immediately. Waiting on a dead queue
 		// for every request would prevent the normal account-rest transition.
 		if shared && poolErr.Code != gwpool.CodeConsumerRateLimited {
