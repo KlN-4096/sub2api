@@ -1,7 +1,7 @@
 // Keep the interval boundaries aligned with pkg/gwpool.ContactInterval.
 const HOUR_MS = 3_600_000
 const RETENTION_MS = 7 * 24 * HOUR_MS
-const ROUND_LIMIT = 64
+const ROUND_LIMIT = 300
 export const CONTACT_MIN_RESULTS = 5
 export const CONTACT_MIN_WINDOWS = 3
 export const CONTACT_CRITERION = 'state-echo-v1'
