@@ -497,7 +497,7 @@ export default {
         cooldownRemaining: '本地冷却剩余',
         cooldownUnknown: '无法估计',
         cooldownFinished: '本地冷却已到期，等待状态同步',
-        cooldownEstimateHint: '按第 {count} 个本地冷却截止恢复；已知数量不足时等全部已知网关冷却结束。不复查池端库存，取票与满血验证仍照常执行。',
+        cooldownEstimateHint: '入休息时固定的非空优质名单全部冷却，或第 {count} 个本地冷却到期，先满足者恢复；已知数量不足门槛时，数量条件按全部已知网关计算。无优质名单仅走数量条件。不复查池端库存，取票与满血验证仍照常执行。',
         poolRestPending: '等待本地冷却到期后自动恢复；不再复查池端候选数量',
         remaining: '剩余时间',
         matchedKeyword: '匹配关键词',
@@ -809,7 +809,7 @@ export default {
           unavailable: '实时验证进度暂不可用'
         },
         gwpoolResumeGateways: '恢复门槛',
-        gwpoolResumeGatewaysDesc: '候选耗尽后，等第N个本地冷却到期恢复，不复查池端库存；已知不足N则等全部结束，无记录则不休息。默认50。',
+        gwpoolResumeGatewaysDesc: '数量兜底门槛：候选耗尽后，固定优质名单全部冷却，或N个已知网关冷却，任一满足即恢复。无优质名单仅走数量条件；已知不足N按全部计算，无记录不造休息。不复查池端库存，仍需取票验满。默认50。',
         gwpoolCandidatesHint: '候选指可取且未冷却的网关，不代表已验满；清单读取失败不按零处理。',
         gwpoolBulkHint: '逐项勾选才修改；未选字段保留各账号原值。数字清空恢复默认；Key留空保留原Key，不复制任一账号的运行统计。',
         gwpoolBulkApply: '修改：{field}',

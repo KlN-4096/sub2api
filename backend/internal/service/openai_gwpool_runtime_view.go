@@ -91,7 +91,6 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 		runtime := &GatewayPoolRuntimeView{ObservedAt: time.Now().UTC(), Tickets: []GatewayPoolLiveTicket{},
 			Rounds: make([]GatewayPoolUsageRound, len(state.Rounds)), Archived: state.Archived, Incomplete: state.Incomplete}
 		runtime.History, runtime.Contacts = s.gatewayPoolDisplaySnapshot(account, identity, peers, displayCache)
-		runtime.CooldownEstimate = s.codexCookies.gatewayPoolCooldownEstimate(identity, account, runtime.History, runtime.ObservedAt)
 		runtime.Queues = s.codexCookies.gatewayPoolQueueView(account, identity, runtime.History, runtime.Contacts, runtime.ObservedAt)
 		restRows, loaded := restPeers[tag]
 		if !loaded {
@@ -102,6 +101,7 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 			restPeers[tag] = restRows
 		}
 		runtime.Rest = s.gatewayPoolRestDisplay(account, identity, restRows)
+		runtime.CooldownEstimate = s.codexCookies.gatewayPoolCooldownEstimate(identity, account, runtime.History, runtime.ObservedAt, restRows...)
 		runtime.LedgerTag, runtime.ConcurrencyLimit = tag, account.Concurrency
 		runtime.GatewayWindowSeconds = int(account.gatewayPoolGatewayWindow().Seconds())
 		if count, known := concurrency[account.ID]; known {

@@ -449,7 +449,7 @@ export default {
         cooldownRemaining: 'Local cooldown remaining',
         cooldownUnknown: 'Cannot estimate',
         cooldownFinished: 'Local cooldown expired; waiting for status synchronization',
-        cooldownEstimateHint: 'Resume at the {count}th local cooldown deadline, or after all known gateways when fewer are known. Pool inventory is not rechecked; ticket acquisition and quality verification still apply.',
+        cooldownEstimateHint: 'Resume when the nonempty quality cohort frozen on rest entry has fully cooled, or at the {count}th local cooldown deadline, whichever comes first. The count condition waits for all known gateways when fewer are known. With no quality cohort, only the count condition applies. Pool inventory is not rechecked; ticket acquisition and quality verification still apply.',
         poolRestPending: 'Resumes automatically when local cooldowns expire; pool candidate counts are not rechecked',
         remaining: 'Remaining',
         matchedKeyword: 'Matched Keyword',
@@ -692,7 +692,7 @@ export default {
           unavailable: 'Live verification progress unavailable'
         },
         gwpoolResumeGateways: 'Resume threshold',
-        gwpoolResumeGatewaysDesc: 'After exhaustion, resume at the Nth local cooldown deadline without rechecking pool inventory. Fewer than N waits for all known gateways; no history means no rest. Default 50.',
+        gwpoolResumeGatewaysDesc: 'Count fallback: after exhaustion, resume when the frozen quality cohort has fully cooled OR N known gateways have cooled. Without a quality cohort, only the count applies. Fewer than N means all known gateways; no history means no rest. No inventory recheck; tickets must still be acquired and verified. Default 50.',
         gwpoolCandidatesHint: 'Candidates are deliverable gateways outside local cooldown, not verified tickets. A failed listing is not zero.',
         gwpoolBulkHint: 'Only checked fields change; others keep each account’s own value. Clear a number for its default. An empty Key keeps the existing key. Runtime statistics are not copied.',
         gwpoolBulkApply: 'Change: {field}',

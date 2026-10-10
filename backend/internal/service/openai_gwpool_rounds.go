@@ -260,11 +260,13 @@ func (s *OpenAIGatewayService) gatewayPoolRoundSelectionAllowed(ctx context.Cont
 	if s.codexCookies.gatewayPoolVerifiedFull(identity) {
 		return bound || s.codexCookies.poolRounds.claim(*group, identity, s.gatewayPoolActiveAccountLimit(ctx, group))
 	}
-	if !account.GatewayPoolContinuousWaitEnabled() && s.gatewayPoolNoRemainingRoutes(ctx, account) &&
-		s.codexCookies.gatewayPoolLocalResumeAt(identity, account).After(time.Now()) {
-		s.codexCookies.poolRounds.exhaust(*group, identity, s.codexCookies.poolRounds.generation(*group))
-		s.restGatewayPoolAccount(ctx, account, identity, *group)
-		return false
+	if !account.GatewayPoolContinuousWaitEnabled() {
+		plan := s.gatewayPoolExhaustedRestQuality(ctx, account)
+		if plan != nil && s.codexCookies.gatewayPoolLocalResumeAt(identity, account, plan.qualityGateways...).After(time.Now()) {
+			plan.roundGeneration = s.codexCookies.poolRounds.generation(*group)
+			_ = s.restGatewayPoolAccount(ctx, account, identity, *group, *plan)
+			return false
+		}
 	}
 	return bound || s.codexCookies.poolRounds.claim(*group, identity, s.gatewayPoolActiveAccountLimit(ctx, group))
 }
