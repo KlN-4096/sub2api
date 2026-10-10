@@ -836,7 +836,7 @@ export default {
           'Default 10 seconds. Limits a single ticket-fetch network operation, not the entire candidate verification process.',
         gwpoolListTimeout: 'Single gateway-list timeout (s)',
         gwpoolListTimeoutDesc:
-          'Default 2 seconds. Limits the candidate-list request. On failure or timeout, the pool selects a gateway; local cooldown still applies.',
+          'Default 5 seconds. A directory timeout immediately retries without an extra 30-second wait or pool-side selection. Cancellation stops retries; explicit rate limits still honor Retry-After.',
         gwpoolDetails: 'Cooldown, trigger conditions and troubleshooting',
         gwpoolCooldownDetails:
           'Cooldown is tracked per member credential × gateway. Confirmed failure backs off through 1/2/4/6/8/10/12/16/20/24 hours; confirmed recovery ends the cycle. Two successes at the same interval in independent cycles lock it; another failure unlocks it. Network errors do not train it, and pool recommendations do not alter local cooldown.',

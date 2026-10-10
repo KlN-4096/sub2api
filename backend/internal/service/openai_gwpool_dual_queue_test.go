@@ -9,6 +9,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestGatewayPoolDualQueueUsesExistingHighWeightWithoutPersonalMajorityGate(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	svc, _ := gatewayRuntimeService(account)
+	svc.codexCookies.historyByTag = func(context.Context, string) ([]Account, error) { return nil, nil }
+	candidates := []gwpool.Gateway{
+		{Name: "unknown", PairReady: true},
+		{Name: "weighted", PairReady: true,
+			Priority: &gwpool.GatewayPriority{Model: gatewayPoolProbeModelLuna, Full: 100, Samples: 100}},
+	}
+	ctx := context.WithValue(context.Background(), gatewayPoolProbeModelKey{}, gatewayPoolProbeModelLuna)
+	ranking := svc.codexCookies.gatewayPoolRankCandidates(ctx, account, gwpoolTestIdentity, candidates)
+	require.Greater(t, ranking.quality["weighted"], 0.5)
+	require.True(t, ranking.preferred["weighted"], "the fast tier must follow the existing score")
+	require.False(t, ranking.preferred["unknown"], "neutral fallback is not a high score")
+}
+
 func TestGatewayPoolDualQueueRecoveredQualityBypassesOrdinaryBacklog(t *testing.T) {
 	account := gwpoolTestAccount(1)
 	svc, repo := gatewayRuntimeService(account)
@@ -51,42 +67,57 @@ func TestGatewayPoolDualQueueRecoveredQualityBypassesOrdinaryBacklog(t *testing.
 	require.Equal(t, "unknown-a", queue.pick(candidates))
 }
 
-func TestGatewayPoolDualQueueTierRequiresPersonalMajority(t *testing.T) {
-	now := time.Now()
-	state := localRankHistory(now, "good", "bad", 5)
-	local := gatewayPoolLocalContactStats(state, gatewayPoolProbeModelLuna, "foreground", now)
-	candidate := gwpool.Gateway{Name: "good", PairReady: true, Contacts: local["good"],
-		Priority: &gwpool.GatewayPriority{Model: gatewayPoolProbeModelLuna, Full: 100, Samples: 100}}
-	for _, mode := range []string{"local", "global-only", "not-ready", "equal", "minority", "few",
-		"wrong-model", "wrong-source", "truncated", "duplicate-stratum"} {
-		t.Run(mode, func(t *testing.T) {
-			c := candidate
-			c.Contacts = append([]gwpool.ContactStats(nil), candidate.Contacts...)
-			s := state
-			model, source := gatewayPoolProbeModelLuna, "foreground"
-			switch mode {
-			case "global-only":
-				c.Contacts = nil
-			case "not-ready":
-				c.PairReady = false
-			case "equal":
-				c.Contacts[0].Full, c.Contacts[0].Refreshed = 5, 5
-			case "minority":
-				c.Contacts[0].Full, c.Contacts[0].Refreshed = 5, 6
-			case "few":
-				c.Contacts[0].Full, c.Contacts[0].WindowSamples = 4, 4
-			case "wrong-model":
-				model = "other"
-			case "wrong-source":
-				source = "background"
-			case "truncated":
-				s.HistoryTruncated = true
-			case "duplicate-stratum":
-				c.Contacts = append(c.Contacts, c.Contacts[0])
-			}
-			got := gatewayPoolPreferredCandidates([]gwpool.Gateway{c}, s, model, source, now)
-			require.Equal(t, mode == "local", got["good"])
+func TestGatewayPoolDualQueueNeutralScoreBoundary(t *testing.T) {
+	for _, full := range []int{0, 49, 50, 51, 100} {
+		candidates := []gwpool.Gateway{
+			{Name: "unknown", PairReady: true},
+			{Name: "measured", PairReady: true,
+				Priority: &gwpool.GatewayPriority{Model: gatewayPoolProbeModelLuna, Full: full, Samples: 100}},
+		}
+		projection := gatewayPoolRankProjection{model: gatewayPoolProbeModelLuna, source: "foreground", now: time.Now()}
+		ranking := projection.rank(candidates)
+		require.Equal(t, full > 50, ranking.preferred["measured"], "full=%d", full)
+		require.False(t, ranking.preferred["unknown"])
+		projection.model = "different-model"
+		require.Empty(t, projection.rank(candidates).preferred)
+	}
+}
+
+func TestGatewayPoolDualQueuePreviewMatchesSuccessiveDispatchDecisions(t *testing.T) {
+	projection := gatewayPoolRankProjection{model: gatewayPoolProbeModelLuna, source: "foreground", now: time.Now()}
+	candidates := []gwpool.Gateway{{Name: "fifo-a", PairReady: true}, {Name: "fifo-b", PairReady: true}}
+	for i, name := range []string{"score-a", "score-b", "score-c"} {
+		candidates = append(candidates, gwpool.Gateway{Name: name, PairReady: true,
+			Priority: &gwpool.GatewayPriority{Model: gatewayPoolProbeModelLuna, Full: 90 - 10*i, Samples: 100}})
+	}
+	for _, picks := range []uint64{0, 3, 4, 9} {
+		var forecast []gwpool.Gateway
+		projection.visitPreview(candidates, picks, func(_ int, gateway gwpool.Gateway) bool {
+			forecast = append(forecast, gateway)
+			return true
 		})
+		remaining := append([]gwpool.Gateway(nil), candidates...)
+		counter := picks
+		queue := gatewayPoolCandidateQueue{}
+		for i, expected := range forecast {
+			ranking := projection.rank(remaining)
+			if ranking.scored {
+				counter++
+				ranking.explore = counter%gatewayPoolContactExploreEvery == 0
+			}
+			actual := queue.pick(remaining, ranking)
+			require.Equal(t, expected.Name, actual, "initial picks=%d position=%d", picks, i)
+			for j, candidate := range remaining {
+				if candidate.Name == actual {
+					remaining = append(remaining[:j], remaining[j+1:]...)
+					break
+				}
+			}
+		}
+		require.Len(t, forecast, len(candidates))
+		if picks == 4 || picks == 9 {
+			require.Equal(t, "fifo-a", forecast[0].Name, "the fifth decision explores before a fast candidate")
+		}
 	}
 }
 

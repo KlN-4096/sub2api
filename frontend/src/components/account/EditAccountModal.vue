@@ -2735,7 +2735,7 @@
                     min="1"
                     max="86400"
                     step="1"
-                    placeholder="2"
+                    placeholder="5"
                     class="input text-xs"
                     data-testid="edit-openai-gwpool-list-timeout"
                     :title="t('admin.accounts.openai.gwpoolListTimeoutDesc')"
