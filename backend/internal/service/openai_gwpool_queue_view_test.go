@@ -61,12 +61,26 @@ func TestGatewayPoolQueueViewUsesScopedCacheWithoutScheduling(t *testing.T) {
 		require.Equal(t, []any{"good"}, quality["gateways"])
 		require.Equal(t, float64(1), ordinary["count"])
 		require.Equal(t, []any{"ordinary"}, ordinary["gateways"])
+		require.Equal(t, "ordinary", queues["next_gateway"], "the preview includes the next exploration decision")
+		require.Equal(t, []any{float64(1)}, ordinary["positions"])
+		require.Equal(t, []any{float64(2)}, quality["positions"])
 	}
 	require.Equal(t, int64(1), fake.listHits.Load())
 	require.Zero(t, fake.hits.Load())
 	require.Equal(t, uint64(4), counter.Load())
 	require.Equal(t, before, queue.names)
 	require.Empty(t, svc.codexCookies.poolCooldown, "display must not hydrate shared cooldowns")
+	// Compare the next read-only decision with the production ranking entry,
+	// including fresh account/history reads and the actual exploration counter.
+	svc.codexCookies.historyByTag = func(context.Context, string) ([]Account, error) { return nil, nil }
+	catalog, err := pool.Catalog(context.Background(), gatewayPoolUpstreamAccountID(gwpoolTestIdentity),
+		gatewayPoolAccountTag(account, gwpoolTestIdentity), gatewayPoolProbeModelLuna, 0)
+	require.NoError(t, err)
+	eligible := []gwpool.Gateway{catalog.Gateways[0], catalog.Gateways[1]}
+	ctx := context.WithValue(context.Background(), gatewayPoolProbeModelKey{}, gatewayPoolProbeModelLuna)
+	ranking := svc.codexCookies.gatewayPoolRankCandidates(ctx, account, gwpoolTestIdentity, eligible)
+	require.Equal(t, "ordinary", queue.pick(eligible, ranking))
+	require.Equal(t, uint64(5), counter.Load(), "only actual dispatch advances exploration")
 	account.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = "different-key"
 	require.Nil(t, read()["queues"], "cached metadata from a different Key must not leak into the display")
 	require.Equal(t, int64(1), fake.listHits.Load())
@@ -101,7 +115,11 @@ func TestGatewayPoolQueueViewBoundsSamplesAndKeepsReadonlyFIFO(t *testing.T) {
 	require.Equal(t, []string{"g4", "gone", "g5"}, queue.names, "polling does not reconcile or rotate the actual FIFO")
 	view.Ordinary.Gateways[0] = "mutated-output"
 	require.Equal(t, "g4", store.gatewayPoolQueueView(account, gwpoolTestIdentity, history, gatewayPoolContacts{}, now).Ordinary.Gateways[0])
-	require.Nil(t, store.gatewayPoolQueueView(account, gwpoolTestIdentity, history, gatewayPoolContacts{}, view.ValidUntil))
+	expired := store.gatewayPoolQueueView(account, gwpoolTestIdentity, history, gatewayPoolContacts{}, view.ValidUntil)
+	require.NotNil(t, expired, "metadata expiry must not erase the last known display")
+	require.True(t, expired.Stale)
+	require.Equal(t, view.ObservedAt, expired.ObservedAt)
+	require.Equal(t, []string{"g4", "g5", "g2"}, expired.Ordinary.Gateways)
 	// Clear only the projection; reading it must not publish a clear/reset event.
 	history.CooldownReset.ClearedAt = now.Add(time.Second)
 	history.CooldownReset.LastAt = now.Add(time.Second)
