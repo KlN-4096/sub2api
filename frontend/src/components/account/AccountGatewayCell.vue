@@ -1,18 +1,12 @@
 <template>
-  <div v-if="isCodexAccount" class="w-[260px] min-w-[260px] max-w-[260px] space-y-2 overflow-hidden text-[11px] tabular-nums" data-testid="account-gateway-cell">
-    <div v-if="usesPool" class="min-h-[60px] whitespace-normal break-words rounded-md bg-primary-50 px-2.5 py-2 text-[11px] text-primary-700 dark:bg-primary-900/20 dark:text-primary-300"
-      role="status" aria-live="polite" data-testid="account-gateway-progress">
-      <p>
+  <div v-if="isCodexAccount" class="w-[260px] min-w-[260px] max-w-[260px] space-y-1.5 overflow-hidden text-[11px] tabular-nums" data-testid="account-gateway-cell">
+    <div v-if="usesPool" class="truncate rounded-md bg-primary-50 px-2.5 py-1.5 text-[11px] text-primary-700 dark:bg-primary-900/20 dark:text-primary-300"
+      role="status" aria-live="polite" :title="progressHint" data-testid="account-gateway-progress">
         <span v-if="displayProgress?.sequence">{{ t('admin.accounts.openai.gatewayProgress.run', { id: displayProgress.sequence }) }} · </span>
         {{ t(`admin.accounts.openai.gatewayProgress.${displayProgress?.phase || 'idle'}`) }}
-      </p>
-      <p v-if="displayProgress && displayProgress.phase !== 'idle'" class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-        {{ t('admin.accounts.openai.gatewayProgress.count', {
-          attempt: displayProgress.attempt, seconds: Math.floor(displayProgress.elapsed_ms / 1000)
-        }) }}
-        <span v-if="displayProgress.rejected"> · {{ t('admin.accounts.openai.gatewayProgress.rejected', { count: displayProgress.rejected }) }}</span>
-        <span v-if="displayProgress.active_requests > 1"> · {{ t('admin.accounts.openai.gatewayProgress.concurrent', { count: displayProgress.active_requests }) }}</span>
-      </p>
+        <span v-if="displayProgress && displayProgress.phase !== 'idle'"> · {{ t('admin.accounts.openai.gatewayProgress.elapsed', {
+          seconds: Math.floor(displayProgress.elapsed_ms / 1000)
+        }) }}</span>
     </div>
     <!-- 没有读数也要占位：整块消失时，「没接网关池」「接了还没跑过流量」「落点读不出来」
          在页面上长得一模一样。非 Codex 上游的账号根本没有落点这回事，那才该整块消失。 -->
@@ -38,17 +32,39 @@
         <span v-else class="truncate text-[10px] text-gray-400">{{ t(`admin.accounts.openai.gatewayProgress.${displayProgress?.phase}`) }}</span>
         <span v-if="current" class="ml-auto shrink-0 text-[10px] text-gray-400" data-testid="account-gateway-current-time">{{ safeRelativeTime(currentAt) }}</span>
       </div>
-      <div v-for="round in (usesPool ? activeRounds : [])" :key="round.id" class="space-y-1 text-[11px] text-gray-500 dark:text-gray-400" data-testid="account-gateway-usage-round">
-        <span>{{ t('admin.accounts.openai.gatewayRuntime.counts', { full: round.full, attempted: round.attempted }) }}</span>
-        <p v-if="round.full_usage_mode === ACTIVE_USAGE_MODE" :title="t('admin.accounts.openai.gatewayRuntime.activeHint')">
+      <div v-for="round in (usesPool ? activeRounds : [])" :key="round.id" class="flex items-center justify-between gap-2 whitespace-nowrap text-[10px] text-gray-500 dark:text-gray-400" data-testid="account-gateway-usage-round">
+        <span class="shrink-0 text-left">{{ t('admin.accounts.openai.gatewayRuntime.counts', { full: round.full, attempted: round.attempted }) }}</span>
+        <span v-if="round.full_usage_mode === ACTIVE_USAGE_MODE" class="min-w-0 truncate text-right" :title="t('admin.accounts.openai.gatewayRuntime.activeHint')">
           {{ t('admin.accounts.openai.gatewayRuntime.active', { duration: fullUseTime(round) }) }}<span v-if="round.duration_incomplete">{{ t('admin.accounts.openai.gatewayRuntime.durationIncomplete') }}</span>
-        </p>
+        </span>
       </div>
-      <div v-if="usesPool && runtime && !activeRounds.length" class="space-y-1 text-[11px] text-gray-500 dark:text-gray-400" data-testid="account-gateway-usage-idle">
-        <span>{{ t('admin.accounts.openai.gatewayRuntime.counts', { full: 0, attempted: 0 }) }}</span>
-        <p>{{ t('admin.accounts.openai.gatewayRuntime.active', { duration: formatUseTime(0) }) }}</p>
+      <div v-if="usesPool && runtime && !activeRounds.length" class="flex items-center justify-between gap-2 whitespace-nowrap text-[10px] text-gray-500 dark:text-gray-400" data-testid="account-gateway-usage-idle">
+        <span class="shrink-0 text-left">{{ t('admin.accounts.openai.gatewayRuntime.counts', { full: 0, attempted: 0 }) }}</span>
+        <span class="min-w-0 truncate text-right">{{ t('admin.accounts.openai.gatewayRuntime.active', { duration: formatUseTime(0) }) }}</span>
       </div>
       <GatewayQueueCards v-if="usesPool" :snapshot="runtime?.queues" :now="now" />
+      <section v-if="usesPool && usedItems.length" class="space-y-1.5" data-testid="account-gateway-used">
+        <div class="flex items-center justify-between gap-2 text-[10px] text-gray-500 dark:text-gray-400">
+          <span :title="t('admin.accounts.openai.gatewayUsed.hint')">{{ t('admin.accounts.openai.gatewayUsed.title', { count: usedItems.length }) }}</span>
+          <GatewayUsedHistory :key="display.account.id" :items="usedHistoryDetails" />
+        </div>
+        <div class="space-y-1">
+          <template v-for="(row, index) in recentUsedSummary" :key="row.key">
+          <div v-if="row.kind === 'degraded'" class="flex items-center gap-2 text-[10px] leading-4" data-testid="gateway-used-degraded">
+            <span class="whitespace-nowrap border-l-2 border-gray-200 pl-1.5 text-gray-400 dark:border-gray-600">{{ index === 0 ? t('admin.accounts.openai.gatewayUsed.recent') : t('admin.accounts.openai.gatewayUsed.earlier') }}</span>
+            <span class="text-rose-600 dark:text-rose-300">{{ t(`admin.accounts.openai.gatewayUsed.${row.atLeast ? 'degradedTicketsAtLeast' : 'degradedTickets'}`, { count: row.count }) }}</span>
+          </div>
+          <div v-else
+            class="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 text-[10px] leading-4"
+            :title="usedTitleOf(row.item)" :data-tone="toneOf(row.item)"
+            :data-gateway="row.item.name" data-testid="gateway-used-recent">
+            <span class="whitespace-nowrap border-l-2 border-gray-200 pl-1.5 text-gray-400 dark:border-gray-600">{{ recentLabel(index) }}</span>
+            <span class="flex min-w-0 items-center gap-1"><span class="truncate">#{{ shortName(row.item.name) }}</span><span class="shrink-0 text-gray-400">· <span data-testid="gateway-used-duration">{{ fullHeldOf(row.item) }}</span></span></span>
+            <span class="whitespace-nowrap text-right" :class="toneOf(row.item) === 'degraded' ? 'text-rose-600 dark:text-rose-300' : 'text-gray-500 dark:text-gray-400'" data-testid="gateway-used-status">{{ usedStatus(row.item) }}</span>
+          </div>
+          </template>
+        </div>
+      </section>
       <!-- 只展示本地冷却，不把过期库存快照当成剩余候选。 -->
     <div v-if="usesPool" class="flex items-center justify-end gap-2" data-testid="account-gateway-cooldown-row">
       <p
@@ -105,7 +121,10 @@ import { useSharedNowTicker } from '@/composables/useNowTicker'
 import { usePausedDisplay } from '@/composables/usePausedDisplay'
 import Icon from '@/components/icons/Icon.vue'
 import GatewayQueueCards from './GatewayQueueCards.vue'
+import GatewayUsedHistory from './GatewayUsedHistory.vue'
 import { gatewayRegionDisplayKey } from '@/utils/gatewayRegionDisplay'
+import { readGatewayContacts } from '@/utils/gatewayContactStats'
+import { gatewayUsedSummary } from '@/utils/gatewayUsedSummary'
 
 /** 初始冷却默认 1 小时；有学习状态时优先使用每个网关自己的截止时间。 */
 const DEFAULT_WINDOW_MS = 60 * 60 * 1000
@@ -121,6 +140,16 @@ const display = usePausedDisplay(
   () => props.account.id
 )
 const displayProgress = computed(() => display.value.progress)
+const progressHint = computed(() => {
+  const progress = displayProgress.value
+  if (!progress || progress.phase === 'idle') return undefined
+  const parts = [t('admin.accounts.openai.gatewayProgress.count', {
+    attempt: progress.attempt, seconds: Math.floor(progress.elapsed_ms / 1000)
+  })]
+  if (progress.rejected) parts.push(t('admin.accounts.openai.gatewayProgress.rejected', { count: progress.rejected }))
+  if (progress.active_requests > 1) parts.push(t('admin.accounts.openai.gatewayProgress.concurrent', { count: progress.active_requests }))
+  return parts.join(' · ')
+})
 const now = computed(() => display.value.now)
 const runtime = computed(() => displayProgress.value?.runtime)
 function ticketExpired(ticket: NonNullable<GatewayPoolProgress['runtime']>['tickets'][number]): boolean {
@@ -165,12 +194,10 @@ function safeRelativeTime(value?: string): string {
 }
 function formatUseTime(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000))
-  if (seconds >= 3600) {
-    return t('admin.accounts.openai.gatewayRuntime.durationHours', {
-      hours: Math.floor(seconds / 3600), minutes: Math.floor(seconds / 60) % 60, seconds: seconds % 60
-    })
-  }
-  return t('admin.accounts.openai.gatewayRuntime.duration', { minutes: Math.floor(seconds / 60), seconds: seconds % 60 })
+  const secondsPerMinute = 60
+  const secondsPerHour = secondsPerMinute * secondsPerMinute
+  return [Math.floor(seconds / secondsPerHour), Math.floor(seconds / secondsPerMinute) % secondsPerMinute, seconds % secondsPerMinute]
+    .map(value => String(value).padStart(2, '0')).join(':')
 }
 function fullUseTime(round: GatewayPoolUsageRound): string {
   // The one-second backend snapshot already projects live observed intervals.
@@ -288,6 +315,36 @@ const items = computed<GatewayItem[]>(() => {
     }))
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
 })
+
+const usedItems = computed(() => items.value.filter(item => validTimestamp(item.at)))
+const recentUsedSummary = computed(() => gatewayUsedSummary(
+  readGatewayContacts(extra.value.openai_gwpool_contacts, extra.value.openai_gwpool_ledger_tag, now.value),
+  usedItems.value,
+  new Set([current.value?.name || '', ...liveTickets.value.map(ticket => ticket.gateway)])
+))
+
+function recentLabel(index: number): string {
+  if (index === 0) {
+    return t(`admin.accounts.openai.gatewayUsed.${liveTickets.value.some(ticket => ticket.verified_models.length > 0) ? 'previous' : 'recent'}`)
+  }
+  return t('admin.accounts.openai.gatewayUsed.earlier')
+}
+
+function usedStatus(item: GatewayItem): string {
+  if (toneOf(item) === 'full') return t('admin.accounts.openai.gatewayUsed.live')
+  const remaining = cooldownDeadline(item) - now.value
+  return remaining > 0
+    ? t('admin.accounts.openai.gatewayUsed.cooling', { minutes: Math.ceil(remaining / 60_000) })
+    : t('admin.accounts.openai.gatewayUsed.cooled')
+}
+
+const usedHistoryDetails = computed(() => [...usedItems.value]
+  .sort((a, b) => Number(toneOf(b) === 'full') - Number(toneOf(a) === 'full'))
+  .map(item => ({
+    name: item.name, label: shortName(item.name), region: gatewayRegionDisplayKey(item.region),
+    title: usedTitleOf(item), duration: toneOf(item) === 'full' ? '—' : fullHeldOf(item),
+    status: usedStatus(item), tone: toneOf(item)
+  })))
 
 const preparing = computed(() => usesPool.value && !!displayProgress.value &&
   ['pending', 'fetching', 'verifying', 'waiting'].includes(displayProgress.value.phase))
@@ -437,11 +494,19 @@ function cooldownOf(item: GatewayItem): string {
 }
 
 function titleOf(item: GatewayItem): string {
-  const base = 'admin.accounts.openai.gatewayHistory'
   const live = liveTickets.value.find((ticket) => ticket.gateway === item.name && ticket.verified_models.length > 0)
   if (live) {
     return t('admin.accounts.openai.gatewayRuntime.live', { gateway: item.name, models: live.verified_models.join(', ') })
   }
+  return historyTitleOf(item)
+}
+function usedTitleOf(item: GatewayItem): string {
+  return toneOf(item) === 'full'
+    ? `${t('admin.accounts.openai.gatewayUsed.current')} · ${historyTitleOf(item)}`
+    : historyTitleOf(item)
+}
+function historyTitleOf(item: GatewayItem): string {
+  const base = 'admin.accounts.openai.gatewayHistory'
   const state = cooldownOf(item)
   const verdict = item.verdict === 'full'
     ? t(`${base}.verdicts.fullExpired`)
