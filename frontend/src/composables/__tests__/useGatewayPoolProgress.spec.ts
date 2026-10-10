@@ -23,6 +23,41 @@ describe('gateway progress polling', () => {
     vi.restoreAllMocks()
   })
 
+  it.each([400, 2400])('keeps fixed one-second ticks with a %ims response, without overlapping requests', async (latency) => {
+    vi.useFakeTimers()
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+    const startedAt = Date.now()
+    const starts: number[] = []
+    let resolveRequest!: (value: Record<number, GatewayPoolProgress>) => void
+    vi.mocked(getGatewayPoolProgress).mockImplementation(() => {
+      starts.push(Date.now() - startedAt)
+      return new Promise(resolve => { resolveRequest = resolve })
+    })
+    const wrapper = mount(defineComponent({
+      setup() { useGatewayPoolProgress(computed(() => [1])); return () => null }
+    }))
+    try {
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(latency)
+      expect(starts).toEqual([0])
+      resolveRequest({ 1: snapshot() })
+      await flushPromises()
+      const nextTick = Math.ceil(latency / 1000) * 1000
+      await vi.advanceTimersByTimeAsync(nextTick - latency - 1)
+      expect(starts).toEqual([0])
+      await vi.advanceTimersByTimeAsync(1)
+      expect(starts).toEqual([0, nextTick])
+      wrapper.unmount()
+      expect(vi.mocked(getGatewayPoolProgress).mock.calls[1][1]?.aborted).toBe(true)
+      resolveRequest({ 1: snapshot() })
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(starts).toEqual([0, nextTick])
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('polls every second and retains the last snapshot unchanged on failure', async () => {
     vi.useFakeTimers()
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
