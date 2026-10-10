@@ -22,6 +22,7 @@ export interface ContactStep {
 
 export interface ContactRound {
   id: string
+  versionHash: string
   gateway: string
   model: string
   criterion: string
@@ -125,7 +126,7 @@ export function readGatewayContacts(value: unknown, ledgerTag: unknown, now: num
     const hasProbeContext = Number.isFinite(explicitProbeAt) && explicitProbeAt <= now + 60_000 &&
       (round.last_probe_source === 'foreground' || round.last_probe_source === 'background')
     result.rounds.push({
-      id, gateway, model, criterion: text(report.criterion), source, at,
+      id, versionHash: text(round.version_hash), gateway, model, criterion: text(report.criterion), source, at,
       first: report.first === 'tracked_first' || report.first === 'repeat' ? report.first : 'unknown',
       lastAt: timestamp(round.last_at),
       probeAt: hasProbeContext ? explicitProbeAt : source === 'business' ? Number.NaN : at,

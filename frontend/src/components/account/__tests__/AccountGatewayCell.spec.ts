@@ -31,6 +31,41 @@ const account = (gateways: unknown, extra: Record<string, unknown> = {}): Accoun
 
 const render = (acc: Account) => mount(AccountGatewayCell, { props: { account: acc } })
 
+it('进度单行只留编号、状态和秒数，尝试/未通过/并发详情保留在提示里', () => {
+  const w = mount(AccountGatewayCell, { props: { account: account({}), progress: {
+    phase: 'ready', sequence: 12, attempt: 23, rejected: 2, elapsed_ms: 46999,
+    active_requests: 3, limit: 0, started_at: '', updated_at: ''
+  } } })
+  const progress = w.get('[data-testid="account-gateway-progress"]')
+  expect(progress.findAll('p')).toHaveLength(0)
+  expect(progress.text()).toContain('gatewayProgress.run:{"id":12}')
+  expect(progress.text()).toContain('gatewayProgress.ready')
+  expect(progress.text()).toContain('gatewayProgress.elapsed:{"seconds":46}')
+  expect(progress.text()).not.toContain('gatewayProgress.count')
+  expect(progress.text()).not.toContain('gatewayProgress.rejected')
+  expect(progress.attributes('title')).toContain('gatewayProgress.count:{"attempt":23,"seconds":46}')
+  expect(progress.attributes('title')).toContain('gatewayProgress.rejected:{"count":2}')
+  expect(progress.attributes('title')).toContain('gatewayProgress.concurrent:{"count":3}')
+  w.unmount()
+})
+
+it.each([
+  [-1000, '00:00:00'], [0, '00:00:00'], [59000, '00:00:59'],
+  [60000, '00:01:00'], [1938000, '00:32:18'], [3600000, '01:00:00'],
+  [90061000, '25:01:01']
+])('时长 %i 毫秒显示为 %s，不在一天后回绕', (ms, expected) => {
+  const w = mount(AccountGatewayCell, { props: { account: account({}), progress: {
+    phase: 'idle', attempt: 0, rejected: 0, elapsed_ms: 0, active_requests: 0, limit: 0,
+    started_at: '', updated_at: '', runtime: {
+      observed_at: '', tickets: [], archived: null,
+      rounds: [{ id: 'r', model: 'all', started_at: isoAgo(1000), full: 1, attempted: 1,
+        full_usage_mode: 'business_active_v1', full_duration_ms: ms }]
+    }
+  } } })
+  expect(w.get('[data-testid="account-gateway-usage-round"]').text()).toContain(`"duration":"${expected}"`)
+  w.unmount()
+})
+
 it('验证候选与取票空档不回跳历史票，验满后显示新票', async () => {
   const at = new Date().toISOString()
   const history = { current: 'unified-11', seen: { 'unified-11': { at, region: 'north-america' } } }
@@ -237,9 +272,9 @@ it('网关落点在没有历史时也显示真实验证进度，空快照显示�
     phase: 'verifying', attempt: 2, limit: 5, rejected: 1, elapsed_ms: 8200,
     started_at: new Date().toISOString(), updated_at: new Date().toISOString(), active_requests: 1
   } } })
-  expect(wrapper.get('[data-testid="account-gateway-progress"]').text()).toContain('"attempt":2,"seconds":8')
-  expect(wrapper.get('[data-testid="account-gateway-progress"]').classes()).toContain('whitespace-normal')
-  expect(wrapper.get('[data-testid="account-gateway-progress"]').classes()).toContain('break-words')
+  expect(wrapper.get('[data-testid="account-gateway-progress"]').text()).toContain('"seconds":8')
+  expect(wrapper.get('[data-testid="account-gateway-progress"]').attributes('title')).toContain('"attempt":2,"seconds":8')
+  expect(wrapper.get('[data-testid="account-gateway-progress"]').classes()).toContain('truncate')
   await wrapper.setProps({ progress: undefined })
   expect(wrapper.find('[data-testid="account-gateway-progress"]').exists()).toBe(true)
   expect(wrapper.find('[data-testid="account-gateway-progress-unavailable"]').exists()).toBe(false)
@@ -291,7 +326,7 @@ it('失联仍保留已观测时长，归档同排展示且不混入旧模型墙�
   } })
   const current = wrapper.get('[data-testid="account-gateway-usage-round"]').text()
   expect(current).toContain('"full":7,"attempted":9')
-  expect(current).toContain('\\"minutes\\":1,\\"seconds\\":1')
+  expect(current).toContain('"duration":"00:01:01"')
   const history = wrapper.get('[data-testid="account-gateway-usage-history"]').text()
   expect(history).toContain('"count":2')
   expect(history).not.toContain('legacyArchived')
@@ -628,7 +663,7 @@ describe('AccountGatewayCell', () => {
     } })
     expect(w.get('[data-testid="account-gateway-current-time"]').text()).toBe('—')
     const usage = w.get('[data-testid="account-gateway-usage-round"]').text()
-    expect(usage).toContain('\\"minutes\\":20,\\"seconds\\":2')
+    expect(usage).toContain('"duration":"00:20:02"')
     expect(usage).not.toContain('3418')
     expect(w.text()).not.toContain('gatewayRuntime.hint')
     w.unmount()
@@ -644,17 +679,17 @@ describe('AccountGatewayCell', () => {
     expect(w.find('[data-testid="account-gateway-usage-round"]').exists()).toBe(false)
     const empty = w.get('[data-testid="account-gateway-usage-idle"]').text()
     expect(empty).toContain('"full":0,"attempted":0')
-    expect(empty).toContain('\\"minutes\\":0,\\"seconds\\":0')
+    expect(empty).toContain('"duration":"00:00:00"')
     const history = w.get('[data-testid="account-gateway-usage-history"]').text()
     expect(history).toContain('"count":1')
-    expect(history).toContain('\\"minutes\\":1,\\"seconds\\":5')
+    expect(history).toContain('"duration":"00:01:05"')
     await w.setProps({ progress: { ...progress, runtime: { ...runtime,
       rounds: [...runtime.rounds, { id: 'new', model: 'all', started_at: isoAgo(30), ended_at: '',
         attempted: 1, full: 1, full_duration_ms: 5000, full_usage_mode: 'business_active_v1' }] } } })
     expect(w.find('[data-testid="account-gateway-usage-idle"]').exists()).toBe(false)
     const next = w.get('[data-testid="account-gateway-usage-round"]').text()
     expect(next).toContain('"full":1,"attempted":1')
-    expect(next).toContain('\\"minutes\\":0,\\"seconds\\":5')
+    expect(next).toContain('"duration":"00:00:05"')
     expect(w.get('[data-testid="account-gateway-usage-history"]').text()).toBe(history)
     w.unmount()
   })
@@ -672,13 +707,13 @@ describe('AccountGatewayCell', () => {
     const w = mount(AccountGatewayCell, { props: { account: account({}), progress } })
     const history = () => w.get('[data-testid="account-gateway-usage-history"]').text()
     expect(history()).toContain('"count":3')
-    expect(history()).toContain('\\"minutes\\":2,\\"seconds\\":40')
+    expect(history()).toContain('"duration":"00:02:40"')
     expect(history()).not.toContain('durationIncomplete')
     const before = history()
     await w.setProps({ progress: { ...progress, runtime: { ...runtime, rounds: [active],
       archived: { all: { rounds: 3, attempted: 18, full: 7, duration_ms: 990000, active_duration_ms: 160000 } } } } })
     expect(history()).toBe(before)
-    expect(w.get('[data-testid="account-gateway-usage-round"]').text()).toContain('\\"seconds\\":5')
+    expect(w.get('[data-testid="account-gateway-usage-round"]').text()).toContain('"duration":"00:00:05"')
     w.unmount()
   })
 
