@@ -6,12 +6,38 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGatewayPoolContactsRetainsNewest300RoundsAcrossReload(t *testing.T) {
+	now := time.Now().UTC()
+	state := gatewayPoolContacts{LedgerTag: gatewayPoolLedgerTag(gwpoolTestIdentity)}
+	for i := 0; i < 305; i++ {
+		id := gatewayPoolContactHash(strconv.Itoa(i))
+		state.Rounds = append(state.Rounds, gatewayPoolContactRound{
+			RoundID: id, Report: gwpool.ContactReport{ID: id, At: now.Add(time.Duration(i-305) * time.Minute)},
+		})
+	}
+	pruneGatewayPoolContacts(&state, now)
+	require.Len(t, state.Rounds, 300)
+	require.Equal(t, gatewayPoolContactHash("5"), state.Rounds[0].RoundID)
+	require.Equal(t, gatewayPoolContactHash("304"), state.Rounds[299].RoundID)
+	account := gwpoolTestAccount(1)
+	raw, err := json.Marshal(state)
+	require.NoError(t, err)
+	var durable map[string]any
+	require.NoError(t, json.Unmarshal(raw, &durable))
+	account.Extra[openAIGatewayPoolContactsExtraKey] = durable
+	require.Len(t, readGatewayPoolContacts(account, state.LedgerTag).Rounds, 300)
+	pruneGatewayPoolContacts(&state, now.Add(8*24*time.Hour))
+	require.Empty(t, state.Rounds, "the seven-day retention is unchanged")
+}
 
 func contactEvent(at time.Time, version string) gatewayPoolContactEvent {
 	return gatewayPoolContactEvent{
