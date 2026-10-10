@@ -212,7 +212,11 @@ func (s *OpenAIGatewayService) PrepareGatewayPoolAccountRotation(ctx context.Con
 		return ctx // shortages wait before dispatch; they never authorize credential rotation
 	}
 	generation := s.codexCookies.poolRounds.generation(*groupID)
-	if !failure.GatewayPoolRotation || !s.gatewayPoolNoRemainingRoutes(ctx, fresh) {
+	if !failure.GatewayPoolRotation {
+		return ctx
+	}
+	plan := s.gatewayPoolExhaustedRestQuality(ctx, fresh)
+	if plan == nil {
 		return ctx
 	}
 	identity, err := s.codexCookies.gatewayPoolIdentity(ctx, fresh)
@@ -220,8 +224,10 @@ func (s *OpenAIGatewayService) PrepareGatewayPoolAccountRotation(ctx context.Con
 		return ctx
 	}
 	// Mark before finding a replacement, including the last account in a round.
-	s.codexCookies.poolRounds.exhaust(*groupID, identity, generation)
-	s.restGatewayPoolAccount(ctx, fresh, identity, *groupID)
+	plan.roundGeneration = generation
+	if err := s.restGatewayPoolAccount(ctx, fresh, identity, *groupID, *plan); err != nil {
+		return ctx
+	}
 	next := &gatewayPoolRotation{groupID: *groupID, attempted: map[int64]struct{}{source.ID: {}},
 		domains: map[string]struct{}{identity: {}}}
 	if state != nil {
@@ -246,29 +252,39 @@ func (s *OpenAIGatewayService) PrepareGatewayPoolAccountRotation(ctx context.Con
 }
 
 func (s *OpenAIGatewayService) gatewayPoolNoRemainingRoutes(ctx context.Context, account *Account) bool {
+	return s.gatewayPoolExhaustedCatalog(ctx, account) != nil
+}
+
+type gatewayPoolExhaustion struct {
+	identity   string
+	generation uint64
+	gateways   []gwpool.Gateway
+}
+
+func (s *OpenAIGatewayService) gatewayPoolExhaustedCatalog(ctx context.Context, account *Account) *gatewayPoolExhaustion {
 	if ctx.Err() != nil {
-		return false
+		return nil
 	}
 	identity, err := s.codexCookies.gatewayPoolIdentity(ctx, account)
 	if err != nil || s.codexCookies.gatewayPoolVerifiedFull(identity) {
-		return false
+		return nil
 	}
 	if err := s.codexCookies.hydrateGatewayPoolSharedHistory(ctx, account, identity); err != nil {
-		return false
+		return nil
 	}
 	generation, active, available := s.codexCookies.gatewayPoolInventoryCandidates(identity)
 	if active {
-		return false
+		return nil
 	}
 	pool, err := s.codexCookies.poolClient(account)
 	if err != nil {
-		return false
+		return nil
 	}
 	listCtx, cancel := context.WithTimeout(ctx, account.gatewayPoolListTimeout())
 	defer cancel()
-	catalog, err := pool.FreshCatalog(listCtx, gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(account, identity), "")
+	catalog, err := pool.FreshCatalog(listCtx, gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(account, identity), gatewayPoolProbeModelLuna)
 	if err != nil {
-		return false // unreadable state is not a zero inventory
+		return nil // unreadable state is not a zero inventory
 	}
 	for _, gateway := range catalog.Gateways {
 		if !gateway.ReadyAt(time.Now()) {
@@ -280,7 +296,10 @@ func (s *OpenAIGatewayService) gatewayPoolNoRemainingRoutes(ctx context.Context,
 		}
 	}
 	after, pending, _ := s.codexCookies.gatewayPoolInventoryCandidates(identity)
-	return len(available) == 0 && !pending && after == generation
+	if len(available) != 0 || pending || after != generation || ctx.Err() != nil {
+		return nil
+	}
+	return &gatewayPoolExhaustion{identity: identity, generation: generation, gateways: catalog.Gateways}
 }
 
 // Read gateway-pool eligibility from the repository, not scheduler snapshots. An explicit
