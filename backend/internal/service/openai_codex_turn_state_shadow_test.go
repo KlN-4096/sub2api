@@ -308,40 +308,37 @@ func TestCodexTurnStateShadowRowWSV2OwnerIsParentIdentity(t *testing.T) {
 	}
 }
 
-// TestOpenAITurnStateOverrideBeatsEchoGuard 钉住账号级覆写与回声守卫的先后顺序。
-//
-// 覆写必须排在 guardOpenAICodexTurnStateEcho 之后：守卫只剥不注，而覆写是管理员的
-// 显式动作。两者顺序颠倒时，凡是守卫会剥的场景（覆写值恰好是别的凭证域铸的——排查
-// 「跨账号复用 turn-state」时这正是主用法）就会「配了但静默失效」。
-func TestOpenAITurnStateOverrideBeatsEchoGuard(t *testing.T) {
+// TestOpenAITurnStateSentRecordedAfterEchoGuard 钉住用量表「Turn-State 出站」列记的是守卫
+// 之后真正出站的值：没有溯源记录的回带值照常出站并记下；别的凭证域铸的被剥掉，出站列
+// 也不能再记它。
+func TestOpenAITurnStateSentRecordedAfterEchoGuard(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	parent, _, other := codexShadowTestRows(true)
-	const override = "gAAAAABoverride-blob-from-another-credential-domain"
-	if parent.Extra == nil {
-		parent.Extra = map[string]any{}
-	}
-	// 覆写表按模型存，键必须是 convTestBody 里那个模型，否则取不到票就不注入。
-	parent.Extra[openAITurnStateOverrideExtraKey] = map[string]any{"gpt-5.5": override}
+	const echoed = "gAAAAABecho-blob-without-origin-record"
+	const foreign = "gAAAAABforeign-blob-from-another-credential-domain"
 
 	cfg := &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}
-	up := &httpUpstreamRecorder{responses: []*http.Response{codexShadowUpstreamResponse(false, "")}}
+	up := &httpUpstreamRecorder{responses: []*http.Response{
+		codexShadowUpstreamResponse(false, ""), codexShadowUpstreamResponse(false, ""),
+	}}
 	svc := &OpenAIGatewayService{
 		cfg: cfg, httpUpstream: up, toolCorrector: NewCodexToolCorrector(),
 		responseHeaderFilter: compileResponseHeaderFilter(cfg),
 		accountRepo:          &stubQuotaAccountRepo{accounts: map[int64]*Account{parent.ID: parent}},
 	}
+	svc.noteOpenAICodexTurnStateOrigin(nil, other, foreign)
 
-	// 前提：把覆写值登记成「由 other 凭证域铸造」，守卫因此一定会剥它。
-	svc.noteOpenAICodexTurnStateOrigin(nil, other, override)
-	require.Empty(t, svc.guardOpenAICodexTurnStateValue(nil, parent, override),
-		"前提不成立：守卫没把这条判为异凭证域，本测试就失去意义")
-
-	body := wireProfileTestBody(t)
-	c := newConvTestContext(t, body)
-	c.Request.Header.Set(openAICodexTurnStateHeader, override)
-	_, err := svc.Forward(context.Background(), c, parent, body)
-	require.NoError(t, err)
-	require.Len(t, up.requests, 1)
-	require.Equal(t, override, up.requests[0].Header.Get(openAICodexTurnStateHeader),
-		"覆写排在守卫之前的话，这里会是空——配置静默失效")
+	for i, tc := range []struct{ inbound, want string }{
+		{echoed, echoed},
+		{foreign, ""},
+	} {
+		body := wireProfileTestBody(t)
+		c := newConvTestContext(t, body)
+		c.Request.Header.Set(openAICodexTurnStateHeader, tc.inbound)
+		_, err := svc.Forward(context.Background(), c, parent, body)
+		require.NoError(t, err)
+		require.Len(t, up.requests, i+1)
+		require.Equal(t, tc.want, up.requests[i].Header.Get(openAICodexTurnStateHeader))
+		require.Equal(t, tc.want, OpenAITurnStateUsageSent(c), "出站列记守卫之后真正出站的值")
+	}
 }

@@ -329,7 +329,6 @@
               @account-updated="handleAccountUpdated"
               @usage-loaded="handleAccountUsageLoaded(row.id, $event)"
             />
-            <AccountTurnStateCell :account="row" />
           </template>
           <template #header-gateway="{ column }">
             <div class="flex items-center">
@@ -550,7 +549,6 @@ import AccountStatusIndicator from '@/components/account/AccountStatusIndicator.
 import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
 import AccountGatewayCell from '@/components/account/AccountGatewayCell.vue'
 import { useGatewayPoolProgress } from '@/composables/useGatewayPoolProgress'
-import AccountTurnStateCell from '@/components/account/AccountTurnStateCell.vue'
 import AccountTodayStatsCell from '@/components/account/AccountTodayStatsCell.vue'
 import AccountGroupsCell from '@/components/account/AccountGroupsCell.vue'
 import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'

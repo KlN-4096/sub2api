@@ -497,7 +497,7 @@ func (s *OpenAIGatewayService) gatewayPoolWarmShot(
 ) (int, string, error) {
 	shotCtx, cancel := context.WithTimeout(ctx, gatewayPoolProbeTimeout(ctx, account))
 	defer cancel()
-	_, req, err := s.buildOpenAITurnStateProbe(shotCtx, account, model, gatewayPoolWarmProbeEffort, gatewayPoolWarmProbeText)
+	req, err := s.buildOpenAITurnStateProbe(shotCtx, account, model, gatewayPoolWarmProbeEffort, gatewayPoolWarmProbeText)
 	if err != nil {
 		return 0, "", err
 	}
