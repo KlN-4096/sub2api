@@ -80,36 +80,11 @@ func TestGatewayPoolWaitStillVerifiesActualTicketBeforeBusiness(t *testing.T) {
 	require.Len(t, upstream.sentBodies, 3, "two state-echo probes then exactly one unchanged business request")
 }
 
-func TestGatewayPoolWaitRecoversProbeWithoutReplayingBusiness(t *testing.T) {
-	svc, repo, _, account, request, state := ticketWaitFixture(t)
-	account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = true
-	account.Credentials["access_token"] = "offline-token"
-	account.Extra[openAIGatewayPoolRecoveryExtraKey] = 1
-	repo.account = *account
-	sleeps := 0
-	state.sleep = func(context.Context, time.Duration) error { sleeps++; return nil }
-	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
-		{status: http.StatusOK}, // A has no state: recoverable, not degraded.
-		{status: http.StatusOK, minted: "probe-state"}, {status: http.StatusOK},
-		{status: http.StatusOK}, // business, sent only once
-	}}
-	svc.httpUpstream = upstream
-	response, err := svc.doOpenAIUpstream(request, "", account)
-	require.NoError(t, err)
-	require.NoError(t, response.Body.Close())
-	require.Equal(t, 1, sleeps)
-	require.Len(t, upstream.sentBodies, 4)
-	progress := svc.GatewayPoolProgress([]int64{account.ID})[account.ID]
-	require.Equal(t, 1, progress.Attempt, "retrying the same ticket does not invent a second ticket; work budget is separate")
-	require.Zero(t, progress.Rejected, "unknown is not a quality verdict")
-}
-
-func TestGatewayPoolWaitProbeFailureUsesSharedRecoveryLimitAndStopsAuthentication(t *testing.T) {
+func TestGatewayPoolWaitProbeAuthenticationFailureStopsPreparation(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			svc, repo, _, account, request, state := ticketWaitFixture(t)
 			account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = true
-			account.Extra[openAIGatewayPoolRecoveryExtraKey] = 1
 			repo.account = *account
 			sleeps, shots := 0, 0
 			state.sleep = func(context.Context, time.Duration) error { sleeps++; return nil }
@@ -193,7 +168,7 @@ func TestGatewayPoolWaitReadsFreshSettingsAndIgnoresRetiredBudget(t *testing.T) 
 	for _, invalid := range []any{0, -1, 3601, 1.5, "60", true, nil} {
 		account.Extra[openAIGatewayPoolWaitEnabledExtraKey] = true
 		account.Extra[openAIGatewayPoolWaitSecondsExtraKey] = invalid
-		require.True(t, account.GatewayPoolLongWaitEnabled())
+		require.True(t, account.UsesGatewayPool())
 	}
 	delete(account.Extra, openAIGatewayPoolWaitSecondsExtraKey)
 	svc, _ := gatewayRuntimeService(account)
@@ -356,7 +331,7 @@ func TestGatewayPoolWaitRetriesChangedVerifiedFastPathWithoutReplayingBusiness(t
 	repo.account = *account
 	repo.mu.Unlock()
 	identity := gwpoolTestIdentity
-	pair := openAIGatewayPoolPair{cookie: "offline-cookie", gateway: "old", version: "old", until: time.Now().Add(time.Minute)}
+	pair := openAIGatewayPoolPair{cookie: "offline-cookie", gateway: "old", version: "old"}
 	svc.codexCookies.poolPairs.Store(identity, pair)
 	svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, pair.version, "gpt-6-luna")
 	resolved := 0

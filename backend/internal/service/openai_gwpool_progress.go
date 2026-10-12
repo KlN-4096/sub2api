@@ -22,6 +22,8 @@ type GatewayPoolProgress struct {
 	UpdatedAt      time.Time               `json:"updated_at"`
 	ElapsedMS      int64                   `json:"elapsed_ms"`
 	ActiveRequests int                     `json:"active_requests"`
+	// Inactive: the row is deleted or no longer a pool account; no runtime follows.
+	Inactive bool `json:"inactive,omitempty"`
 }
 
 type gatewayPoolProgressRun struct {
@@ -79,18 +81,6 @@ func (p *gatewayPoolProgressTracker) start(account int64, limit int, scopes ...g
 	}
 	p.runs[account] = append(active, run)
 	return run
-}
-
-func (p *gatewayPoolProgressTracker) resume(run *gatewayPoolProgressRun) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	run.done = false
-	for _, current := range p.runs[run.account] {
-		if current == run {
-			return
-		}
-	}
-	p.runs[run.account] = append(p.runs[run.account], run)
 }
 
 // Distinct tickets actually sent for verification; neither fetch failures,
