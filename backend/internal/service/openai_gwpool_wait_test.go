@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +79,58 @@ func TestGatewayPoolWaitStillVerifiesActualTicketBeforeBusiness(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, response.Body.Close())
 	require.Len(t, upstream.sentBodies, 3, "two state-echo probes then exactly one unchanged business request")
+}
+
+func TestGatewayPoolWaitRecoversProbeWithoutReplayingBusiness(t *testing.T) {
+	svc, repo, _, account, request, state := ticketWaitFixture(t)
+	account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = true
+	account.Credentials["access_token"] = "offline-token"
+	repo.account = *account
+	sleeps := 0
+	state.sleep = func(context.Context, time.Duration) error { sleeps++; return nil }
+	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
+		{status: http.StatusOK}, // A has no state: recoverable, not degraded.
+		{status: http.StatusOK, minted: "probe-state"}, {status: http.StatusOK},
+		{status: http.StatusOK}, // business, sent only once
+	}}
+	svc.httpUpstream = upstream
+	response, err := svc.doOpenAIUpstream(request, "", account)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, 1, sleeps)
+	require.Len(t, upstream.sentBodies, 4)
+	progress := svc.GatewayPoolProgress([]int64{account.ID})[account.ID]
+	require.Equal(t, 1, progress.Attempt, "retrying the same ticket does not invent a second ticket; work budget is separate")
+	require.Zero(t, progress.Rejected, "unknown is not a quality verdict")
+}
+
+// 取票本身的临时故障（池子 502、没有错误码，不是缺票）与验票同一条规则：等一次再取，
+// 连续第二次还失败就结束这次准备。
+func TestGatewayPoolPreparationRetriesTransientTicketFetchOnce(t *testing.T) {
+	for _, failures := range []int{1, 2} {
+		t.Run(strconv.Itoa(failures), func(t *testing.T) {
+			svc, _, fake, account, request, state := ticketWaitFixture(t)
+			fake.refuseStatus = http.StatusBadGateway
+			left, sleeps := failures, 0
+			state.sleep = func(context.Context, time.Duration) error {
+				sleeps++
+				if left--; left == 0 {
+					fake.refuseStatus = 0
+				}
+				return nil
+			}
+			shooter := &gwpoolWarmShooter{}
+			err := svc.gatewayPoolWarmUpWith(request, account, gwpoolTestIdentity, gwpoolWarmModel, shooter.shoot)
+			require.Equal(t, 1, sleeps)
+			if failures == 1 {
+				require.NoError(t, err)
+				require.Len(t, shooter.shots, 2)
+				return
+			}
+			require.Error(t, err)
+			require.Empty(t, shooter.shots)
+		})
+	}
 }
 
 func TestGatewayPoolWaitProbeAuthenticationFailureStopsPreparation(t *testing.T) {
