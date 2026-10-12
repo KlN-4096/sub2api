@@ -1,4 +1,4 @@
-import { onMounted, onUnmounted, ref, watch, type ComputedRef } from 'vue'
+import { onMounted, onUnmounted, ref, shallowRef, watch, type ComputedRef } from 'vue'
 import { getGatewayPoolProgress, type GatewayPoolProgress } from '@/api/admin/accounts'
 
 const POLL_MS = 1000
@@ -8,7 +8,8 @@ const MAX_ACCOUNTS = 200
 // One lightweight batch poll for the visible page. No full account refresh,
 // persistence, or upstream verification is triggered by this endpoint.
 export function useGatewayPoolProgress(ids: ComputedRef<number[]>) {
-  const progress = ref<Record<number, GatewayPoolProgress>>({})
+  // Only ever replaced whole, so the snapshots need no deep proxies.
+  const progress = shallowRef<Record<number, GatewayPoolProgress>>({})
   const paused = ref(true)
   let timer: ReturnType<typeof setInterval> | undefined
   let controller: AbortController | undefined

@@ -93,7 +93,7 @@
           <span>·</span>
           <span data-testid="gateway-window-cooled">{{ t('admin.accounts.openai.gatewayUsed.cooledCount', { count: windowUsage.cooled }) }}</span>
         </span>
-        <GatewayUsedHistory v-if="usedItems.length" :key="display.account.id" :items="usedHistoryDetails" />
+        <GatewayUsedHistory v-if="usedItems.length" :key="display.account.id" :items="usedHistoryDetails" @toggle="historyOpen = $event" />
       </div>
       <div v-if="windowUsage.used + windowUsage.cooled" class="col-span-2 flex h-[3px] min-w-0 gap-px overflow-hidden rounded-full" aria-hidden="true">
         <span v-if="windowUsage.used" class="bg-amber-300 dark:bg-amber-500/60" :style="{ flexGrow: windowUsage.used }" />
@@ -132,7 +132,7 @@
  * 大区同样是**池子口径**（铸这张票的出口在哪儿），不是「这一发实际落在哪个大区」：
  * 注入时两件 cookie 齐送 ⇒ 上游不回新 __oailb ⇒ 真实落点读不出来（docs 的 S1/S2）。
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { Account } from '@/types'
 import type { GatewayPoolProgress, GatewayPoolUsageRound } from '@/api/admin/accounts'
@@ -155,8 +155,35 @@ const props = defineProps<{ account: Account; progress?: GatewayPoolProgress; pr
 const emit = defineEmits<{ retry: [id: number] }>()
 const { t } = useI18n()
 const wallTime = useSharedNowTicker(1000)
+// Only the fields rendered below: a paused pool row deep-copies all of it.
+// Built apart from the clock, so progress keeps its identity between ticks.
+const view = computed(() => {
+  const { id, platform, type, extra } = props.account
+  const progress = props.progress
+  const runtime = progress?.runtime
+  // A pool row with a snapshot reads these four from it, not the stored page copy.
+  // Display-only projection: never replace the account object used by editing.
+  const snapshot = extra?.openai_gwpool === true ? runtime : undefined
+  return {
+    account: { id, platform, type },
+    extra: {
+      openai_gwpool: extra?.openai_gwpool,
+      openai_gwpool_gateways: snapshot?.history ?? extra?.openai_gwpool_gateways,
+      openai_gwpool_contacts: snapshot?.contacts ?? extra?.openai_gwpool_contacts,
+      openai_gwpool_ledger_tag: snapshot?.ledger_tag ?? extra?.openai_gwpool_ledger_tag,
+      openai_gwpool_gateway_window_s: snapshot?.gateway_window_seconds ?? extra?.openai_gwpool_gateway_window_s
+    },
+    progress: progress && {
+      phase: progress.phase, sequence: progress.sequence, gateway: progress.gateway, attempt: progress.attempt,
+      rejected: progress.rejected, elapsed_ms: progress.elapsed_ms, active_requests: progress.active_requests,
+      updated_at: progress.updated_at,
+      runtime: runtime && { tickets: runtime.tickets, rounds: runtime.rounds, archived: runtime.archived, queues: runtime.queues }
+    },
+    retryPending: props.retryPending
+  }
+})
 const display = usePausedDisplay(
-  () => ({ ...props, now: wallTime.value }),
+  () => ({ ...view.value, now: wallTime.value }),
   () => props.progressPaused === true,
   () => props.account.id
 )
@@ -268,19 +295,7 @@ type GatewayTone = 'full' | 'degraded' | 'idle'
 
 const isCodexAccount = computed(() => targetsCodexUpstream(display.value.account))
 
-const extra = computed(() => {
-  const base = (display.value.account.extra as Record<string, unknown> | undefined) ?? {}
-  const snapshot = runtime.value
-  if (base.openai_gwpool !== true || !snapshot) return base
-  // Display-only projection: never replace the account object used by editing.
-  return {
-    ...base,
-    openai_gwpool_gateways: snapshot.history ?? base.openai_gwpool_gateways,
-    openai_gwpool_contacts: snapshot.contacts ?? base.openai_gwpool_contacts,
-    openai_gwpool_ledger_tag: snapshot.ledger_tag ?? base.openai_gwpool_ledger_tag,
-    openai_gwpool_gateway_window_s: snapshot.gateway_window_seconds ?? base.openai_gwpool_gateway_window_s
-  }
-})
+const extra = computed(() => display.value.extra)
 
 /**
  * 这个号的路由 cookie 是不是由网关池下发（账号上的 `openai_gwpool` 开关）。
@@ -353,13 +368,28 @@ function usedStatus(item: GatewayItem): string {
     : t('admin.accounts.openai.gatewayUsed.cooled')
 }
 
-const usedHistoryDetails = computed(() => [...usedItems.value]
-  .sort((a, b) => Number(toneOf(b) === 'full') - Number(toneOf(a) === 'full'))
-  .map(item => ({
-    name: item.name, region: gatewayRegionDisplayKey(item.region),
-    title: usedTitleOf(item), duration: toneOf(item) === 'full' ? '—' : fullHeldOf(item),
-    status: usedStatus(item), tone: toneOf(item)
-  })))
+const historyOpen = ref(false)
+type HistoryEntry = { name: string; region: string; title: string; duration: string; status: string; tone: GatewayTone }
+// A closed panel still receives every name and region: they keep its region filter and
+// page valid exactly as when the full entries were rebuilt every second. While they hold,
+// it keeps the same list, so a poll does not re-render it either.
+const closedHistoryDetails = computed<HistoryEntry[]>(previous => {
+  const next = usedItems.value.map(item => ({
+    name: item.name, region: gatewayRegionDisplayKey(item.region), title: '', duration: '', status: '', tone: 'idle' as const
+  }))
+  return previous?.length === next.length &&
+    previous.every((entry, index) => entry.name === next[index].name && entry.region === next[index].region) ? previous : next
+})
+// Statuses, colours and titles follow the clock, so only an open panel gets them.
+const usedHistoryDetails = computed(() => historyOpen.value
+  ? [...usedItems.value]
+    .sort((a, b) => Number(toneOf(b) === 'full') - Number(toneOf(a) === 'full'))
+    .map(item => ({
+      name: item.name, region: gatewayRegionDisplayKey(item.region),
+      title: usedTitleOf(item), duration: toneOf(item) === 'full' ? '—' : fullHeldOf(item),
+      status: usedStatus(item), tone: toneOf(item)
+    }))
+  : closedHistoryDetails.value)
 
 const preparing = computed(() => usesPool.value && !!displayProgress.value &&
   ['pending', 'fetching', 'verifying', 'waiting'].includes(displayProgress.value.phase))
