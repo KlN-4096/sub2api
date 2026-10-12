@@ -1482,6 +1482,34 @@ describe('EditAccountModal', () => {
     }
   })
 
+  it('drops every retired gateway pool key on save, whether the pool is on or off', async () => {
+    const retired = [
+      'openai_gwpool_all_models', 'openai_gwpool_renew', 'openai_gwpool_steering', 'openai_gwpool_auto_wait',
+      'openai_gwpool_warm_tickets', 'openai_gwpool_max_wait_s', 'openai_gwpool_use_recommended_cooldown',
+      'openai_gwpool_member_isolation', 'openai_gwpool_early_probe_enabled', 'openai_gwpool_early_probe_state',
+      'openai_gwpool_prewarm', 'openai_gwpool_rotation', 'openai_gwpool_rotation_min_gateways',
+      'openai_gwpool_probe_model', 'openai_gwpool_guard_enabled', 'openai_gwpool_guard',
+      'openai_gwpool_state_echo', 'openai_gwpool_degraded_retries'
+    ]
+    for (const enabled of [true, false]) {
+      const account = buildAccount()
+      account.type = 'oauth'
+      account.extra = {
+        openai_gwpool: true, openai_gwpool_base_url: 'https://pool.example.test',
+        ...Object.fromEntries(retired.map(key => [key, 1]))
+      }
+      updateAccountMock.mockReset().mockResolvedValue(account)
+      checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+      const wrapper = mountModal(account)
+      if (!enabled) await wrapper.get('[data-testid="edit-openai-gwpool-enabled"]').setValue(false)
+      await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+      const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+      expect(extra?.openai_gwpool_base_url).toBe('https://pool.example.test')
+      for (const key of retired) expect(extra, `${key} (pool ${enabled ? 'on' : 'off'})`).not.toHaveProperty(key)
+      wrapper.unmount()
+    }
+  })
+
   // 配置错误的报错走 reason code → i18n 命名空间（文案本体由 gwpoolLocales.spec.ts 钉）。
   // 这个 spec 的 t 桩把任何 key 原样回传，所以这里只能钉「没有映射时仍回落后端原串」，
   // 也就是接 i18n 之前的行为不许丢。
