@@ -44,7 +44,7 @@ func TestGatewayPoolRoundsRestIncludesActualProbesAndKeepsRequestCloneExclusions
 	a, b, clone := preferenceAccount(1, group, 20), preferenceAccount(2, group, 1), preferenceAccount(3, group, 20)
 	clone.Credentials = a.Credentials
 	repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*a, *b, *clone}}}
-	svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}, rateLimitService: gatewayPoolSchedulerTestSettings("legacy")}
+	svc := withGatewayPoolRowRead(&OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}, rateLimitService: gatewayPoolSchedulerTestSettings("legacy")})
 	aid, bid := openAIGatewayPoolAccountKey(a), openAIGatewayPoolAccountKey(b)
 	now := time.Now()
 	svc.codexCookies.poolRounds.touch(aid, now.Add(-time.Hour))
@@ -82,7 +82,7 @@ func TestGatewayPoolRoundsDoNotWaitForDisabledOrIncompatibleAccounts(t *testing.
 				b.Extra[openAIGatewayPoolExtraKey] = false
 			}
 			repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*a, *b}}}
-			svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}}
+			svc := withGatewayPoolRowRead(&OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}})
 			svc.codexCookies.poolRounds.exhaust(group, openAIGatewayPoolAccountKey(a), 0)
 			ctx := svc.withGatewayPoolAccountPreferences(context.Background(), OpenAIAccountScheduleRequest{
 				GroupID: &group, Platform: PlatformOpenAI, RequestedModel: "gpt-6-astra",

@@ -22,7 +22,7 @@ func TestGatewayPoolActiveUsageClosesWhenAttemptFinishes(t *testing.T) {
 	applied := OpenAIGatewayPoolApplied{AccountID: account.ID, Gateway: pair.gateway, Version: pair.version}
 	require.True(t, svc.noteGatewayPoolFullUse(ctx, account, gwpoolTestIdentity, applied, time.Now().UTC()))
 	finish()
-	fresh, err := repo.GetByID(ctx, account.ID)
+	fresh, err := repo.stored(account.ID)
 	require.NoError(t, err)
 	state := readGatewayPoolUsage(fresh, gatewayPoolLedgerTag(gwpoolTestIdentity))
 	require.Len(t, state.Rounds, 1)
@@ -64,7 +64,7 @@ func TestGatewayPoolActiveUsageInvalidationSurvivesReplacementAndFailedWrite(t *
 	store.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{cookie: "new", gateway: "new", version: "new"})
 	repo.fail = false
 	flushGatewayPoolActiveUsage(svc, context.Background(), account, gwpoolTestIdentity)
-	fresh, err := repo.GetByID(context.Background(), account.ID)
+	fresh, err := repo.stored(account.ID)
 	require.NoError(t, err)
 	state := readGatewayPoolUsage(fresh, gatewayPoolLedgerTag(gwpoolTestIdentity))
 	require.Len(t, state.Rounds, 1)

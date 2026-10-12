@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/chatgptcookies"
@@ -80,27 +81,22 @@ func (s *OpenAIGatewayService) WaitGatewayPoolCapacity(ctx context.Context, c *g
 	if !account.UsesGatewayPool() {
 		return false, nil
 	}
-	holder := &gatewayPoolWaitHolder{}
-	if c != nil {
-		if value, ok := c.Get(gatewayPoolWaitGinKey); ok {
-			if saved, valid := value.(*gatewayPoolWaitHolder); valid {
-				holder = saved
-			}
-		} else {
-			c.Set(gatewayPoolWaitGinKey, holder)
-		}
-	}
+	holder := gatewayPoolWaitHolderFor(c)
 	ctx = context.WithValue(ctx, gatewayPoolWaitKey{}, (*gatewayPoolWaitState)(nil))
 	ctx = context.WithValue(ctx, openAIGatewayPoolSinkCtxKey{}, &openAIGatewayPoolSink{waitBudget: holder})
 	return s.waitGatewayPoolRetry(s.gatewayPoolWaitContext(ctx, account), account, gatewayPoolWaitMinGap)
+}
+
+// gatewayPoolInferenceURL reports the Codex inference endpoint on a ChatGPT host.
+func gatewayPoolInferenceURL(u *url.URL) bool {
+	return chatgptcookies.IsChatGPTURL(u) && u.Path == openAIGatewayPoolInferencePath
 }
 
 // This boundary owns no downstream writer. A response is returned only after
 // verification; failed attempts can therefore be replaced without splicing
 // streams or leaking a discarded response's IDs, state or tool calls.
 func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL string, account *Account) (response *http.Response, responseErr error) {
-	pool := request != nil && request.URL != nil && account.UsesGatewayPool() &&
-		chatgptcookies.IsChatGPTURL(request.URL) && request.URL.Path == openAIGatewayPoolInferencePath
+	pool := request != nil && account.UsesGatewayPool() && gatewayPoolInferenceURL(request.URL)
 	if !pool {
 		return s.doOpenAIUpstreamAttempt(request, proxyURL, account)
 	}

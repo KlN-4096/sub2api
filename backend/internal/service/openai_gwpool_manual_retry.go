@@ -93,9 +93,8 @@ func (s *openAICodexCookieStore) applyGatewayPoolCooldownClear(identity string, 
 // Commit one durable owner barrier before publishing it in memory. Every
 // hydration/ordinary history writer adopts that barrier, including old clones.
 func (s *OpenAIGatewayService) clearGatewayPoolCooldown(ctx context.Context, account *Account, identity string) error {
-	value, _ := s.codexCookies.poolCooldownResetLocks.LoadOrStore(identity, &sync.Mutex{})
-	lock, ok := value.(*sync.Mutex)
-	if !ok || !gatewayPoolLockWithin(ctx, lock) {
+	lock := gatewayPoolLoadOrNew[sync.Mutex](&s.codexCookies.poolCooldownResetLocks, identity)
+	if !gatewayPoolLockWithin(ctx, lock) {
 		return errors.New("gateway cooldown clear lock unavailable")
 	}
 	defer lock.Unlock()
@@ -110,70 +109,43 @@ func (s *OpenAIGatewayService) clearGatewayPoolCooldown(ctx context.Context, acc
 	if latest := s.codexCookies.gatewayPoolCooldownResetAt(identity); !at.After(latest) {
 		at = latest.Add(time.Nanosecond)
 	}
-	if err := s.writeGatewayPoolCooldownClear(ctx, account.ID, identity, at, true); err != nil {
-		return err
-	}
-	for i := range peers {
-		if peers[i].ID != account.ID {
-			if err := s.writeGatewayPoolCooldownClear(ctx, peers[i].ID, identity, at, false); err != nil {
-				return err
-			}
-		}
-	}
-	s.codexCookies.poolCandidateQueues.Range(func(key, value any) bool {
-		name, _ := key.(string)
-		if name == identity {
-			queue, ok := value.(*gatewayPoolCandidateQueue)
-			if !ok || queue == nil {
-				panic("invalid gateway pool candidate queue")
-			}
-			queue.reset()
-		}
-		return true
-	})
-	return nil
-}
-
-func (s *OpenAIGatewayService) writeGatewayPoolCooldownClear(ctx context.Context, id int64, identity string, at time.Time, owner bool) error {
-	value, _ := s.codexCookies.poolHistoryLocks.LoadOrStore(id, &sync.Mutex{})
-	lock, ok := value.(*sync.Mutex)
-	if !ok || !gatewayPoolLockWithin(ctx, lock) {
-		return errors.New("gateway cooldown clear history lock unavailable")
-	}
-	defer lock.Unlock()
-	fresh, err := s.accountRepo.GetByID(ctx, id)
-	if err != nil || fresh == nil {
-		return errors.New("gateway cooldown clear account unavailable")
-	}
-	tag := gatewayPoolLedgerTag(identity)
-	rec, _ := readOpenAIGatewayHistory(fresh)
-	if owner {
-		current, err := s.codexCookies.gatewayPoolIdentity(ctx, fresh)
-		if err != nil || current != identity || !fresh.UsesGatewayPool() {
-			return errors.New("gateway cooldown clear identity changed")
-		}
-		rec = gatewayPoolHistoryForTag(rec, tag)
-		rec.LedgerTag = tag
-	}
-	view := gatewayPoolCooldownResetHistory(&rec, tag)
-	if view == nil {
-		return nil
-	}
-	view.CooldownReset.LastAt, view.CooldownReset.ClearedAt = at, at
-	base := gatewayPoolCooldownBase(fresh.gatewayPoolGatewayWindow())
-	for name, seen := range view.Seen {
-		next := gatewayPoolCooldown{}
-		next.clearCooldown(at, base)
-		seen.Cooldown = &next
-		view.Seen[name] = seen
-	}
-	if err := s.accountRepo.UpdateExtra(ctx, id, map[string]any{
-		openAIGatewayHistoryExtraKey: rec, openAIGatewayLedgerTagExtraKey: rec.LedgerTag,
+	if err := gatewayPoolForOwnerThenPeers(account.ID, peers, func(id int64, owner bool) error {
+		return s.writeGatewayPoolCooldownClear(ctx, id, identity, at, owner)
 	}); err != nil {
 		return err
 	}
-	s.codexCookies.applyGatewayPoolCooldownClear(identity, at, base)
+	if value, exists := s.codexCookies.poolCandidateQueues.Load(identity); exists {
+		queue, _ := value.(*gatewayPoolCandidateQueue)
+		queue.reset()
+	}
 	return nil
+}
+
+var gatewayPoolCooldownClearErrors = gatewayPoolHistoryViewErrors{
+	lock:     errors.New("gateway cooldown clear history lock unavailable"),
+	read:     errors.New("gateway cooldown clear account unavailable"),
+	missing:  errors.New("gateway cooldown clear account unavailable"),
+	identity: errors.New("gateway cooldown clear identity changed"),
+}
+
+func (s *OpenAIGatewayService) writeGatewayPoolCooldownClear(ctx context.Context, id int64, identity string, at time.Time, owner bool) error {
+	return s.lockGatewayPoolHistoryView(ctx, id, identity, owner, gatewayPoolCooldownClearErrors, func(fresh *Account, view *openAIGatewayHistory) error {
+		view.CooldownReset.LastAt, view.CooldownReset.ClearedAt = at, at
+		base := gatewayPoolCooldownBase(fresh.gatewayPoolGatewayWindow())
+		for name, seen := range view.Seen {
+			next := gatewayPoolCooldown{}
+			next.clearCooldown(at, base)
+			seen.Cooldown = &next
+			view.Seen[name] = seen
+		}
+		if err := s.updateGatewayPoolRuntimeExtra(ctx, id, map[string]any{
+			openAIGatewayHistoryExtraKey: *view, openAIGatewayLedgerTagExtraKey: view.LedgerTag,
+		}); err != nil {
+			return err
+		}
+		s.codexCookies.applyGatewayPoolCooldownClear(identity, at, base)
+		return nil
+	})
 }
 
 type gatewayPoolClearRestRepository interface {

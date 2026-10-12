@@ -60,6 +60,8 @@ func (g *gatewayPoolSharedWork[T]) do(
 			g.calls[key] = call
 			finish := func() {}
 			if len(register) > 0 {
+				// Register before launching: caller cancellation must not
+				// expose zero in-flight work while this goroutine is queued.
 				finish = register[0]()
 			}
 			go func(call *gatewayPoolSharedCall[T]) {

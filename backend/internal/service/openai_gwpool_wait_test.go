@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +81,58 @@ func TestGatewayPoolWaitStillVerifiesActualTicketBeforeBusiness(t *testing.T) {
 	require.Len(t, upstream.sentBodies, 3, "two state-echo probes then exactly one unchanged business request")
 }
 
+func TestGatewayPoolWaitRecoversProbeWithoutReplayingBusiness(t *testing.T) {
+	svc, repo, _, account, request, state := ticketWaitFixture(t)
+	account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = true
+	account.Credentials["access_token"] = "offline-token"
+	repo.account = *account
+	sleeps := 0
+	state.sleep = func(context.Context, time.Duration) error { sleeps++; return nil }
+	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
+		{status: http.StatusOK}, // A has no state: recoverable, not degraded.
+		{status: http.StatusOK, minted: "probe-state"}, {status: http.StatusOK},
+		{status: http.StatusOK}, // business, sent only once
+	}}
+	svc.httpUpstream = upstream
+	response, err := svc.doOpenAIUpstream(request, "", account)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, 1, sleeps)
+	require.Len(t, upstream.sentBodies, 4)
+	progress := svc.GatewayPoolProgress([]int64{account.ID})[account.ID]
+	require.Equal(t, 1, progress.Attempt, "retrying the same ticket does not invent a second ticket; work budget is separate")
+	require.Zero(t, progress.Rejected, "unknown is not a quality verdict")
+}
+
+// 取票本身的临时故障（池子 502、没有错误码，不是缺票）与验票同一条规则：等一次再取，
+// 连续第二次还失败就结束这次准备。
+func TestGatewayPoolPreparationRetriesTransientTicketFetchOnce(t *testing.T) {
+	for _, failures := range []int{1, 2} {
+		t.Run(strconv.Itoa(failures), func(t *testing.T) {
+			svc, _, fake, account, request, state := ticketWaitFixture(t)
+			fake.refuseStatus = http.StatusBadGateway
+			left, sleeps := failures, 0
+			state.sleep = func(context.Context, time.Duration) error {
+				sleeps++
+				if left--; left == 0 {
+					fake.refuseStatus = 0
+				}
+				return nil
+			}
+			shooter := &gwpoolWarmShooter{}
+			err := svc.gatewayPoolWarmUpWith(request, account, gwpoolTestIdentity, gwpoolWarmModel, shooter.shoot)
+			require.Equal(t, 1, sleeps)
+			if failures == 1 {
+				require.NoError(t, err)
+				require.Len(t, shooter.shots, 2)
+				return
+			}
+			require.Error(t, err)
+			require.Empty(t, shooter.shots)
+		})
+	}
+}
+
 func TestGatewayPoolWaitProbeAuthenticationFailureStopsPreparation(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -131,7 +184,7 @@ func TestGatewayPoolWaitHonorsCallerDeadlineCancellationAndFreshSettings(t *test
 			state.sleep = func(ctx context.Context, delay time.Duration) error {
 				sleeps++
 				if mode == "deadline" {
-					return gatewayPoolSleep(ctx, delay)
+					return sleepWithContext(ctx, delay)
 				}
 				repo.mu.Lock()
 				defer repo.mu.Unlock()
@@ -163,6 +216,30 @@ func TestGatewayPoolWaitHonorsCallerDeadlineCancellationAndFreshSettings(t *test
 	}
 }
 
+func TestGatewayPoolWaitGapBoundsOnSharedAndRequestPaths(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	svc := &OpenAIGatewayService{}
+	for _, tc := range []struct{ gap, want time.Duration }{
+		{0, 30 * time.Second}, {-time.Second, 30 * time.Second},
+		{time.Millisecond, time.Second}, {time.Second, time.Second}, {5 * time.Second, 5 * time.Second},
+		{time.Minute, time.Minute}, {time.Minute + time.Millisecond, time.Minute},
+	} {
+		var slept []time.Duration
+		capture := func(_ context.Context, gap time.Duration) error {
+			slept = append(slept, gap)
+			return nil
+		}
+		shared := context.WithValue(context.Background(), gatewayPoolPreparationKey{}, true)
+		shared = context.WithValue(shared, gatewayPoolPreparationSleepKey{}, capture)
+		_, err := svc.waitGatewayPoolRetry(shared, account, tc.gap)
+		require.NoError(t, err)
+		request := context.WithValue(context.Background(), gatewayPoolWaitKey{}, &gatewayPoolWaitState{sleep: capture})
+		_, err = svc.waitGatewayPoolRetry(request, account, tc.gap)
+		require.NoError(t, err)
+		require.Equal(t, []time.Duration{tc.want, tc.want}, slept, "gap %v", tc.gap)
+	}
+}
+
 func TestGatewayPoolWaitReadsFreshSettingsAndIgnoresRetiredBudget(t *testing.T) {
 	account := rotationAccount(1, 7)
 	for _, invalid := range []any{0, -1, 3601, 1.5, "60", true, nil} {
@@ -175,6 +252,23 @@ func TestGatewayPoolWaitReadsFreshSettingsAndIgnoresRetiredBudget(t *testing.T) 
 	stale := *account
 	stale.Extra = map[string]any{openAIGatewayPoolExtraKey: true}
 	require.NotNil(t, gatewayPoolWaitFrom(svc.gatewayPoolWaitContext(context.Background(), &stale)))
+}
+
+func TestGatewayPoolWaitContextTrustsOrdinaryRequestAccount(t *testing.T) {
+	ordinary := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true,
+		Credentials: map[string]any{"chatgpt_account_id": "acc-a", "chatgpt_user_id": "user-a"}, Extra: map[string]any{}}
+	stored := gwpoolTestAccount(1)
+	svc := &OpenAIGatewayService{}
+	reads := 0
+	svc.codexCookies.accountByID = func(context.Context, int64, ...string) (*Account, error) {
+		reads++
+		return stored, nil
+	}
+	ctx := context.Background()
+	require.Nil(t, gatewayPoolWaitFrom(svc.gatewayPoolWaitContext(ctx, ordinary)))
+	require.Zero(t, reads, "the request account is the same row business_retry used to choose the ordinary path")
+	require.NotNil(t, gatewayPoolWaitFrom(svc.gatewayPoolWaitContext(ctx, stored)))
+	require.Equal(t, 1, reads, "pool rows still read their waiting policy fresh")
 }
 
 func TestGatewayPoolWaitConfigIgnoresRetiredSavedValues(t *testing.T) {

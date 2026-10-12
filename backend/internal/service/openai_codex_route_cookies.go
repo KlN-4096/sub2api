@@ -159,15 +159,19 @@ func openAICodexRouteGateway(pair string) string {
 	return ""
 }
 
-// usageCodexRoutePairPtr / usageCodexRouteGatewayPtr：写进使用记录的两个读数，空值给 NULL。
-// 列是 TEXT：截断不切多字节字符，非法字节剔掉，否则整行 INSERT 被 PostgreSQL 拒绝。
-func usageCodexRoutePairPtr(pair string) *string {
-	pair = strings.TrimSpace(pair)
-	if pair == "" {
+// usageTextPtr 是用量表 TEXT 读数列的共用收边：空值给 nil（列保持 NULL）；按字节上限截断但不切开
+// 多字节字符，再剔掉非法字节——否则整行 INSERT 被 PostgreSQL 拒绝。是否 TrimSpace 由调用方决定。
+func usageTextPtr(s string, maxBytes int) *string {
+	if s == "" {
 		return nil
 	}
-	v := strings.ToValidUTF8(truncateUTF8(pair, maxUsageRoutePairLen), "")
+	v := strings.ToValidUTF8(truncateUTF8(s, maxBytes), "")
 	return &v
+}
+
+// usageCodexRoutePairPtr / usageCodexRouteGatewayPtr：写进使用记录的两个读数，空值给 NULL。
+func usageCodexRoutePairPtr(pair string) *string {
+	return usageTextPtr(strings.TrimSpace(pair), maxUsageRoutePairLen)
 }
 
 // usageCodexRoutePairOverriddenPtr 记录这一发出站的路由对是不是网关池下发的
@@ -198,30 +202,15 @@ func usageCodexRouteLandedOnPoolGateway(poolGateway, inUseGateway string) bool {
 // 那张 ⇒ **没有观测到落点**，不是「注入被接受」的确认。健康请求本来就一个 cookie 都不回，
 // 所以那条「相同即接受」的读法恒为真、无法证伪（见 UsageLog.RouteGateway）。
 func usageCodexRoutePairPoolGatewayPtr(gateway string) *string {
-	gateway = strings.TrimSpace(gateway)
-	if gateway == "" {
-		return nil
-	}
-	v := strings.ToValidUTF8(truncateUTF8(gateway, maxUsageRouteGatewayLen), "")
-	return &v
+	return usageTextPtr(strings.TrimSpace(gateway), maxUsageRouteGatewayLen)
 }
 
 // usageCodexRoutePairPoolVersionPtr 记池子给这张票的身份（cookie_version），用来和池子侧的
 // 交付/验证日志对上账。池子没报时为 nil。长度上限与网关名同口径（池子侧已钳到 128 内）。
 func usageCodexRoutePairPoolVersionPtr(version string) *string {
-	version = strings.TrimSpace(version)
-	if version == "" {
-		return nil
-	}
-	v := strings.ToValidUTF8(truncateUTF8(version, maxUsageRoutePairVersionLen), "")
-	return &v
+	return usageTextPtr(strings.TrimSpace(version), maxUsageRoutePairVersionLen)
 }
 
 func usageCodexRouteGatewayPtr(pair string) *string {
-	gw := openAICodexRouteGateway(pair)
-	if gw == "" {
-		return nil
-	}
-	v := strings.ToValidUTF8(truncateUTF8(gw, maxUsageRouteGatewayLen), "")
-	return &v
+	return usageTextPtr(openAICodexRouteGateway(pair), maxUsageRouteGatewayLen)
 }

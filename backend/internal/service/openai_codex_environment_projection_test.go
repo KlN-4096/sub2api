@@ -157,6 +157,9 @@ func TestRewriteCodexEnvironmentTimezoneKernel(t *testing.T) {
 			[]byte(`{"input":[{"text":"open <environment_context><timezone>"},{"text":"</timezone></environment_context>"}]}`),
 			[]byte(strings.ReplaceAll(strings.ReplaceAll(string(body), "<", `\u003c`), ">", `\u003e`)),
 			[]byte(strings.Replace(message, `"internal_chat_message_metadata_passthrough"`, `"other_metadata"`, 1)),
+			// 标签值里的裸控制字符让整帧非法；改写会把它连同旧时区一起换掉，等于把坏帧修成好帧。
+			// WS 透传后续帧在归一化 / BeforeRequest 之前先到这里，内核的 ValidBytes 不能省。
+			[]byte(strings.Replace(string(body), "<timezone>Asia/Shanghai", "<timezone>\tAsia/Shanghai", 1)),
 		} {
 			require.Equal(t, raw, rewriteCodexEnvironmentTimezoneWithName(wireTimezoneTestExit, raw))
 		}

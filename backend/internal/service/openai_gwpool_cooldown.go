@@ -202,6 +202,18 @@ func (s *openAICodexCookieStore) cooldownEntry(identity, gateway string) (gatewa
 	return c.clone(), ok
 }
 
+// gatewayPoolReuseDelay is the local wait before a gateway's next use: its
+// recorded cooldown window, else the account's base. The account is only read
+// when the returned function runs.
+func (s *openAICodexCookieStore) gatewayPoolReuseDelay(identity string, account *Account) func(string) time.Duration {
+	return func(gateway string) time.Duration {
+		if cooldown, ok := s.cooldownEntry(identity, gateway); ok {
+			return time.Duration(cooldown.WindowSeconds) * time.Second
+		}
+		return time.Duration(gatewayPoolCooldownBase(account.gatewayPoolGatewayWindow())) * time.Second
+	}
+}
+
 func validGatewayPoolCooldown(c *gatewayPoolCooldown, now time.Time, base int) bool {
 	validStep := func(seconds int) bool {
 		for step := base; step > 0 && step <= int(gatewayPoolCooldownCeiling.Seconds()); {
@@ -280,28 +292,38 @@ func (s *openAICodexCookieStore) hydrateCooldown(identity, gateway string, c *ga
 		return
 	}
 	s.refreshGatewayPoolCooldown(&restored, identity, time.Duration(base)*time.Second, at, time.Now().UTC())
-	if s.poolCooldown == nil {
-		s.poolCooldown = map[string]gatewayPoolCooldown{}
-	}
 	// 未完成的尝试属于写入它的请求/进程。恢复冷却，不恢复可供下一次响应计分的在途样本。
 	if restored.Outcome == "" {
 		restored.AttemptAt = time.Time{}
 		restored.AttemptSeconds, restored.ElapsedSeconds = 0, 0
 	}
-	s.poolCooldown[key] = restored
+	s.storeGatewayPoolCooldown(key, restored)
+}
+
+// storeGatewayPoolCooldown writes one entry; the caller holds poolCooldownMu.
+func (s *openAICodexCookieStore) storeGatewayPoolCooldown(key string, c gatewayPoolCooldown) {
+	if s.poolCooldown == nil {
+		s.poolCooldown = map[string]gatewayPoolCooldown{}
+	}
+	s.poolCooldown[key] = c
 }
 
 const openAIGatewayLedgerTagExtraKey = "openai_gwpool_ledger_tag"
 
-func gatewayPoolLedgerTag(identity string) string {
-	sum := sha256.Sum256([]byte("gwpool-ledger\x00" + identity))
+// gatewayPoolDigest is the lowercase hex SHA-256 of value.
+func gatewayPoolDigest(value string) string {
+	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
+}
+
+func gatewayPoolLedgerTag(identity string) string {
+	return gatewayPoolDigest("gwpool-ledger\x00" + identity)
 }
 
 // 每次取新票前合并所有账号行里带相同绑定标签的新鲜历史。不能永久缓存“已加载”，
 // 否则另一个实例写入其他克隆行后，本实例永远看不到。缓存中的活票不经过这里。
 func (s *openAICodexCookieStore) hydrateGatewayPoolSharedHistory(ctx context.Context, account *Account, identity string) error {
-	fresh, err := s.freshGatewayPoolAccount(ctx, account)
+	fresh, err := s.freshGatewayPoolAccount(ctx, account, openAIGatewayHistoryExtraKey)
 	if err != nil || fresh == nil {
 		return fmt.Errorf("unable to read current gateway cooldown")
 	}
@@ -310,15 +332,17 @@ func (s *openAICodexCookieStore) hydrateGatewayPoolSharedHistory(ctx context.Con
 		return nil
 	}
 	tag := gatewayPoolLedgerTag(identity)
-	_, err, _ = s.poolHistoryLoad.Do(tag, func() (any, error) {
-		accounts, err := s.historyByTag(ctx, tag)
+	// The peer read is shared work: each caller leaves on its own context and
+	// only the last departure cancels the read for everyone.
+	_, _, err = s.poolHistoryLoad.do(ctx, tag, 0, func(work context.Context) (struct{}, error) {
+		accounts, err := s.historyByTag(work, tag, openAIGatewayHistoryExtraKey)
 		if err != nil {
-			return nil, err
+			return struct{}{}, err
 		}
 		for i := range accounts {
 			s.gatewayPoolHydrateUsed(&accounts[i], identity)
 		}
-		return nil, nil
+		return struct{}{}, nil
 	})
 	return err
 }
@@ -343,18 +367,12 @@ func (s *openAICodexCookieStore) beginGatewayPoolAttemptAt(identity, gateway str
 	previous := c.clone()
 	base := gatewayPoolCooldownBase(window)
 	if !c.begin(now, usedAt, base) {
-		if s.poolCooldown == nil {
-			s.poolCooldown = map[string]gatewayPoolCooldown{}
-		}
-		s.poolCooldown[key] = c
+		s.storeGatewayPoolCooldown(key, c)
 		return false
 	}
 	c.initSources(previous, gatewayPoolCooldownBase(window), now)
 	s.refreshGatewayPoolCooldown(&c, identity, window, now, now)
-	if s.poolCooldown == nil {
-		s.poolCooldown = map[string]gatewayPoolCooldown{}
-	}
-	s.poolCooldown[key] = c
+	s.storeGatewayPoolCooldown(key, c)
 	s.poolUsed.Store(key, now)
 	return true
 }
@@ -381,10 +399,7 @@ func (s *openAICodexCookieStore) observeGatewayPoolCooldown(identity, gateway, v
 			c.LocalFloorSeconds = max(c.LocalFloorSeconds, nextGatewayPoolCooldown(sample.WindowSeconds))
 		}
 		s.refreshGatewayPoolCooldown(&c, identity, window, now, now)
-		if s.poolCooldown == nil {
-			s.poolCooldown = map[string]gatewayPoolCooldown{}
-		}
-		s.poolCooldown[key] = c
+		s.storeGatewayPoolCooldown(key, c)
 	}
 	if sample != nil {
 		sample.Gateway = gateway
@@ -392,21 +407,17 @@ func (s *openAICodexCookieStore) observeGatewayPoolCooldown(identity, gateway, v
 	return sample
 }
 
-// 运行态 history 是调度中立键，不能从五分钟的调度快照做决策。生产构造器注入 GetByID；
-// 未接数据库的离线替身仍可使用传入账号。
-func (s *openAICodexCookieStore) freshGatewayPoolAccount(ctx context.Context, account *Account) (*Account, error) {
+// 运行态账本不能从五分钟的调度快照做决策。生产构造器注入 gatewayPoolLedgerRow：读行并补读
+// ledgers 指定的账本（gateway_pool_ledgers）；未接数据库的离线替身仍可使用传入账号。
+func (s *openAICodexCookieStore) freshGatewayPoolAccount(ctx context.Context, account *Account, ledgers ...string) (*Account, error) {
 	if s.accountByID == nil {
 		return account, nil
 	}
-	return s.accountByID(ctx, account.ID)
+	return s.accountByID(ctx, account.ID, ledgers...)
 }
 
 func (s *openAICodexCookieStore) gatewayPoolHistoryLock(id int64) func() {
-	lock, _ := s.poolHistoryLocks.LoadOrStore(id, &sync.Mutex{})
-	mu, ok := lock.(*sync.Mutex)
-	if !ok {
-		panic("gwpool history lock has an invalid type")
-	}
+	mu := gatewayPoolLoadOrNew[sync.Mutex](&s.poolHistoryLocks, id)
 	mu.Lock()
 	return mu.Unlock
 }

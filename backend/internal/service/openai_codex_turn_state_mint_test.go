@@ -122,6 +122,13 @@ func turnStateFernetBlob(minted time.Time, blocks int) string {
 	return base64.URLEncoding.EncodeToString(raw)
 }
 
+// openAITurnStateHealthy 按 blob 直接问健康判定。生产在 noteOpenAITurnStateObservation 里一次解析
+// 同时取块数、铸造时刻与判定（openAITurnStateShape），只有测试需要这个单项形态，留在生产侧就是 unused。
+func openAITurnStateHealthy(blob string) bool {
+	_, _, healthy := openAITurnStateShape(blob)
+	return healthy
+}
+
 // TestOpenAITurnStateHealthyLengthMatchesRealSample 钉住「292 = 不降智」这个口径的真实样本。
 func TestOpenAITurnStateHealthyLengthMatchesRealSample(t *testing.T) {
 	// 真实捕获样本（pro3），运维口径「292 = 不降智」的由来
@@ -309,4 +316,37 @@ func TestCPRTurnStateSentAndObserved(t *testing.T) {
 	require.True(t, ok, "形态观测照记")
 	require.Equal(t, openAIHealthyTurnStateBlocks+1, observed.Blocks)
 	repo.waitObservationWrites(t, 1)
+}
+
+// TestExtraJSONRecordReadsAreStrict 钉住 extra 上两条 JSON 记录的严格读：账号为 nil、缺键、
+// 值为 null、形状对不上都按「没有」处理，并且返回零值而不是解了一半的记录。
+func TestExtraJSONRecordReadsAreStrict(t *testing.T) {
+	_, ok := readOpenAITurnStateObservation(nil)
+	require.False(t, ok)
+	_, ok = readOpenAIGatewayHistory(nil)
+	require.False(t, ok)
+
+	account := &Account{Extra: map[string]any{openAITurnStateObservedExtraKey: nil}}
+	_, ok = readOpenAITurnStateObservation(account)
+	require.False(t, ok, "值为 null")
+	_, ok = readOpenAIGatewayHistory(account)
+	require.False(t, ok, "缺键")
+
+	// 形状对不上时 json.Unmarshal 仍会填上能解的字段再报错，读侧必须整条丢掉。
+	account.Extra[openAITurnStateObservedExtraKey] = map[string]any{"model": "gpt-5", "blocks": "ten"}
+	observed, ok := readOpenAITurnStateObservation(account)
+	require.False(t, ok)
+	require.Zero(t, observed)
+	account.Extra[openAIGatewayHistoryExtraKey] = map[string]any{
+		"current": "unified-1",
+		"seen":    map[string]any{"unified-1": "2026-10-01T00:00:00Z"}, // 2026-10-02 之前的老形状
+	}
+	history, ok := readOpenAIGatewayHistory(account)
+	require.False(t, ok)
+	require.Zero(t, history)
+
+	account.Extra[openAITurnStateObservedExtraKey] = map[string]any{"model": "gpt-5", "blocks": 10, "chars": 292}
+	observed, ok = readOpenAITurnStateObservation(account)
+	require.True(t, ok)
+	require.Equal(t, openAITurnStateObservation{Model: "gpt-5", Blocks: 10, Chars: 292}, observed)
 }

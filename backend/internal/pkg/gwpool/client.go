@@ -183,7 +183,7 @@ func (r CookieRequest) query() url.Values {
 		query.Set("exclude_versions", list)
 	}
 	if r.MinRemaining > 0 {
-		query.Set("min_remaining", strconv.Itoa(int(clampDuration(r.MinRemaining, minRemainingFloor, minRemainingCeil).Seconds())))
+		query.Set("min_remaining", strconv.Itoa(int(min(max(r.MinRemaining, minRemainingFloor), minRemainingCeil).Seconds())))
 	}
 	return query
 }
@@ -205,16 +205,6 @@ func joinExcludes(items []string) string {
 	return strings.Join(kept, ",")
 }
 
-func clampDuration(value, low, high time.Duration) time.Duration {
-	if value < low {
-		return low
-	}
-	if value > high {
-		return high
-	}
-	return value
-}
-
 // sanitizeOpaque 收口池子给的不透明字符串（cookie_version、错误码）：**这是信任边界**。
 // 它们会进 URL query、JSON 体、数据库和页面，所以控制字符一律判废（返回空串 = 当池子没报），
 // 超长同样判废而不是截断，不能将截断后的 version 用于精确匹配。
@@ -223,11 +213,13 @@ func sanitizeOpaque(value string, maxLen int) string {
 	if value == "" || len(value) > maxLen {
 		return ""
 	}
-	if strings.ContainsFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+	if strings.ContainsFunc(value, isControl) {
 		return ""
 	}
 	return value
 }
+
+func isControl(r rune) bool { return r < 0x20 || r == 0x7f }
 
 // Gateway 是 /gateways 列表里的一项，只留挑网关用得上的字段（live / target / valid_for_s
 // 是池子自己的读数，消费端不按它们分流）。
@@ -368,7 +360,7 @@ func (p cookiePayload) pair() (Pair, error) {
 	if strings.TrimSpace(p.Cookie) == "" {
 		return Pair{}, fmt.Errorf("%w: cookie response carried no cookie", ErrPool)
 	}
-	if strings.ContainsFunc(p.Cookie, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+	if strings.ContainsFunc(p.Cookie, isControl) {
 		return Pair{}, fmt.Errorf("%w: cookie response carried control characters", ErrPool)
 	}
 	return Pair{
@@ -376,7 +368,7 @@ func (p cookiePayload) pair() (Pair, error) {
 		// 同样过 sanitizeOpaque：池子的响应是信任边界，这个串会进账号 extra 和前端。
 		Region:            sanitizeOpaque(p.Region, maxGatewayLen),
 		Cookie:            strings.TrimSpace(p.Cookie),
-		ValidFor:          clampDuration(time.Duration(p.ValidForS)*time.Second, 0, maxValidFor),
+		ValidFor:          min(max(time.Duration(p.ValidForS)*time.Second, 0), maxValidFor),
 		Version:           sanitizeOpaque(p.CookieVersion, maxVersionLen),
 		DatacenterCountry: datacenterCountry(p.DatacenterCountry),
 	}, nil
@@ -403,23 +395,20 @@ func refusal(resp *http.Response) error {
 			}
 		}
 		if seconds := payload.Error.RetryAfterSeconds; seconds > 0 {
-			out.RetryAfter = clampDuration(time.Duration(seconds)*time.Second, 0, MaxRetryAfter)
+			out.RetryAfter = min(max(time.Duration(seconds)*time.Second, 0), MaxRetryAfter)
 		}
 	}
 	// 体里没给就读头（契约说两者同时出现；体被截断 / 解不开时头还在）。只认秒数形态——
 	// Retry-After 的 HTTP-date 形态依赖双方时钟，这里不需要那点精度。
 	if out.RetryAfter == 0 {
 		if seconds, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); err == nil && seconds > 0 {
-			out.RetryAfter = clampDuration(time.Duration(seconds)*time.Second, 0, MaxRetryAfter)
+			out.RetryAfter = min(max(time.Duration(seconds)*time.Second, 0), MaxRetryAfter)
 		}
 	}
 	return out
 }
 
 func (c *Client) fetchGateways(ctx context.Context, account, accountTag, model string) ([]Gateway, error) {
-	if c == nil {
-		return nil, fmt.Errorf("%w: client is nil", ErrPool)
-	}
 	endpoint := c.endpoint("gateways")
 	query := url.Values{}
 	if account = strings.TrimSpace(account); account != "" {
@@ -503,7 +492,7 @@ func (c *Client) fetchGateways(ctx context.Context, account, accountTag, model s
 		}
 		var availableUntil time.Time
 		if item.ValidForS > 0 {
-			availableUntil = started.Add(clampDuration(time.Duration(item.ValidForS)*time.Second, 0, maxValidFor))
+			availableUntil = started.Add(min(max(time.Duration(item.ValidForS)*time.Second, 0), maxValidFor))
 		}
 		gateways = append(gateways, Gateway{
 			Name: name, PairReady: item.PairReady,

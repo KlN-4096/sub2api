@@ -139,17 +139,104 @@ func TestGatewayPoolProbeFlightsCancelOnlyAfterLastWaiter(t *testing.T) {
 	}
 }
 
+func TestGatewayPoolProbeFlightsCallerCancellationReportsSent(t *testing.T) {
+	var flights gatewayPoolProbeFlights
+	started, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	work := func(ctx context.Context) (gatewayPoolProbeResult, error) {
+		close(started)
+		<-ctx.Done()
+		<-release // the abandoned transport is still unwinding
+		return gatewayPoolProbeResult{}, ctx.Err()
+	}
+	gone, cancelGone := context.WithCancel(context.Background())
+	cancelGone()
+	got, err := flights.do(gone, "ticket", time.Second, work)
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, got.sent, "a caller cancelled before joining must not release the ticket")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	type outcome struct {
+		got gatewayPoolProbeResult
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		got, err := flights.do(ctx, "ticket", time.Second, work)
+		done <- outcome{got, err}
+	}()
+	<-started
+	cancel()
+	left := <-done
+	require.ErrorIs(t, left.err, context.Canceled)
+	require.True(t, left.got.sent, "the shared transport may already have sent")
+
+	late, cancelLate := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancelLate()
+	got, err = flights.do(late, "ticket", time.Second, work)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.True(t, got.sent, "a caller waiting out an abandoned transport must not release the ticket")
+}
+
+func TestGatewayPoolSharedHistoryLoadSurvivesFirstCallerCancellation(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var loads atomic.Int32
+	store := &openAICodexCookieStore{
+		accountByID: func(context.Context, int64, ...string) (*Account, error) { return account, nil },
+		historyByTag: func(ctx context.Context, _ string, _ ...string) ([]Account, error) {
+			if loads.Add(1) == 1 {
+				close(entered)
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-release:
+				return nil, nil
+			}
+		},
+	}
+	first, cancelFirst := context.WithCancel(context.Background())
+	defer cancelFirst()
+	firstDone, secondDone := make(chan error, 1), make(chan error, 1)
+	go func() { firstDone <- store.hydrateGatewayPoolSharedHistory(first, account, gwpoolTestIdentity) }()
+	<-entered
+	go func() {
+		secondDone <- store.hydrateGatewayPoolSharedHistory(context.Background(), account, gwpoolTestIdentity)
+	}()
+	tag := gatewayPoolLedgerTag(gwpoolTestIdentity)
+	require.Eventually(t, func() bool { // the second caller joined the in-flight load
+		store.poolHistoryLoad.mu.Lock()
+		defer store.poolHistoryLoad.mu.Unlock()
+		call := store.poolHistoryLoad.calls[tag]
+		return call != nil && call.waiters == 2
+	}, time.Second, time.Millisecond)
+	cancelFirst()
+	require.ErrorIs(t, <-firstDone, context.Canceled)
+	close(release)
+	select {
+	case err := <-secondDone:
+		require.NoError(t, err, "the first caller's cancellation failed another caller's shared load")
+	case <-time.After(time.Second):
+		t.Fatal("the remaining caller never finished its shared load")
+	}
+	require.EqualValues(t, 1, loads.Load(), "both callers shared one peer read")
+}
+
 func TestGatewayPoolProgressDoesNotJumpToNewerActiveRequest(t *testing.T) {
 	var tracker gatewayPoolProgressTracker
-	first := tracker.start(1, 8)
-	tracker.update(first, "verifying", 4, "first", false, false)
-	second := tracker.start(1, 8)
-	tracker.update(second, "fetching", 2, "", false, false)
+	first := tracker.start(1)
+	gatewayPoolTestTried(&tracker, first, 4)
+	tracker.update(first, "verifying", "first", false, false)
+	second := tracker.start(1)
+	gatewayPoolTestTried(&tracker, second, 2)
+	tracker.update(second, "fetching", "", false, false)
 	got := tracker.snapshot([]int64{1}, time.Now())[1]
 	require.Equal(t, first.progress.RunID, got.RunID)
 	require.Equal(t, 4, got.Attempt)
 	require.Equal(t, 2, got.ActiveRequests)
-	tracker.update(first, "cancelled", 1, "", false, true)
+	gatewayPoolTestTried(&tracker, first, 1)
+	tracker.update(first, "cancelled", "", false, true)
 	require.Equal(t, 4, first.progress.Attempt, "a late lower update must not rewind one run")
 	got = tracker.snapshot([]int64{1}, time.Now())[1]
 	require.Equal(t, second.progress.RunID, got.RunID)

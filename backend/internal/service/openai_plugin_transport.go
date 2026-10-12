@@ -10,8 +10,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/Wei-Shaw/sub2api/internal/pkg/chatgptcookies"
 )
 
 func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
@@ -30,7 +28,7 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamAttempt(request *http.Request, pr
 			return nil, failure
 		}
 	}
-	if request != nil && request.URL != nil && chatgptcookies.IsChatGPTURL(request.URL) && request.URL.Path == openAIGatewayPoolInferencePath {
+	if request != nil && gatewayPoolInferenceURL(request.URL) {
 		if allowed, err := s.gatewayPoolResumeAllowed(request.Context(), account, true); err != nil || !allowed {
 			return nil, gatewayPoolRestError()
 		}
@@ -104,8 +102,7 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamOnce(
 		return nil, false, ctxErr
 	}
 	applied := openAIGatewayPoolSinkFrom(request.Context()).snapshot()
-	poolRequest := s.codexCookies.gatewayPoolTakeover(account) && request.URL != nil &&
-		chatgptcookies.IsChatGPTURL(request.URL) && request.URL.Path == openAIGatewayPoolInferencePath
+	poolRequest := s.codexCookies.gatewayPoolTakeover(account) && gatewayPoolInferenceURL(request.URL)
 	var identity string
 	var identityErr error
 	if poolRequest && applied.AccountID == account.ID && applied.Version != "" {

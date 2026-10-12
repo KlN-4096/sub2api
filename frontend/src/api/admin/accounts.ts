@@ -133,9 +133,10 @@ export interface GatewayPoolUsageRound {
   incomplete?: boolean
 }
 
-export async function getGatewayPoolProgress(ids: number[], signal?: AbortSignal): Promise<Record<number, GatewayPoolProgress>> {
+// The backend computes cooldown_estimate only on request; the one-second poll opts out.
+export async function getGatewayPoolProgress(ids: number[], signal?: AbortSignal, estimate = true): Promise<Record<number, GatewayPoolProgress>> {
   const { data } = await apiClient.get<Record<number, GatewayPoolProgress>>('/admin/accounts/gateway-pool-progress', {
-    params: { ids: ids.join(',') }, signal
+    params: estimate ? { ids: ids.join(','), estimate: 1 } : { ids: ids.join(',') }, signal
   })
   return data
 }

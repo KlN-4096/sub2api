@@ -380,6 +380,42 @@ func TestForwardAsAnthropic_DeviceWireProfileBridgeSessionIdentity(t *testing.T)
 	})
 }
 
+// 桥会话表的键里有客户端可控的会话键：不再访问的过期条目要被清掉，否则留到重启。清扫跟着新铸走
+// （每 256 次一轮），只删过期条目；命中续期不算新铸。
+func TestOpenAICompatBridgeSessionSweepDropsOnlyExpired(t *testing.T) {
+	account := wireProfileTestAccount(true)
+	svc := codexBridgeTestService(&httpUpstreamRecorder{})
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	session := func(key string) openAICompatBridgeSession {
+		t.Helper()
+		got, ok := svc.openAICompatBridgeSession(c, account, key)
+		require.True(t, ok)
+		return got
+	}
+	stored := func(key string) bool {
+		_, ok := svc.openaiCompatBridgeSessions.Load(openAICompatBridgeSessionKey(c, account, key))
+		return ok
+	}
+
+	live := session("live")
+	mints := svc.openaiCompatBridgeMints.Load()
+	require.Equal(t, live.SessionID, session("live").SessionID)
+	require.Equal(t, mints, svc.openaiCompatBridgeMints.Load(), "命中续期不铸新身份")
+
+	svc.openaiCompatBridgeSessions.Store(openAICompatBridgeSessionKey(c, account, "stale"),
+		openAICompatBridgeSession{SessionID: "stale", ExpiresAt: time.Now().Add(-time.Minute)})
+	session("a")
+	require.True(t, stored("stale"), "不到 256 次新铸不清扫")
+
+	svc.openaiCompatBridgeMints.Store(255)
+	session("b")
+	require.False(t, stored("stale"), "第 256 次新铸清掉过期条目")
+	for _, key := range []string{"live", "a", "b"} {
+		require.True(t, stored(key), "活会话 %s 不得被清掉", key)
+	}
+	require.Equal(t, live.SessionID, session("live").SessionID)
+}
+
 // 直连 /v1/responses 的双开请求即使体里出现桥标记（<todo-guard> 字面量 / anthropic-* 缓存键），也是
 // 客户端自己的会话身份原样派生——桥身份只在 ForwardAsAnthropic 入口合成，不按请求体嗅探。
 // 双开直连 /v1/responses：请求体里出现兼容桥标记（<todo-guard> 字面量 / anthropic-* 缓存键）不得改变出站身份——

@@ -35,7 +35,7 @@ func TestGatewayPoolBusinessRetryKeepsRequestAndVerifiesReplacement(t *testing.T
 	gwpoolEchoSeedVerified(t, svc, account)
 	for range 2 {
 		run := svc.startGatewayPoolProgress(request.Context(), account, gwpoolTestIdentity)
-		svc.codexCookies.poolProgress.update(run, "ready", 1, "", false, true)
+		svc.codexCookies.poolProgress.update(run, "ready", "", false, true)
 	}
 	var replacementProgress GatewayPoolProgress
 	upstream := &gwpoolEchoUpstream{replies: []gwpoolEchoReply{
@@ -176,7 +176,7 @@ func TestGatewayPoolBusinessRetryStopsAtCallerDeadlineOrDisconnect(t *testing.T)
 					cancel()
 					return context.Canceled
 				}
-				return gatewayPoolSleep(ctx, time.Second)
+				return sleepWithContext(ctx, time.Second)
 			}
 			response, err := svc.doOpenAIUpstream(request.WithContext(ctx), "", account)
 			require.Nil(t, response)
@@ -217,22 +217,22 @@ func TestGatewayPoolBusinessRetryHandlerKeepsSameAccountAndCallerCancellation(t 
 	svc, _, _, account, request, budget := ticketWaitFixture(t)
 	group := int64(7)
 	first := &UpstreamFailoverError{StatusCode: 502}
-	ctx := svc.PrepareGatewayPoolAccountRotation(request.Context(), &group, account, first)
+	ctx := svc.PrepareGatewayPoolAccountRotation(request.Context(), &group, account, first, nil)
 	require.True(t, first.GatewayPoolRetry)
 	require.True(t, first.SameAccountRetryOnly)
 	require.False(t, first.ShouldRetryNextAccount())
 	require.Zero(t, first.SameAccountRetryDeadline, "ordinary recovery has no synthetic aggregate budget")
 	require.Same(t, budget, gatewayPoolWaitFrom(ctx))
-	ctx = svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, first)
+	ctx = svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, first, nil)
 	require.True(t, first.GatewayPoolRetry, "preparing a classified retry is idempotent")
 	next := &UpstreamFailoverError{StatusCode: 504}
-	ctx = svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, next)
+	ctx = svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, next, nil)
 	require.Equal(t, first.SameAccountRetryDeadline, next.SameAccountRetryDeadline)
 	require.Equal(t, account.ID, gatewayPoolRetryOnlyFrom(ctx).accountID)
 	ctx, cancel := context.WithCancel(ctx)
 	cancel()
 	last := &UpstreamFailoverError{StatusCode: 502}
-	svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, last)
+	svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, last, nil)
 	require.False(t, last.GatewayPoolRetry)
 	require.False(t, last.ShouldRetryNextAccount())
 }
@@ -243,9 +243,9 @@ func TestGatewayPoolBusinessRetryPreservesReal429DeadlineAcrossHTTPRecovery(t *t
 	deadline := time.Now().Add(time.Minute)
 	first := &UpstreamFailoverError{StatusCode: 429, RetryableOnSameAccount: true,
 		SameAccountRetryDeadline: deadline}
-	ctx := svc.PrepareGatewayPoolAccountRotation(request.Context(), &group, account, first)
+	ctx := svc.PrepareGatewayPoolAccountRotation(request.Context(), &group, account, first, nil)
 	next := &UpstreamFailoverError{StatusCode: 502}
-	ctx = svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, next)
+	ctx = svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, next, nil)
 	require.True(t, next.GatewayPoolRetry)
 	require.Equal(t, deadline, next.SameAccountRetryDeadline, "HTTP recovery cannot erase the original rate-limit cutoff")
 	require.Equal(t, deadline, gatewayPoolRetryOnlyFrom(ctx).deadline)
@@ -253,7 +253,7 @@ func TestGatewayPoolBusinessRetryPreservesReal429DeadlineAcrossHTTPRecovery(t *t
 	retry.deadline = time.Now().Add(-time.Second)
 	ctx = context.WithValue(ctx, gatewayPoolRetryOnlyKey{}, retry)
 	last := &UpstreamFailoverError{StatusCode: 503}
-	svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, last)
+	svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, last, nil)
 	require.False(t, last.GatewayPoolRetry)
 	require.False(t, last.ShouldRetryNextAccount())
 }

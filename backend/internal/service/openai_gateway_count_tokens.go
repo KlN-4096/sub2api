@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -463,11 +462,7 @@ func (s *OpenAIGatewayService) buildInputTokensUpstreamRequest(
 		}
 	case AccountTypeCPR:
 		// CPR 中继绝不能回落到官方端点：client key 只对 CPR 网关有效，发给 OpenAI 就是凭据外泄。
-		baseURL := account.GetCPRGatewayBaseURL()
-		if baseURL == "" {
-			return nil, errors.New("cpr account requires credentials.base_url")
-		}
-		validatedURL, err := s.validateUpstreamBaseURL(baseURL)
+		validatedURL, err := s.validatedCPRBaseURL(account)
 		if err != nil {
 			return nil, err
 		}

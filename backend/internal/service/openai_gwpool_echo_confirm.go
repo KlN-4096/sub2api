@@ -18,27 +18,53 @@ type gatewayPoolConfirmBodyKey struct{}
 // response IDs. Sending these values through the identity builder again would
 // namespace them twice. The original body is not retained in this context value.
 func gatewayPoolConfirmBody(body []byte) []byte {
-	if !gjson.ValidBytes(body) || gjson.GetBytes(body, "model").String() == "" {
+	if !gjson.ValidBytes(body) {
+		return nil
+	}
+	// One top-level pass instead of one gjson lookup per field. Same path
+	// semantics: the first occurrence of a key wins, and each metadata field
+	// comes from the first client_metadata object holding it.
+	fields := map[string]gjson.Result{}
+	var metas []gjson.Result
+	gjson.ParseBytes(body).ForEach(func(key, value gjson.Result) bool {
+		switch name := key.String(); name {
+		case "client_metadata":
+			metas = append(metas, value)
+		case "model", "prompt_cache_key", "reasoning", "service_tier":
+			if _, seen := fields[name]; !seen {
+				fields[name] = value
+			}
+		}
+		return true
+	})
+	if fields["model"].String() == "" {
 		return nil
 	}
 	payload := openAITurnStateProbeBody(gatewayPoolProbeModelLuna, gatewayPoolWarmProbeEffort, openAITurnStateProbeIdentity{}, gatewayPoolWarmProbeText)
 	delete(payload, "prompt_cache_key")
 	delete(payload, "client_metadata")
 	for _, key := range []string{"prompt_cache_key", "reasoning", "service_tier"} {
-		if value := gjson.GetBytes(body, key); value.Exists() {
+		if value, ok := fields[key]; ok {
 			payload[key] = json.RawMessage(value.Raw)
 		}
 	}
 	metadata := map[string]json.RawMessage{}
-	for _, key := range []string{"session_id", "thread_id", "turn_id", "root_turn_id",
-		"x-codex-installation-id", "x-codex-window-id", "x-codex-turn-metadata"} {
-		if value := gjson.GetBytes(body, "client_metadata."+key); value.Exists() {
-			metadata[key] = json.RawMessage(value.Raw)
-			if key == openAIWSTurnMetadataHeader && value.Type == gjson.String {
-				encoded, _ := json.Marshal(alignCodexTurnMetadataJSON(value.String(), map[string]string{"model": gatewayPoolProbeModelLuna}))
-				metadata[key] = encoded
+	for _, meta := range metas {
+		meta.ForEach(func(key, value gjson.Result) bool {
+			switch name := key.String(); name {
+			case "session_id", "thread_id", "turn_id", "root_turn_id",
+				"x-codex-installation-id", "x-codex-window-id", openAIWSTurnMetadataHeader:
+				if _, seen := metadata[name]; seen {
+					break
+				}
+				metadata[name] = json.RawMessage(value.Raw)
+				if name == openAIWSTurnMetadataHeader && value.Type == gjson.String {
+					encoded, _ := json.Marshal(alignCodexTurnMetadataJSON(value.String(), map[string]string{"model": gatewayPoolProbeModelLuna}))
+					metadata[name] = encoded
+				}
 			}
-		}
+			return true
+		})
 	}
 	if len(metadata) > 0 {
 		payload["client_metadata"] = metadata

@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	// 出站时区改写按 IANA 名解析，容器/精简镜像可能没有 /usr/share/zoneinfo，
@@ -87,13 +89,38 @@ func codexWireTimezoneName(account *Account) string {
 	return ""
 }
 
+// codexWireTimezoneLocations 缓存加载成功的时区（名字 → *time.Location）。一个带时区的双开请求要按名
+// 加载好几次（出口名、环境块里的原时区、user_location 判定），LoadLocation 每次都重新解析 tzdata。
+// 失败不缓存。键是客户端给的原写法：目录型 tzdata（Linux /usr/share/zoneinfo）下 "Asia//Shanghai"
+// 这类写法同样加载成功，名字集合没有上界，所以条数封顶，满了只加载不缓存（同不缓存时的行为）。
+var (
+	codexWireTimezoneLocations sync.Map
+	codexWireTimezoneCached    atomic.Int32
+)
+
+const codexWireTimezoneCacheLimit = 1024
+
 // codexWireTimezoneLocation 校验并加载时区；名字不合字符集或加载失败都算非法。
 func codexWireTimezoneLocation(name string) (*time.Location, error) {
 	name = strings.TrimSpace(name)
 	if !codexWireTimezoneNamePattern.MatchString(name) {
 		return nil, errInvalidCodexWireTimezone
 	}
-	return time.LoadLocation(name)
+	if cached, ok := codexWireTimezoneLocations.Load(name); ok {
+		if loc, ok := cached.(*time.Location); ok {
+			return loc, nil
+		}
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, err
+	}
+	if codexWireTimezoneCached.Load() < codexWireTimezoneCacheLimit {
+		if _, loaded := codexWireTimezoneLocations.LoadOrStore(name, loc); !loaded {
+			codexWireTimezoneCached.Add(1)
+		}
+	}
+	return loc, nil
 }
 
 // errInvalidCodexWireTimezone 是所有非法时区名共用的哨兵错误；调用方只判 err != nil。

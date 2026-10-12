@@ -169,7 +169,7 @@ describe('gateway compact queue cards', () => {
     } finally { wrapper.unmount() }
   })
 
-  it('keeps individually used gateways with their history details visible', () => {
+  it('keeps individually used gateways with their history details visible', async () => {
     const value = progress()
     value.runtime!.history = {
       current: 'unified-178',
@@ -185,6 +185,8 @@ describe('gateway compact queue cards', () => {
       expect(history.get('[data-gateway="unified-26"]').attributes('title')).toContain('43s')
       expect(history.get('[data-gateway="unified-26"]').attributes('data-tone')).toBe('degraded')
       expect(history.find('[data-gateway="unified-178"]').exists()).toBe(false)
+      // Full history entries are built only for an open panel.
+      await wrapper.get('[data-testid="gateway-used-history-trigger"]').trigger('mouseenter')
       const current = wrapper.getComponent(GatewayUsedHistory).props('items')[0]
       expect(current.title).toContain('87s')
       expect(current.title).toContain('gatewayUsed.current')
@@ -238,7 +240,7 @@ describe('gateway compact queue cards', () => {
     } finally { wrapper.unmount() }
   })
 
-  it('excludes current tickets from the two-row timeline and keeps complete history in use order', () => {
+  it('excludes current tickets from the two-row timeline and keeps complete history in use order', async () => {
     vi.useFakeTimers()
     const value = progress()
     const ago = (seconds: number) => new Date(Date.now() - seconds * 1000).toISOString()
@@ -261,6 +263,8 @@ describe('gateway compact queue cards', () => {
       expect(recent[0].get('[data-testid="gateway-used-duration"]').text()).toContain('"duration":"43s"')
       expect(recent[0].get('[data-testid="gateway-used-status"]').text()).toContain('gatewayUsed.cooled')
       expect(recent[1].get('[data-testid="gateway-used-status"]').text()).toContain('"minutes":20')
+      // Full history entries are built only for an open panel.
+      await wrapper.get('[data-testid="gateway-used-history-trigger"]').trigger('mouseenter')
       const details = wrapper.getComponent(GatewayUsedHistory).props('items')
       expect(details.filter(item => item.region === 'north-america').map(item => item.name))
         .toEqual(['unified-178', 'unified-101', 'unified-201', 'unified-202'])

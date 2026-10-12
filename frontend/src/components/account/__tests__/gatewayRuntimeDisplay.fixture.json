@@ -1,0 +1,276 @@
+{
+  "displayed": {
+    "contacts": {
+      "ledger_tag": "fixture-ledger",
+      "tracking_since": "2026-10-05T00:00:00Z",
+      "history_truncated": true,
+      "rounds": [
+        {
+          "version_hash": "v-104",
+          "report": {
+            "id": "r1",
+            "gateway": "unified-104",
+            "model": "gpt-6-luna",
+            "source": "foreground",
+            "at": "2026-10-10T23:10:00Z",
+            "outcome": "full",
+            "full_window_ms": 150000,
+            "window_final": true
+          }
+        },
+        {
+          "version_hash": "v-106",
+          "report": {
+            "id": "r2",
+            "gateway": "unified-106",
+            "model": "gpt-6-luna",
+            "source": "background",
+            "at": "2026-10-10T23:20:00Z",
+            "outcome": "refreshed",
+            "full_window_ms": 0,
+            "window_final": false
+          }
+        },
+        {
+          "version_hash": "v-106",
+          "report": {
+            "id": "r3",
+            "gateway": "unified-106",
+            "model": "gpt-6-luna",
+            "source": "background",
+            "at": "2026-10-10T23:19:00Z",
+            "outcome": "refreshed",
+            "full_window_ms": 0,
+            "window_final": false
+          }
+        }
+      ]
+    },
+    "history": {
+      "current": "unified-999",
+      "current_region": "europe",
+      "seen": {
+        "unified-101": {
+          "at": "2026-10-10T23:50:00Z",
+          "region": "us-east",
+          "verdict": "degraded",
+          "full_at": "2026-10-10T19:00:00Z",
+          "full_held_ms": 43000,
+          "cooldown": {
+            "window_seconds": 7200,
+            "fixed_seconds": 5400,
+            "until": "2026-10-11T03:00:00Z",
+            "recommended_seconds": 10800
+          }
+        },
+        "unified-102": {
+          "at": "2026-10-10T23:30:00Z",
+          "region": "east-asia",
+          "verdict": "full",
+          "full_at": "2026-10-10T22:00:00Z",
+          "full_held_ms": 120000,
+          "cooldown": {
+            "window_seconds": 7200,
+            "recommended_seconds": 10800
+          }
+        },
+        "unified-103": {
+          "at": "2026-10-10T23:40:00Z",
+          "region": "europe",
+          "cooldown": {
+            "cleared": true,
+            "window_seconds": 3600
+          }
+        },
+        "unified-104": {
+          "at": "2026-10-10T21:00:00Z"
+        },
+        "unified-105": {
+          "at": "2026-10-10T23:45:00Z",
+          "region": "country-jp",
+          "verdict": "degraded",
+          "full_at": "2026-10-10T20:00:00Z",
+          "full_held_ms": 60000
+        }
+      },
+      "updated_at": "2026-10-10T23:53:00Z"
+    }
+  },
+  "gateway_window_seconds": 3600,
+  "ledger_tag": "fixture-ledger",
+  "now": "2026-10-11T00:00:00Z",
+  "stored": {
+    "contacts": {
+      "ledger_tag": "fixture-ledger",
+      "tracking_since": "2026-10-05T00:00:00Z",
+      "history_truncated": true,
+      "last_us_at": "2026-10-10T23:00:00Z",
+      "seen": {
+        "unified-104": {
+          "first_at": "2026-10-05T00:00:00Z",
+          "last_at": "2026-10-10T23:10:00Z"
+        }
+      },
+      "rounds": [
+        {
+          "round_id": "round-1",
+          "aliases": [
+            "alias-1"
+          ],
+          "version_hash": "v-104",
+          "report": {
+            "id": "r1",
+            "account_tag": "account-tag",
+            "gateway": "unified-104",
+            "model": "gpt-6-luna",
+            "criterion": "state-echo-v1",
+            "source": "foreground",
+            "first": "repeat",
+            "at": "2026-10-10T23:10:00Z",
+            "gap_known": true,
+            "elapsed_seconds": 300,
+            "outcome": "full",
+            "full_window_ms": 150000,
+            "window_final": true
+          },
+          "last_at": "2026-10-10T23:10:00Z",
+          "last_probe_outcome": "full",
+          "last_probe_at": "2026-10-10T23:10:00Z",
+          "last_probe_model": "gpt-6-luna",
+          "last_probe_source": "foreground",
+          "steps": [
+            {
+              "shot": "verify",
+              "sent": true,
+              "status": 200,
+              "got_state": true,
+              "echo_accepted": true,
+              "actual_gateway": "unified-104",
+              "duration_ms": 812
+            }
+          ]
+        },
+        {
+          "round_id": "",
+          "version_hash": "v-106",
+          "report": {
+            "id": "r2",
+            "account_tag": "",
+            "gateway": "unified-106",
+            "model": "gpt-6-luna",
+            "criterion": "",
+            "source": "background",
+            "first": "",
+            "at": "2026-10-10T23:20:00Z",
+            "gap_known": false,
+            "elapsed_seconds": 0,
+            "outcome": "refreshed",
+            "full_window_ms": 0,
+            "window_final": false
+          },
+          "last_at": "0001-01-01T00:00:00Z",
+          "last_probe_outcome": "",
+          "last_probe_at": "0001-01-01T00:00:00Z"
+        },
+        {
+          "round_id": "",
+          "version_hash": "v-106",
+          "report": {
+            "id": "r3",
+            "account_tag": "",
+            "gateway": "unified-106",
+            "model": "gpt-6-luna",
+            "criterion": "",
+            "source": "background",
+            "first": "",
+            "at": "2026-10-10T23:19:00Z",
+            "gap_known": false,
+            "elapsed_seconds": 0,
+            "outcome": "refreshed",
+            "full_window_ms": 0,
+            "window_final": false
+          },
+          "last_at": "0001-01-01T00:00:00Z",
+          "last_probe_outcome": "",
+          "last_probe_at": "0001-01-01T00:00:00Z"
+        }
+      ]
+    },
+    "history": {
+      "ledger_tag": "fixture-ledger",
+      "cooldown_reset": {
+        "interval_hours": 6,
+        "started_at": "2026-10-10T00:00:00Z",
+        "last_at": "2026-10-10T18:00:00Z",
+        "cleared_at": "2026-10-10T21:00:00Z"
+      },
+      "current": "unified-999",
+      "current_region": "europe",
+      "seen": {
+        "unified-101": {
+          "at": "2026-10-10T23:50:00Z",
+          "region": "us-east",
+          "verdict": "degraded",
+          "full_at": "2026-10-10T19:00:00Z",
+          "full_held_ms": 43000,
+          "cooldown": {
+            "reset_at": "2026-10-10T00:00:00Z",
+            "sources_known": true,
+            "base_seconds": 3600,
+            "local_floor_seconds": 1800,
+            "cycle_at": "2026-10-10T23:50:00Z",
+            "schedule_updated_at": "2026-10-10T23:50:00Z",
+            "window_seconds": 7200,
+            "fixed_seconds": 5400,
+            "until": "2026-10-11T03:00:00Z",
+            "updated_at": "2026-10-10T23:50:00Z",
+            "attempt_at": "2026-10-10T23:50:00Z",
+            "attempt_seconds": 7200,
+            "elapsed_seconds": 600,
+            "outcome": "degraded",
+            "successes": {
+              "3600": 2
+            },
+            "last_success_seconds": 3600,
+            "last_success_at": "2026-10-09T00:00:00Z",
+            "recommended_seconds": 10800,
+            "recommendation_source": "pool",
+            "recommendation_until": "2026-10-11T01:00:00Z"
+          }
+        },
+        "unified-102": {
+          "at": "2026-10-10T23:30:00Z",
+          "region": "east-asia",
+          "verdict": "full",
+          "full_at": "2026-10-10T22:00:00Z",
+          "full_held_ms": 120000,
+          "cooldown": {
+            "window_seconds": 7200,
+            "recommended_seconds": 10800
+          }
+        },
+        "unified-103": {
+          "at": "2026-10-10T23:40:00Z",
+          "region": "europe",
+          "cooldown": {
+            "cleared": true,
+            "window_seconds": 3600
+          }
+        },
+        "unified-104": {
+          "at": "2026-10-10T21:00:00Z"
+        },
+        "unified-105": {
+          "at": "2026-10-10T23:45:00Z",
+          "region": "country-jp",
+          "verdict": "degraded",
+          "full_at": "2026-10-10T20:00:00Z",
+          "full_held_ms": 60000
+        }
+      },
+      "pool_live": 62,
+      "pool_free": 5,
+      "updated_at": "2026-10-10T23:53:00Z"
+    }
+  }
+}

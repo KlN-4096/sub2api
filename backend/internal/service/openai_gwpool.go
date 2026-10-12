@@ -30,6 +30,8 @@ const (
 	// openAIGatewayPoolExtraKey 是账号级开关键，默认缺省即关。写成字符串 "true" 时
 	// getExtraBool 返回 false、开关静默失效，只能是 bool（与 extra 里其它账号特性开关同口径）。
 	openAIGatewayPoolExtraKey = "openai_gwpool"
+	// OpenAIGatewayPoolExtraKey 供仓储层的调度投影白名单引用（repository.filterSchedulerExtra）。
+	OpenAIGatewayPoolExtraKey = openAIGatewayPoolExtraKey
 	// openAIGatewayPoolBaseURLExtraKey 是该账号要问的池子地址，形如 http://127.0.0.1:8099。
 	// 合法性在管理端写入时按 config.ValidateAbsoluteHTTPURL 校验。
 	openAIGatewayPoolBaseURLExtraKey = "openai_gwpool_base_url"
@@ -550,6 +552,13 @@ func gatewayPoolLedgerKey(identity, gateway string) string {
 // 为什么不能只信池子的 used_by_you：池子按它发的 consumer key 认账号，而同一份 Codex 凭据
 // 可能挂在多个账号行、各自配着不同的 key；池子那本账对不上真正被烧掉的那个单位。
 func (s *openAICodexCookieStore) gatewayPoolUsedAt(identity, gateway string, window time.Duration) (time.Time, bool) {
+	at, until := s.gatewayPoolCooldownUntil(identity, gateway, window)
+	return at, time.Now().Before(until)
+}
+
+// gatewayPoolCooldownUntil refreshes the gateway's local cooldown and returns
+// its last touch (zero when not after the clear tombstone) and local deadline.
+func (s *openAICodexCookieStore) gatewayPoolCooldownUntil(identity, gateway string, window time.Duration) (time.Time, time.Time) {
 	value, ok := s.poolUsed.Load(gatewayPoolLedgerKey(identity, gateway))
 	var at time.Time
 	if ok {
@@ -561,17 +570,24 @@ func (s *openAICodexCookieStore) gatewayPoolUsedAt(identity, gateway string, win
 	base := gatewayPoolCooldownBase(window)
 	until := at.Add(time.Duration(base) * time.Second)
 	s.poolCooldownMu.Lock()
+	defer s.poolCooldownMu.Unlock()
 	key := gatewayPoolLedgerKey(identity, gateway)
 	if c, found := s.poolCooldown[key]; found {
 		s.refreshGatewayPoolCooldown(&c, identity, window, at, time.Now().UTC())
 		s.poolCooldown[key] = c
-		until = c.Until
-		if touchedUntil := at.Add(time.Duration(c.WindowSeconds) * time.Second); !c.Cleared && touchedUntil.After(until) {
-			until = touchedUntil
-		}
+		until = c.deadline(at)
 	}
-	s.poolCooldownMu.Unlock()
-	return at, time.Now().Before(until)
+	return at, until
+}
+
+// deadline is the learned Until, extended to the touch plus the current window
+// unless a manual clear voided that contact.
+func (c gatewayPoolCooldown) deadline(touched time.Time) time.Time {
+	until := c.Until
+	if touchedUntil := touched.Add(time.Duration(c.WindowSeconds) * time.Second); !c.Cleared && !touched.IsZero() && touchedUntil.After(until) {
+		until = touchedUntil
+	}
+	return until
 }
 
 // gatewayPoolMarkUsed 记一笔「这个上游账号碰过这个网关」。
@@ -588,6 +604,32 @@ func (s *openAICodexCookieStore) gatewayPoolMarkUsed(identity, gateway string, e
 		return
 	}
 	s.poolUsed.Store(gatewayPoolLedgerKey(identity, gateway), time.Now())
+}
+
+// rangeGatewayPoolUsed visits identity's named gateways with a non-zero touch.
+func (s *openAICodexCookieStore) rangeGatewayPoolUsed(identity string, fn func(gateway string, at time.Time)) {
+	prefix := gatewayPoolLedgerKey(identity, "")
+	s.poolUsed.Range(func(key, value any) bool {
+		name, keyOK := key.(string)
+		at, timeOK := value.(time.Time)
+		gateway, matches := strings.CutPrefix(name, prefix)
+		if keyOK && timeOK && matches && gateway != "" && !at.IsZero() {
+			fn(gateway, at)
+		}
+		return true
+	})
+}
+
+// rangeGatewayPoolKnown visits identity's named gateways kept as known.
+func (s *openAICodexCookieStore) rangeGatewayPoolKnown(identity string, fn func(gateway string)) {
+	prefix := gatewayPoolLedgerKey(identity, "")
+	s.poolKnown.Range(func(key, _ any) bool {
+		name, keyOK := key.(string)
+		if gateway, matches := strings.CutPrefix(name, prefix); keyOK && matches && gateway != "" {
+			fn(gateway)
+		}
+		return true
+	})
 }
 
 // gatewayPoolHydrateUsed 把账号行上那份**落库的**落点记录补回内存账本。
@@ -754,7 +796,7 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 	// /gateways 只列此刻有活 pair 的网关 ⇒ 列表长度就是池子的可交付网关数。账号卡片拿它当
 	// 「还剩几个落点没用」的分母（见 OpenAIGatewayPoolApplied.PoolLive）。
 	var eligible []gwpool.Gateway
-	// free =「池子此刻可交付、而且**本地账本**说这个号还没烧过」的落点数，也就是
+	// free = len(eligible) =「池子此刻可交付、而且**本地账本**说这个号还没烧过」的落点数，也就是
 	// 「池子剩余」。每次拉到清单都拿它和本地账本现对一遍，不缓存、不事后推算。
 	//
 	// 两条纪律：
@@ -767,7 +809,6 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 	//     铸过的网关都会被标成 used_by_you，于是这个数恒为 0。而「这个 (账号 × 网关) 的满血
 	//     窗口烧没烧」只有本地账本答得准：它记的是**这个号真的打过业务请求**的那些落点。
 	//     选择、报数和耗尽共用同一准入；/cookie 仍执行池端短期保护和真实退避。
-	free := 0
 	window := account.gatewayPoolGatewayWindow()
 	for _, candidate := range gateways {
 		s.noteGatewayPoolFeedbackPolicy(account, identity, candidate.Name, candidate.Cooldown)
@@ -776,21 +817,18 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 			continue
 		}
 		if !burned {
-			free++
-		}
-		if !burned {
 			eligible = append(eligible, candidate)
 		}
 	}
 	// 两个数一起记：live 是「池子此刻能交付几个」，free 是「其中这个号还没烧过几个」。
 	// 成对下发，卡片才能把 free=0（全烧过了）和「没问到清单」分开。
-	openAIGatewayPoolSinkFrom(ctx).notePoolCounts(len(gateways), free)
+	openAIGatewayPoolSinkFrom(ctx).notePoolCounts(len(gateways), len(eligible))
 	if len(eligible) > 0 {
 		// FIFO and measured local ranking are owned here, not by pool history.
 		ranking := s.gatewayPoolRankCandidates(ctx, account, identity, eligible)
 		return s.gatewayPoolCandidateQueue(identity).pick(ranking.candidates, ranking)
 	}
-	s.gatewayPoolCandidateQueue(identity).pick(nil)
+	s.gatewayPoolCandidateQueue(identity).reset()
 	return ""
 }
 
@@ -977,8 +1015,7 @@ func (s *openAICodexCookieStore) gatewayPoolTakePair(
 	now := time.Now()
 	country := got.DatacenterCountry
 	if country == "" {
-		value, _ := s.poolDatacenterCountries.Load(account.gatewayPoolBaseURL() + "\x00" + gateway)
-		country, _ = value.(string)
+		country = s.gatewayPoolDatacenterCountry(account, gateway)
 	}
 	pair = openAIGatewayPoolPair{
 		cookie: cookie, gateway: gateway, datacenterCountry: country,
@@ -1144,18 +1181,27 @@ const openAIGatewayPoolSinkGinKey = "openai_gwpool_sink"
 // withOpenAIGatewayPoolSink 在转发入口挂一个 sink。**新增一条能打到 chatgpt.com 的转发入口时
 // 要加这一行**，否则那条路上的用量行恒为「没覆写」（安全方向：宁可少报，不许假报）。
 func withOpenAIGatewayPoolSink(ctx context.Context, c *gin.Context) (context.Context, *openAIGatewayPoolSink) {
-	sink := &openAIGatewayPoolSink{waitBudget: &gatewayPoolWaitHolder{}}
+	sink := &openAIGatewayPoolSink{waitBudget: gatewayPoolWaitHolderFor(c)}
 	if c != nil {
-		if value, exists := c.Get(gatewayPoolWaitGinKey); exists {
-			if budget, ok := value.(*gatewayPoolWaitHolder); ok {
-				sink.waitBudget = budget
-			}
-		} else {
-			c.Set(gatewayPoolWaitGinKey, sink.waitBudget)
-		}
 		c.Set(openAIGatewayPoolSinkGinKey, sink)
 	}
 	return context.WithValue(ctx, openAIGatewayPoolSinkCtxKey{}, sink), sink
+}
+
+// gatewayPoolWaitHolderFor returns the request's wait holder, storing a new one
+// on first use. A foreign value under the key is left alone and not shared.
+func gatewayPoolWaitHolderFor(c *gin.Context) *gatewayPoolWaitHolder {
+	holder := &gatewayPoolWaitHolder{}
+	if c != nil {
+		if value, exists := c.Get(gatewayPoolWaitGinKey); exists {
+			if saved, ok := value.(*gatewayPoolWaitHolder); ok {
+				holder = saved
+			}
+		} else {
+			c.Set(gatewayPoolWaitGinKey, holder)
+		}
+	}
+	return holder
 }
 
 func openAIGatewayPoolSinkFrom(ctx context.Context) *openAIGatewayPoolSink {

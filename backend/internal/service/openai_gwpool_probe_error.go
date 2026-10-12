@@ -46,12 +46,8 @@ func gatewayPoolRetryableProbeError(err error) bool {
 	}
 	var status *gatewayPoolProbeHTTPError
 	if errors.As(err, &status) {
-		switch status.status {
-		case http.StatusRequestTimeout, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-			return true
-		default:
-			return false // authentication, quota and configuration are not supply shortages
-		}
+		// Authentication, quota and configuration are not supply shortages.
+		return gatewayPoolBusinessRetryStatus(status.status)
 	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) ||
 		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, syscall.EPIPE) {

@@ -105,9 +105,12 @@ func rewriteCodexAlphaSearchUserLocation(c *gin.Context, account *Account, body 
 //
 // timezone 为空表示出口时区尚未解析成功——此时 environment_context 整条不改写，位置也
 // 不能单独动，否则会出现"本机时区 + 出口城市"这种此前不存在的组合。
+//
+// 不再自己跑 ValidBytes：调用方（两个 HTTP 请求构造器、WS 帧收口）拿到的体都已在边界校验过
+// （handler、WS 入站解析、透传后续帧的 BeforeRequest），之后只经 sjson / 重新序列化。
 func rewriteCodexWebSearchUserLocationWith(account *Account, timezone string, body []byte) []byte {
 	timezone = strings.TrimSpace(timezone)
-	if timezone == "" || len(body) == 0 || !gjson.ValidBytes(body) {
+	if timezone == "" || len(body) == 0 {
 		return body
 	}
 	tools := gjson.GetBytes(body, "tools")

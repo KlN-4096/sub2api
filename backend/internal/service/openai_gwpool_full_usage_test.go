@@ -20,7 +20,7 @@ func TestGatewayPoolFullUsageStopsWhenBusinessBodyFinishes(t *testing.T) {
 	_, err = io.ReadAll(response.Body)
 	require.NoError(t, err)
 	require.NoError(t, response.Body.Close())
-	view, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{account.ID})
+	view, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{account.ID}, true)
 	require.NoError(t, err)
 	round := view[account.ID].Runtime.Rounds[0]
 	require.True(t, round.ActiveUsage == nil || !round.ActiveUsage.Open,
@@ -37,7 +37,7 @@ func TestGatewayPoolFullUsageKeepsEarliestOutOfOrderSend(t *testing.T) {
 	svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, "v", "luna")
 	svc.noteGatewayPoolFullUse(context.Background(), account, identity, applied, start.Add(2*time.Second))
 	svc.noteGatewayPoolFullUse(context.Background(), account, identity, applied, start)
-	fresh, err := repo.GetByID(context.Background(), 1)
+	fresh, err := repo.stored(1)
 	require.NoError(t, err)
 	state := readGatewayPoolUsage(fresh, gatewayPoolLedgerTag(identity))
 	require.Equal(t, start, state.Rounds[0].Tickets[gatewayPoolUsageTicketKey("g", "v")].At)
@@ -49,7 +49,7 @@ func TestGatewayPoolFullUsageStartsOnBusinessWriteBeforeResponse(t *testing.T) {
 	account.Credentials["access_token"] = "offline-token"
 	repo := &forkPerformanceRepo{gatewayRuntimeRepo: &gatewayRuntimeRepo{account: *account}}
 	svc := &OpenAIGatewayService{accountRepo: repo}
-	svc.codexCookies.accountByID = repo.GetByID
+	svc.codexCookies.accountByID = svc.gatewayPoolLedgerRow
 	gwpoolEchoSeedVerified(t, svc, account)
 	upstream := &gatewayPoolUsageHeldUpstream{written: make(chan struct{}), release: make(chan struct{})}
 	svc.httpUpstream = upstream
@@ -73,7 +73,7 @@ func TestGatewayPoolFullUsageStartsOnBusinessWriteBeforeResponse(t *testing.T) {
 		close(upstream.release)
 		t.Fatal("business write did not start")
 	}
-	fresh, readErr := repo.GetByID(context.Background(), 1)
+	fresh, readErr := repo.stored(1)
 	writesBeforeResponse := repo.writes
 	close(upstream.release)
 	<-done
