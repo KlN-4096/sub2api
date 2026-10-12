@@ -400,7 +400,7 @@ func TestGatewayPoolSideRequestsDoNotStartPairAgeFromSharedSink(t *testing.T) {
 func TestGatewayPoolRuntimeProgressAnswersEveryRequestedID(t *testing.T) {
 	account := gwpoolTestAccount(1)
 	svc, _ := gatewayRuntimeService(account)
-	view, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{1, 999})
+	view, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{1, 999}, true)
 	require.NoError(t, err)
 	require.NotNil(t, view[1].Runtime)
 	require.False(t, view[1].Inactive)
@@ -410,7 +410,7 @@ func TestGatewayPoolRuntimeProgressAnswersEveryRequestedID(t *testing.T) {
 	off := gwpoolTestAccount(1)
 	off.Extra[openAIGatewayPoolExtraKey] = false
 	svc, _ = gatewayRuntimeService(off)
-	view, err = svc.GatewayPoolRuntimeProgress(context.Background(), []int64{1})
+	view, err = svc.GatewayPoolRuntimeProgress(context.Background(), []int64{1}, true)
 	require.NoError(t, err)
 	require.True(t, view[1].Inactive, "pool switched off")
 }

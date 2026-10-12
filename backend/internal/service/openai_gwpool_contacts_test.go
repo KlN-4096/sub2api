@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,19 +17,121 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestGatewayPoolPersistedDigestsKeepTheirBytes(t *testing.T) {
+	// Durable ledger tags, ticket keys and round IDs; literals are sha256sum output.
+	require.Equal(t, "997721ebc06a9278c1b1fa3c68fb1772d21e6a50674aa03eb805c644e6218a14", gatewayPoolLedgerTag("member"))
+	require.Equal(t, "f9680054dcbb66bfa971d0aec13fbafea3d9cce979c361182896c0e7b3f3dd44", gatewayPoolUsageTicketKey("g", "v"))
+	require.Equal(t, "9ec27bc78e2a82c135a9c88c9189e2099e40e323f5bb19a9e6e2e84d861d7ca1",
+		gatewayPoolContactRoundID("member", "v", time.Unix(0, 0)))
+}
+
+func TestGatewayPoolBusinessContactSkipsOrdinaryResponseBody(t *testing.T) {
+	account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	request := httptest.NewRequest(http.MethodPost, gwpoolTestURL, nil)
+	bodies := 0
+	request.GetBody = func() (io.ReadCloser, error) {
+		bodies++
+		return io.NopCloser(strings.NewReader(`{"model":"gpt-5.4"}`)), nil
+	}
+	response := &http.Response{Header: http.Header{"Set-Cookie": {"__oailb=offline"}}}
+	(&OpenAIGatewayService{}).noteGatewayPoolBusinessContact(request, account, "", OpenAIGatewayPoolApplied{}, time.Now(), response)
+	require.Zero(t, bodies, "a response without this account's pool route has nothing to record")
+}
+
+type gatewayPoolContactPeersRepo struct {
+	*gatewayRuntimeRepo
+	rows []Account
+}
+
+func (r *gatewayPoolContactPeersRepo) FindByExtraField(ctx context.Context, key string, value any) ([]Account, error) {
+	self, err := r.GetByID(ctx, r.account.ID)
+	if err != nil {
+		return nil, err
+	}
+	var out []Account
+	for _, row := range append([]Account{*self}, r.rows...) {
+		if row.Extra[key] == value {
+			out = append(out, row)
+		}
+	}
+	return out, nil
+}
+
+// Mirrors the repository's contacts projection: same ledger, minus exclude,
+// contacts only.
+type gatewayPoolContactNarrowRepo struct {
+	*gatewayPoolContactPeersRepo
+	calls []string
+}
+
+func (r *gatewayPoolContactNarrowRepo) FindGatewayPoolStatePeers(ctx context.Context, tag, kind string, exclude int64) ([]Account, error) {
+	r.calls = append(r.calls, kind+"/"+strconv.FormatInt(exclude, 10))
+	rows, err := r.gatewayPoolContactPeersRepo.FindByExtraField(ctx, openAIGatewayLedgerTagExtraKey, tag)
+	var out []Account
+	for _, row := range rows {
+		if row.ID != exclude {
+			out = append(out, Account{ID: row.ID, Extra: map[string]any{
+				openAIGatewayPoolContactsExtraKey: row.Extra[openAIGatewayPoolContactsExtraKey]}})
+		}
+	}
+	return out, err
+}
+
+func (r *gatewayPoolContactNarrowRepo) FindByExtraField(context.Context, string, any) ([]Account, error) {
+	return nil, errors.New("contacts peers must use the narrow projection")
+}
+
+func TestGatewayPoolContactsWriteMergesSameLedgerPeers(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	tag := gatewayPoolLedgerTag(gwpoolTestIdentity)
+	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	peer := func(id int64, ledger, gateway string) Account {
+		return Account{ID: id, Extra: map[string]any{openAIGatewayLedgerTagExtraKey: ledger,
+			openAIGatewayPoolContactsExtraKey: gatewayPoolContacts{LedgerTag: ledger,
+				Seen: map[string]gatewayPoolContactSeen{gateway: {FirstAt: at, LastAt: at}}}}}
+	}
+	for _, narrow := range []bool{false, true} {
+		peers := &gatewayPoolContactPeersRepo{gatewayRuntimeRepo: &gatewayRuntimeRepo{account: *account},
+			rows: []Account{peer(2, tag, "unified-clone"), peer(3, "another-ledger", "unified-foreign")}}
+		var repo AccountRepository = peers
+		narrowRepo := &gatewayPoolContactNarrowRepo{gatewayPoolContactPeersRepo: peers}
+		if narrow {
+			repo = narrowRepo
+		}
+		svc := &OpenAIGatewayService{accountRepo: repo}
+		svc.codexCookies.accountByID = peers.GetByID
+		for _, gateway := range []string{"unified-own", "unified-own-later"} {
+			svc.noteGatewayPoolContact(context.Background(), account, gatewayPoolContactEvent{
+				Applied:  OpenAIGatewayPoolApplied{AccountID: account.ID, Gateway: gateway, RoundID: gatewayPoolDigest(gateway), Version: "v"},
+				Identity: gwpoolTestIdentity, Source: "business", FirstSent: time.Now().UTC(),
+			})
+		}
+		fresh, err := peers.GetByID(context.Background(), account.ID)
+		require.NoError(t, err)
+		seen := readGatewayPoolContacts(fresh, tag).Seen
+		require.Contains(t, seen, "unified-own")
+		require.Contains(t, seen, "unified-own-later", "the second write keeps the row's own first contact")
+		require.Contains(t, seen, "unified-clone", "a same-ledger clone's contacts are merged into the write")
+		require.NotContains(t, seen, "unified-foreign")
+		if narrow {
+			require.Equal(t, []string{"contacts/1", "contacts/1"}, narrowRepo.calls, "only peers' contacts, never the writer's own row")
+		}
+	}
+}
+
 func TestGatewayPoolContactsRetainsNewest300RoundsAcrossReload(t *testing.T) {
 	now := time.Now().UTC()
 	state := gatewayPoolContacts{LedgerTag: gatewayPoolLedgerTag(gwpoolTestIdentity)}
 	for i := 0; i < 305; i++ {
-		id := gatewayPoolContactHash(strconv.Itoa(i))
+		id := gatewayPoolDigest(strconv.Itoa(i))
 		state.Rounds = append(state.Rounds, gatewayPoolContactRound{
 			RoundID: id, Report: gwpool.ContactReport{ID: id, At: now.Add(time.Duration(i-305) * time.Minute)},
 		})
 	}
 	pruneGatewayPoolContacts(&state, now)
 	require.Len(t, state.Rounds, 300)
-	require.Equal(t, gatewayPoolContactHash("5"), state.Rounds[0].RoundID)
-	require.Equal(t, gatewayPoolContactHash("304"), state.Rounds[299].RoundID)
+	require.Equal(t, gatewayPoolDigest("5"), state.Rounds[0].RoundID)
+	require.Equal(t, gatewayPoolDigest("304"), state.Rounds[299].RoundID)
 	account := gwpoolTestAccount(1)
 	raw, err := json.Marshal(state)
 	require.NoError(t, err)

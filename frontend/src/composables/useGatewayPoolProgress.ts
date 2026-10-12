@@ -53,7 +53,8 @@ export function useGatewayPoolProgress(ids: ComputedRef<number[]>) {
     controller = request
     const timeout = setTimeout(() => request.abort(), REQUEST_TIMEOUT_MS)
     try {
-      const snapshots = await getGatewayPoolProgress(requested, request.signal)
+      // No cell reads cooldown_estimate, so the poll never asks the backend for it.
+      const snapshots = await getGatewayPoolProgress(requested, request.signal, false)
       // Every ID must be answered; an inactive row (deleted / pool off) has no runtime.
       const complete = requested.every(id => {
         if (snapshots?.[id]?.inactive === true) return true

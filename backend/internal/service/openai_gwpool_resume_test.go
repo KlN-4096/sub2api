@@ -363,3 +363,34 @@ func TestGatewayPoolResumeStrongBindingCannotBypassRestOrSwitchAccount(t *testin
 	require.Equal(t, 1, calls)
 	require.Equal(t, 1, releases)
 }
+
+func TestGatewayPoolLoadRestAdoptsNewestRowPeerOrCacheExceptOnPartialRead(t *testing.T) {
+	ctx, now := context.Background(), time.Now().UTC()
+	tag := gatewayPoolLedgerTag(gwpoolTestIdentity)
+	at := func(minutes int) gatewayPoolRestState {
+		return gatewayPoolRestState{Tag: tag, Active: true, ChangedAt: now.Add(time.Duration(minutes) * time.Minute)}
+	}
+	account, peer := rotationAccount(1, 7), rotationAccount(2, 7)
+	account.Extra[gatewayPoolRestStateKey], account.Extra[gatewayPoolRestTagKey] = at(-3), tag
+	peer.Extra[gatewayPoolRestStateKey], peer.Extra[gatewayPoolRestTagKey] = at(-2), tag
+	repo := &gatewayQualityRestRepo{gatewayRotationRepo: gatewayRotationRepo{
+		schedulerTestOpenAIAccountRepo{accounts: []Account{*account, *peer}},
+	}}
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	load := func() gatewayPoolRestState {
+		state, fresh, err := svc.loadGatewayPoolRest(ctx, account, gwpoolTestIdentity)
+		require.NoError(t, err)
+		require.Equal(t, account.ID, fresh.ID)
+		return state
+	}
+	require.Equal(t, at(-2), load(), "a newer clone row wins over the own row")
+	svc.codexCookies.poolRestState.Store(tag, at(-1))
+	require.Equal(t, at(-1), load(), "a newer published cache wins over both rows")
+	repo.fail = true
+	state, _, err := svc.loadGatewayPoolRest(ctx, account, gwpoolTestIdentity)
+	require.Error(t, err)
+	require.Equal(t, at(-3), state, "a partial peer read reports only the own row, never the cache")
+	repo.fail = false
+	account.Extra[OpenAIGatewayPoolContinuousWaitKey] = true
+	require.Equal(t, at(-3), load(), "a continuous-wait row never adopts another clone's latch")
+}

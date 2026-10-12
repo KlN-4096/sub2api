@@ -50,7 +50,7 @@ func TestGatewayPoolContinuousWaitRetriesEmptyPoolWithoutBusinessOrRest(t *testi
 	state.sleep = func(ctx context.Context, _ time.Duration) error {
 		sleeps++
 		// Wait longer than this account's ordinary preparation budget.
-		if err := gatewayPoolSleep(ctx, 1100*time.Millisecond); err != nil {
+		if err := sleepWithContext(ctx, 1100*time.Millisecond); err != nil {
 			return err
 		}
 		fake.refuseStatus = 0
@@ -148,10 +148,10 @@ func TestGatewayPoolContinuousWaitDoesNotRecoverOrdinaryClone(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, fresh.TempUnschedulableUntil)
 	require.True(t, readGatewayPoolRest(fresh, tag).Active, "do not overwrite the shared rest history")
-	require.False(t, svc.gatewayPoolRestDisplay(fresh, gwpoolTestIdentity, nil).Active)
+	require.False(t, gatewayPoolRestDisplay(fresh, svc.codexCookies.gatewayPoolRestSnapshot(fresh, gwpoolTestIdentity, nil)).Active)
 	ordinary := *fresh
 	ordinary.Extra = map[string]any{openAIGatewayPoolExtraKey: true}
-	require.True(t, svc.gatewayPoolRestDisplay(&ordinary, gwpoolTestIdentity, nil).Active)
+	require.True(t, gatewayPoolRestDisplay(&ordinary, svc.codexCookies.gatewayPoolRestSnapshot(&ordinary, gwpoolTestIdentity, nil)).Active)
 	require.NoError(t, repo.UpdateExtra(context.Background(), account.ID, map[string]any{OpenAIGatewayPoolContinuousWaitKey: false}))
 	require.False(t, gatewayPoolWaitAccountMatches(&ordinary, fresh), "the original request snapshot stays in waiting mode")
 }

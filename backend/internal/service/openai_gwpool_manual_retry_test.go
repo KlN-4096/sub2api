@@ -78,6 +78,23 @@ func TestGatewayPoolManualClearPersistsAndKeepsLiveTicket(t *testing.T) {
 	require.Zero(t, entry.AttemptSeconds, "manual clear is not an observed one-hour recovery")
 }
 
+func TestGatewayPoolManualClearRestartsOnlyThisMembersCandidateFIFO(t *testing.T) {
+	ctx := context.Background()
+	svc, repo, identity := cooldownResetService(t, time.Now().UTC())
+	account, _ := repo.GetByID(ctx, 1)
+	require.NoError(t, svc.clearGatewayPoolCooldown(ctx, account, identity))
+	_, exists := svc.codexCookies.poolCandidateQueues.Load(identity)
+	require.False(t, exists, "clearing does not create a candidate queue")
+	gateways := []gwpool.Gateway{{Name: "a", PairReady: true}, {Name: "b", PairReady: true}}
+	mine := svc.codexCookies.gatewayPoolCandidateQueue(identity)
+	other := svc.codexCookies.gatewayPoolCandidateQueue("another-member")
+	require.Equal(t, "a", mine.pick(gateways))
+	require.Equal(t, "a", other.pick(gateways))
+	require.NoError(t, svc.clearGatewayPoolCooldown(ctx, account, identity))
+	require.Equal(t, "a", mine.pick(gateways), "the cleared member restarts its FIFO")
+	require.Equal(t, "b", other.pick(gateways), "another member keeps its FIFO")
+}
+
 func TestGatewayPoolManualClearRejectsFetchStartedBeforeClear(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

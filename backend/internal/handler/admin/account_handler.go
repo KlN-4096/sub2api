@@ -2642,9 +2642,9 @@ func (h *AccountHandler) GetTempUnschedulable(c *gin.Context) {
 		return
 	}
 	if reader, ok := h.adminService.(interface {
-		GatewayPoolRuntimeProgress(context.Context, []int64) (map[int64]service.GatewayPoolProgress, error)
+		GatewayPoolRuntimeProgress(context.Context, []int64, bool) (map[int64]service.GatewayPoolProgress, error)
 	}); ok {
-		progress, readErr := reader.GatewayPoolRuntimeProgress(c.Request.Context(), []int64{accountID})
+		progress, readErr := reader.GatewayPoolRuntimeProgress(c.Request.Context(), []int64{accountID}, false)
 		if readErr != nil {
 			response.Error(c, http.StatusServiceUnavailable, "gateway rest status unavailable")
 			return

@@ -31,10 +31,11 @@ func (h *AccountHandler) GatewayPoolProgress(c *gin.Context) {
 	}
 	progress := map[int64]service.GatewayPoolProgress{}
 	if reader, ok := h.adminService.(interface {
-		GatewayPoolRuntimeProgress(context.Context, []int64) (map[int64]service.GatewayPoolProgress, error)
+		GatewayPoolRuntimeProgress(context.Context, []int64, bool) (map[int64]service.GatewayPoolProgress, error)
 	}); ok {
 		var err error
-		progress, err = reader.GatewayPoolRuntimeProgress(c.Request.Context(), ids)
+		// Only the temporary-unschedulable dialog asks for the cooldown estimate.
+		progress, err = reader.GatewayPoolRuntimeProgress(c.Request.Context(), ids, c.Query("estimate") == "1")
 		if err != nil {
 			response.Error(c, http.StatusServiceUnavailable, "gateway runtime snapshot unavailable")
 			return

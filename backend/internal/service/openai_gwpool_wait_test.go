@@ -184,7 +184,7 @@ func TestGatewayPoolWaitHonorsCallerDeadlineCancellationAndFreshSettings(t *test
 			state.sleep = func(ctx context.Context, delay time.Duration) error {
 				sleeps++
 				if mode == "deadline" {
-					return gatewayPoolSleep(ctx, delay)
+					return sleepWithContext(ctx, delay)
 				}
 				repo.mu.Lock()
 				defer repo.mu.Unlock()
@@ -216,6 +216,30 @@ func TestGatewayPoolWaitHonorsCallerDeadlineCancellationAndFreshSettings(t *test
 	}
 }
 
+func TestGatewayPoolWaitGapBoundsOnSharedAndRequestPaths(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	svc := &OpenAIGatewayService{}
+	for _, tc := range []struct{ gap, want time.Duration }{
+		{0, 30 * time.Second}, {-time.Second, 30 * time.Second},
+		{time.Millisecond, time.Second}, {time.Second, time.Second}, {5 * time.Second, 5 * time.Second},
+		{time.Minute, time.Minute}, {time.Minute + time.Millisecond, time.Minute},
+	} {
+		var slept []time.Duration
+		capture := func(_ context.Context, gap time.Duration) error {
+			slept = append(slept, gap)
+			return nil
+		}
+		shared := context.WithValue(context.Background(), gatewayPoolPreparationKey{}, true)
+		shared = context.WithValue(shared, gatewayPoolPreparationSleepKey{}, capture)
+		_, err := svc.waitGatewayPoolRetry(shared, account, tc.gap)
+		require.NoError(t, err)
+		request := context.WithValue(context.Background(), gatewayPoolWaitKey{}, &gatewayPoolWaitState{sleep: capture})
+		_, err = svc.waitGatewayPoolRetry(request, account, tc.gap)
+		require.NoError(t, err)
+		require.Equal(t, []time.Duration{tc.want, tc.want}, slept, "gap %v", tc.gap)
+	}
+}
+
 func TestGatewayPoolWaitReadsFreshSettingsAndIgnoresRetiredBudget(t *testing.T) {
 	account := rotationAccount(1, 7)
 	for _, invalid := range []any{0, -1, 3601, 1.5, "60", true, nil} {
@@ -228,6 +252,23 @@ func TestGatewayPoolWaitReadsFreshSettingsAndIgnoresRetiredBudget(t *testing.T) 
 	stale := *account
 	stale.Extra = map[string]any{openAIGatewayPoolExtraKey: true}
 	require.NotNil(t, gatewayPoolWaitFrom(svc.gatewayPoolWaitContext(context.Background(), &stale)))
+}
+
+func TestGatewayPoolWaitContextTrustsOrdinaryRequestAccount(t *testing.T) {
+	ordinary := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true,
+		Credentials: map[string]any{"chatgpt_account_id": "acc-a", "chatgpt_user_id": "user-a"}, Extra: map[string]any{}}
+	stored := gwpoolTestAccount(1)
+	svc := &OpenAIGatewayService{}
+	reads := 0
+	svc.codexCookies.accountByID = func(context.Context, int64) (*Account, error) {
+		reads++
+		return stored, nil
+	}
+	ctx := context.Background()
+	require.Nil(t, gatewayPoolWaitFrom(svc.gatewayPoolWaitContext(ctx, ordinary)))
+	require.Zero(t, reads, "the request account is the same row business_retry used to choose the ordinary path")
+	require.NotNil(t, gatewayPoolWaitFrom(svc.gatewayPoolWaitContext(ctx, stored)))
+	require.Equal(t, 1, reads, "pool rows still read their waiting policy fresh")
 }
 
 func TestGatewayPoolWaitConfigIgnoresRetiredSavedValues(t *testing.T) {

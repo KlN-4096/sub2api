@@ -31,7 +31,7 @@ func (p gatewayPoolFeedbackPolicy) stable(binding string, now time.Time) bool {
 }
 
 func (s *openAICodexCookieStore) noteGatewayPoolFeedbackPolicy(account *Account, identity, gateway string, recommendation *gwpool.CooldownRecommendation) {
-	binding := gatewayPoolReportBinding(account, gatewayPoolAccountTag(account, identity))
+	binding := gatewayPoolAccountReportBinding(account, identity)
 	update := gatewayPoolFeedbackPolicyUpdate{at: time.Now().UTC()}
 	if recommendation != nil {
 		update.CooldownRecommendation = *recommendation
