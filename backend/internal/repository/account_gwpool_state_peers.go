@@ -10,22 +10,25 @@ import (
 )
 
 // FindGatewayPoolStatePeers reads only the state merged by usage/rest/contacts
-// ledgers, skipping row exclude (0 keeps every row). No credentials, unrelated
-// extra, proxies or group edges are materialized.
+// ledgers, skipping row exclude (0 keeps every row). Rows are still found by
+// their extra tag; usage and contact ledgers come from gateway_pool_ledgers.
+// No credentials, unrelated extra, proxies or group edges are materialized.
 func (r *accountRepository) FindGatewayPoolStatePeers(ctx context.Context, tag, kind string, exclude int64) ([]service.Account, error) {
 	var query string
 	switch kind {
 	case "usage":
-		query = `SELECT id, jsonb_build_object(
-			'openai_gwpool_usage_rounds', extra->'openai_gwpool_usage_rounds',
-			'openai_gwpool_usage_blocked_at', extra->'openai_gwpool_usage_blocked_at')
-			FROM accounts WHERE deleted_at IS NULL AND extra->>'openai_gwpool_usage_tag' = $1 AND id <> $2 ORDER BY id`
+		query = `SELECT a.id, jsonb_build_object(
+			'openai_gwpool_usage_rounds', l.value,
+			'openai_gwpool_usage_blocked_at', a.extra->'openai_gwpool_usage_blocked_at')
+			FROM accounts a LEFT JOIN gateway_pool_ledgers l ON l.account_id = a.id AND l.kind = 'openai_gwpool_usage_rounds'
+			WHERE a.deleted_at IS NULL AND a.extra->>'openai_gwpool_usage_tag' = $1 AND a.id <> $2 ORDER BY a.id`
 	case "rest":
 		query = `SELECT id, jsonb_build_object('openai_gwpool_rest_state', extra->'openai_gwpool_rest_state')
 			FROM accounts WHERE deleted_at IS NULL AND extra->>'openai_gwpool_rest_tag' = $1 AND id <> $2 ORDER BY id`
 	case "contacts":
-		query = `SELECT id, jsonb_build_object('openai_gwpool_contacts', extra->'openai_gwpool_contacts')
-			FROM accounts WHERE deleted_at IS NULL AND extra->>'openai_gwpool_ledger_tag' = $1 AND id <> $2 ORDER BY id`
+		query = `SELECT a.id, jsonb_build_object('openai_gwpool_contacts', l.value)
+			FROM accounts a LEFT JOIN gateway_pool_ledgers l ON l.account_id = a.id AND l.kind = 'openai_gwpool_contacts'
+			WHERE a.deleted_at IS NULL AND a.extra->>'openai_gwpool_ledger_tag' = $1 AND a.id <> $2 ORDER BY a.id`
 	default:
 		return nil, fmt.Errorf("unsupported gateway-pool state kind %q", kind)
 	}
@@ -54,28 +57,4 @@ func (r *accountRepository) FindGatewayPoolStatePeers(ctx context.Context, tag, 
 		return nil, err
 	}
 	return peers, nil
-}
-
-// UpdateGatewayPoolRuntimeExtra is UpdateExtra's scheduler-neutral merge
-// without the per-write snapshot sync. Only gateway-pool runtime ledgers come
-// here; their readers load the row from the database, never the snapshot.
-func (r *accountRepository) UpdateGatewayPoolRuntimeExtra(ctx context.Context, id int64, updates map[string]any) error {
-	payload, err := json.Marshal(updates)
-	if err != nil {
-		return err
-	}
-	result, err := clientFromContext(ctx, r.client).ExecContext(ctx,
-		"UPDATE accounts SET extra = COALESCE(extra, '{}'::jsonb) || $1::jsonb, updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL",
-		string(payload), id)
-	if err != nil {
-		return err
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return service.ErrAccountNotFound
-	}
-	return nil
 }

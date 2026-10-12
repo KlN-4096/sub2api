@@ -102,7 +102,7 @@ func (s *OpenAIGatewayService) changeGatewayPoolUsage(ctx context.Context, accou
 		return false
 	}
 	defer historyLock.Unlock()
-	fresh, err := s.accountRepo.GetByID(ctx, account.ID)
+	fresh, err := s.gatewayPoolLedgerRow(ctx, account.ID, gatewayPoolUsageExtraKey)
 	if err != nil || fresh == nil {
 		slog.Warn("gwpool_usage_read_failed", "account_id", account.ID)
 		return false

@@ -201,7 +201,7 @@ func (s *OpenAIGatewayService) lockGatewayPoolHistoryView(ctx context.Context, i
 		return cmp.Or(errs.lock, ctx.Err())
 	}
 	defer lock.Unlock()
-	fresh, err := s.accountRepo.GetByID(ctx, id)
+	fresh, err := s.gatewayPoolLedgerRow(ctx, id, openAIGatewayHistoryExtraKey)
 	if err != nil {
 		return cmp.Or(errs.read, err)
 	}
@@ -269,7 +269,7 @@ func (s *OpenAIGatewayService) maintainGatewayPoolCooldownReset(ctx context.Cont
 	defer mu.Unlock()
 
 	tag := gatewayPoolLedgerTag(identity)
-	peers, err := s.gatewayPoolHistoryPeers(ctx, tag)
+	peers, err := s.gatewayPoolHistoryPeers(ctx, tag, openAIGatewayHistoryExtraKey)
 	if err != nil {
 		return err
 	}

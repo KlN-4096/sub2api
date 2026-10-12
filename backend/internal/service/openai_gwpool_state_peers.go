@@ -1,9 +1,6 @@
 package service
 
-import (
-	"context"
-	"slices"
-)
+import "context"
 
 // Optional narrow projection. Keep this out of AccountRepository: lightweight
 // repositories that embed that interface must not accidentally claim support.
@@ -18,33 +15,16 @@ func (s *OpenAIGatewayService) gatewayPoolStatePeers(ctx context.Context, tag, k
 	if repo, ok := s.accountRepo.(gatewayPoolStatePeerRepository); ok {
 		return repo.FindGatewayPoolStatePeers(ctx, tag, kind, exclude)
 	}
-	key := gatewayPoolUsageTagKey
+	key, ledger := gatewayPoolUsageTagKey, gatewayPoolUsageExtraKey
 	switch kind {
 	case "rest":
-		key = gatewayPoolRestTagKey
+		key, ledger = gatewayPoolRestTagKey, ""
 	case "contacts":
-		key = openAIGatewayLedgerTagExtraKey
+		key, ledger = openAIGatewayLedgerTagExtraKey, openAIGatewayPoolContactsExtraKey
 	}
-	return s.accountRepo.FindByExtraField(ctx, key, tag)
-}
-
-// Optional like gatewayPoolRestRepository: merges extra without syncing the
-// scheduler snapshot on every write.
-type gatewayPoolRuntimeExtraRepository interface {
-	UpdateGatewayPoolRuntimeExtra(context.Context, int64, map[string]any) error
-}
-
-// updateGatewayPoolRuntimeExtra stores a gateway-pool runtime ledger write.
-// Every reader of these keys loads the row from the database, so the snapshot
-// copy may lag until the next other write or full rebuild. A patch holding
-// any other key keeps UpdateExtra and its snapshot sync.
-func (s *OpenAIGatewayService) updateGatewayPoolRuntimeExtra(ctx context.Context, id int64, patch map[string]any) error {
-	repo, ok := s.accountRepo.(gatewayPoolRuntimeExtraRepository)
-	for key := range patch {
-		ok = ok && slices.Contains(gatewayPoolRuntimeExtraKeys, key)
+	rows, err := s.accountRepo.FindByExtraField(ctx, key, tag)
+	if err != nil || ledger == "" {
+		return rows, err
 	}
-	if ok {
-		return repo.UpdateGatewayPoolRuntimeExtra(ctx, id, patch)
-	}
-	return s.accountRepo.UpdateExtra(ctx, id, patch)
+	return rows, s.hydrateGatewayPoolLedgers(ctx, gatewayPoolRowPointers(rows), ledger)
 }

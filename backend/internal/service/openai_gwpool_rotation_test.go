@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"testing"
 	"time"
@@ -19,14 +21,44 @@ func (r gatewayRotationRepo) ListByPlatform(context.Context, string) ([]Account,
 	return r.accounts, nil
 }
 
+// Row reads leave the runtime ledgers out, as the database does since
+// migration 253; they come only through LoadGatewayPoolLedgers.
+func (r gatewayRotationRepo) GetByID(ctx context.Context, id int64) (*Account, error) {
+	account, err := r.stored(id)
+	if err != nil {
+		return nil, err
+	}
+	row := gatewayPoolWithoutLedgers(*account)
+	return &row, nil
+}
+
+// stored is the row with its ledgers, for assertions.
+func (r gatewayRotationRepo) stored(id int64) (*Account, error) {
+	return r.schedulerTestOpenAIAccountRepo.GetByID(context.Background(), id)
+}
+
 func (r gatewayRotationRepo) FindByExtraField(_ context.Context, key string, value any) ([]Account, error) {
 	var found []Account
 	for _, account := range r.accounts {
 		if account.Extra[key] == value {
-			found = append(found, account)
+			found = append(found, gatewayPoolWithoutLedgers(account))
 		}
 	}
 	return found, nil
+}
+
+func (r gatewayRotationRepo) LoadGatewayPoolLedgers(_ context.Context, ids []int64, keys []string) (map[int64]map[string]json.RawMessage, error) {
+	return fakeGatewayPoolLedgers(r.accounts, ids, keys)
+}
+
+func (r gatewayRotationRepo) LoadGatewayPoolLedgerWithout(_ context.Context, id int64, kind string, omit ...string) (json.RawMessage, error) {
+	return fakeGatewayPoolLedgerWithout(r.accounts, id, kind, omit)
+}
+
+func (r gatewayRotationRepo) WriteGatewayPoolLedgers(ctx context.Context, id int64, ledgers, tags map[string]any) error {
+	patch := maps.Clone(ledgers)
+	maps.Copy(patch, tags)
+	return r.UpdateExtra(ctx, id, patch)
 }
 
 func (r gatewayRotationRepo) UpdateExtra(_ context.Context, id int64, patch map[string]any) error {
@@ -67,8 +99,17 @@ func rotationAccount(id, group int64) *Account {
 	return account
 }
 
+// withGatewayPoolRowRead wires the fresh row read (accountByID) as
+// NewOpenAIGatewayService does; without it the gateway reads fall back to the
+// row they are handed, which since migration 253 carries no ledgers. Peer
+// history (historyByTag) stays unwired unless a test sets it.
+func withGatewayPoolRowRead(svc *OpenAIGatewayService) *OpenAIGatewayService {
+	svc.codexCookies.accountByID = svc.gatewayPoolLedgerRow
+	return svc
+}
+
 func rotationService(account *Account) *OpenAIGatewayService {
-	return &OpenAIGatewayService{accountRepo: gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*account}}}}
+	return withGatewayPoolRowRead(&OpenAIGatewayService{accountRepo: gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*account}}}})
 }
 
 func TestGatewayPoolRotationOnlyAfterFreshCompleteExhaustion(t *testing.T) {
@@ -155,7 +196,7 @@ func TestGatewayPoolRotationPreservesConfirmedTransient429SameAccountRetry(t *te
 	group := int64(7)
 	account, other := rotationAccount(1, group), rotationAccount(2, group)
 	repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*account, *other}}}
-	svc := &OpenAIGatewayService{accountRepo: repo}
+	svc := withGatewayPoolRowRead(&OpenAIGatewayService{accountRepo: repo})
 	body := []byte(`{"detail":"Rate limit exceeded"}`)
 	failure := svc.newOpenAIAccountFailoverError(account, http.StatusTooManyRequests, nil, body, "Rate limit exceeded", false, false)
 	require.True(t, failure.RetryableOnSameAccount)
@@ -277,7 +318,7 @@ func TestGatewayPoolRotationFreshOptInsAndGroupIsolation(t *testing.T) {
 	stale := *source
 	stale.Extra = map[string]any{openAIGatewayPoolExtraKey: true, openAIGatewayPoolRotationExtraKey: true}
 	repo.accounts[0].Extra[openAIGatewayPoolExtraKey] = false
-	svc := &OpenAIGatewayService{accountRepo: repo}
+	svc := withGatewayPoolRowRead(&OpenAIGatewayService{accountRepo: repo})
 	svc.PrepareGatewayPoolAccountRotation(context.Background(), &group, &stale, failure, nil)
 	require.False(t, failure.ShouldRetryNextAccount())
 }
@@ -338,8 +379,8 @@ func TestGatewayPoolRotationUsesExistingSchedulerAndDoesNotRevisitAccounts(t *te
 	off.Extra[openAIGatewayPoolRotationExtraKey] = false
 	source.Priority, target.Priority, off.Priority = 0, 2, 1
 	repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*source, *target, *off}}}
-	svc := &OpenAIGatewayService{accountRepo: repo, cache: &schedulerTestGatewayCache{}, cfg: &config.Config{},
-		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{})}
+	svc := withGatewayPoolRowRead(&OpenAIGatewayService{accountRepo: repo, cache: &schedulerTestGatewayCache{}, cfg: &config.Config{},
+		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{})})
 	ctx := context.WithValue(context.Background(), gatewayPoolRotationKey{}, &gatewayPoolRotation{
 		groupID: group, attempted: map[int64]struct{}{1: {}},
 	})

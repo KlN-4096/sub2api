@@ -260,7 +260,7 @@ func TestGatewayPoolWaitContextTrustsOrdinaryRequestAccount(t *testing.T) {
 	stored := gwpoolTestAccount(1)
 	svc := &OpenAIGatewayService{}
 	reads := 0
-	svc.codexCookies.accountByID = func(context.Context, int64) (*Account, error) {
+	svc.codexCookies.accountByID = func(context.Context, int64, ...string) (*Account, error) {
 		reads++
 		return stored, nil
 	}

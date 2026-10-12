@@ -60,14 +60,14 @@ func (s *openAICodexCookieStore) gatewayPoolRankCandidates(ctx context.Context, 
 	source, now := gatewayPoolProbeSource(ctx), time.Now()
 	state := gatewayPoolContacts{}
 	freshComplete := false
-	fresh, err := s.freshGatewayPoolAccount(ctx, account)
+	fresh, err := s.freshGatewayPoolAccount(ctx, account, openAIGatewayPoolContactsExtraKey)
 	if err == nil && fresh != nil && s.accountByID != nil && ctx.Err() == nil {
 		current, identityErr := s.gatewayPoolIdentity(ctx, fresh)
 		if identityErr == nil && current == identity {
 			tag := gatewayPoolLedgerTag(identity)
 			state = readGatewayPoolContacts(fresh, tag)
 			if s.historyByTag != nil {
-				peers, err := s.historyByTag(ctx, tag)
+				peers, err := s.historyByTag(ctx, tag, openAIGatewayPoolContactsExtraKey)
 				if err == nil && ctx.Err() == nil {
 					freshComplete = true
 					for i := range peers {

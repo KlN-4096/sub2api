@@ -100,7 +100,7 @@ func TestGatewayPoolExhaustCandidatesStopsAtLastFailureInsteadOfWaitingForCooldo
 	require.Equal(t, 2, shots)
 	require.True(t, svc.gatewayPoolNoRemainingRoutes(ctx, account))
 	require.NoError(t, svc.restGatewayPoolAccount(ctx, account, gwpoolTestIdentity, 7))
-	fresh, err := repo.GetByID(ctx, account.ID)
+	fresh, err := repo.stored(account.ID)
 	require.NoError(t, err)
 	require.True(t, readGatewayPoolRest(fresh, gatewayPoolLedgerTag(gwpoolTestIdentity)).Active)
 }
@@ -135,7 +135,7 @@ func TestGatewayPoolExhaustCandidatesRefreshesProbeCredentials(t *testing.T) {
 	account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = true
 	account.Credentials["access_token"] = "old-offline-token"
 	repo.account = *account
-	account, err := repo.GetByID(context.Background(), account.ID)
+	account, err := repo.stored(account.ID)
 	require.NoError(t, err)
 	fake.beforeCookie = func() {
 		repo.mu.Lock()

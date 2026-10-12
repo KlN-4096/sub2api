@@ -183,8 +183,8 @@ func TestGatewayPoolSharedHistoryLoadSurvivesFirstCallerCancellation(t *testing.
 	entered, release := make(chan struct{}), make(chan struct{})
 	var loads atomic.Int32
 	store := &openAICodexCookieStore{
-		accountByID: func(context.Context, int64) (*Account, error) { return account, nil },
-		historyByTag: func(ctx context.Context, _ string) ([]Account, error) {
+		accountByID: func(context.Context, int64, ...string) (*Account, error) { return account, nil },
+		historyByTag: func(ctx context.Context, _ string, _ ...string) ([]Account, error) {
 			if loads.Add(1) == 1 {
 				close(entered)
 			}

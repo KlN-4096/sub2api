@@ -84,8 +84,8 @@ type openAICodexCookieStore struct {
 	poolCooldownResetLocks sync.Map // ledger identity -> *sync.Mutex; timer writes only
 	poolCooldownPersist    func(context.Context, *Account, string)
 	poolHistoryLocks       sync.Map // 本地行 ID → *sync.Mutex，串行合并已有 history。
-	accountByID            func(context.Context, int64) (*Account, error)
-	historyByTag           func(context.Context, string) ([]Account, error)
+	accountByID            func(context.Context, int64, ...string) (*Account, error)
+	historyByTag           func(context.Context, string, ...string) ([]Account, error)
 	poolHistoryLoad        gatewayPoolSharedWork[struct{}]
 	// poolBackoff 是「池子让这个身份先别取票」的到点（见 gatewayPoolBackoff）。
 	// 按**上游账号**记而不是按请求：退避只对本次请求生效的话，重试环照旧每轮都去敲池子。
