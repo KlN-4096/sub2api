@@ -247,8 +247,7 @@ func (s *OpenAIGatewayService) gatewayPoolPrepare(
 			// 判成降智：标 Stale ⇒ 下一圈的 AttachRoute 天然带 force=1 + exclude_versions 换网关。
 			// 本地账本不用再记一笔 —— 取票那一刻 gatewayPoolPair 已经记过了（它按实际拿到的落点记）。
 			// 已发票只标失效，保持触碰/CD；不走未发送清理。
-			held := s.codexCookies.gatewayPoolMarkStale(identity, applied.Version)
-			applied.FullHeldMs = held.Milliseconds()
+			applied.FullUseMs = s.codexCookies.gatewayPoolMarkStale(identity, applied.Version).Milliseconds()
 			slog.Info("gwpool_warm_degraded", "account_id", account.ID,
 				"gateway", applied.Gateway, "attempt", attempt)
 			s.codexCookies.poolProgress.update(progress, "fetching", applied.Gateway, true, false)
@@ -291,7 +290,7 @@ func (s *OpenAIGatewayService) noteWarmVerdict(
 	defer cancel()
 	s.noteGatewayPoolCooldownVerdict(ctx, account, applied, verdict)
 	s.noteOpenAIGatewayUse(context.WithValue(ctx, gatewayPoolObservationEpochKey{}, applied.cooldownResetAt), account, applied.Gateway, applied.Region, verdict, advanceCurrent,
-		applied.PoolLive, applied.PoolFree, applied.FullHeldMs, applied.LedgerTag)
+		applied.PoolLive, applied.PoolFree, applied.FullUseMs, applied.LedgerTag)
 }
 
 // gatewayPoolWarmVerdict 跑一组判据，并把**同一张票上的并发预热收口成一次**（见 poolWarm）。
@@ -360,7 +359,7 @@ func (s *openAICodexCookieStore) gatewayPoolWarmVerdict(
 		if full && conclusive {
 			s.gatewayPoolMarkVerifiedFull(identity, applied.Version, model)
 		} else if conclusive {
-			applied.FullHeldMs = s.gatewayPoolMarkStale(identity, applied.Version).Milliseconds()
+			applied.FullUseMs = s.gatewayPoolMarkStale(identity, applied.Version).Milliseconds()
 		}
 		// Ambiguous transmission forbids returning a ticket but is not a measured contact.
 		sent = sent || trace.shots > 0 || trace.mayHaveSent
