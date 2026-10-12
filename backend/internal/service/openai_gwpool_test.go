@@ -438,7 +438,7 @@ func TestAttachRouteMatchesAttachGuards(t *testing.T) {
 func TestRoutePairInUseFallsBackToJarWhenDisabled(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	acct := gwpoolTestAccount(1)
-	svc.codexCookies.Store(acct, openAITurnStatePairCookieURL, codexCookieUpstreamResponse())
+	svc.codexCookies.Store(acct, chatgptCodexURL, codexCookieUpstreamResponse())
 	pair, fromPool, poolGateway, _ := svc.routePairInUse(acct, http.Header{}, OpenAIGatewayPoolApplied{})
 	require.Equal(t, "__cflb=lb-1; __oailb=jwt-1", pair)
 	require.False(t, fromPool, "没接管就不是覆写")
@@ -1253,7 +1253,7 @@ func TestRoutePairInUsePrefersGatewayPoolPair(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	acct := fake.account(1)
 	// 罐里存着另一个网关的 pair，它不该再被当成这一发的读数。
-	svc.codexCookies.Store(acct, openAITurnStatePairCookieURL, codexCookieUpstreamResponse())
+	svc.codexCookies.Store(acct, chatgptCodexURL, codexCookieUpstreamResponse())
 
 	headers := http.Header{}
 	applied := attachRouteApplied(t, &svc.codexCookies, acct, gwpoolTestURL, headers)

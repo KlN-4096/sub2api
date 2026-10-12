@@ -15,8 +15,8 @@ import (
 // 这条记录每发请求都可能被写一次，所以三件事得钉住：换网关立刻写、同一个网关在节流窗口里
 // 不写、条目不会无限长。写爆了不是功能问题而是**每发请求一次 UPDATE + 一次调度快照同步**。
 func TestNoteOpenAIGatewayUse(t *testing.T) {
-	newSvc := func() (*OpenAIGatewayService, *turnStateAutoRepo) {
-		repo := newTurnStateAutoRepo()
+	newSvc := func() (*OpenAIGatewayService, *turnStateTestRepo) {
+		repo := newTurnStateTestRepo()
 		return &OpenAIGatewayService{accountRepo: repo}, repo
 	}
 
@@ -260,7 +260,7 @@ func TestPruneOpenAIGatewayHistory(t *testing.T) {
 
 func TestGatewayPoolCooldownFreshPersistenceAndCrossRowRestart(t *testing.T) {
 	account := gwpoolTestAccount(1)
-	repo := newTurnStateAutoRepo()
+	repo := newTurnStateTestRepo()
 	repo.latest = account
 	svc := &OpenAIGatewayService{accountRepo: repo}
 	svc.codexCookies.accountByID = repo.GetByID

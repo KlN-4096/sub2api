@@ -115,7 +115,7 @@ type openAIGatewaySeen struct {
 	// 4 小时的命中率是常数，零相关），所以「等 N 小时就算恢复」没有实测依据。判「这个网关
 	// 还能不能用」必须结合本地 CD 和当前 exact-version 验满 proof。
 	// omitzero 而不是 omitempty：omitempty 对 struct 不生效，零值会落库成
-	// "0001-01-01T00:00:00Z"（同 openai_turn_state_recovery.go 的两个时间字段）。
+	// "0001-01-01T00:00:00Z"。
 	FullAt time.Time `json:"full_at,omitzero"`
 	// FullHeldMs 是这个 (账号 × 网关) 上量到的**满血持续了多久**（毫秒），由判降智那一刻
 	// 从「这张票验出满血」算到「判成降智」—— 两头都在同一张票的生命里，有界。

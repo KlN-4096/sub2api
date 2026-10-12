@@ -135,7 +135,7 @@ export default {
         hint: '显示格式为“分组名 / 基础分 / 粘性加分”。基础分按当前筛选条件限定的候选账号计算，包含优先级、负载、排队、错误率、首包延迟、重置窗口、额度余量、计费倍率等因子；粘性加分只在开启粘性加权时用于 previous_response_id 或 session_hash。分数越大越优先。'
       },
       gatewayColumnHint: '展示当前路由票、满血使用统计与优质/普通候选队列。只有当前有效且已验满的票显示绿色，候选一律中性，不代表已经恢复满血。队列按同成员、同模型的后端证据分类，只读已有目录与本地冷却；无有效快照显示—，不为页面额外取票或探测。大区与网关名是池端交付口径，不等于已观测的上游实际落点。',
-      usageWindowsHint: '“5h / 7d”是上游账号（如 OpenAI ChatGPT、Claude）官方的滚动用量窗口限制，由上游对账号设定，并非 sub2api 配置，也与你映射的模型无关。窗口滚动到期后用量会自动重置，无法在 sub2api 端解除该限制。紫色/琥珀色的条目是该账号当前生效的 Codex Turn-State（按模型分），倒计时是这张票自铸造起 1 小时的剩余有效期；琥珀色代表这张票疑似降智。',
+      usageWindowsHint: '“5h / 7d”是上游账号（如 OpenAI ChatGPT、Claude）官方的滚动用量窗口限制，由上游对账号设定，并非 sub2api 配置，也与你映射的模型无关。窗口滚动到期后用量会自动重置，无法在 sub2api 端解除该限制。',
       ollamaCloud: {
         title: 'Ollama Cloud 用量',
         sessionSecurityHint: '浏览器会话会加密落库，且只发送到固定的 Ollama 官方设置页。',
@@ -461,9 +461,7 @@ export default {
         creditsExhaustedUntil: 'AI Credits 已用尽，预计 {time} 恢复',
         overloadedUntil: '负载过重，重置时间：{time}',
         viewTempUnschedDetails: '查看临时不可调度详情',
-        tempUnschedulableUntil: '预计 {time} 恢复',
-        turnStateHold: '降智暂停 · {model} 在本账号上停着，猎手寻票中；猎到即恢复，到期后有请求会再停',
-        turnStateHoldShort: '降智'
+        tempUnschedulableUntil: '预计 {time} 恢复'
       },
       tempUnschedulable: {
         title: '临时不可调度',
@@ -990,21 +988,6 @@ export default {
           GWPOOL_CONSUMER_KEY_REQUIRED:
             '这个账号开着网关池，必须填消费端凭据（Consumer Key）：粘贴池子发给这个账号的那把 key。'
         },
-        turnStateHunterEffort: '探测思考强度',
-        turnStateHunterUsageKey: '记账 API Key ID（留空不记）',
-        turnStateHunterUsageKeyDesc:
-          '填了就把每次 200 探测按标准用量路径记到这把 key 下（类型「猎手探测」，正常计费扣额度、刷新最近使用）；输入 token 为本地估算（含 base prompt），输出恒 0。建议用一把专用 key：它的额度/限流会被探测消耗，订阅型分组要有有效订阅才记。',
-        turnStateRecovery: '降智恢复探测',
-        turnStateRecoveryDesc:
-          '用账号自己的出口每隔一段不固定的时间出一道糖果题（正常模型答 21，降智答 29/36），最近「总次数」次里答对「成功次数」次就判定降智已恢复并打上标记；连续「总次数」次答错则进入冷却。独立于猎手（猎手关着也能开），只标记与记日志，不会自动改任何配置。判定后停止探测，真实流量再铸出 312 就清掉标记重新攒。',
-        turnStateRecoveryModel: '探测模型',
-        turnStateRecoveryModelAuto: '留空 = gpt-5.6-sol',
-        turnStateRecoveryStreak: '总次数（窗口）',
-        turnStateRecoverySuccess: '成功次数',
-        turnStateRecoveryEffortDefault: '默认（medium）',
-        turnStateRecoveryCooldown: '失败冷却（小时）',
-        turnStateRecoveryMin: '间隔下限（分钟）',
-        turnStateRecoveryMax: '间隔上限（分钟）',
         gatewayHistory: {
           empty: '网关 -',
           // tooltip 的五段是「区域-网关名-满血时间-状态-判定」，每段只放**值**不带标签：
@@ -1042,44 +1025,6 @@ export default {
             'middle-east': '中东',
             unknown: '未归类'
           }
-        },
-        turnStatePool: {
-          empty: 'Turn-State -',
-          starved: 'Turn-State 无票·裸奔中',
-          manualTag: '手填',
-          observedTag: '最近铸出',
-          summary: '{n} 个模型有生效的 Turn-State',
-          summaryObservedOnly: '无生效票，{n} 条仅为读数',
-          detail: '{model}：{shape} {health}，铸于 {minted}，到期 {expires}',
-          detailPair: '，pair {n} 个',
-          detailReminted: '，上游已重铸 {n} 次',
-          healthy: '满血',
-          degraded: '疑似降智',
-          unknown: '新形态·判不了',
-          hunterSummary: '猎手(实验性) 本小时 {count}/{max} · {next} · {last}',
-          hunterNext: '下次 {time}',
-          hunterReady: '待命',
-          hunterProbing: '探测中',
-          recoverySummary: '恢复探测 答对 {successes}/{window}（需 {success}） · {next}',
-          recoveryCooling: '冷却至 {time}',
-          recoveryDone: '降智已恢复 · {time}',
-          recoveryResultHit: '答 {answer}✓',
-          recoveryResultMiss: '答 {answer}✗',
-          recoveryDetail: "{time} {model} {'@'}{proxy}{exit}：{result}，耗时 {latency}",
-          hunterGateIdle: '无流量·暂停',
-          hunterGateHeld: '降智暂停·补票中',
-          hunterGateFresh: '票未到期',
-          hunterNeedsAuto: '猎手 未生效：需先开自动接管',
-          // `@` 是 vue-i18n 的链接消息前缀，裸写会在生产构建里抛 SyntaxError 并整块吞掉
-          // 账号列的 Turn-State 格子；字面量要用 {'@'}。
-          hunterLast: "上次 {result} {'@'}{proxy} {time}",
-          hunterLastNone: '尚未探测',
-          hunterResultHit: '{chars}✓',
-          hunterResultMiss: '{chars}',
-          hunterResultAnswerHit: '{chars}·答 {answer}✓',
-          hunterResultAnswerMiss: '{chars}·答 {answer}✗',
-          hunterResultError: '出错 {status} {error}',
-          hunterDetail: "{time} {model} {'@'}{proxy}{exit}：{result}，耗时 {latency}",
         },
         compactMode: 'Compact 模式',
         compactModeDesc:

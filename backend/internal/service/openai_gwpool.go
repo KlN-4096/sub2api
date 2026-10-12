@@ -304,7 +304,6 @@ const (
 // 里看到的统一是一句 `{"error":{"type":"upstream_error","message":"Upstream request failed"}}`
 // ——分不出「稍后重试就行」和「运维得去改配置」，也不知道该等多久。上面那三条双语说明
 // 写得很清楚，却只进了 Ops 日志，一个字到不了客户端。
-// 同型先例：OpenAITurnStateHoldReason（注释写的正是「客户端一眼能看出不是上游故障」）。
 const OpenAIGatewayPoolReason = GatewayFailureReason("openai_gateway_pool")
 
 // gatewayPoolHopelessCodes 是「重试不会好」的池子错误码：要人去改 key 或改参数。
@@ -1003,9 +1002,6 @@ func (s *openAICodexCookieStore) gatewayPoolTakePair(
 	slog.Info("gwpool_pair_taken", "account_id", account.ID, "gateway", gateway,
 		"steered_to", steer,
 		"valid_for_s", int(got.ValidFor.Seconds()))
-	if account.IsOpenAITurnStatePairModeEnabled() {
-		slog.Warn("gwpool_overrides_turn_state_pair_mode", "account_id", account.ID, "gateway", gateway)
-	}
 	return pair, resetAt, nil
 }
 

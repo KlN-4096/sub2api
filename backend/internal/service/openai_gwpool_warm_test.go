@@ -585,7 +585,7 @@ func TestGatewayPoolWarmModelPrefersTheSinkOverTheHeaderAndBody(t *testing.T) {
 	require.Equal(t, "gpt-6-astra", gatewayPoolWarmModel(all.WithContext(ctx)))
 
 	// 没有 sink 读数 ⇒ 读头。主转发入口上 sink **一定**有 model（buildUpstreamRequest 必然在
-	// doOpenAIUpstream 之前跑完），所以来源 #1 是常态；后两个来源兜的是桥接口、猎手那类
+	// doOpenAIUpstream 之前跑完），所以来源 #1 是常态；后两个来源兜的是桥接口那类
 	// 不经 buildUpstreamRequest 的调用方。双开账号：体是 zstd 字节，头里有本轮 model。
 	compressed, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("\x28\xb5\x2f\xfd zstd"))
 	require.NoError(t, err)

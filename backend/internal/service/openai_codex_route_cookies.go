@@ -123,7 +123,7 @@ func (s *OpenAIGatewayService) routePairInUse(
 		return applied.Cookie, true, poolGateway, poolVersion
 	}
 	probe := http.Header{}
-	s.codexCookies.Attach(account, openAITurnStatePairCookieURL, probe)
+	s.codexCookies.Attach(account, chatgptCodexURL, probe)
 	return openAICodexRoutePairFromCookie(probe), false, "", ""
 }
 
@@ -171,8 +171,8 @@ func usageCodexRoutePairPtr(pair string) *string {
 }
 
 // usageCodexRoutePairOverriddenPtr 记录这一发出站的路由对是不是网关池下发的
-// （使用记录里那张小卡片的「已覆写」徽标）。与 usageCodexTurnStateOverriddenPtr 同口径：
-// 账号类型不适用时返回 nil（列保持 NULL），与「接管着但这一发没覆写」区分开。
+// （使用记录里那张小卡片的「已覆写」徽标）。账号类型不适用时返回 nil（列保持 NULL），
+// 与「接管着但这一发没覆写」区分开。
 //
 // 只记「覆写了没有」和两个网关名，**不记 cookie 本体是从哪来的**——pair 全文已经在
 // route_pair 列里，卡片不展示它。
