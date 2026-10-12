@@ -221,8 +221,9 @@ func TestWarmUpRotatesPastADegradedGatewayAndServesTheFullOne(t *testing.T) {
 	require.Equal(t, "unified-84", pair.gateway)
 
 	// 两个落点都进账本（都真的被碰过了）：下一个窗口挑票时都要排掉。
-	burned := svc.codexCookies.gatewayPoolBurnedGateways(gwpoolTestIdentity, openAIGatewayPoolGatewayWindow, 8)
-	require.ElementsMatch(t, []string{"unified-142", "unified-84"}, burned)
+	for _, gateway := range []string{"unified-142", "unified-84"} {
+		require.True(t, svc.codexCookies.gatewayPoolUsedRecently(gwpoolTestIdentity, gateway, openAIGatewayPoolGatewayWindow))
+	}
 }
 
 // 试满了也没验出满血 ⇒ **按失败处理，绝不降级放行**（queue 档唯一的承诺）。
@@ -272,7 +273,6 @@ func TestWarmUpBlocksInconclusiveShotsWithoutCallingThemDegraded(t *testing.T) {
 			shooter := &gwpoolWarmShooter{replies: replies}
 
 			account := gwpoolWarmAccount(fake)
-			account.Extra[openAIGatewayPoolRecoveryExtraKey] = 0
 			err := gwpoolWarmRun(t, svc, account, shooter)
 			require.Error(t, err, "严格模式下无法判断必须停止业务出站")
 			require.NotErrorIs(t, err, errOpenAIGatewayPoolRouteDegraded, "无法判断不能冒充明确降级")

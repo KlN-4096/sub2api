@@ -64,7 +64,6 @@ const (
 // 碰过的网关数。顺序在读的时候按时间排（readOpenAIGatewayHistoryRows）。
 type openAIGatewayHistory struct {
 	LedgerTag     string                        `json:"ledger_tag,omitempty"`
-	Previous      *openAIGatewayHistory         `json:"previous,omitempty"`
 	CooldownReset gatewayPoolCooldownResetState `json:"cooldown_reset,omitzero"`
 	// Current 是最近一发请求实际落在的网关。空 = 这个号还没拿到过能读出落点的路由。
 	Current string `json:"current"`
@@ -292,15 +291,10 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 	}
 	account.Extra[openAIGatewayHistoryExtraKey] = generic
 	account.Extra[openAIGatewayLedgerTagExtraKey] = rec.LedgerTag
-	previousTag := ""
-	if rec.Previous != nil {
-		previousTag = rec.Previous.LedgerTag
-	}
 	// 不随请求取消：用量是在响应收尾之后记的，跟着请求 ctx 一起死就等于这条读数永远写不进去。
 	if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
-		openAIGatewayHistoryExtraKey:           generic,
-		openAIGatewayLedgerTagExtraKey:         rec.LedgerTag,
-		openAIGatewayPreviousLedgerTagExtraKey: previousTag,
+		openAIGatewayHistoryExtraKey:   generic,
+		openAIGatewayLedgerTagExtraKey: rec.LedgerTag,
 	}); err != nil {
 		slog.Debug("gwpool_gateway_history_persist_failed", "account_id", account.ID, "error", err)
 	}
@@ -311,24 +305,13 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 // Current 不许被裁掉：它是这张卡最要紧的那一格，而「当前网关」恰好可能是刚加进来的那条
 // （加进来时它是最新的，裁的是最旧的，所以这里实际裁不到它——留着这个判断是为了让
 // 以后改排序规则的人撞上它）。
-// Retain an old identity's history without adopting its observations. Untagged
-// workspace-era records cannot establish ownership by the current member.
+// Another identity's (or an untagged workspace-era) history is never adopted:
+// a member switch starts an empty ledger and drops the old one.
 func gatewayPoolHistoryForTag(rec openAIGatewayHistory, tag string) openAIGatewayHistory {
 	if rec.LedgerTag == tag {
 		return rec
 	}
-	previous := rec
-	previous.Previous = nil
-	next := openAIGatewayHistory{LedgerTag: tag}
-	if rec.Previous != nil && rec.Previous.LedgerTag == tag {
-		next = *rec.Previous
-	}
-	if rec.LedgerTag != "" || rec.Seen != nil || rec.Current != "" || rec.CurrentRegion != "" ||
-		!rec.UpdatedAt.IsZero() || rec.PoolLive != 0 || rec.PoolFree != 0 ||
-		rec.CooldownReset != (gatewayPoolCooldownResetState{}) {
-		next.Previous = &previous
-	}
-	return next
+	return openAIGatewayHistory{LedgerTag: tag}
 }
 
 func pruneOpenAIGatewayHistory(rec *openAIGatewayHistory) {

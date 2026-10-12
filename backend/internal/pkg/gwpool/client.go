@@ -117,10 +117,9 @@ const (
 	// 复合键、进日志、进 usage_logs.route_pair_pool_gateway，而 NUL(0x00) 是**合法 UTF-8**
 	// （ToValidUTF8 不会剔掉它）、Postgres 的 TEXT 直接拒收 ⇒ 一条脏行能连带让整批用量插入失败。
 	maxGatewayLen = 64
-	// MaxExcludeItems / maxExcludeItemLen 是 exclude / exclude_versions 的契约上限：最多 64 项，
+	// maxExcludeItems / maxExcludeItemLen 是 exclude_versions 的契约上限：最多 64 项，
 	// 每项 ≤64 字符。超限池子会拒掉**整条**请求（= 取不到票），所以出站前自己先裁。
-	// 项数上限导出：调用方要按它裁自己那本账（裁掉哪些由它定，这里只保证不发非法请求）。
-	MaxExcludeItems   = 64
+	maxExcludeItems   = 64
 	maxExcludeItemLen = 64
 	// min_remaining 的契约钳位区间（池子那边也钳，这里先钳是为了别发一个必然被改写的值）。
 	minRemainingFloor = 30 * time.Second
@@ -146,21 +145,8 @@ type Pair struct {
 	Region string
 	// Cookie 是直接写进出站 Cookie 头的整串 "__cflb=...; __oailb=..."。
 	Cookie string
-	// ValidFor is advisory, never a quality or cookie-expiry decision.
+	// ValidFor is advisory (logged only), never a quality or cookie-expiry decision.
 	ValidFor time.Duration
-	// Advisory deadline calculated by the pool with unspecified provenance.
-	// It must not be used as a hard credential-expiry boundary.
-	RouteExpiresAt time.Time
-	// PairRemaining 是**这张 pair 自己**的剩余寿命（池子的 pair_remaining_s = __cflb 的死期
-	// 减现在）。和 ValidFor 是两根轴：ValidFor = min(满血窗口剩余, pair 剩余)，绝大多数时候
-	// 等于那 183 秒的窗口，分不出 pair 还剩 50 分钟还是 8 分钟 ⇒ 判「这张要不要续」只能用这个。
-	// 0 = 池子没报（还没升级）。消费端目前只读它做日志口径，不据此做任何动作。
-	PairRemaining time.Duration
-	// VerifiedFull 是池子交付前自己验过满血。只做读数，消费端不拿它当闸门。
-	VerifiedFull bool
-	// TTLIsAdvisory：池子声明 valid_for_s 只是建议值，换不换 pair 由消费端自己判。
-	// 纯读数——消费端的逻辑本来就是「自己判这张不行了就 force 换一张」，不按这个字段分流。
-	TTLIsAdvisory bool
 	// Version 是**这一张具体的票**的不透明稳定身份（池子的 cookie_version）。两个用处：
 	// Exact-version local cleanup and CookieRequest.ExcludeVersions.
 	// Missing or malformed versions cannot support exact-version cleanup.
@@ -177,8 +163,6 @@ type CookieRequest struct {
 	Account string
 	// Gateway is chosen locally; the pool must not substitute another route.
 	Gateway string
-	// Exclude explicitly rejects named gateways, without delegating selection.
-	Exclude []string
 	// ExcludeVersions rejects these exact ticket versions.
 	ExcludeVersions []string
 	// MinRemaining 是能接受的最低剩余寿命。0 = 用池子配的 DeliverFloor。
@@ -193,9 +177,6 @@ func (r CookieRequest) query() url.Values {
 	if gateway := strings.TrimSpace(r.Gateway); gateway != "" {
 		query.Set("gateway", gateway)
 	}
-	if list := joinExcludes(r.Exclude); list != "" {
-		query.Set("exclude", list)
-	}
 	if list := joinExcludes(r.ExcludeVersions); list != "" {
 		query.Set("exclude_versions", list)
 	}
@@ -205,17 +186,17 @@ func (r CookieRequest) query() url.Values {
 	return query
 }
 
-// joinExcludes 裁出一条合法的 exclude 串：空项丢掉，超长项丢掉（带上去池子会拒整条请求），
-// 最多 64 项（尾部裁掉 —— 调用方把最近烧的放在前面）。
+// joinExcludes 裁出一条合法的 exclude_versions 串：空项丢掉，超长项丢掉（带上去池子会拒整条
+// 请求），最多 64 项（尾部裁掉）。
 func joinExcludes(items []string) string {
-	kept := make([]string, 0, min(len(items), MaxExcludeItems))
+	kept := make([]string, 0, min(len(items), maxExcludeItems))
 	for _, item := range items {
 		item = strings.TrimSpace(item)
 		if item == "" || len(item) > maxExcludeItemLen {
 			continue
 		}
 		kept = append(kept, item)
-		if len(kept) == MaxExcludeItems {
+		if len(kept) == maxExcludeItems {
 			break
 		}
 	}
@@ -368,16 +349,12 @@ func (c *Client) Cookie(ctx context.Context, request CookieRequest) (Pair, error
 
 // cookiePayload is the single-ticket wire response.
 type cookiePayload struct {
-	Gateway           string    `json:"gateway"`
-	DatacenterCountry string    `json:"datacenter_country"`
-	Region            string    `json:"region"`
-	Cookie            string    `json:"cookie"`
-	ValidForS         int       `json:"valid_for_s"`
-	VerifiedFull      bool      `json:"verified_full"`
-	TTLIsAdvisory     bool      `json:"ttl_is_advisory"`
-	CookieVersion     string    `json:"cookie_version"`
-	PairRemainingS    int       `json:"pair_remaining_s"`
-	RouteExpiresAt    time.Time `json:"route_expires_at"`
+	Gateway           string `json:"gateway"`
+	DatacenterCountry string `json:"datacenter_country"`
+	Region            string `json:"region"`
+	Cookie            string `json:"cookie"`
+	ValidForS         int    `json:"valid_for_s"`
+	CookieVersion     string `json:"cookie_version"`
 }
 
 // pair 校验并转成 Pair。
@@ -398,14 +375,8 @@ func (p cookiePayload) pair() (Pair, error) {
 		Region:            sanitizeOpaque(p.Region, maxGatewayLen),
 		Cookie:            strings.TrimSpace(p.Cookie),
 		ValidFor:          clampDuration(time.Duration(p.ValidForS)*time.Second, 0, maxValidFor),
-		RouteExpiresAt:    p.RouteExpiresAt,
-		VerifiedFull:      p.VerifiedFull,
-		TTLIsAdvisory:     p.TTLIsAdvisory,
 		Version:           sanitizeOpaque(p.CookieVersion, maxVersionLen),
 		DatacenterCountry: datacenterCountry(p.DatacenterCountry),
-		// 和 ValidFor 同样钳进 [0, maxValidFor]：缺失/负数 ⇒ 0 ⇒ 消费端不续（安全方向），
-		// 报一个大数被钳到 3900s 仍然远在续期阈值之上 ⇒ 同样不续。
-		PairRemaining: clampDuration(time.Duration(p.PairRemainingS)*time.Second, 0, maxValidFor),
 	}, nil
 }
 
@@ -441,21 +412,6 @@ func refusal(resp *http.Response) error {
 		}
 	}
 	return out
-}
-
-// Gateways returns a short-lived metadata snapshot. Selection and cooldown are
-// local; any failed refresh is unknown supply, never a successful empty list.
-func (c *Client) Gateways(ctx context.Context, account string, accountTag ...string) ([]Gateway, error) {
-	tag := ""
-	if len(accountTag) > 0 {
-		tag = accountTag[0]
-	}
-	return c.GatewaysForModel(ctx, account, tag, "")
-}
-
-func (c *Client) GatewaysForModel(ctx context.Context, account, accountTag, model string) ([]Gateway, error) {
-	catalog, err := c.Catalog(ctx, account, accountTag, model, 0)
-	return catalog.Gateways, err
 }
 
 func (c *Client) fetchGateways(ctx context.Context, account, accountTag, model string) ([]Gateway, error) {

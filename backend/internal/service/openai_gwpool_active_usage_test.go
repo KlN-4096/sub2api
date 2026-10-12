@@ -101,19 +101,19 @@ func TestGatewayPoolActiveUsageFailedNewTicketWriteKeepsExistingCycleCounts(t *t
 	require.False(t, state.Rounds[0].Tickets[gatewayPoolUsageTicketKey("next", "b")].At.IsZero())
 }
 
-func TestGatewayPoolActiveUsageUnionsBusinessIntervalsAndHidesLegacy(t *testing.T) {
+func TestGatewayPoolActiveUsageUnionsBusinessIntervals(t *testing.T) {
 	start := time.Now().UTC().Add(-time.Hour)
 	at := func(seconds int) time.Time { return start.Add(time.Duration(seconds) * time.Second) }
 	round := GatewayPoolUsageRound{ID: "r", Model: gatewayPoolUsageSharedModel,
 		Attempted: 20, Full: 20, StartedAt: start,
 		Tickets: map[string]gatewayPoolUsageTicket{
-			"one": {Full: true, UseStartedAt: start, UseEndedAt: at(3600)},
+			"one": {Full: true},
 			"two": {Full: true},
 		}}
-	legacy := round.fullUsageView("process", at(3600))
-	require.Zero(t, legacy.FullDurationMS)
-	require.Empty(t, legacy.FullUsageMode)
-	require.Equal(t, 20, legacy.Attempted)
+	unmeasured := round.fullUsageView("process", at(3600))
+	require.Zero(t, unmeasured.FullDurationMS)
+	require.Empty(t, unmeasured.FullUsageMode)
+	require.Equal(t, 20, unmeasured.Attempted)
 	events := []gatewayPoolActiveUseEvent{
 		{roundID: "r", ticket: "one", start: at(0), end: at(10)},
 		{roundID: "r", ticket: "one", start: at(5), end: at(20)},
@@ -126,7 +126,6 @@ func TestGatewayPoolActiveUsageUnionsBusinessIntervalsAndHidesLegacy(t *testing.
 		"overlapping requests and tickets count once; idle 25..40 is excluded")
 	round.syncActiveUsage(events, "process", at(600))
 	require.EqualValues(t, 35000, round.ActiveUsage.duration(at(600)), "repeated persistence is idempotent")
-	require.Equal(t, at(3600), round.Tickets["one"].UseEndedAt, "retain the old raw record")
 	view := round.fullUsageView("process", at(3600))
 	require.Equal(t, gatewayPoolActiveUsageMode, view.FullUsageMode)
 	require.EqualValues(t, 35000, view.FullDurationMS)
@@ -176,7 +175,6 @@ func TestGatewayPoolActiveUsageFailedStopWriteCannotAccrueIdle(t *testing.T) {
 	view := state.Rounds[0].fullUsageView(svc.codexCookies.gatewayPoolUsageSession(), now, events...)
 	later := state.Rounds[0].fullUsageView(svc.codexCookies.gatewayPoolUsageSession(), now.Add(time.Hour), events...)
 	require.Equal(t, view.FullDurationMS, later.FullDurationMS)
-	require.Empty(t, later.FullActiveUntil)
 	repo.fail = false
 	flushGatewayPoolActiveUsage(svc, context.Background(), account, gwpoolTestIdentity)
 	require.Empty(t, tracker.snapshot())

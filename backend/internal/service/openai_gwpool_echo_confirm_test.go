@@ -230,7 +230,7 @@ func TestStateEchoConfirmationDiscardDoesNotPoisonNewVersion(t *testing.T) {
 	sink.mark(OpenAIGatewayPoolApplied{AccountID: 1, Cookie: "offline", Gateway: "unified-142", Version: "old"})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gwpoolTestURL, nil)
 	require.NoError(t, err)
-	newPair := openAIGatewayPoolPair{cookie: "offline", gateway: "unified-142", version: "new", until: time.Now().Add(time.Minute)}
+	newPair := openAIGatewayPoolPair{cookie: "offline", gateway: "unified-142", version: "new"}
 	svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, newPair)
 	body := &gwpoolEchoBody{}
 	require.False(t, svc.dropDegradedGatewayPoolRoute(req, &http.Response{StatusCode: 200, Body: body}, account))

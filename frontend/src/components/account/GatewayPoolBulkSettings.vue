@@ -59,7 +59,6 @@ const fields: Field[] = [
   { key: 'openai_gwpool_consumer_key', label: 'gwpoolConsumerKey', type: 'password', default: '', wide: true },
   { key: 'openai_gwpool_continuous_wait', label: 'gwpoolContinuousWait', hint: 'gwpoolContinuousWaitDesc', type: 'boolean', default: false, wide: true },
   { key: 'openai_gwpool_probe_timeout_s', label: 'gwpoolProbeTimeout', hint: 'gwpoolProbeTimeoutDesc', type: 'number', default: 10, max: 120 },
-  { key: 'openai_gwpool_prepare_retries', label: 'gwpoolPrepareRetries', hint: 'gwpoolPrepareRetriesDesc', type: 'number', default: 0, min: 0, max: 10 },
   { key: 'openai_gwpool_resume_gateways', label: 'gwpoolResumeGateways', hint: 'gwpoolResumeGatewaysDesc', type: 'number', default: 50, max: 512 },
   { key: 'openai_gwpool_gateway_window_s', label: 'gwpoolGatewayWindow', type: 'number', default: 3600, max: 86400 },
   { key: 'openai_gwpool_cooldown_reset_hours', label: 'gwpoolCooldownResetHours', hint: 'gwpoolCooldownResetDesc', type: 'number', default: 24, min: 0, max: cooldownResetMaxHours },

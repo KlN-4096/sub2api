@@ -3,7 +3,7 @@ package service
 // 网关池业务只能使用本地已验证且凭据仍有效的票；验证未知时拒绝，不把未知记成降级。
 // 一组验证先取 state，再带回同一张 state 读响应头；验过的 Live 票复用，不每次重验。
 // 这些额外请求消耗上游配额，但没有实测 token，不能计费给客户端 API Key。
-// 请求尝试、结果、耗时落 openai_gwpool_metrics，详细过程仍记 gwpool_warm_probe；
+// 详细过程记 gwpool_warm_probe 日志；
 // 历史首次可见日志不是账号真实首次接触，不能当成首次满血率。
 //
 // 判据本体与纪律一个字不改，见 openai_gwpool_state_echo.go 的文件头。
@@ -70,15 +70,11 @@ func (s *OpenAIGatewayService) gatewayPoolWarmUp(request *http.Request, proxyURL
 	}
 	return s.gatewayPoolWarmUpWith(request, account, identity, gatewayPoolProbeModelLuna,
 		func(ctx context.Context, cookie, state string) (int, string, error) {
-			probeAccount := account
-			if account.GatewayPoolLongWaitEnabled() {
-				fresh, err := s.freshGatewayPoolPreparationAccount(ctx, account)
-				if err != nil || !gatewayPoolWaitAccountMatches(fresh, account) {
-					return 0, "", errGatewayPoolPreparationOwnerChanged
-				}
-				probeAccount = fresh
+			fresh, err := s.freshGatewayPoolPreparationAccount(ctx, account)
+			if err != nil || !gatewayPoolWaitAccountMatches(fresh, account) {
+				return 0, "", errGatewayPoolPreparationOwnerChanged
 			}
-			return s.gatewayPoolWarmShot(ctx, probeAccount, proxyURL, cookie, gatewayPoolProbeModelLuna, state)
+			return s.gatewayPoolWarmShot(ctx, fresh, proxyURL, cookie, gatewayPoolProbeModelLuna, state)
 		})
 }
 
@@ -105,7 +101,6 @@ func (s *OpenAIGatewayService) gatewayPoolPrepare(
 	// There is no fixed 5/8-ticket loop or leader-owned 90s deadline.
 	// Every network operation is bounded; only live waiters keep this worker alive.
 	rawURL := request.URL.String()
-	recoveries := 0
 	for attempt := 1; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -131,17 +126,6 @@ func (s *OpenAIGatewayService) gatewayPoolPrepare(
 		if err != nil {
 			if errors.Is(err, errGatewayPoolGenerationChanged) {
 				continue // a manual clear invalidates old preparation, not the caller's deadline
-			}
-			if ctx.Err() == nil && recoveries < fresh.gatewayPoolPreparationRecoveries() &&
-				gatewayPoolRetryablePreparationError(err) {
-				recoveries++
-				retry, waitErr := s.waitGatewayPoolRetry(ctx, account, gatewayPoolVerificationRetryGap)
-				if waitErr != nil {
-					return waitErr
-				}
-				if retry {
-					continue
-				}
 			}
 			return err
 		}
@@ -197,17 +181,6 @@ func (s *OpenAIGatewayService) gatewayPoolPrepare(
 			slog.Warn("gwpool_warm_inconclusive", "account_id", account.ID,
 				"gateway", applied.Gateway, "attempt", attempt, "budget_exhausted", false,
 				"error", gatewayPoolWarmErrorText(perr))
-			if recoveries < fresh.gatewayPoolPreparationRecoveries() && gatewayPoolRetryableProbeError(perr) {
-				recoveries++
-				s.codexCookies.poolProgress.update(progress, "waiting", 0, applied.Gateway, false, false)
-				retry, waitErr := s.waitGatewayPoolRetry(ctx, account, gatewayPoolVerificationRetryGap)
-				if waitErr != nil {
-					return waitErr
-				}
-				if retry {
-					continue
-				}
-			}
 			if ctx.Err() == nil && !errors.Is(perr, context.Canceled) &&
 				gatewayPoolRetryableProbeError(perr) {
 				// An unavailable ticket is not a measured quality failure. Retire
@@ -322,7 +295,6 @@ func (s *openAICodexCookieStore) gatewayPoolWarmVerdict(
 			pair.version == applied.Version && s.gatewayPoolVerifiedFull(identity) {
 			return verdict{full: true, conclusive: true}, nil
 		}
-		start := time.Now()
 		trace := &gatewayPoolProbeTrace{onFirst: func(at time.Time) {
 			s.gatewayPoolMarkSent(identity, applied.Version, at)
 			if onTried, ok := work.Value(gatewayPoolProgressTriedKey{}).(func()); ok {
@@ -366,8 +338,7 @@ func (s *openAICodexCookieStore) gatewayPoolWarmVerdict(
 			model, _ := work.Value(gatewayPoolProbeModelKey{}).(string)
 			s.poolProbeObserved(work, account, gatewayPoolProbeObservation{
 				Source: gatewayPoolProbeSource(work), Shots: trace.shots, Full: full, Conclusive: conclusive,
-				DurationMS: time.Since(start).Milliseconds(),
-				Applied:    applied, Identity: identity, Model: model, FirstSent: trace.firstSent, LastSent: trace.lastSent, Steps: steps,
+				Applied: applied, Identity: identity, Model: model, FirstSent: trace.firstSent, LastSent: trace.lastSent, Steps: steps,
 			})
 		}
 		return verdict{full: full, conclusive: conclusive, sent: sent, firstSent: trace.firstSent}, err

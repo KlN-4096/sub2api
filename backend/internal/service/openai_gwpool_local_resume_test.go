@@ -25,9 +25,9 @@ func TestGatewayPoolLocalResumeIgnoresPoolSupplyAndOldRecheck(t *testing.T) {
 		svc.codexCookies.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, gateway), now.Add(-2*time.Hour))
 	}
 	require.NoError(t, svc.enterGatewayPoolRest(context.Background(), account, gwpoolTestIdentity, now, now.Add(10*time.Minute)))
-	legacy := gatewayPoolRestState{Tag: gatewayPoolLedgerTag(gwpoolTestIdentity), Active: true,
-		ChangedAt: now, NextCheck: now.Add(10 * time.Minute)}
-	require.NoError(t, repo.UpdateExtra(context.Background(), account.ID, map[string]any{gatewayPoolRestStateKey: legacy}))
+	legacy := gatewayPoolRestState{Tag: gatewayPoolLedgerTag(gwpoolTestIdentity), Active: true, ChangedAt: now}
+	require.NoError(t, repo.UpdateExtra(context.Background(), account.ID, map[string]any{gatewayPoolRestStateKey: map[string]any{
+		"tag": legacy.Tag, "active": true, "changed_at": now, "next_check": now.Add(10 * time.Minute)}}))
 	svc.codexCookies.poolRestState.Store(legacy.Tag, legacy)
 	allowed, err := svc.gatewayPoolResumeAllowed(context.Background(), account, true)
 	require.NoError(t, err)

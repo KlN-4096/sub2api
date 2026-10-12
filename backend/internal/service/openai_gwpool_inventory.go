@@ -35,11 +35,6 @@ func (s *openAICodexCookieStore) gatewayPoolInventoryOperation(identity string) 
 
 // No network and no ticket consumption. The generation rejects a listing observed
 // across an intervening fetch/probe, including one that has already completed.
-func (s *openAICodexCookieStore) gatewayPoolInventorySnapshot(identity string) (generation uint64, pending bool) {
-	generation, active, candidates := s.gatewayPoolInventoryCandidates(identity)
-	return generation, active || len(candidates) > 0
-}
-
 func (s *openAICodexCookieStore) gatewayPoolInventoryCandidates(identity string) (generation uint64, active bool, candidates map[string]struct{}) {
 	state := s.gatewayPoolInventory(identity)
 	state.mu.Lock()

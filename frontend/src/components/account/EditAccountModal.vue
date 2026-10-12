@@ -2757,12 +2757,6 @@
                 type="number" min="1" max="120" step="1" placeholder="10" class="input text-xs" />
               <p class="input-hint">{{ t('admin.accounts.openai.gwpoolProbeTimeoutDesc') }}</p>
             </div>
-            <div>
-              <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolPrepareRetries') }}</label>
-              <input v-model.number="openAIGwpoolPrepareRetries" data-testid="edit-openai-gwpool-prepare-retries"
-                type="number" min="0" max="10" step="1" placeholder="0" class="input text-xs" />
-              <p class="input-hint">{{ t('admin.accounts.openai.gwpoolPrepareRetriesDesc') }}</p>
-            </div>
             </div>
             <p class="input-hint" data-testid="edit-openai-gwpool-credential-scope">
               {{ t('admin.accounts.openai.gwpoolCredentialScope') }}
@@ -4272,7 +4266,6 @@ const openAIGwpoolConsumerKeySaved = ref(false)
 const openAIGwpoolResumeGateways = ref<number | ''>('')
 const openAIGwpoolContinuousWait = ref(false)
 const openAIGwpoolProbeTimeout = ref<number | ''>('')
-const openAIGwpoolPrepareRetries = ref<number | ''>('')
 // 秒数留空使用后端默认值：初始CD 1h、取票10s、清单2s。
 // 严格验证与Luna固定，不保存退役开关。
 const openAIGwpoolGatewayWindow = ref<number | null>(null)
@@ -4850,7 +4843,6 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	openAIGwpoolResumeGateways.value = typeof extra?.openai_gwpool_resume_gateways === 'number' ? extra.openai_gwpool_resume_gateways : ''
 	openAIGwpoolContinuousWait.value = extra?.openai_gwpool_continuous_wait === true
 	openAIGwpoolProbeTimeout.value = typeof extra?.openai_gwpool_probe_timeout_s === 'number' ? extra.openai_gwpool_probe_timeout_s : ''
-	openAIGwpoolPrepareRetries.value = typeof extra?.openai_gwpool_prepare_retries === 'number' ? extra.openai_gwpool_prepare_retries : ''
 	// 续期缺省即关：只有显式 true 才算开（与后端 gatewayPoolRenew 同口径）。
 	openAIGwpoolGatewayWindow.value = readGwpoolSeconds(extra?.openai_gwpool_gateway_window_s)
 	openAIGwpoolCooldownResetHours.value = extra?.openai_gwpool_cooldown_reset_hours === 0
@@ -6532,12 +6524,10 @@ const handleSubmit = async () => {
         } else {
           delete newExtra.openai_gwpool_continuous_wait
         }
-        for (const [key, value] of [
-          ['openai_gwpool_probe_timeout_s', openAIGwpoolProbeTimeout.value],
-          ['openai_gwpool_prepare_retries', openAIGwpoolPrepareRetries.value]
-        ] as const) {
-          if (openAIGwpoolEnabled.value && value !== '') newExtra[key] = value
-          else delete newExtra[key]
+        if (openAIGwpoolEnabled.value && openAIGwpoolProbeTimeout.value !== '') {
+          newExtra.openai_gwpool_probe_timeout_s = openAIGwpoolProbeTimeout.value
+        } else {
+          delete newExtra.openai_gwpool_probe_timeout_s
         }
         delete newExtra.openai_gwpool_use_recommended_cooldown
         delete newExtra.openai_gwpool_member_isolation

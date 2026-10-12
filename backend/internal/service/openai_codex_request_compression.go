@@ -21,7 +21,7 @@ import (
 // 帧头对齐 libzstd 流式编码的默认形态：encode_all 走流式（io::copy 先 ZSTD_e_continue，再 finish），
 // 没有 pledged size → 不写内容长度、非 single segment；ZSTD_c_checksumFlag 默认 0 → 无校验和；
 // level 3 的 windowLog 21 → 2MB 窗口。即前六个字节固定为 28 b5 2f fd 00 58。klauspost 会按输入大小
-// 自选 single segment / 内容长度 / 窗口描述，所以帧头由 normalizeCodexZstdFrameHeader 统一改写；块内容
+// 自选 single segment / 内容长度 / 窗口描述，所以帧头由 normalizeOwnedCodexZstdFrameHeader 统一改写；块内容
 // （偏移不超过 2MB 窗口）不动，由各自实现决定，不作对齐。
 const (
 	codexRequestZstdContentEncoding = "zstd"
@@ -89,19 +89,11 @@ var (
 	codexZstdStreamFrameHeader = []byte{0x00, 0x58} // FHD：无 FCS / 非 single segment / 无校验和 / 无字典；窗口描述 2^21
 )
 
-// normalizeCodexZstdFrameHeader 把编码器写出的帧头换成 libzstd 流式默认帧头，块内容原样保留。
+// normalizeOwnedCodexZstdFrameHeader 把编码器写出的帧头原地换成 libzstd 流式默认帧头，块内容原样保留。
 // 编码器窗口固定 2MB，块内偏移不会超过它，所以声明 2MB 窗口且不写内容长度对任何解码器都成立。
-func normalizeCodexZstdFrameHeader(frame []byte) ([]byte, error) {
-	return normalizeCodexZstdFrameHeaderWithOwnership(frame, false)
-}
-
 // Only EncodeAll's newly allocated output is owned. Never rewrite a caller's
 // plaintext body or a shared frame in place.
 func normalizeOwnedCodexZstdFrameHeader(frame []byte) ([]byte, error) {
-	return normalizeCodexZstdFrameHeaderWithOwnership(frame, true)
-}
-
-func normalizeCodexZstdFrameHeaderWithOwnership(frame []byte, owned bool) ([]byte, error) {
 	magic := len(codexZstdFrameMagic)
 	if len(frame) < magic+1 || !bytes.Equal(frame[:magic], codexZstdFrameMagic) {
 		return nil, errors.New("unexpected zstd frame magic")
@@ -133,15 +125,9 @@ func normalizeCodexZstdFrameHeaderWithOwnership(frame []byte, owned bool) ([]byt
 	if headerLen == len(codexZstdStreamFrameHeader) && bytes.Equal(frame[magic:magic+headerLen], codexZstdStreamFrameHeader) {
 		return frame, nil
 	}
-	if owned {
-		// Every accepted frame has at least a two-byte header. The normalized
-		// header is never longer, so the block payload can move left in place.
-		length := magic + len(codexZstdStreamFrameHeader) + copy(frame[magic+len(codexZstdStreamFrameHeader):], frame[magic+headerLen:])
-		copy(frame[magic:], codexZstdStreamFrameHeader)
-		return frame[:length], nil
-	}
-	out := make([]byte, 0, len(frame)-headerLen+len(codexZstdStreamFrameHeader))
-	out = append(out, codexZstdFrameMagic...)
-	out = append(out, codexZstdStreamFrameHeader...)
-	return append(out, frame[magic+headerLen:]...), nil
+	// Every accepted frame has at least a two-byte header. The normalized
+	// header is never longer, so the block payload can move left in place.
+	length := magic + len(codexZstdStreamFrameHeader) + copy(frame[magic+len(codexZstdStreamFrameHeader):], frame[magic+headerLen:])
+	copy(frame[magic:], codexZstdStreamFrameHeader)
+	return frame[:length], nil
 }
