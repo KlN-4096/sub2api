@@ -126,7 +126,6 @@ func (s *OpenAIGatewayService) gatewayPoolConfirmResponse(request *http.Request,
 	// This confirms an already-dispatched business response. The old 429
 	// admission window must still gate new business, not this bounded probe.
 	ctx = context.WithValue(ctx, gatewayPoolProbeTraceKey{}, trace)
-	started := time.Now()
 	var steps []gatewayPoolProbeStep
 	full, conclusive, err := gatewayPoolConfirmState(ctx, request.Header.Get("Cookie"), state,
 		attempts, func(ctx context.Context, cookie, state string) (int, string, error) {
@@ -188,7 +187,6 @@ func (s *OpenAIGatewayService) gatewayPoolConfirmResponse(request *http.Request,
 		// Confirmation traffic is not an independent quality observation.
 		// Preserve raw header steps; only the final business decision trains
 		// cooldowns, so a late cancellation/CAS failure leaves no false sample.
-		DurationMS: time.Since(started).Milliseconds(),
 	})
 	current, status = s.codexCookies.cachedPoolPair(identity)
 	if status == openAIGatewayPoolPairNone || current.invalidated || current.version != applied.Version || ctx.Err() != nil {

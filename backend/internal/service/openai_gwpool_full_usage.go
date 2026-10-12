@@ -16,28 +16,6 @@ func gatewayPoolUsageTicketKey(gateway, version string) string {
 	return gatewayPoolUsageDigest(gateway + "\x00" + version)
 }
 
-// Read-only legacy archival projection. Never accrue an open historical tail
-// to now, and never write derived bounds back into the original ticket record.
-func (r *GatewayPoolUsageRound) legacyFullUseDuration() int64 {
-	var total int64
-	for _, ticket := range r.Tickets {
-		total += ticket.UseMS
-		end := ticket.UseEndedAt
-		if end.IsZero() {
-			end = ticket.UseObservedAt
-		}
-		for _, bound := range []time.Time{ticket.UseExpiresAt, r.EndedAt} {
-			if !bound.IsZero() && bound.Before(end) {
-				end = bound
-			}
-		}
-		if !ticket.UseStartedAt.IsZero() && end.After(ticket.UseStartedAt) {
-			total += end.Sub(ticket.UseStartedAt).Milliseconds()
-		}
-	}
-	return total
-}
-
 func (s *OpenAIGatewayService) noteGatewayPoolFullUse(ctx context.Context, account *Account, identity string,
 	applied OpenAIGatewayPoolApplied, at time.Time,
 ) bool {
@@ -86,7 +64,7 @@ func (r GatewayPoolUsageRound) fullUsageView(session string, now time.Time, even
 		r.Tickets = nil
 		return r
 	}
-	r.FullDurationMS, r.FullActiveUntil, r.FullUsageMode = 0, nil, ""
+	r.FullDurationMS, r.FullUsageMode = 0, ""
 	if !r.EndedAt.IsZero() && r.EndedAt.Before(now) {
 		now = r.EndedAt
 	}

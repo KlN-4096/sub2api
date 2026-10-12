@@ -167,13 +167,8 @@ func (s *OpenAIGatewayService) writeGatewayPoolCooldownClear(ctx context.Context
 		seen.Cooldown = &next
 		view.Seen[name] = seen
 	}
-	previousTag := ""
-	if rec.Previous != nil {
-		previousTag = rec.Previous.LedgerTag
-	}
 	if err := s.accountRepo.UpdateExtra(ctx, id, map[string]any{
 		openAIGatewayHistoryExtraKey: rec, openAIGatewayLedgerTagExtraKey: rec.LedgerTag,
-		openAIGatewayPreviousLedgerTagExtraKey: previousTag,
 	}); err != nil {
 		return err
 	}
@@ -192,7 +187,7 @@ func (s *OpenAIGatewayService) clearGatewayPoolManualRest(ctx context.Context, a
 	}
 	// An inactive owner does not prove every clone's block was cleared: a
 	// previous attempt may have committed one row before another write failed.
-	state.Active, state.NextCheck, state.ResumeAt = false, time.Time{}, time.Time{}
+	state.Active, state.ResumeAt = false, time.Time{}
 	state.QualityGateways = nil
 	state.advance(time.Now().UTC())
 	repo, ok := s.accountRepo.(gatewayPoolClearRestRepository)
@@ -223,14 +218,8 @@ func (s *OpenAIGatewayService) clearGatewayPoolManualRest(ctx context.Context, a
 		if gatewayPoolLedgerTag(current) != state.Tag || !peer.UsesGatewayPool() {
 			continue
 		}
-		copy := state
-		copy.Previous = readGatewayPoolRest(peer, state.Tag).Previous
-		previous := ""
-		if copy.Previous != nil {
-			previous = copy.Previous.Tag
-		}
 		if err := repo.ClearGatewayPoolRest(ctx, peer.ID, map[string]any{
-			gatewayPoolRestStateKey: copy, gatewayPoolRestTagKey: copy.Tag, gatewayPoolRestPreviousTagKey: previous,
+			gatewayPoolRestStateKey: state, gatewayPoolRestTagKey: state.Tag,
 		}); err != nil {
 			return err
 		}

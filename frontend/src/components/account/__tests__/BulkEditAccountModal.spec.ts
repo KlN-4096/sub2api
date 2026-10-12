@@ -108,15 +108,16 @@ describe('BulkEditAccountModal', () => {
     for (const key of ['guard_enabled', 'probe_model', 'rotation', 'rotation_min_gateways', 'max_wait_s', 'warm_tickets']) {
       expect(wrapper.find(`[data-testid="bulk-gwpool-apply-openai_gwpool_${key}"]`).exists()).toBe(false)
     }
-    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_prepare_retries"]').setValue(true)
-    expect(wrapper.get<HTMLInputElement>('[data-testid="bulk-gwpool-value-openai_gwpool_prepare_retries"]').element.value).toBe('0')
+    expect(wrapper.find('[data-testid="bulk-gwpool-apply-openai_gwpool_prepare_retries"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_probe_timeout_s"]').setValue(true)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="bulk-gwpool-value-openai_gwpool_probe_timeout_s"]').element.value).toBe('10')
     await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_resume_gateways"]').setValue(true)
     await wrapper.get('[data-testid="bulk-gwpool-value-openai_gwpool_resume_gateways"]').setValue(4)
     await wrapper.get('[data-testid="bulk-gwpool-apply-openai_gwpool_consumer_key"]').setValue(true)
     await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
     await flushPromises()
     expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], expect.objectContaining({
-      extra: { openai_gwpool_prepare_retries: 0, openai_gwpool_resume_gateways: 4 }
+      extra: { openai_gwpool_probe_timeout_s: 10, openai_gwpool_resume_gateways: 4 }
     }))
     wrapper.unmount()
   })

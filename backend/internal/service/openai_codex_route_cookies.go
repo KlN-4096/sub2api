@@ -183,21 +183,9 @@ func usageCodexRoutePairOverriddenPtr(account *Account, fromPool bool) *bool {
 	return &fromPool
 }
 
-// usageCodexRouteRegion 判这一发的落点能不能归到池子说的那个大区上。
-//
-// 只有「池子说的网关 == 这一发实际在用的网关」时才算：不一致说明上游把这一发改派走了
-// （见 routePairInUse），池子那个大区讲的是另一个网关的事，记上去会把落点归到错的大区，
-// 于是账号卡片上「这个号在哪个大区还有没烧过的落点」直接答错。宁可留空（显示未归类）。
-func usageCodexRouteRegion(poolGateway, inUseGateway, region string) string {
-	if !usageCodexRouteLandedOnPoolGateway(poolGateway, inUseGateway) {
-		return ""
-	}
-	return strings.TrimSpace(region)
-}
-
-// usageCodexRouteLandedOnPoolGateway 是上面那道判断本身。抽出来是因为 state-echo 的判定读数
-// （openAIGatewaySeen.Verdict）要用**同一个**谓词：判据问的也是池子那个网关，改派时同样不能
-// 把结论挂到实际落点上。两处各写一份的话只在「名字两边没有空白」时同义。
+// usageCodexRouteLandedOnPoolGateway 判这一发是否落在池子说的那个网关上：只有「池子说的网关 ==
+// 这一发实际在用的网关」才算，不一致说明上游把这一发改派走了（见 routePairInUse）。state-echo 的
+// 判定读数（openAIGatewaySeen.Verdict）用它：判据问的是池子那个网关，改派时不能把结论挂到实际落点上。
 func usageCodexRouteLandedOnPoolGateway(poolGateway, inUseGateway string) bool {
 	poolGateway = strings.TrimSpace(poolGateway)
 	return poolGateway != "" && poolGateway == strings.TrimSpace(inUseGateway)

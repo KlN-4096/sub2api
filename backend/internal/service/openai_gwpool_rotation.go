@@ -71,10 +71,6 @@ func gatewayPoolRotationFrom(ctx context.Context) *gatewayPoolRotation {
 	return state
 }
 
-func GatewayPoolAccountRotationActive(ctx context.Context) bool {
-	return gatewayPoolRotationFrom(ctx) != nil
-}
-
 func gatewayPoolRotationAccount(account *Account, groupID int64) bool {
 	return account != nil && groupID > 0 && account.IsOpenAIOAuthLike() &&
 		account.UsesGatewayPool() &&

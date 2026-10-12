@@ -2367,15 +2367,13 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 		if result != openAISlotAcquireOK || !selection.Account.UsesGatewayPool() {
 			return
 		}
-		if selection.Account.GatewayPoolLongWaitEnabled() {
-			if err := service.EnableConcurrencySlotRenewal(c.Request.Context()); err != nil {
-				if release != nil {
-					release()
-				}
-				writeError(http.StatusServiceUnavailable, "api_error", "", "Unable to retain request concurrency slots")
-				release, result = nil, openAISlotAcquireFailed
-				return
+		if err := service.EnableConcurrencySlotRenewal(c.Request.Context()); err != nil {
+			if release != nil {
+				release()
 			}
+			writeError(http.StatusServiceUnavailable, "api_error", "", "Unable to retain request concurrency slots")
+			release, result = nil, openAISlotAcquireFailed
+			return
 		}
 		service.MaintainGatewayPoolWaitKeepalive(c, reqStream)
 	}()
@@ -3012,7 +3010,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		// captured by the previous failover account before credential lookup.
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 		currentAccountRelease = wrapReleaseOnDone(ctx, accountReleaseFunc)
-		if account.GatewayPoolLongWaitEnabled() {
+		if account.UsesGatewayPool() {
 			if err := service.EnableConcurrencySlotRenewal(ctx); err != nil {
 				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "request concurrency slot unavailable")
 				return

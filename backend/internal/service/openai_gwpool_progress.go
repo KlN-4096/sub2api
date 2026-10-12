@@ -81,18 +81,6 @@ func (p *gatewayPoolProgressTracker) start(account int64, limit int, scopes ...g
 	return run
 }
 
-func (p *gatewayPoolProgressTracker) resume(run *gatewayPoolProgressRun) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	run.done = false
-	for _, current := range p.runs[run.account] {
-		if current == run {
-			return
-		}
-	}
-	p.runs[run.account] = append(p.runs[run.account], run)
-}
-
 // Distinct tickets actually sent for verification; neither fetch failures,
 // A/B request count nor unused prefetched tickets.
 func (p *gatewayPoolProgressTracker) tried(run *gatewayPoolProgressRun, ticket string) {

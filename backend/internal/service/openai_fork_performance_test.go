@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/klauspost/compress/zstd"
 	"github.com/tidwall/gjson"
 )
 
@@ -70,7 +69,7 @@ func BenchmarkForkPerformanceUsageLifecycle(b *testing.B) {
 			applied := OpenAIGatewayPoolApplied{AccountID: account.ID, Gateway: "offline", Version: "v"}
 			svc.codexCookies.poolPairs.Store(identity, openAIGatewayPoolPair{
 				gateway: applied.Gateway, version: applied.Version, cookie: "fixture",
-				until: time.Now().Add(time.Hour), routeExpiresAt: time.Now().Add(time.Hour),
+				routeExpiresAt: time.Now().Add(time.Hour),
 			})
 			svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, applied.Version, "gpt-6-luna")
 			tag := gatewayPoolLedgerTag(identity)
@@ -82,7 +81,6 @@ func BenchmarkForkPerformanceUsageLifecycle(b *testing.B) {
 				b.StopTimer()
 				delete(repo.account.Extra, gatewayPoolUsageExtraKey)
 				delete(repo.account.Extra, gatewayPoolUsageTagKey)
-				delete(repo.account.Extra, gatewayPoolUsagePreviousTagKey)
 				svc.codexCookies.poolUsageCache.Delete(tag)
 				b.StartTimer()
 				ctx, finish := svc.beginGatewayPoolUsageRequest(context.Background(), account)
@@ -117,9 +115,8 @@ func BenchmarkForkPerformanceBody(b *testing.B) {
 		b.Run(fmt.Sprintf("bytes_%d", size), func(b *testing.B) {
 			body := forkPerformanceBody(size)
 			canonical := reorderCodexTopLevelFields(body, codexResponsesFieldOrder)
-			frame, err := encodeCodexZstdRequestBody(body)
-			if err != nil || !json.Valid(canonical) {
-				b.Fatalf("invalid fixture: %v", err)
+			if !json.Valid(canonical) {
+				b.Fatal("invalid fixture")
 			}
 			for _, tc := range []struct {
 				name string
@@ -129,26 +126,6 @@ func BenchmarkForkPerformanceBody(b *testing.B) {
 				{"legacy_canonical_order", func() []byte { return forkPerformanceLegacyReorder(canonical, codexResponsesFieldOrder) }},
 				{"zstd", func() []byte {
 					wire, err := encodeCodexZstdRequestBody(body)
-					if err != nil {
-						b.Fatal(err)
-					}
-					return wire
-				}},
-				{"legacy_zstd", func() []byte {
-					enc, ok := codexRequestZstdEncoders.Get().(*zstd.Encoder)
-					if !ok {
-						b.Fatal("unexpected zstd encoder fixture")
-					}
-					defer codexRequestZstdEncoders.Put(enc)
-					frame := enc.EncodeAll(body, make([]byte, 0, len(body)/3+64))
-					wire, err := normalizeCodexZstdFrameHeader(frame)
-					if err != nil {
-						b.Fatal(err)
-					}
-					return wire
-				}},
-				{"frame_header", func() []byte {
-					wire, err := normalizeCodexZstdFrameHeader(frame)
 					if err != nil {
 						b.Fatal(err)
 					}

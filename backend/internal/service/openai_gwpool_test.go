@@ -1696,3 +1696,26 @@ func TestPoolClientCacheKeyFollowsCallTimeout(t *testing.T) {
 	require.NoError(t, err)
 	require.Same(t, tuned, swapped)
 }
+
+// Test-only probes over production state (no production caller).
+
+func (s *openAICodexCookieStore) gatewayPoolUsedRecently(identity, gateway string, window time.Duration) bool {
+	_, used := s.gatewayPoolUsedAt(identity, gateway, window)
+	return used
+}
+
+func (s *openAICodexCookieStore) beginGatewayPoolAttempt(identity, gateway string, window time.Duration) bool {
+	return s.beginGatewayPoolAttemptAt(identity, gateway, window, nil)
+}
+
+func (s *openAICodexCookieStore) gatewayPoolInventorySnapshot(identity string) (generation uint64, pending bool) {
+	generation, active, candidates := s.gatewayPoolInventoryCandidates(identity)
+	return generation, active || len(candidates) > 0
+}
+
+func (s *openAICodexCookieStore) gatewayPoolRestDuration(identity string, account *Account, now time.Time) time.Duration {
+	if until := s.gatewayPoolLocalResumeAt(identity, account); until.After(now) {
+		return until.Sub(now)
+	}
+	return 0
+}

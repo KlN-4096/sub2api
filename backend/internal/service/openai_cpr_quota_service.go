@@ -86,12 +86,6 @@ type CPRAccountState struct {
 	FetchedAt             time.Time
 }
 
-// Schedulable 报告 CPR 是否会把请求路由给这个账号。CPR 的 scheduling_blocker
-// 只放行 normal，其余四态一律选不中（且不会 fallback 到组外账号）。
-func (s *CPRAccountState) Schedulable() bool {
-	return s != nil && s.Status == CPRAccountStatusNormal
-}
-
 // CPRQuotaService 查询 CPR 的 admin API。
 //
 // 不走账号代理：CPR 是本机服务，直连才对。admin_base_url 指向远端时同样直连，
