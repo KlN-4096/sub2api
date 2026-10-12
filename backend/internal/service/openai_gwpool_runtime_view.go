@@ -205,7 +205,7 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 		}
 		runtime.Rest = gatewayPoolRestDisplay(account, rest)
 		if estimate {
-			cooldown := gatewayPoolCooldownEstimate(account, cooldownDeadlines(), rest)
+			cooldown := gatewayPoolCooldownEstimate(account, cooldownDeadlines(), rest, runtime.ObservedAt)
 			runtime.CooldownEstimate = &cooldown
 		}
 		runtime.LedgerTag, runtime.ConcurrencyLimit = tag, account.Concurrency
