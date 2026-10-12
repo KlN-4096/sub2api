@@ -646,7 +646,6 @@ func TestCodexWindowNumberEvidence(t *testing.T) {
 			require.Equal(t, tc.want, extractClientWindowNumber(headers))
 			for _, cm := range []any{
 				map[string]any{openAIWSTurnMetadataHeader: metadata},
-				map[string]string{openAIWSTurnMetadataHeader: metadata},
 			} {
 				require.Equal(t, tc.want, codexFingerprintWindowNumberEvidence(cm))
 			}
