@@ -18,7 +18,7 @@ func TestGatewayPoolStatePeersNarrowSingleQuery(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	repo := &accountRepository{sql: db}
 	for _, kind := range []string{"usage", "rest"} {
-		mock.ExpectQuery(`SELECT id, jsonb_build_object\([\s\S]*FROM accounts WHERE deleted_at IS NULL AND\s*\(extra->>'openai_gwpool_` + kind + `_tag' = \$1 OR extra->>'openai_gwpool_` + kind + `_previous_tag' = \$1\)\s*ORDER BY CASE WHEN extra->>'openai_gwpool_` + kind + `_tag' = \$1 THEN 0 ELSE 1 END`).
+		mock.ExpectQuery(`SELECT id, jsonb_build_object\([\s\S]*FROM accounts WHERE deleted_at IS NULL AND extra->>'openai_gwpool_` + kind + `_tag' = \$1 ORDER BY id$`).
 			WithArgs("offline-tag").
 			WillReturnRows(sqlmock.NewRows([]string{"id", "extra"}).AddRow(2, `{"openai_gwpool_usage_blocked_at":"2026-10-06T10:00:00Z"}`))
 		rows, err := repo.FindGatewayPoolStatePeers(context.Background(), "offline-tag", kind)

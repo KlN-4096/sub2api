@@ -13,7 +13,7 @@ func TestBulkUpdateAccountsGatewayPoolSparsePatchAndTargetValidation(t *testing.
 	b.Extra[openAIGatewayPoolBaseURLExtraKey] = "http://127.0.0.1:8099"
 	a.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = "offline-one"
 	b.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = "offline-two"
-	a.Extra[openAIGatewayPoolMetricsExtraKey] = map[string]any{"requests": 8}
+	a.Extra["unrelated_runtime"] = map[string]any{"requests": 8}
 	repo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{1: a, 2: b}}
 	svc := &adminServiceImpl{accountRepo: repo}
 	result, err := svc.BulkUpdateAccounts(context.Background(), &BulkUpdateAccountsInput{

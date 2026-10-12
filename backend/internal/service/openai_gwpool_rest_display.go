@@ -7,7 +7,6 @@ type GatewayPoolRestView struct {
 	ChangedAt time.Time `json:"changed_at,omitzero"`
 	StartedAt time.Time `json:"started_at,omitzero"`
 	ResumeAt  time.Time `json:"resume_at,omitzero"`
-	NextCheck time.Time `json:"next_check,omitzero"`
 	Reason    string    `json:"reason,omitempty"`
 }
 
@@ -19,7 +18,7 @@ func (s *OpenAIGatewayService) gatewayPoolRestDisplay(account *Account, identity
 	}
 	state := s.codexCookies.gatewayPoolRestSnapshot(account, identity, peers)
 	view := GatewayPoolRestView{Active: state.Active, ChangedAt: state.ChangedAt, StartedAt: state.StartedAt,
-		ResumeAt: state.ResumeAt, NextCheck: state.NextCheck}
+		ResumeAt: state.ResumeAt}
 	if view.Active {
 		view.Reason = gatewayPoolRestReason(account, state.QualityGateways...)
 	}

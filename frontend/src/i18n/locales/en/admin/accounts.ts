@@ -683,7 +683,6 @@ export default {
         },
         gatewayRuntime: {
           live: 'Verified · {gateway} · probe models: {models}',
-          unverified: 'not verified',
           noTicket: 'No live ticket',
           verifiedAt: 'verified {time}',
           cycleFull: 'Cycle full',
@@ -692,10 +691,6 @@ export default {
           totalRounds: '{count} rounds',
           incompleteHint: 'Some duration unobserved; actual is at least this value',
           activeHint: 'Counts active business intervals on verified tickets, with overlaps counted once. Excludes idle time, ticket preparation, verification and retry waits. Legacy durations are hidden.',
-          history: 'Usage history',
-          ended: '{full}/{attempted} tickets · full-strength use {duration} · ended {end}',
-          legacy: 'Legacy · {model} · {full}/{attempted} tickets',
-          legacyArchived: 'Legacy archive · {model} · {count} rounds · {full}/{attempted} tickets',
           incomplete: ' (counts are lower bounds)'
         },
         gatewayProgress: {
@@ -727,8 +722,6 @@ export default {
         gwpoolContinuousWaitInactiveLimits: 'When enabled, exhaustion does not enter pool rest; the recovery count is inactive but its saved value remains. When disabled, every eligible candidate is still tried before resting. Client or intermediary hard timeouts can still end the connection.',
         gwpoolProbeTimeout: 'Maximum ticket verification time (seconds)',
         gwpoolProbeTimeoutDesc: 'Default 10 seconds, range 1–120. Each preflight A/B or post-response confirmation uses this timeout; the round budget follows its shot count. Timeouts are unknown failures, not degradation. All quality probes use Luna without changing the business model.',
-        gwpoolPrepareRetries: 'Recovery attempts',
-        gwpoolPrepareRetriesDesc: 'Default 0: no extra retries. Optional shared recovery for retryable ticket-fetch or verification failures before business dispatch. Failed tickets enter cooldown once attempts are exhausted. Never replays business requests.',
         baseUrlHint: 'Leave default for official OpenAI API',
         apiKeyHint: 'Your OpenAI API Key',
         oauthPassthrough: 'Auto passthrough (auth only)',
@@ -894,14 +887,7 @@ export default {
         turnStateRecoveryMin: 'Min interval (minutes)',
         turnStateRecoveryMax: 'Max interval (minutes)',
         gatewayHistory: {
-          diagnostics: 'Diagnostics',
-          runtimeSummary: 'Probes {requests} · Pending {pending}',
-          probeSource: { foreground: 'Foreground verification', background: 'Background preparation' },
-          probeTotals: '{rounds} rounds / {requests} requests: {full} full, {degraded} degraded, {inconclusive} unknown; mean {seconds}s/round, cumulative {perFull} requests/successful round',
-          feedbackTotals: 'Reports: {sent} sent, {pending} pending, {failed} permanent failures, {discarded} discarded',
-          runtimeHint: 'Cumulative probe attempts only, not business traffic. Unknown is not degraded. These are not a business success rate or measured tokens/cost. Up to 64 queued reports, retained for 7 days while enabled.',
           empty: 'Gateway -',
-          seen: '{n} used',
           // The tooltip's five segments are region-gateway-fullTime-state-verdict, each
           // carrying only the VALUE and no label: operators scan a column vertically, and
           // repeating "used within the window, still cooling" on every row pushes the values
@@ -912,7 +898,6 @@ export default {
           // scan picks out the one that comes back first.
           regionHot: 'CD left: {minutes}min',
           regionCooled: 'retry eligible',
-          regionIdle: 'never used',
           // Segment 3 is how LONG full strength held (full verdict → degraded verdict),
           // rendered straight as `180s` with no i18n key. This one is the placeholder when
           // there is no duration to show: window still running, never verified full, or both
@@ -921,33 +906,8 @@ export default {
           fullUntimed: 'not timed',
           cooldownFixed: 'fixed {minutes}min',
           cooldownRecommended: 'pool suggests {minutes}min',
-          legend:
-            '✓ current ticket verified · ! local cooldown · grey retry eligible; historical full does not mean available now',
-          // Two independent numbers, NO subtraction: "landings" comes from this row's ledger
-          // (gateway names touched over the past window), "left in pool" is the current
-          // deliverable listing reconciled against that ledger. The two sets do not nest.
-          // Without the pool listing, report only the landings: inventing a number is worse.
-          poolSnapshot: 'Last inventory snapshot: {free} (not live)',
           windowUsageHint:
             'Counts follow each recorded gateway\'s cooldown deadline. Unknown timestamps are not counted as cooled down. Expiry permits a retry, but does not guarantee an available ticket or recovered quality.',
-          // Expiry permits a retry; it does not prove recovery.
-          forecast: 'retry-eligible gateways, weighted by observed success: about {minutes} full-strength min/hour',
-          forecastPending: 'One-hour forecast: awaiting comparable samples',
-          forecastNone: 'no landing comes out of cooldown within the hour',
-          forecastHint:
-            'Counted per (account × gateway); do not collapse by region: {units} retry-eligible gateways within one hour. For the latest probe model {model} / {source} / state-echo-v1 and comparable observed resting intervals: count × observed full-strength rate × mean observed ended window, capped at 60 minutes.\n' +
-            'Uses at most 64 local repeat-contact rounds from the last 7 days. Each interval needs {results} conclusive results and {windows} ended windows; unknowns are not failures. No fixed success rate or 183-second fallback. Unfinished windows are omitted from duration, introducing censoring bias. Other rows may have contacts not merged yet.\n' +
-            'An estimate, not guaranteed full-strength time, ticket lifetime or quota. Tickets may be unavailable; existing traffic or warm-up must still confirm recovery.',
-          contactSummary: 'Contacts {count}',
-          contactHint: 'At most 64 rounds from 7 days; the latest 8 are detailed below. Stratified by model, criterion, source, first-contact classification and observed interval; unknowns are excluded from the rate denominator. First means first since local tracking, not never touched upstream. Full-strength duration is an observed ended window, not ticket lifetime.',
-          contactTruncated: 'History is incomplete or was trimmed; missing records do not prove first contact.',
-          contactRate: 'Full {full}/{total}; unknown {unknown}; {windows} ended windows, mean {seconds}s',
-          contactTimes: 'First recorded {first}; last sent {last}; round {round}; observed interval {gap}s',
-          contactWindow: 'Historical full window {seconds}s; latest probe {at} · {model} · {source} · {outcome}',
-          contactStep: 'Sent {sent} · HTTP {status} · state received {state} · echo accepted {echo} · observed gateway {gateway} · {ms}ms (— = no evidence)',
-          contactSources: { foreground: 'foreground probe', background: 'background probe', business: 'business' },
-          contactFirst: { tracked_first: 'first tracked', repeat: 'repeat contact', unknown: 'first unknown' },
-          contactOutcomes: { full: 'full', refreshed: 'state refreshed', unknown: 'inconclusive' },
           // state-echo verdict (backend openai_gwpool_state_echo.go).
           verdicts: {
             full: 'full',

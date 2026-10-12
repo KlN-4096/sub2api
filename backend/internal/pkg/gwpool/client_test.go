@@ -22,7 +22,7 @@ func TestClientCookieReturnsPair(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"gateway":"unified-142","cookie":"__cflb=lb; __oailb=jwt",`+
 			`"expires_at":"2026-10-01T06:40:00Z","valid_for_s":150,"verified_full":true,`+
-			`"ttl_is_advisory":true}`)
+			`"ttl_is_advisory":true,"pair_remaining_s":3000,"route_expires_at":"not-a-time"}`)
 	}))
 	defer srv.Close()
 
@@ -44,12 +44,6 @@ func TestClientCookieReturnsPair(t *testing.T) {
 	}
 	if pair.ValidFor != 150*time.Second {
 		t.Fatalf("valid_for_s 是满血窗口剩余量，要原样带出来, got %v", pair.ValidFor)
-	}
-	if !pair.VerifiedFull {
-		t.Fatal("verified_full 丢了")
-	}
-	if !pair.TTLIsAdvisory {
-		t.Fatal("ttl_is_advisory 丢了")
 	}
 }
 
@@ -133,7 +127,6 @@ func TestClientGatewaysRejectsAnswerForAnotherAccount(t *testing.T) {
 }
 
 // /cookie 也要报 account：一把 key 替多个上游账号取票时，槽位必须记在**报上来的那个**账号上。
-// 跨账号取到的票 verified_full 恒为 false（池子没有那个账号的凭据），但票本身照常交出来。
 func TestClientCookieCarriesAccount(t *testing.T) {
 	var gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -149,9 +142,6 @@ func TestClientCookieCarriesAccount(t *testing.T) {
 	}
 	if gotQuery != "account=acc-a&gateway=unified-167" {
 		t.Fatalf("query = %q", gotQuery)
-	}
-	if pair.VerifiedFull {
-		t.Fatal("verified_full 要原样带出来")
 	}
 	if pair.Cookie == "" {
 		t.Fatal("跨账号验不了满血不是丢票的理由")
@@ -265,7 +255,6 @@ func TestClientCookieRejectsUnusablePayloads(t *testing.T) {
 	}{
 		"非 200":    {http.StatusInternalServerError, `{}`},
 		"空 cookie": {http.StatusOK, `{"gateway":"unified-1","cookie":"","valid_for_s":150}`},
-		"非法截止":     {http.StatusOK, `{"gateway":"unified-1","cookie":"__cflb=a","route_expires_at":"not-a-time"}`},
 		"不是 JSON":  {http.StatusOK, `not json`},
 	}
 	for name, tc := range cases {
@@ -282,17 +271,11 @@ func TestClientCookieRejectsUnusablePayloads(t *testing.T) {
 	}
 }
 
-func TestClientCookieReferenceTTLIsIndependentOfRouteDeadline(t *testing.T) {
-	deadline := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+func TestClientCookieReferenceTTLNeverRejects(t *testing.T) {
 	for _, seconds := range []int{-1, 0, 150} {
-		pair, err := (cookiePayload{Cookie: "__cflb=a; __oailb=b", ValidForS: seconds, RouteExpiresAt: deadline}).pair()
-		if err != nil || !pair.RouteExpiresAt.Equal(deadline) {
-			t.Fatalf("reference %d must not reject or modify route deadline: %v", seconds, err)
+		if _, err := (cookiePayload{Cookie: "__cflb=a; __oailb=b", ValidForS: seconds}).pair(); err != nil {
+			t.Fatalf("reference %d must not reject: %v", seconds, err)
 		}
-	}
-	pair, err := (cookiePayload{Cookie: "__cflb=a; __oailb=b", ValidForS: 150}).pair()
-	if err != nil || !pair.RouteExpiresAt.IsZero() {
-		t.Fatal("missing deadline must remain unknown")
 	}
 }
 
@@ -417,4 +400,18 @@ func TestNewAppliesCallTimeout(t *testing.T) {
 	if _, err := New(srv.URL, "k", 3*time.Second).Cookie(context.Background(), testCookieRequest()); err != nil {
 		t.Fatalf("上限 3s 时这次 300ms 的调用不该失败: %v", err)
 	}
+}
+
+// Gateways / GatewaysForModel are test-only shortcuts over Catalog.
+func (c *Client) Gateways(ctx context.Context, account string, accountTag ...string) ([]Gateway, error) {
+	tag := ""
+	if len(accountTag) > 0 {
+		tag = accountTag[0]
+	}
+	return c.GatewaysForModel(ctx, account, tag, "")
+}
+
+func (c *Client) GatewaysForModel(ctx context.Context, account, accountTag, model string) ([]Gateway, error) {
+	catalog, err := c.Catalog(ctx, account, accountTag, model, 0)
+	return catalog.Gateways, err
 }

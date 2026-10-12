@@ -23,23 +23,8 @@ func TestGatewayPoolFullUsageStopsWhenBusinessBodyFinishes(t *testing.T) {
 	view, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{account.ID})
 	require.NoError(t, err)
 	round := view[account.ID].Runtime.Rounds[0]
-	require.Empty(t, round.FullActiveUntil, "EOF/Close must stop usage even while the verified ticket remains live")
-}
-
-func TestGatewayPoolLegacyHeldUsageIsReadOnlyAndNotDisplayed(t *testing.T) {
-	start := time.Now().UTC().Add(-time.Hour)
-	ticket := gatewayPoolUsageTicket{At: start, Full: true, UseStartedAt: start,
-		UseObservedAt: start.Add(20 * time.Second), UseExpiresAt: start.Add(time.Minute), UseSession: "before"}
-	round := GatewayPoolUsageRound{ID: "old", Model: gatewayPoolUsageSharedModel, StartedAt: start,
-		FullStartedAt: start, Full: 1, Attempted: 1, Tickets: map[string]gatewayPoolUsageTicket{"one": ticket}}
-	for _, session := range []string{"before", "after"} {
-		view := round.fullUsageView(session, time.Now())
-		require.Zero(t, view.FullDurationMS)
-		require.Empty(t, view.FullActiveUntil)
-		require.Empty(t, view.FullUsageMode)
-		require.Equal(t, ticket, round.Tickets["one"], "read-only projection cannot settle raw legacy timing")
-	}
-	require.EqualValues(t, 20000, round.legacyFullUseDuration(), "archival keeps observed history, not an unobserved open tail")
+	require.True(t, round.ActiveUsage == nil || !round.ActiveUsage.Open,
+		"EOF/Close must stop usage even while the verified ticket remains live")
 }
 
 func TestGatewayPoolFullUsageKeepsEarliestOutOfOrderSend(t *testing.T) {
@@ -97,7 +82,6 @@ func TestGatewayPoolFullUsageStartsOnBusinessWriteBeforeResponse(t *testing.T) {
 	require.Len(t, state.Rounds, 1)
 	require.NotNil(t, state.Rounds[0].ActiveUsage)
 	require.True(t, state.Rounds[0].ActiveUsage.Open)
-	require.Zero(t, state.Rounds[0].FullStartedAt)
 	require.Equal(t, 1, state.Rounds[0].Full)
 	require.Equal(t, 1, state.Rounds[0].Attempted)
 	require.Equal(t, 2, writesBeforeResponse, "one request-begin write plus one combined business-send write")

@@ -14,9 +14,8 @@ import (
 )
 
 const (
-	gatewayPoolRestStateKey       = "openai_gwpool_rest_state"
-	gatewayPoolRestTagKey         = "openai_gwpool_rest_tag"
-	gatewayPoolRestPreviousTagKey = "openai_gwpool_rest_previous_tag"
+	gatewayPoolRestStateKey = "openai_gwpool_rest_state"
+	gatewayPoolRestTagKey   = "openai_gwpool_rest_tag"
 )
 
 type gatewayPoolRestState struct {
@@ -28,9 +27,6 @@ type gatewayPoolRestState struct {
 	// Frozen on entry, shared by clones and durable across restarts. Legacy
 	// records without a cohort retain the configured count-only recovery rule.
 	QualityGateways []string `json:"quality_gateways,omitempty"`
-	// Decode old records, but never use a legacy recheck as a local deadline.
-	NextCheck time.Time             `json:"next_check,omitzero"`
-	Previous  *gatewayPoolRestState `json:"previous,omitempty"`
 }
 
 func readGatewayPoolRest(account *Account, tag string) gatewayPoolRestState {
@@ -39,18 +35,8 @@ func readGatewayPoolRest(account *Account, tag string) gatewayPoolRestState {
 		raw, _ := json.Marshal(account.Extra[gatewayPoolRestStateKey])
 		_ = json.Unmarshal(raw, &state)
 	}
-	if state.Tag == tag {
-		return state
-	}
-	previous := state
-	previous.Previous = nil
-	if state.Previous != nil && state.Previous.Tag == tag {
-		state = *state.Previous
-	} else {
-		state = gatewayPoolRestState{Tag: tag}
-	}
-	if previous.Tag != "" {
-		state.Previous = &previous
+	if state.Tag != tag {
+		return gatewayPoolRestState{Tag: tag}
 	}
 	return state
 }
@@ -86,9 +72,7 @@ func (s *OpenAIGatewayService) loadGatewayPoolRest(ctx context.Context, account 
 	}
 	adopt := func(other gatewayPoolRestState) {
 		if other.ChangedAt.After(state.ChangedAt) {
-			previous := state.Previous
 			state = other
-			state.Previous = previous
 		}
 	}
 	if s.accountRepo != nil {
@@ -176,13 +160,7 @@ func (s *OpenAIGatewayService) writeGatewayPoolRest(ctx context.Context, account
 	}
 	defer unlockInventory()
 	publishActive()
-	previousTag := ""
-	if state.Previous != nil {
-		previousTag = state.Previous.Tag
-	}
-	patch := map[string]any{
-		gatewayPoolRestStateKey: state, gatewayPoolRestTagKey: state.Tag, gatewayPoolRestPreviousTagKey: previousTag,
-	}
+	patch := map[string]any{gatewayPoolRestStateKey: state, gatewayPoolRestTagKey: state.Tag}
 	if atomicRepo, ok := s.accountRepo.(gatewayPoolRestRepository); ok && state.Active {
 		err = atomicRepo.SetGatewayPoolRest(ctx, account.ID, state.ResumeAt, gatewayPoolRestReason(fresh, state.QualityGateways...), patch)
 	} else if clearRepo, ok := s.accountRepo.(gatewayPoolClearRestRepository); ok && !state.Active {
@@ -261,7 +239,7 @@ func (s *OpenAIGatewayService) enterGatewayPoolRest(ctx context.Context, account
 	} else {
 		until = s.codexCookies.gatewayPoolLocalResumeAt(identity, fresh, state.QualityGateways...)
 	}
-	state.Active, state.ResumeAt, state.NextCheck = true, until, time.Time{}
+	state.Active, state.ResumeAt = true, until
 	state.advance(at)
 	err = s.writeGatewayPoolRest(ctx, fresh, identity, state, plan)
 	if cached, ok := s.codexCookies.poolRestState.Load(tag); ok {
@@ -333,10 +311,10 @@ func (s *OpenAIGatewayService) gatewayPoolResumeAllowed(ctx context.Context, acc
 	now := time.Now().UTC()
 	until := s.codexCookies.gatewayPoolLocalResumeAt(identity, fresh, state.QualityGateways...)
 	if until.After(now) {
-		if state.ResumeAt.Equal(until) && state.NextCheck.IsZero() {
+		if state.ResumeAt.Equal(until) {
 			return false, nil
 		}
-		state.ResumeAt, state.NextCheck = until, time.Time{}
+		state.ResumeAt = until
 		state.advance(now)
 		err = s.writeGatewayPoolRest(ctx, fresh, identity, state, gatewayPoolRestPlan{generation: &generation})
 		if err == nil {
@@ -344,7 +322,7 @@ func (s *OpenAIGatewayService) gatewayPoolResumeAllowed(ctx context.Context, acc
 		}
 		return false, err
 	}
-	state.Active, state.ResumeAt, state.NextCheck = false, time.Time{}, time.Time{}
+	state.Active, state.ResumeAt = false, time.Time{}
 	state.QualityGateways = nil
 	state.advance(now)
 	if err := s.writeGatewayPoolRest(ctx, fresh, identity, state, gatewayPoolRestPlan{generation: &generation}); err != nil {

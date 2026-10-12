@@ -12,7 +12,7 @@ func flushGatewayPoolActiveUsage(svc *OpenAIGatewayService, ctx context.Context,
 	svc.changeGatewayPoolUsage(ctx, account, identity, func(*gatewayPoolUsageLedger) bool { return false })
 }
 
-func TestGatewayPoolActiveUsageDoesNotWriteLegacyHeldDuration(t *testing.T) {
+func TestGatewayPoolActiveUsageClosesWhenAttemptFinishes(t *testing.T) {
 	svc, repo, _, account, request, _ := ticketWaitFixture(t)
 	gwpoolEchoSeedVerified(t, svc, account)
 	ctx, complete := svc.beginGatewayPoolUsageRequest(request.Context(), account)
@@ -31,41 +31,6 @@ func TestGatewayPoolActiveUsageDoesNotWriteLegacyHeldDuration(t *testing.T) {
 	require.Equal(t, 1, round.Full)
 	require.NotNil(t, round.ActiveUsage)
 	require.False(t, round.ActiveUsage.Open)
-	require.Zero(t, round.FullStartedAt)
-	ticket := round.Tickets[gatewayPoolUsageTicketKey(pair.gateway, pair.version)]
-	require.Zero(t, ticket.UseStartedAt)
-	require.Zero(t, ticket.UseObservedAt)
-	require.Zero(t, ticket.UseEndedAt)
-	require.Zero(t, ticket.UseExpiresAt)
-	require.Empty(t, ticket.UseSession)
-	require.Zero(t, ticket.UseMS)
-}
-
-func TestGatewayPoolLegacyUsageStaysUnchangedWhenNewCycleEnds(t *testing.T) {
-	start := time.Now().UTC().Add(-time.Hour)
-	account := gwpoolTestAccount(1)
-	svc, repo := gatewayRuntimeService(account)
-	legacy := gatewayPoolUsageTicket{
-		At: start, Full: true, UseStartedAt: start, UseObservedAt: start.Add(time.Minute),
-		UseExpiresAt: start.Add(10 * time.Minute), UseSession: "old-process", UseMS: 12,
-	}
-	tag := gatewayPoolLedgerTag(gwpoolTestIdentity)
-	require.NoError(t, repo.UpdateExtra(context.Background(), account.ID, map[string]any{
-		gatewayPoolUsageExtraKey: gatewayPoolUsageLedger{
-			Tag: tag, Rounds: []GatewayPoolUsageRound{{
-				ID: "legacy", Model: gatewayPoolUsageSharedModel, StartedAt: start,
-				Attempted: 1, Full: 1, FullStartedAt: start, Tickets: map[string]gatewayPoolUsageTicket{"old": legacy},
-			}},
-		},
-	}))
-	svc.changeGatewayPoolUsage(context.Background(), account, gwpoolTestIdentity, func(state *gatewayPoolUsageLedger) bool {
-		return state.end(time.Now().UTC(), "observed_exhausted")
-	})
-	fresh, err := repo.GetByID(context.Background(), account.ID)
-	require.NoError(t, err)
-	state := readGatewayPoolUsage(fresh, tag)
-	require.Equal(t, legacy, state.Rounds[0].Tickets["old"], "ending a new cycle cannot settle or rewrite legacy raw fields")
-	require.Equal(t, start, state.Rounds[0].FullStartedAt)
 }
 
 func TestGatewayPoolActiveUsageInvalidationSurvivesReplacementAndFailedWrite(t *testing.T) {
@@ -105,6 +70,4 @@ func TestGatewayPoolActiveUsageInvalidationSurvivesReplacementAndFailedWrite(t *
 	require.Len(t, state.Rounds, 1)
 	view := state.Rounds[0].fullUsageView(store.gatewayPoolUsageSession(), time.Now().Add(time.Hour), tracker.snapshot()...)
 	require.Equal(t, invalidated.invalidatedAt.Sub(start).Milliseconds(), view.FullDurationMS)
-	require.Empty(t, view.FullActiveUntil)
-	require.Zero(t, state.Rounds[0].Tickets[key].UseEndedAt, "new cutoff must not depend on legacy writes")
 }

@@ -12,24 +12,16 @@ import (
 )
 
 const (
-	gatewayPoolUsageExtraKey       = "openai_gwpool_usage_rounds"
-	gatewayPoolUsageTagKey         = "openai_gwpool_usage_tag"
-	gatewayPoolUsagePreviousTagKey = "openai_gwpool_usage_previous_tag"
-	gatewayPoolUsageHistoryLimit   = 100
-	gatewayPoolUsageTicketLimit    = 8192
-	gatewayPoolUsageSharedModel    = "all"
+	gatewayPoolUsageExtraKey     = "openai_gwpool_usage_rounds"
+	gatewayPoolUsageTagKey       = "openai_gwpool_usage_tag"
+	gatewayPoolUsageHistoryLimit = 100
+	gatewayPoolUsageTicketLimit  = 8192
+	gatewayPoolUsageSharedModel  = "all"
 )
 
 type gatewayPoolUsageTicket struct {
 	At   time.Time `json:"at"`
 	Full bool      `json:"full"`
-	// Legacy held-ticket timing is decoded/re-encoded verbatim, never updated.
-	UseStartedAt  time.Time `json:"use_started_at,omitzero"`
-	UseObservedAt time.Time `json:"use_observed_at,omitzero"`
-	UseEndedAt    time.Time `json:"use_ended_at,omitzero"`
-	UseExpiresAt  time.Time `json:"use_expires_at,omitzero"`
-	UseSession    string    `json:"use_session,omitempty"`
-	UseMS         int64     `json:"use_ms,omitempty"`
 }
 
 type GatewayPoolUsageRound struct {
@@ -42,23 +34,19 @@ type GatewayPoolUsageRound struct {
 	Full               int                               `json:"full"`
 	Incomplete         bool                              `json:"incomplete,omitempty"`
 	Tickets            map[string]gatewayPoolUsageTicket `json:"tickets,omitempty"`
-	FullStartedAt      time.Time                         `json:"full_started_at,omitzero"`
 	FullDurationMS     int64                             `json:"full_duration_ms"`
-	FullActiveUntil    []time.Time                       `json:"full_active_until,omitempty"`
 	DurationIncomplete bool                              `json:"duration_incomplete,omitempty"`
 	ActiveUsage        *gatewayPoolActiveUsage           `json:"active_usage,omitempty"`
 	FullUsageMode      string                            `json:"full_usage_mode,omitempty"`
 }
 
 type GatewayPoolUsageArchive struct {
-	Rounds             int64  `json:"rounds"`
-	Attempted          int64  `json:"attempted"`
-	Full               int64  `json:"full"`
-	DurationMS         int64  `json:"duration_ms"`
-	Incomplete         bool   `json:"incomplete,omitempty"`
-	DurationIncomplete bool   `json:"duration_incomplete,omitempty"`
-	ActiveDurationMS   *int64 `json:"active_duration_ms,omitempty"`
-	ActiveIncomplete   bool   `json:"active_duration_incomplete,omitempty"`
+	Rounds           int64  `json:"rounds"`
+	Attempted        int64  `json:"attempted"`
+	Full             int64  `json:"full"`
+	Incomplete       bool   `json:"incomplete,omitempty"`
+	ActiveDurationMS *int64 `json:"active_duration_ms,omitempty"`
+	ActiveIncomplete bool   `json:"active_duration_incomplete,omitempty"`
 }
 
 type gatewayPoolUsageLedger struct {
@@ -68,7 +56,6 @@ type gatewayPoolUsageLedger struct {
 	Archived               map[string]GatewayPoolUsageArchive `json:"archived"`
 	ClosedBefore           map[string]time.Time               `json:"closed_before"`
 	Incomplete             bool                               `json:"incomplete,omitempty"`
-	Previous               *gatewayPoolUsageLedger            `json:"previous,omitempty"`
 	LastRequestStartedAt   time.Time                          `json:"last_request_started_at,omitzero"`
 	LastRequestCompletedAt time.Time                          `json:"last_request_completed_at,omitzero"`
 	BlockedAt              time.Time                          `json:"blocked_at,omitzero"`
@@ -87,21 +74,8 @@ func readGatewayPoolUsage(account *Account, tag string) gatewayPoolUsageLedger {
 		raw, _ := json.Marshal(account.Extra[gatewayPoolUsageExtraKey])
 		_ = json.Unmarshal(raw, &state)
 	}
-	if state.Tag == tag {
-		return state
-	}
-	if state.Previous != nil && state.Previous.Tag == tag {
-		previous := state
-		state = *state.Previous
-		previous.Previous = nil
-		state.Previous = &previous
-		return state
-	}
-	previous := state
-	previous.Previous = nil
-	state = gatewayPoolUsageLedger{Tag: tag}
-	if previous.Tag != "" || len(previous.Rounds) > 0 || len(previous.Archived) > 0 {
-		state.Previous = &previous
+	if state.Tag != tag {
+		return gatewayPoolUsageLedger{Tag: tag}
 	}
 	return state
 }
@@ -165,11 +139,8 @@ func (s *OpenAIGatewayService) changeGatewayPoolUsage(ctx context.Context, accou
 		if blocked := gatewayPoolUsageBlockedAt(&peers[i]); blocked.After(blockedAt) {
 			blockedAt = blocked
 		}
-		other := readGatewayPoolUsage(&peers[i], tag)
-		if other.UpdatedAt.After(state.UpdatedAt) {
-			previous := state.Previous
+		if other := readGatewayPoolUsage(&peers[i], tag); other.UpdatedAt.After(state.UpdatedAt) {
 			state = other
-			state.Previous = previous
 		}
 	}
 	boundary := state.applyGatewayPoolBlock(blockedAt)
@@ -191,12 +162,8 @@ func (s *OpenAIGatewayService) changeGatewayPoolUsage(ctx context.Context, accou
 		updated = state.UpdatedAt.Add(time.Nanosecond)
 	}
 	state.UpdatedAt = updated
-	previousTag := ""
-	if state.Previous != nil {
-		previousTag = state.Previous.Tag
-	}
 	if err := s.accountRepo.UpdateExtra(ctx, fresh.ID, map[string]any{
-		gatewayPoolUsageExtraKey: state, gatewayPoolUsageTagKey: tag, gatewayPoolUsagePreviousTagKey: previousTag,
+		gatewayPoolUsageExtraKey: state, gatewayPoolUsageTagKey: tag,
 	}); err != nil {
 		slog.Warn("gwpool_usage_write_failed", "account_id", account.ID)
 		return false
@@ -337,19 +304,13 @@ func (r *gatewayPoolUsageLedger) prune() {
 		total.Rounds++
 		total.Attempted += int64(round.Attempted)
 		total.Full += int64(round.Full)
-		if round.Model == gatewayPoolUsageSharedModel {
-			total.DurationMS += round.legacyFullUseDuration()
-			if round.ActiveUsage != nil {
-				if total.ActiveDurationMS == nil {
-					total.ActiveDurationMS = new(int64)
-				}
-				*total.ActiveDurationMS += round.ActiveUsage.duration(round.EndedAt)
-				total.ActiveIncomplete = total.ActiveIncomplete || round.ActiveUsage.Incomplete
+		if round.Model == gatewayPoolUsageSharedModel && round.ActiveUsage != nil {
+			if total.ActiveDurationMS == nil {
+				total.ActiveDurationMS = new(int64)
 			}
-		} else if duration := round.EndedAt.Sub(round.StartedAt).Milliseconds(); duration > 0 {
-			total.DurationMS += duration // legacy wall-clock data remains separate
+			*total.ActiveDurationMS += round.ActiveUsage.duration(round.EndedAt)
+			total.ActiveIncomplete = total.ActiveIncomplete || round.ActiveUsage.Incomplete
 		}
-		total.DurationIncomplete = total.DurationIncomplete || round.DurationIncomplete
 		total.Incomplete = total.Incomplete || round.Incomplete
 		r.Archived[round.Model] = total
 	}

@@ -241,7 +241,6 @@ func TestCPRQuotaAdapterMapsWindows(t *testing.T) {
 	require.Equal(t, "/api/admin/accounts/detail", (*seen)[0].URL.Path)
 
 	require.Equal(t, "normal", state.Status)
-	require.True(t, state.Schedulable())
 	require.Equal(t, "pro", state.PlanType)
 	// 走完整解码路径，钉住 JSON 字段名 outboundProxyEndpoint，以及生产调用点上的脱敏。
 	// 只测 buildCPR* 的话，这个名字拼错会让功能静默失效而所有断言照样绿；fixture 放干净
@@ -445,7 +444,6 @@ func TestCPRRateLimitedUntilParsed(t *testing.T) {
 
 	state := buildCPRAccountState(&view, now)
 	require.Equal(t, "rate_limited", state.Status)
-	require.False(t, state.Schedulable(), "CPR 的调度器只放行 normal")
 	require.NotNil(t, state.RateLimitedUntil)
 	require.InDelta(t, until.Unix(), state.RateLimitedUntil.Unix(), 1)
 }

@@ -92,19 +92,15 @@ func TestGatewayPoolMemberIdentityRejectsMissingOrConflictingMember(t *testing.T
 	}
 }
 
-func TestGatewayPoolHistoryPartitionToggleRestoresOnlyMatchingView(t *testing.T) {
+func TestGatewayPoolHistoryTagSwitchDropsOldLedger(t *testing.T) {
 	at := time.Now().UTC()
 	original := openAIGatewayHistory{LedgerTag: "old", Current: "unified-1",
 		Seen: map[string]openAIGatewaySeen{"unified-1": {At: at}}}
 	member := gatewayPoolHistoryForTag(original, "member")
-	require.Empty(t, member.Seen)
-	require.Equal(t, "old", member.Previous.LedgerTag)
+	require.Equal(t, openAIGatewayHistory{LedgerTag: "member"}, member)
 	member.Seen = map[string]openAIGatewaySeen{"unified-2": {At: at}}
-	member.LedgerTag = "member"
-	restored := gatewayPoolHistoryForTag(member, "old")
-	require.Equal(t, original.Seen, restored.Seen)
-	require.NotContains(t, restored.Seen, "unified-2")
-	require.Nil(t, restored.Previous.Previous, "do not grow an unbounded nested archive")
+	require.Equal(t, openAIGatewayHistory{LedgerTag: "old"}, gatewayPoolHistoryForTag(member, "old"),
+		"switching back must not resurrect an abandoned ledger")
 }
 
 func TestGatewayPoolMemberSwitchRejectsLateOldHistory(t *testing.T) {
@@ -130,33 +126,52 @@ func TestGatewayPoolMemberHistoryDoesNotAdoptUnattributedWorkspaceTouches(t *tes
 	account.Extra[openAIGatewayHistoryExtraKey] = old
 	identity := openAIGatewayPoolAccountKey(account)
 	view := gatewayPoolHistoryForTag(old, gatewayPoolLedgerTag(identity))
-	require.Empty(t, view.Seen)
-	require.NotNil(t, view.Previous)
-	require.Equal(t, old.Seen, view.Previous.Seen, "preserve unassigned history without claiming it belongs to this member")
+	require.Equal(t, openAIGatewayHistory{LedgerTag: gatewayPoolLedgerTag(identity)}, view)
 	store := &openAICodexCookieStore{}
 	store.gatewayPoolHydrateUsed(account, identity)
 	require.False(t, store.gatewayPoolUsedRecently(identity, "unified-142", time.Hour))
 }
 
-func TestGatewayPoolMemberMigrationPreservesPreviousContactsAndUsage(t *testing.T) {
+func TestGatewayPoolMemberSwitchStartsEmptyLedgers(t *testing.T) {
 	account := gatewayPoolMemberFixture(t, 1, "user-one")
 	tag := gatewayPoolLedgerTag(openAIGatewayPoolAccountKey(account))
-	seen := map[string]gatewayPoolContactSeen{"unified-142": {LastAt: time.Now().UTC()}}
-	account.Extra[openAIGatewayPoolContactsExtraKey] = gatewayPoolContacts{LedgerTag: "old-workspace", Seen: seen}
+	now := time.Now().UTC()
+	account.Extra[openAIGatewayPoolContactsExtraKey] = gatewayPoolContacts{LedgerTag: "old-workspace",
+		Seen: map[string]gatewayPoolContactSeen{"unified-142": {LastAt: now}}}
+	account.Extra[gatewayPoolUsageExtraKey] = gatewayPoolUsageLedger{Tag: "old-workspace",
+		Rounds: []GatewayPoolUsageRound{{ID: "unassigned", Attempted: 7, Full: 3}}}
+	account.Extra[gatewayPoolRestStateKey] = gatewayPoolRestState{Tag: "old-workspace", Active: true, ChangedAt: now}
 	contacts := readGatewayPoolContacts(account, tag)
+	require.Equal(t, tag, contacts.LedgerTag)
 	require.Empty(t, contacts.Seen)
 	require.Empty(t, contacts.Rounds)
-	require.NotNil(t, contacts.Previous)
-	require.Equal(t, "old-workspace", contacts.Previous.LedgerTag)
-	require.Equal(t, seen, contacts.Previous.Seen)
-	account.Extra[gatewayPoolUsageExtraKey] = gatewayPoolUsageLedger{
-		Rounds: []GatewayPoolUsageRound{{ID: "unassigned", Attempted: 7, Full: 3}},
-	}
-	usage := readGatewayPoolUsage(account, tag)
-	require.Empty(t, usage.Rounds)
-	require.NotNil(t, usage.Previous)
-	require.Equal(t, 7, usage.Previous.Rounds[0].Attempted)
-	require.Equal(t, 3, usage.Previous.Rounds[0].Full)
+	raw, err := json.Marshal(contacts)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "previous")
+	require.Equal(t, gatewayPoolUsageLedger{Tag: tag}, readGatewayPoolUsage(account, tag))
+	require.Equal(t, gatewayPoolRestState{Tag: tag}, readGatewayPoolRest(account, tag))
+}
+
+func TestGatewayPoolLedgerWritesCarryNoPreviousArchive(t *testing.T) {
+	account := gatewayPoolMemberFixture(t, 1, "user-one")
+	identity := openAIGatewayPoolAccountKey(account)
+	tag := gatewayPoolLedgerTag(identity)
+	now := time.Now().UTC()
+	account.Extra[openAIGatewayHistoryExtraKey] = openAIGatewayHistory{LedgerTag: "old-workspace", Current: "unified-9",
+		Seen: map[string]openAIGatewaySeen{"unified-9": {At: now}}}
+	account.Extra[openAIGatewayLedgerTagExtraKey] = "old-workspace"
+	account.Extra[gatewayPoolUsageExtraKey] = gatewayPoolUsageLedger{Tag: "old-workspace", UpdatedAt: now}
+	account.Extra[gatewayPoolUsageTagKey] = "old-workspace"
+	svc, repo := gatewayRuntimeService(account)
+	ctx := context.Background()
+	svc.noteOpenAIGatewayUse(ctx, account, "unified-1", "", openAIGatewayVerdictFull, true, 0, 0, 0, tag)
+	require.True(t, svc.changeGatewayPoolUsage(ctx, account, identity, func(*gatewayPoolUsageLedger) bool { return true }))
+	fresh, err := repo.GetByID(ctx, account.ID)
+	require.NoError(t, err)
+	raw, err := json.Marshal(fresh.Extra)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "previous")
+	require.NotContains(t, string(raw), "old-workspace")
 }
 
 func TestGatewayPoolMemberWaitingRejectsCredentialSwitch(t *testing.T) {

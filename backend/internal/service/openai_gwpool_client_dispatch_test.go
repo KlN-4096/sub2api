@@ -174,7 +174,7 @@ func TestGatewayPoolClientDispatchLocallyExcludesStaleRoute(t *testing.T) {
 			store.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
 				cookie: "__cflb=old; __oailb=old", gateway: "old", version: version, invalidated: true,
 			})
-			for i := range gwpool.MaxExcludeItems + 5 {
+			for i := range 64 + 5 { // past the 64-item wire limit
 				store.gatewayPoolMarkUsed(gwpoolTestIdentity, fmt.Sprintf("cooling-%d", i))
 			}
 			pair, _, err := store.gatewayPoolPair(context.Background(), account, gwpoolTestIdentity)

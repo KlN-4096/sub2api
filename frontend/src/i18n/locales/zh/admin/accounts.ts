@@ -800,7 +800,6 @@ export default {
         },
         gatewayRuntime: {
           live: '已验证 · {gateway} · 验证模型：{models}',
-          unverified: '尚未验证',
           noTicket: '暂无可用票',
           verifiedAt: '{time}验满',
           cycleFull: '本轮满血用时',
@@ -809,10 +808,6 @@ export default {
           totalRounds: '{count}轮',
           incompleteHint: '部分时长未观测，实际不少于此值',
           activeHint: '仅统计已验满票承载业务的活跃区间，并发去重；不含空闲、找票、验证和重试等待。旧口径时长不再展示。',
-          history: '使用历史',
-          ended: '{full}/{attempted}张 · 满血使用 {duration} · {end}结束',
-          legacy: '旧统计 · {model} · {full}/{attempted}张',
-          legacyArchived: '旧归档 · {model} · {count}轮 · {full}/{attempted}张',
           incomplete: '（计数为下界）'
         },
         gatewayProgress: {
@@ -844,8 +839,6 @@ export default {
         gwpoolContinuousWaitInactiveLimits: '开启后，耗尽也不进入池休息，恢复数量设置暂不生效但保留原值。关闭后仍会试尽候选，耗尽才休息。客户端或中间代理的硬超时仍可能结束连接。',
         gwpoolProbeTimeout: '票验证最大时间（秒）',
         gwpoolProbeTimeoutDesc: '默认10秒，范围1–120秒。前置A/B和后置确认的每一发均使用此超时，整组预算按发数计算；超时属于未知故障，不计为降级。所有满血验证固定使用Luna，不改变业务模型。',
-        gwpoolPrepareRetries: '异常恢复次数',
-        gwpoolPrepareRetriesDesc: '默认0次，不额外重试。可配置发送业务前取票或验证异常的额外恢复次数；并发请求共享恢复，次数用完后失败票进入冷却，不重放业务。',
         baseUrlHint: '留空使用官方 OpenAI API',
         apiKeyHint: '您的 OpenAI API Key',
         oauthPassthrough: '自动透传（仅替换认证）',
@@ -1001,14 +994,7 @@ export default {
         turnStateRecoveryMin: '间隔下限（分钟）',
         turnStateRecoveryMax: '间隔上限（分钟）',
         gatewayHistory: {
-          diagnostics: '诊断',
-          runtimeSummary: '验证 {requests} · 待发 {pending}',
-          probeSource: { foreground: '前台验证', background: '后台准备' },
-          probeTotals: '{rounds} 轮 / {requests} 发：满血 {full}、降级 {degraded}、未知 {inconclusive}；平均 {seconds}s/轮，累计 {perFull} 发/成功轮',
-          feedbackTotals: '反馈：已发送 {sent}，待重试 {pending}，永久失败 {failed}，已丢弃 {discarded}',
-          runtimeHint: '仅累计验证请求尝试，不含业务请求；未知不算降级，不代表业务满血率或实际 token/金额。待发送最多 64 条，启用期间保留 7 天。',
           empty: '网关 -',
-          seen: '打过 {n} 个',
           // tooltip 的五段是「区域-网关名-满血时间-状态-判定」，每段只放**值**不带标签：
           // 运营方竖着扫一列看，每行重复一遍「窗口内打过，仍在冷却」会把真正要比的那几个
           // 值推到行尾对不齐。长说法留在 gatewayColumnHint 和 legend 里，那两处只出现一次。
@@ -1016,38 +1002,15 @@ export default {
           // 那个窗口算，默认 4 小时），竖着扫就能挑出最快能再用的那个。
           regionHot: '剩余CD:{minutes}分钟',
           regionCooled: '可重试',
-          regionIdle: '未打过',
           // 第三段是满血**时长**（判成满血到判成降智那一段），直接渲染成 `180s`，没有 i18n 键。
           // 这一条是没有时长读数时的占位：窗口还在跑、从没验出过满血、两条读数挤在同一次写入
           // 里算不出长度——对读者是同一件事，合成一个标签。
           fullUntimed: '未计时',
           cooldownFixed: '固定{minutes}分钟',
           cooldownRecommended: '池子建议{minutes}分钟',
-          legend: '✓ 当前票已验证 · ! 本地冷却中 · 灰 可再试；历史满血不代表当前可用',
-          // 两个数各报各的，**不做减法**：历史落点来自本地账本（过去一个窗口碰过的网关名），
-          // 池子剩余是「此刻可交付的清单」现对本地账本得出的，两个集合不是包含关系。
-          poolSnapshot: '最近库存快照：{free}（非实时）',
           windowUsageHint:
             '「冷却中」和「冷却完毕」按本行历史中各网关的冷却截止时间实时计算；时间未知不计入完毕。' +
             '冷却完毕只表示允许重试，不保证池中仍有票或已经恢复满血。',
-          // 冷却到期只是允许重试，不能把本地估计写成满血保底。
-          forecast: '可重试网关按实测成功率估计：一小时约 {minutes} 分钟满血',
-          forecastPending: '一小时满血预测：待统计（同层样本不足）',
-          forecastNone: '一小时内没有落点出冷却',
-          forecastHint:
-            '按 (账号 × 网关) 算，别按大区并：一小时内可重试 {units} 个。按最近验证模型 {model} / {source} / state-echo-v1，匹配实际静置间隔分档，以数量 × 实测满血率 × 已观测结束的平均满血时长计算，封顶60分钟。\n' +
-            '仅用本地最近7天内最多64轮重复接触；每档至少 {results} 次有结论和 {windows} 个结束窗口，无结论不算失败；缺样本不沿用183秒或固定成功率。未观测结束的窗口不参与时长，存在截尾偏差。同凭据其他行可能尚有未合并记录。\n' +
-            '这是估计，不是满血保底、票据有效期或配额；不保证仍有票，已有业务/预热仍需确认恢复。',
-          contactSummary: '接触 {count} 轮',
-          contactHint: '最多保留7天内64轮；下方显示最近8轮明细。按模型、判据、来源、首次分类和实际间隔分层；成功率分母不含无结论。首次仅指本地开始跟踪后首次，不代表上游从未接触。满血时长是已观测结束窗口的历史读数，不是票据有效期。',
-          contactTruncated: '历史不完整或曾被裁剪，缺失记录不能当成首次接触。',
-          contactRate: '满血 {full}/{total}；无结论 {unknown}；结束窗口 {windows} 个，平均 {seconds}s',
-          contactTimes: '首次记录 {first}；最近发送 {last}；本轮 {round}；实际间隔 {gap}s',
-          contactWindow: '本轮历史满血 {seconds}s；最近验证 {at} · {model} · {source} · {outcome}',
-          contactStep: '已发送 {sent} · HTTP {status} · 收到state {state} · echo接受 {echo} · 实测网关 {gateway} · {ms}ms（—为无证据）',
-          contactSources: { foreground: '前台预检', background: '后台预检', business: '业务' },
-          contactFirst: { tracked_first: '跟踪后首次', repeat: '重复接触', unknown: '首次未知' },
-          contactOutcomes: { full: '满血', refreshed: 'state刷新', unknown: '无结论' },
           // state-echo 判定（后端 openai_gwpool_state_echo.go）。
           verdicts: {
             full: '满血',
