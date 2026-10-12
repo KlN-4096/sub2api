@@ -136,7 +136,7 @@ func (s *OpenAIGatewayService) changeGatewayPoolOutbox(ctx context.Context, id i
 	}
 	unlock := s.codexCookies.gatewayPoolHistoryLock(id)
 	defer unlock()
-	account, err := s.accountRepo.GetByID(ctx, id)
+	account, err := s.gatewayPoolLedgerRow(ctx, id, openAIGatewayPoolOutboxExtraKey)
 	if err != nil {
 		return err
 	}
@@ -250,6 +250,9 @@ func (s *OpenAIGatewayService) flushGatewayPoolReports(ctx context.Context) {
 	}
 	scanCtx, scanCancel := context.WithTimeout(ctx, gatewayPoolReportTimeout)
 	accounts, err := s.accountRepo.FindByExtraField(scanCtx, openAIGatewayPoolExtraKey, true)
+	if err == nil {
+		err = s.hydrateGatewayPoolLedgers(scanCtx, gatewayPoolRowPointers(accounts), openAIGatewayPoolOutboxExtraKey, gatewayPoolUsageExtraKey)
+	}
 	scanCancel()
 	if err != nil {
 		slog.Warn("gwpool_feedback_scan_failed")

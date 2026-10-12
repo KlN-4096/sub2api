@@ -171,7 +171,7 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 
 	unlock := s.codexCookies.gatewayPoolHistoryLock(account.ID)
 	defer unlock()
-	fresh, err := s.codexCookies.freshGatewayPoolAccount(ctx, account)
+	fresh, err := s.codexCookies.freshGatewayPoolAccount(ctx, account, openAIGatewayHistoryExtraKey)
 	if err != nil || fresh == nil {
 		slog.Warn("gwpool_gateway_history_read_failed", "account_id", account.ID)
 		return

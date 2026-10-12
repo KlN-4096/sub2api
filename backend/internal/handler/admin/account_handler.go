@@ -366,6 +366,9 @@ func (h *AccountHandler) isSimpleMode() bool {
 }
 
 func (h *AccountHandler) buildAccountResponseWithRuntime(ctx context.Context, account *service.Account) AccountWithConcurrency {
+	if account != nil {
+		h.resolveGatewayPoolDisplay(ctx, []*service.Account{account})
+	}
 	item := AccountWithConcurrency{
 		Account:            h.accountResponseFromService(account),
 		simpleMode:         h.isSimpleMode(),
@@ -698,6 +701,7 @@ func (h *AccountHandler) List(c *gin.Context) {
 				return
 			}
 		}
+		h.resolveGatewayPoolDisplay(c.Request.Context(), accountPointers)
 	}
 
 	// Get current concurrency counts for all accounts

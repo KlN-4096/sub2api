@@ -26,7 +26,7 @@ func (s *OpenAIGatewayService) gatewayPoolExhaustedRestQuality(ctx context.Conte
 	fresh := account
 	if s.accountRepo != nil {
 		var err error
-		fresh, err = s.accountRepo.GetByID(ctx, account.ID)
+		fresh, err = s.gatewayPoolLedgerRow(ctx, account.ID, openAIGatewayPoolContactsExtraKey)
 		if err != nil || fresh == nil {
 			return nil
 		}
@@ -38,7 +38,7 @@ func (s *OpenAIGatewayService) gatewayPoolExhaustedRestQuality(ctx context.Conte
 	tag := gatewayPoolLedgerTag(identity)
 	contacts := readGatewayPoolContacts(fresh, tag)
 	if s.accountRepo != nil {
-		peers, err := s.gatewayPoolHistoryPeers(ctx, tag)
+		peers, err := s.gatewayPoolHistoryPeers(ctx, tag, openAIGatewayPoolContactsExtraKey)
 		if err != nil {
 			return nil // unavailable evidence is not an empty quality set
 		}

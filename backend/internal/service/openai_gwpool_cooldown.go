@@ -323,7 +323,7 @@ func gatewayPoolLedgerTag(identity string) string {
 // 每次取新票前合并所有账号行里带相同绑定标签的新鲜历史。不能永久缓存“已加载”，
 // 否则另一个实例写入其他克隆行后，本实例永远看不到。缓存中的活票不经过这里。
 func (s *openAICodexCookieStore) hydrateGatewayPoolSharedHistory(ctx context.Context, account *Account, identity string) error {
-	fresh, err := s.freshGatewayPoolAccount(ctx, account)
+	fresh, err := s.freshGatewayPoolAccount(ctx, account, openAIGatewayHistoryExtraKey)
 	if err != nil || fresh == nil {
 		return fmt.Errorf("unable to read current gateway cooldown")
 	}
@@ -335,7 +335,7 @@ func (s *openAICodexCookieStore) hydrateGatewayPoolSharedHistory(ctx context.Con
 	// The peer read is shared work: each caller leaves on its own context and
 	// only the last departure cancels the read for everyone.
 	_, _, err = s.poolHistoryLoad.do(ctx, tag, 0, func(work context.Context) (struct{}, error) {
-		accounts, err := s.historyByTag(work, tag)
+		accounts, err := s.historyByTag(work, tag, openAIGatewayHistoryExtraKey)
 		if err != nil {
 			return struct{}{}, err
 		}
@@ -407,13 +407,13 @@ func (s *openAICodexCookieStore) observeGatewayPoolCooldown(identity, gateway, v
 	return sample
 }
 
-// 运行态 history 是调度中立键，不能从五分钟的调度快照做决策。生产构造器注入 GetByID；
-// 未接数据库的离线替身仍可使用传入账号。
-func (s *openAICodexCookieStore) freshGatewayPoolAccount(ctx context.Context, account *Account) (*Account, error) {
+// 运行态账本不能从五分钟的调度快照做决策。生产构造器注入 gatewayPoolLedgerRow：读行并补读
+// ledgers 指定的账本（gateway_pool_ledgers）；未接数据库的离线替身仍可使用传入账号。
+func (s *openAICodexCookieStore) freshGatewayPoolAccount(ctx context.Context, account *Account, ledgers ...string) (*Account, error) {
 	if s.accountByID == nil {
 		return account, nil
 	}
-	return s.accountByID(ctx, account.ID)
+	return s.accountByID(ctx, account.ID, ledgers...)
 }
 
 func (s *openAICodexCookieStore) gatewayPoolHistoryLock(id int64) func() {

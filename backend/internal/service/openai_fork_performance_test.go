@@ -37,6 +37,11 @@ func (r *forkPerformanceRepo) UpdateExtra(ctx context.Context, id int64, patch m
 	return r.gatewayRuntimeRepo.UpdateExtra(ctx, id, patch)
 }
 
+func (r *forkPerformanceRepo) WriteGatewayPoolLedgers(ctx context.Context, id int64, ledgers, tags map[string]any) error {
+	r.writes++
+	return r.gatewayRuntimeRepo.WriteGatewayPoolLedgers(ctx, id, ledgers, tags)
+}
+
 func (r *forkPerformanceRepo) FindGatewayPoolStatePeers(_ context.Context, _ string, kind string, _ int64) ([]Account, error) {
 	r.scans++
 	r.mu.Lock()
@@ -64,7 +69,7 @@ func BenchmarkForkPerformanceUsageLifecycle(b *testing.B) {
 			account.Extra["unrelated_fixture"] = strings.Repeat("x", extraBytes)
 			repo := &forkPerformanceRepo{gatewayRuntimeRepo: &gatewayRuntimeRepo{account: *account}}
 			svc := &OpenAIGatewayService{accountRepo: repo}
-			svc.codexCookies.accountByID = repo.GetByID
+			svc.codexCookies.accountByID = svc.gatewayPoolLedgerRow
 			identity := openAIGatewayPoolAccountKey(account)
 			applied := OpenAIGatewayPoolApplied{AccountID: account.ID, Gateway: "offline", Version: "v"}
 			svc.codexCookies.poolPairs.Store(identity, openAIGatewayPoolPair{

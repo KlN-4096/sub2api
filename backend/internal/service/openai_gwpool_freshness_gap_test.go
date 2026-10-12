@@ -46,7 +46,7 @@ func TestGatewayPoolHealthCheckBeforeSendSeesInProcessWrite(t *testing.T) {
 			repo := &freshnessGapRepo{gatewayLocalRestRepo: &gatewayLocalRestRepo{&gatewayRuntimeRepo{account: *account}}}
 			upstream := &gwpoolEchoUpstream{}
 			svc := &OpenAIGatewayService{accountRepo: repo, httpUpstream: upstream}
-			svc.codexCookies.accountByID = repo.GetByID
+			svc.codexCookies.accountByID = svc.gatewayPoolLedgerRow
 			gwpoolEchoSeedVerified(t, svc, account) // fast path: live ticket already verified full
 			// Reads 1-2 are request level (usage start, waiting policy);
 			// read 3 is the attempt's locked rest admission.

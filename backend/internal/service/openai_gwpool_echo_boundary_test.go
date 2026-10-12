@@ -15,9 +15,9 @@ type gatewayEchoBoundaryRepo struct {
 	onContact func()
 }
 
-func (r *gatewayEchoBoundaryRepo) UpdateExtra(ctx context.Context, id int64, patch map[string]any) error {
-	err := r.gatewayRuntimeRepo.UpdateExtra(ctx, id, patch)
-	if patch[openAIGatewayPoolContactsExtraKey] != nil && r.onContact != nil {
+func (r *gatewayEchoBoundaryRepo) WriteGatewayPoolLedgers(ctx context.Context, id int64, ledgers, tags map[string]any) error {
+	err := r.gatewayRuntimeRepo.WriteGatewayPoolLedgers(ctx, id, ledgers, tags)
+	if ledgers[openAIGatewayPoolContactsExtraKey] != nil && r.onContact != nil {
 		r.onContact()
 	}
 	return err

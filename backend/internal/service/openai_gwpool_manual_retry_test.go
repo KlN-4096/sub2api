@@ -32,7 +32,7 @@ func TestGatewayPoolManualClearEndpointNeverStartsNetworkWork(t *testing.T) {
 	require.Zero(t, fake.releaseHits.Load())
 	require.Empty(t, upstream.sentBodies)
 	for _, id := range []int64{1, 2} {
-		account, readErr := repo.GetByID(ctx, id)
+		account, readErr := repo.stored(id)
 		require.NoError(t, readErr)
 		history, _ := readOpenAIGatewayHistory(account)
 		require.False(t, history.CooldownReset.ClearedAt.IsZero())
@@ -43,8 +43,8 @@ func TestGatewayPoolManualClearEndpointNeverStartsNetworkWork(t *testing.T) {
 func TestGatewayPoolManualClearPersistsAndKeepsLiveTicket(t *testing.T) {
 	ctx, now := context.Background(), time.Now().UTC()
 	svc, repo, identity := cooldownResetService(t, now)
-	account, _ := repo.GetByID(ctx, 1)
-	stale, _ := repo.GetByID(ctx, 2)
+	account, _ := repo.stored(1)
+	stale, _ := repo.stored(2)
 	before, _ := readOpenAIGatewayHistory(account)
 	pair := openAIGatewayPoolPair{gateway: "recent", version: "live", routeExpiresAt: now.Add(time.Hour)}
 	mark := gatewayPoolVerifiedMark{version: "live", at: now}
@@ -52,7 +52,7 @@ func TestGatewayPoolManualClearPersistsAndKeepsLiveTicket(t *testing.T) {
 	svc.codexCookies.poolVerified.Store(identity, mark)
 	require.NoError(t, svc.clearGatewayPoolCooldown(ctx, account, identity))
 	for _, id := range []int64{1, 2} {
-		fresh, err := repo.GetByID(ctx, id)
+		fresh, err := repo.stored(id)
 		require.NoError(t, err)
 		history, _ := readOpenAIGatewayHistory(fresh)
 		require.False(t, history.CooldownReset.ClearedAt.IsZero())
@@ -69,7 +69,7 @@ func TestGatewayPoolManualClearPersistsAndKeepsLiveTicket(t *testing.T) {
 	svc.codexCookies.gatewayPoolHydrateUsed(stale, identity)
 	require.False(t, svc.codexCookies.gatewayPoolUsedRecently(identity, "recent", time.Hour))
 	// A restart may see the stale clone first, then the durable owner barrier.
-	restarted := &openAICodexCookieStore{accountByID: repo.GetByID, historyByTag: svc.gatewayPoolHistoryPeers}
+	restarted := &openAICodexCookieStore{accountByID: svc.gatewayPoolLedgerRow, historyByTag: svc.gatewayPoolHistoryPeers}
 	require.NoError(t, restarted.hydrateGatewayPoolSharedHistory(ctx, stale, identity))
 	require.False(t, restarted.gatewayPoolUsedRecently(identity, "recent", time.Hour))
 	require.True(t, restarted.beginGatewayPoolAttempt(identity, "recent", time.Hour))
@@ -81,7 +81,7 @@ func TestGatewayPoolManualClearPersistsAndKeepsLiveTicket(t *testing.T) {
 func TestGatewayPoolManualClearRestartsOnlyThisMembersCandidateFIFO(t *testing.T) {
 	ctx := context.Background()
 	svc, repo, identity := cooldownResetService(t, time.Now().UTC())
-	account, _ := repo.GetByID(ctx, 1)
+	account, _ := repo.stored(1)
 	require.NoError(t, svc.clearGatewayPoolCooldown(ctx, account, identity))
 	_, exists := svc.codexCookies.poolCandidateQueues.Load(identity)
 	require.False(t, exists, "clearing does not create a candidate queue")
@@ -99,7 +99,7 @@ func TestGatewayPoolManualClearRejectsFetchStartedBeforeClear(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	svc, repo, identity := cooldownResetService(t, time.Now().UTC())
-	account, _ := repo.GetByID(ctx, 1)
+	account, _ := repo.stored(1)
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-new"), 150)
 	entered, release := make(chan struct{}), make(chan struct{})
 	fake.onCookie = func() { close(entered); <-release }
@@ -127,7 +127,7 @@ func TestGatewayPoolManualClearDropsOnlyCandidateBackoff(t *testing.T) {
 	for _, code := range []string{gwpool.CodeAllCooling, gwpool.CodeConsumerRejected, gwpool.CodeUpstreamRejected, gwpool.CodeNoExit} {
 		ctx := context.Background()
 		svc, repo, identity := cooldownResetService(t, time.Now().UTC())
-		account, _ := repo.GetByID(ctx, 1)
+		account, _ := repo.stored(1)
 		svc.codexCookies.rememberGatewayPoolBackoff(identity, time.Time{}, time.Minute, code)
 		require.NoError(t, svc.clearGatewayPoolCooldown(ctx, account, identity))
 		left, _ := svc.codexCookies.gatewayPoolBackoffFor(identity)
@@ -144,7 +144,7 @@ func TestGatewayPoolManualClearKeepsInFlightAuthenticationRefusal(t *testing.T) 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			svc, repo, identity := cooldownResetService(t, time.Now().UTC())
-			account, _ := repo.GetByID(ctx, 1)
+			account, _ := repo.stored(1)
 			fake := newGwpoolFakePool(t, "", 150)
 			fake.listGateways = []gwpoolFakeGateway{{Name: "unified-new", PairReady: true}}
 			fake.refuseStatus, fake.refuseCode, fake.refuseRetryAfter = 503, code, 60
@@ -207,7 +207,7 @@ func TestGatewayPoolManualClearRestRetriesPartiallyCommittedClones(t *testing.T)
 	repo := &gatewayManualRestRepo{gatewayPoolAccountsRepo: base, failID: 2}
 	svc.accountRepo = repo
 	for _, id := range []int64{1, 2} {
-		account, _ := repo.GetByID(ctx, id)
+		account, _ := repo.stored(id)
 		state := gatewayPoolRestState{Tag: gatewayPoolLedgerTag(identity), Active: true, ChangedAt: now,
 			QualityGateways: []string{"quality-before-clear"}}
 		until := now.Add(time.Minute)
@@ -215,13 +215,13 @@ func TestGatewayPoolManualClearRestRetriesPartiallyCommittedClones(t *testing.T)
 		repo.rows[id].account.TempUnschedulableReason = gatewayPoolRestReason(account)
 		repo.rows[id].account.TempUnschedulableUntil = &until
 	}
-	account, _ := repo.GetByID(ctx, 1)
+	account, _ := repo.stored(1)
 	require.Error(t, svc.clearGatewayPoolManualRest(ctx, account, identity))
-	first, _ := repo.GetByID(ctx, 1)
+	first, _ := repo.stored(1)
 	require.False(t, readGatewayPoolRest(first, gatewayPoolLedgerTag(identity)).Active)
 	repo.failID = 0
 	require.NoError(t, svc.clearGatewayPoolManualRest(ctx, account, identity))
-	second, _ := repo.GetByID(ctx, 2)
+	second, _ := repo.stored(2)
 	require.Nil(t, second.TempUnschedulableUntil)
 	require.False(t, readGatewayPoolRest(second, gatewayPoolLedgerTag(identity)).Active)
 	require.Empty(t, readGatewayPoolRest(second, gatewayPoolLedgerTag(identity)).QualityGateways)
@@ -230,14 +230,14 @@ func TestGatewayPoolManualClearRestRetriesPartiallyCommittedClones(t *testing.T)
 func TestGatewayPoolManualClearRejectsLateTouchAndHistory(t *testing.T) {
 	ctx, now := context.Background(), time.Now().UTC()
 	svc, repo, identity := cooldownResetService(t, now)
-	account, _ := repo.GetByID(ctx, 1)
+	account, _ := repo.stored(1)
 	require.NoError(t, svc.clearGatewayPoolCooldown(ctx, account, identity))
-	before, _ := repo.GetByID(ctx, 1)
+	before, _ := repo.stored(1)
 	svc.codexCookies.gatewayPoolMarkUsed(identity, "recent", time.Time{})
 	require.Nil(t, svc.codexCookies.observeGatewayPoolCooldown(identity, "recent", openAIGatewayVerdictDegraded, time.Hour, time.Time{}))
 	svc.noteOpenAIGatewayUse(context.WithValue(ctx, gatewayPoolObservationEpochKey{}, time.Time{}),
 		account, "recent", "test-region", openAIGatewayVerdictDegraded, true, 0, 0, 0, gatewayPoolLedgerTag(identity))
-	after, _ := repo.GetByID(ctx, 1)
+	after, _ := repo.stored(1)
 	require.Equal(t, before.Extra, after.Extra)
 	require.False(t, svc.codexCookies.gatewayPoolUsedRecently(identity, "recent", time.Hour))
 }
@@ -245,7 +245,7 @@ func TestGatewayPoolManualClearRejectsLateTouchAndHistory(t *testing.T) {
 func TestGatewayPoolManualClearFailedWriteDoesNotPublish(t *testing.T) {
 	ctx, now := context.Background(), time.Now().UTC()
 	svc, repo, identity := cooldownResetService(t, now)
-	account, _ := repo.GetByID(ctx, 1)
+	account, _ := repo.stored(1)
 	repo.rows[1].fail = true
 	require.Error(t, svc.clearGatewayPoolCooldown(ctx, account, identity))
 	require.True(t, svc.codexCookies.gatewayPoolCooldownClearAt(identity).IsZero())

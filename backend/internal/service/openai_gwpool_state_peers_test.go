@@ -45,34 +45,33 @@ func TestGatewayPoolStatePeersIgnoreLegacyNestedPrevious(t *testing.T) {
 		}))
 }
 
-type gatewayPoolRuntimeWriteRepo struct {
+type gatewayPoolLedgerWriteRepo struct {
 	*gatewayRuntimeRepo
-	runtime []map[string]any
+	ledgers, tags []map[string]any
 }
 
-func (r *gatewayPoolRuntimeWriteRepo) UpdateGatewayPoolRuntimeExtra(_ context.Context, _ int64, patch map[string]any) error {
-	r.runtime = append(r.runtime, patch)
+func (r *gatewayPoolLedgerWriteRepo) WriteGatewayPoolLedgers(_ context.Context, _ int64, ledgers, tags map[string]any) error {
+	r.ledgers, r.tags = append(r.ledgers, ledgers), append(r.tags, tags)
 	return nil
 }
 
-func TestGatewayPoolRuntimeWritesSkipUpdateExtraOnlyWhenAllKeysAreRuntime(t *testing.T) {
+func TestGatewayPoolLedgerWritesSplitLedgersFromTags(t *testing.T) {
+	ctx := context.Background()
 	account := gwpoolTestAccount(1)
 	base := &gatewayRuntimeRepo{account: *account}
-	repo := &gatewayPoolRuntimeWriteRepo{gatewayRuntimeRepo: base}
+	repo := &gatewayPoolLedgerWriteRepo{gatewayRuntimeRepo: base}
 	svc := &OpenAIGatewayService{accountRepo: repo}
-	require.True(t, svc.changeGatewayPoolUsage(context.Background(), account, gwpoolTestIdentity,
+	require.True(t, svc.changeGatewayPoolUsage(ctx, account, gwpoolTestIdentity,
 		func(*gatewayPoolUsageLedger) bool { return true }))
-	require.Len(t, repo.runtime, 1)
-	require.Contains(t, repo.runtime[0], gatewayPoolUsageExtraKey)
-	require.NotContains(t, base.account.Extra, gatewayPoolUsageExtraKey, "a runtime ledger write must not take UpdateExtra")
+	require.Len(t, repo.ledgers, 1)
+	require.Contains(t, repo.ledgers[0], gatewayPoolUsageExtraKey)
+	require.Len(t, repo.ledgers[0], 1)
+	require.Equal(t, map[string]any{gatewayPoolUsageTagKey: gatewayPoolLedgerTag(gwpoolTestIdentity)}, repo.tags[0])
+	require.NotContains(t, base.account.Extra, gatewayPoolUsageExtraKey, "a ledger write must not reach extra")
 
-	mixed := map[string]any{gatewayPoolUsageTagKey: "mixed", openAIGatewayPoolExtraKey: true}
-	require.NoError(t, svc.updateGatewayPoolRuntimeExtra(context.Background(), account.ID, mixed))
-	require.Len(t, repo.runtime, 1, "a patch with any other key keeps UpdateExtra and its snapshot sync")
-	require.Equal(t, "mixed", base.account.Extra[gatewayPoolUsageTagKey])
-
-	svc.accountRepo = base
-	require.NoError(t, svc.updateGatewayPoolRuntimeExtra(context.Background(), account.ID,
-		map[string]any{gatewayPoolUsageTagKey: "fallback"}))
-	require.Equal(t, "fallback", base.account.Extra[gatewayPoolUsageTagKey], "repositories without the method fall back")
+	svc.accountRepo = struct{ AccountRepository }{base} // no ledger table
+	require.NoError(t, svc.updateGatewayPoolRuntimeExtra(ctx, account.ID,
+		map[string]any{gatewayPoolUsageExtraKey: "fallback", gatewayPoolUsageTagKey: "fallback"}))
+	require.Equal(t, "fallback", base.account.Extra[gatewayPoolUsageExtraKey])
+	require.Equal(t, "fallback", base.account.Extra[gatewayPoolUsageTagKey])
 }

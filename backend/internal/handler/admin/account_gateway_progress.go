@@ -48,6 +48,16 @@ func (h *AccountHandler) GatewayPoolProgress(c *gin.Context) {
 	response.Success(c, progress)
 }
 
+// resolveGatewayPoolDisplay gives listed and single-row responses the gateway
+// history and contacts the page shows; they live outside extra since migration 253.
+func (h *AccountHandler) resolveGatewayPoolDisplay(ctx context.Context, accounts []*service.Account) {
+	if resolver, ok := h.adminService.(interface {
+		ResolveGatewayPoolDisplay(context.Context, []*service.Account)
+	}); ok {
+		resolver.ResolveGatewayPoolDisplay(ctx, accounts)
+	}
+}
+
 func (h *AccountHandler) RetryGatewayPool(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || id <= 0 {

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"log/slog"
 	"sort"
 	"time"
 )
@@ -123,6 +124,9 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 	}
 	out := map[int64]GatewayPoolProgress{}
 	accounts, err := s.accountRepo.GetByIDs(ctx, ids)
+	if err == nil {
+		err = s.hydrateGatewayPoolLedgers(ctx, accounts, openAIGatewayHistoryExtraKey, openAIGatewayPoolContactsExtraKey, gatewayPoolUsageExtraKey)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +141,12 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 	historyPeers := map[string][]Account{}
 	restPeers := map[string][]Account{}
 	displayCache := gatewayPoolDisplayCache{}
+	requested := map[int64]*Account{}
+	for _, account := range accounts {
+		if account != nil {
+			requested[account.ID] = account
+		}
+	}
 	for _, account := range accounts {
 		if account == nil || !s.codexCookies.gatewayPoolTakeover(account) {
 			continue
@@ -148,7 +158,7 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 		tag := gatewayPoolLedgerTag(identity)
 		peers, loaded := historyPeers[tag]
 		if !loaded {
-			peers, err = s.gatewayPoolHistoryPeers(ctx, tag)
+			peers, err = s.gatewayPoolDisplayPeers(ctx, tag, requested)
 			if err != nil {
 				return nil, err
 			}
@@ -297,4 +307,52 @@ func (s *adminServiceImpl) GatewayPoolRuntimeProgress(ctx context.Context, ids [
 		return reader.GatewayPoolRuntimeProgress(ctx, ids, estimate)
 	}
 	return s.GatewayPoolProgress(ids), nil
+}
+
+// gatewayPoolDisplayPeers is gatewayPoolHistoryPeers for one progress
+// snapshot: a peer that is itself a requested row takes that row's read
+// instead of loading its ledgers again (every row is its own peer).
+func (s *OpenAIGatewayService) gatewayPoolDisplayPeers(ctx context.Context, tag string, requested map[int64]*Account) ([]Account, error) {
+	peers, err := s.accountRepo.FindByExtraField(ctx, openAIGatewayLedgerTagExtraKey, tag)
+	if err != nil {
+		return nil, err
+	}
+	var unread []*Account
+	for i := range peers {
+		if row := requested[peers[i].ID]; row != nil {
+			peers[i] = *row
+		} else {
+			unread = append(unread, &peers[i])
+		}
+	}
+	return peers, s.hydrateGatewayPoolLedgers(ctx, unread, openAIGatewayHistoryExtraKey, openAIGatewayPoolContactsExtraKey)
+}
+
+// ResolveGatewayPoolDisplay puts the display projection of each listed row's
+// own history and contacts under their old extra keys, as the page read them
+// before migration 253: pool rows until their first progress poll, rows off the
+// pool (whose Codex routes record a landing gateway too) always.
+func (s *OpenAIGatewayService) ResolveGatewayPoolDisplay(ctx context.Context, accounts []*Account) {
+	if err := s.hydrateGatewayPoolLedgers(ctx, accounts, openAIGatewayHistoryExtraKey, openAIGatewayPoolContactsExtraKey); err != nil {
+		slog.Warn("gwpool_list_display_failed", "error", err) // display only
+		return
+	}
+	for _, account := range accounts {
+		if _, ok := account.Extra[openAIGatewayHistoryExtraKey]; ok {
+			history, _ := readOpenAIGatewayHistory(account)
+			account.Extra[openAIGatewayHistoryExtraKey] = history.display()
+		}
+		if _, ok := account.Extra[openAIGatewayPoolContactsExtraKey]; ok {
+			tag := account.GetExtraString(openAIGatewayLedgerTagExtraKey)
+			account.Extra[openAIGatewayPoolContactsExtraKey] = readGatewayPoolContacts(account, tag).display()
+		}
+	}
+}
+
+func (s *adminServiceImpl) ResolveGatewayPoolDisplay(ctx context.Context, accounts []*Account) {
+	if resolver, ok := s.runtimeBlocker.(interface {
+		ResolveGatewayPoolDisplay(context.Context, []*Account)
+	}); ok {
+		resolver.ResolveGatewayPoolDisplay(ctx, accounts)
+	}
 }

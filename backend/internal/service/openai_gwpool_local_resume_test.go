@@ -19,7 +19,7 @@ func TestGatewayPoolLocalResumeIgnoresPoolSupplyAndOldRecheck(t *testing.T) {
 	lists := 0
 	fake.onList = func() { lists++ }
 	repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*account}}}
-	svc := &OpenAIGatewayService{accountRepo: repo}
+	svc := withGatewayPoolRowRead(&OpenAIGatewayService{accountRepo: repo})
 	now := time.Now().UTC()
 	for _, gateway := range []string{"one", "two"} {
 		svc.codexCookies.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, gateway), now.Add(-2*time.Hour))
@@ -92,7 +92,7 @@ func TestGatewayPoolLocalResumeKeepsOtherAccountBlocks(t *testing.T) {
 	until := time.Now().Add(time.Hour)
 	account.TempUnschedulableUntil, account.TempUnschedulableReason = &until, "auth failure"
 	repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*account}}}
-	svc := &OpenAIGatewayService{accountRepo: repo}
+	svc := withGatewayPoolRowRead(&OpenAIGatewayService{accountRepo: repo})
 	identity, err := svc.codexCookies.gatewayPoolIdentity(context.Background(), account)
 	require.NoError(t, err)
 	require.NoError(t, svc.enterGatewayPoolRest(context.Background(), account, identity,
@@ -155,12 +155,12 @@ func TestGatewayPoolLocalTimerRestoresDeadlineWithoutBusinessOrPoolRequests(t *t
 	require.NoError(t, svc.enterGatewayPoolRest(context.Background(), account, identity, now, now.Add(time.Hour)))
 	// No process-local rest/touches survive. Startup must load and replace the
 	// legacy/wrong deadline using durable history, not wait for business.
-	restarted := &OpenAIGatewayService{accountRepo: repo}
-	restarted.codexCookies.accountByID = repo.GetByID
+	restarted := withGatewayPoolRowRead(&OpenAIGatewayService{accountRepo: repo})
+	restarted.codexCookies.accountByID = restarted.gatewayPoolLedgerRow
 	restarted.StartGatewayPoolReporter()
 	defer restarted.StopGatewayPoolReporter()
 	require.Eventually(t, func() bool {
-		fresh, err := repo.GetByID(context.Background(), account.ID)
+		fresh, err := repo.stored(account.ID)
 		return err == nil && !readGatewayPoolRest(fresh, gatewayPoolLedgerTag(identity)).Active &&
 			fresh.TempUnschedulableUntil == nil
 	}, 3*time.Second, 20*time.Millisecond)
@@ -174,7 +174,7 @@ func TestGatewayPoolLocalMaintenanceDailyResetReleasesRestImmediately(t *testing
 	repo := &gatewayManualRestRepo{gatewayPoolAccountsRepo: base}
 	svc.accountRepo = repo
 	for _, id := range []int64{1, 2} {
-		account, err := repo.GetByID(ctx, id)
+		account, err := repo.stored(id)
 		require.NoError(t, err)
 		history, _ := readOpenAIGatewayHistory(account)
 		delete(history.Seen, "recent") // the remaining 8h cooldown has already rested 2h
@@ -192,7 +192,7 @@ func TestGatewayPoolLocalMaintenanceDailyResetReleasesRestImmediately(t *testing
 	svc.codexCookies.poolUsed.Delete(gatewayPoolLedgerKey(identity, "recent"))
 	svc.maintainGatewayPoolRests(ctx)
 	for _, id := range []int64{1, 2} {
-		account, err := repo.GetByID(ctx, id)
+		account, err := repo.stored(id)
 		require.NoError(t, err)
 		require.False(t, readGatewayPoolRest(account, gatewayPoolLedgerTag(identity)).Active)
 		require.Nil(t, account.TempUnschedulableUntil)
@@ -202,7 +202,7 @@ func TestGatewayPoolLocalMaintenanceDailyResetReleasesRestImmediately(t *testing
 func TestGatewayPoolLocalDeadlineKeepsClearedKnownGatewaysAfterNewTouchAndRestart(t *testing.T) {
 	ctx, now := context.Background(), time.Now().UTC()
 	svc, base, identity := cooldownResetService(t, now)
-	account, err := base.GetByID(ctx, 1)
+	account, err := base.stored(1)
 	require.NoError(t, err)
 	require.NoError(t, svc.clearGatewayPoolCooldown(ctx, account, identity))
 	// 新触碰须严格晚于清除墓碑：Windows 墙钟约 0.5ms 一跳，同一跳内的触碰按清除前的旧触碰算。
@@ -216,7 +216,7 @@ func TestGatewayPoolLocalDeadlineKeepsClearedKnownGatewaysAfterNewTouchAndRestar
 	account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 1
 	require.False(t, svc.codexCookies.gatewayPoolLocalResumeAt(identity, account).After(time.Now()),
 		"the other cleared known gateway still counts")
-	fresh, err := base.GetByID(ctx, 1)
+	fresh, err := base.stored(1)
 	require.NoError(t, err)
 	fresh.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 1
 	restarted := &OpenAIGatewayService{}
@@ -246,7 +246,7 @@ func TestGatewayPoolLocalResumePreservesAuthBlockWrittenDuringRest(t *testing.T)
 	allowed, err := svc.gatewayPoolResumeAllowed(context.Background(), account, true)
 	require.NoError(t, err)
 	require.False(t, allowed)
-	fresh, err := repo.GetByID(context.Background(), account.ID)
+	fresh, err := repo.stored(account.ID)
 	require.NoError(t, err)
 	require.Equal(t, authUntil, *fresh.TempUnschedulableUntil)
 	require.Equal(t, "oauth 401", fresh.TempUnschedulableReason)

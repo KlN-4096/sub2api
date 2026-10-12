@@ -81,7 +81,7 @@ func TestGatewayPoolQueueViewUsesScopedCacheWithoutScheduling(t *testing.T) {
 	require.Empty(t, svc.codexCookies.poolCooldown, "display must not hydrate shared cooldowns")
 	// Compare the next read-only decision with the production ranking entry,
 	// including fresh account/history reads and the actual exploration counter.
-	svc.codexCookies.historyByTag = func(context.Context, string) ([]Account, error) { return nil, nil }
+	svc.codexCookies.historyByTag = func(context.Context, string, ...string) ([]Account, error) { return nil, nil }
 	catalog, err := pool.Catalog(context.Background(), gatewayPoolUpstreamAccountID(gwpoolTestIdentity),
 		gatewayPoolAccountTag(account, gwpoolTestIdentity), gatewayPoolProbeModelLuna, 0)
 	require.NoError(t, err)
