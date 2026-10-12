@@ -182,6 +182,12 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 		progress.Runtime = runtime
 		out[account.ID] = progress
 	}
+	// Answer every requested ID; the admin page waits for a complete batch.
+	for _, id := range ids {
+		if _, ok := out[id]; !ok {
+			out[id] = GatewayPoolProgress{Inactive: true}
+		}
+	}
 	return out, nil
 }
 

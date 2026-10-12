@@ -103,6 +103,8 @@ const (
 	defaultRequestTimeout = 5 * time.Second
 	// maxResponseBytes 读响应的上限。pair 里 __oailb 是约 300 字符的 JWT，4 KiB 足够。
 	maxResponseBytes = 4 << 10
+	// A full cooldown batch acknowledgement carries up to 32 recommendations (~8 KiB).
+	maxBatchAckBytes = 64 << 10
 	// Catalogs include contact/recommendation history; ordinary 106-gateway
 	// responses already exceed 64 KiB. Bound the whole response, not a JSON prefix.
 	maxListBytes = 2 << 20

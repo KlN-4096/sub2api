@@ -63,3 +63,27 @@ func TestCooldownBatchRejectsAmbiguousAcknowledgements(t *testing.T) {
 		}
 	}
 }
+
+// A full batch acknowledgement with recommendations is far larger than a single
+// ticket response; truncating it would fail a batch the pool already stored.
+func TestCooldownBatchAcceptsFullAcknowledgementWithRecommendations(t *testing.T) {
+	at := time.Now().UTC()
+	reports := make([]CooldownReport, CooldownBatchLimit)
+	results := make([]string, CooldownBatchLimit)
+	for i := range reports {
+		id := fmt.Sprintf("%064x", i+1)
+		reports[i] = CooldownReport{ID: id, AccountTag: strings.Repeat("c", 64), Gateway: "g", WindowSeconds: 3600, ElapsedSeconds: 3600, Result: "full", ObservedAt: at}
+		results[i] = fmt.Sprintf(`{"id":%q,"status":200,"added":true,"recommendation":{"seconds":3600,"samples":6,"source":"account",`+
+			`"report_interval_seconds":21600,"report_policy_expires_at":%q}}`, id, at.Add(time.Hour).Format(time.RFC3339Nano))
+	}
+	body := `{"ok":true,"results":[` + strings.Join(results, ",") + `]}`
+	if len(body) <= maxResponseBytes {
+		t.Fatalf("fixture must exceed the single-response read limit: %d bytes", len(body))
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprint(w, body) }))
+	defer server.Close()
+	got, err := New(server.URL, "test-key", time.Second).ReportCooldownBatch(context.Background(), reports)
+	if err != nil || len(got) != CooldownBatchLimit || got[CooldownBatchLimit-1].Recommendation == nil {
+		t.Fatalf("full acknowledgement rejected: %v (%d results)", err, len(got))
+	}
+}

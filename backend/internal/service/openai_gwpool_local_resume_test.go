@@ -171,6 +171,10 @@ func TestGatewayPoolLocalDeadlineKeepsClearedKnownGatewaysAfterNewTouchAndRestar
 	account, err := base.GetByID(ctx, 1)
 	require.NoError(t, err)
 	require.NoError(t, svc.clearGatewayPoolCooldown(ctx, account, identity))
+	// 新触碰须严格晚于清除墓碑：Windows 墙钟约 0.5ms 一跳，同一跳内的触碰按清除前的旧触碰算。
+	for clearedAt := svc.codexCookies.gatewayPoolCooldownClearAt(identity); !time.Now().After(clearedAt); {
+		time.Sleep(time.Millisecond)
+	}
 	require.True(t, svc.codexCookies.beginGatewayPoolAttempt(identity, "recent", time.Hour))
 	deadline := svc.codexCookies.gatewayPoolLocalResumeAt(identity, account)
 	// Two known, N defaults to 50: both must finish (one has just been touched).
