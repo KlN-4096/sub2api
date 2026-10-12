@@ -255,9 +255,7 @@ export default {
         creditsExhaustedUntil: 'AI Credits exhausted, expected recovery at {time}',
         overloadedUntil: 'Overloaded until {time}',
         viewTempUnschedDetails: 'View temp unschedulable details',
-        tempUnschedulableUntil: 'Resumes {time}',
-        turnStateHold: 'Degraded pause · {model} is paused on this account while the hunter looks for a ticket; resumes on a hit, re-pauses on the next request after expiry',
-        turnStateHoldShort: 'Degraded'
+        tempUnschedulableUntil: 'Resumes {time}'
       },
       columns: {
         name: 'Name',
@@ -291,7 +289,7 @@ export default {
         hint: 'Displayed as "group / base score / sticky bonus". The base score is computed within the current filtered candidate set and includes priority, load, queue depth, error rate, first-token latency, reset window, quota headroom, billing rate, and related factors. The sticky bonus applies only when sticky weighting is enabled for previous_response_id or session_hash. Higher scores are preferred.'
       },
       gatewayColumnHint: 'Shows the current route ticket, measured full-strength usage and quality/ordinary candidate queues. Green is reserved for a live verified ticket; candidates remain neutral. Queue classification comes from backend evidence for the same member and model, using cached metadata and local cooldowns only. Missing or expired metadata displays — without fetching tickets or probing. Region and gateway names are the pool delivery labels, not proof of the actual upstream landing point.',
-      usageWindowsHint: '"5h / 7d" are the upstream account\'s official rolling usage windows (e.g. OpenAI ChatGPT, Claude). They are imposed by the upstream provider on the account itself — not configured by sub2api, and unrelated to the models you map. Usage resets automatically once each window rolls over, and the limit cannot be lifted from within sub2api. Purple/amber rows are the Codex turn-states currently in effect for this account (one per model); the countdown is the remainder of the one-hour validity from minting, and amber means the ticket looks degraded.',
+      usageWindowsHint: '"5h / 7d" are the upstream account\'s official rolling usage windows (e.g. OpenAI ChatGPT, Claude). They are imposed by the upstream provider on the account itself — not configured by sub2api, and unrelated to the models you map. Usage resets automatically once each window rolls over, and the limit cannot be lifted from within sub2api.',
       ollamaCloud: {
         title: 'Ollama Cloud usage',
         sessionSecurityHint: 'The browser session is encrypted at rest and sent only to the fixed official settings URL.',
@@ -695,7 +693,6 @@ export default {
         },
         gatewayRuntime: {
           live: 'Verified · {gateway} · probe models: {models}',
-          unverified: 'not verified',
           noTicket: 'No live ticket',
           verifiedAt: 'verified {time}',
           cycleFull: 'Cycle full',
@@ -704,10 +701,6 @@ export default {
           totalRounds: '{count} rounds',
           incompleteHint: 'Some duration unobserved; actual is at least this value',
           activeHint: 'Counts active business intervals on verified tickets, with overlaps counted once. Excludes idle time, ticket preparation, verification and retry waits. Legacy durations are hidden.',
-          history: 'Usage history',
-          ended: '{full}/{attempted} tickets · full-strength use {duration} · ended {end}',
-          legacy: 'Legacy · {model} · {full}/{attempted} tickets',
-          legacyArchived: 'Legacy archive · {model} · {count} rounds · {full}/{attempted} tickets',
           incomplete: ' (counts are lower bounds)'
         },
         gatewayProgress: {
@@ -739,8 +732,6 @@ export default {
         gwpoolContinuousWaitInactiveLimits: 'When enabled, exhaustion does not enter pool rest; the recovery count is inactive but its saved value remains. When disabled, every eligible candidate is still tried before resting. Client or intermediary hard timeouts can still end the connection.',
         gwpoolProbeTimeout: 'Maximum ticket verification time (seconds)',
         gwpoolProbeTimeoutDesc: 'Default 10 seconds, range 1–120. Each preflight A/B or post-response confirmation uses this timeout; the round budget follows its shot count. Timeouts are unknown failures, not degradation. All quality probes use Luna without changing the business model.',
-        gwpoolPrepareRetries: 'Recovery attempts',
-        gwpoolPrepareRetriesDesc: 'Default 0: no extra retries. Optional shared recovery for retryable ticket-fetch or verification failures before business dispatch. Failed tickets enter cooldown once attempts are exhausted. Never replays business requests.',
         baseUrlHint: 'Leave default for official OpenAI API',
         apiKeyHint: 'Your OpenAI API Key',
         oauthPassthrough: 'Auto passthrough (auth only)',
@@ -890,30 +881,8 @@ export default {
           GWPOOL_CONSUMER_KEY_REQUIRED:
             'The gateway pool is enabled on this account, so the consumer key is required. Paste the key the pool issued for this account.'
         },
-        turnStateHunterEffort: 'Probe reasoning effort',
-        turnStateHunterUsageKey: 'Usage API key ID (blank = no usage log)',
-        turnStateHunterUsageKeyDesc:
-          'When set, every 200 probe is recorded under this key through the standard usage path (type "Hunter probe", billed normally, bumps last-used); input tokens are estimated locally (base prompt included), output is always 0. Use a dedicated key: probes consume its quota/rate limits, and subscription groups need an active subscription.',
-        turnStateRecovery: 'Degradation recovery probe',
-        turnStateRecoveryDesc:
-          "Asks the candy puzzle through the account's own exit at randomized intervals (a healthy model answers 21, a degraded one 29/36); once at least 'successes' of the last 'window' answers are right the account is marked recovered, while 'window' consecutive failures start a cooldown. Independent of the hunter (works with the hunter off), it only records a marker and a log line and never changes any setting. Probing stops once marked, and a natural 312 from real traffic clears the marker.",
-        turnStateRecoveryModel: 'Probe model',
-        turnStateRecoveryModelAuto: 'blank = gpt-5.6-sol',
-        turnStateRecoveryStreak: 'Window (total probes)',
-        turnStateRecoverySuccess: 'Successes needed',
-        turnStateRecoveryEffortDefault: 'default (medium)',
-        turnStateRecoveryCooldown: 'Failure cooldown (hours)',
-        turnStateRecoveryMin: 'Min interval (minutes)',
-        turnStateRecoveryMax: 'Max interval (minutes)',
         gatewayHistory: {
-          diagnostics: 'Diagnostics',
-          runtimeSummary: 'Probes {requests} · Pending {pending}',
-          probeSource: { foreground: 'Foreground verification', background: 'Background preparation' },
-          probeTotals: '{rounds} rounds / {requests} requests: {full} full, {degraded} degraded, {inconclusive} unknown; mean {seconds}s/round, cumulative {perFull} requests/successful round',
-          feedbackTotals: 'Reports: {sent} sent, {pending} pending, {failed} permanent failures, {discarded} discarded',
-          runtimeHint: 'Cumulative probe attempts only, not business traffic. Unknown is not degraded. These are not a business success rate or measured tokens/cost. Up to 64 queued reports, retained for 7 days while enabled.',
           empty: 'Gateway -',
-          seen: '{n} used',
           // The tooltip's five segments are region-gateway-fullTime-state-verdict, each
           // carrying only the VALUE and no label: operators scan a column vertically, and
           // repeating "used within the window, still cooling" on every row pushes the values
@@ -924,7 +893,6 @@ export default {
           // scan picks out the one that comes back first.
           regionHot: 'CD left: {minutes}min',
           regionCooled: 'retry eligible',
-          regionIdle: 'never used',
           // Segment 3 is how LONG full strength held (full verdict → degraded verdict),
           // rendered straight as `180s` with no i18n key. This one is the placeholder when
           // there is no duration to show: window still running, never verified full, or both
@@ -933,33 +901,8 @@ export default {
           fullUntimed: 'not timed',
           cooldownFixed: 'fixed {minutes}min',
           cooldownRecommended: 'pool suggests {minutes}min',
-          legend:
-            '✓ current ticket verified · ! local cooldown · grey retry eligible; historical full does not mean available now',
-          // Two independent numbers, NO subtraction: "landings" comes from this row's ledger
-          // (gateway names touched over the past window), "left in pool" is the current
-          // deliverable listing reconciled against that ledger. The two sets do not nest.
-          // Without the pool listing, report only the landings: inventing a number is worse.
-          poolSnapshot: 'Last inventory snapshot: {free} (not live)',
           windowUsageHint:
             'Counts follow each recorded gateway\'s cooldown deadline. Unknown timestamps are not counted as cooled down. Expiry permits a retry, but does not guarantee an available ticket or recovered quality.',
-          // Expiry permits a retry; it does not prove recovery.
-          forecast: 'retry-eligible gateways, weighted by observed success: about {minutes} full-strength min/hour',
-          forecastPending: 'One-hour forecast: awaiting comparable samples',
-          forecastNone: 'no landing comes out of cooldown within the hour',
-          forecastHint:
-            'Counted per (account × gateway); do not collapse by region: {units} retry-eligible gateways within one hour. For the latest probe model {model} / {source} / state-echo-v1 and comparable observed resting intervals: count × observed full-strength rate × mean observed ended window, capped at 60 minutes.\n' +
-            'Uses at most 64 local repeat-contact rounds from the last 7 days. Each interval needs {results} conclusive results and {windows} ended windows; unknowns are not failures. No fixed success rate or 183-second fallback. Unfinished windows are omitted from duration, introducing censoring bias. Other rows may have contacts not merged yet.\n' +
-            'An estimate, not guaranteed full-strength time, ticket lifetime or quota. Tickets may be unavailable; existing traffic or warm-up must still confirm recovery.',
-          contactSummary: 'Contacts {count}',
-          contactHint: 'At most 64 rounds from 7 days; the latest 8 are detailed below. Stratified by model, criterion, source, first-contact classification and observed interval; unknowns are excluded from the rate denominator. First means first since local tracking, not never touched upstream. Full-strength duration is an observed ended window, not ticket lifetime.',
-          contactTruncated: 'History is incomplete or was trimmed; missing records do not prove first contact.',
-          contactRate: 'Full {full}/{total}; unknown {unknown}; {windows} ended windows, mean {seconds}s',
-          contactTimes: 'First recorded {first}; last sent {last}; round {round}; observed interval {gap}s',
-          contactWindow: 'Historical full window {seconds}s; latest probe {at} · {model} · {source} · {outcome}',
-          contactStep: 'Sent {sent} · HTTP {status} · state received {state} · echo accepted {echo} · observed gateway {gateway} · {ms}ms (— = no evidence)',
-          contactSources: { foreground: 'foreground probe', background: 'background probe', business: 'business' },
-          contactFirst: { tracked_first: 'first tracked', repeat: 'repeat contact', unknown: 'first unknown' },
-          contactOutcomes: { full: 'full', refreshed: 'state refreshed', unknown: 'inconclusive' },
           // state-echo verdict (backend openai_gwpool_state_echo.go).
           verdicts: {
             full: 'full',
@@ -979,43 +922,6 @@ export default {
             'middle-east': 'M.East',
             unknown: 'Unknown'
           }
-        },
-        turnStatePool: {
-          empty: 'Turn-state —',
-          starved: 'Turn-state: no ticket, passing through',
-          manualTag: 'manual',
-          observedTag: 'last minted',
-          summary: '{n} model(s) with a live turn-state',
-          summaryObservedOnly: 'no live ticket, {n} reading(s) only',
-          detail: '{model}: {shape} {health}, minted {minted}, expires {expires}',
-          detailPair: ', pair {n}',
-          detailReminted: ', upstream re-minted {n}x',
-          healthy: 'full',
-          degraded: 'suspect',
-          unknown: 'unknown shape',
-          hunterSummary: 'hunter (experimental) {count}/{max} this hour · {next} · {last}',
-          hunterNext: 'next {time}',
-          hunterReady: 'ready',
-          hunterProbing: 'probing',
-          recoverySummary: 'recovery {successes}/{window} right (need {success}) · {next}',
-          recoveryCooling: 'cooling until {time}',
-          recoveryDone: 'recovered · {time}',
-          recoveryResultHit: 'answered {answer}✓',
-          recoveryResultMiss: 'answered {answer}✗',
-          recoveryDetail: "{time} {model} {'@'}{proxy}{exit}: {result}, took {latency}",
-          hunterGateIdle: 'paused: no traffic',
-          hunterGateHeld: 'degraded pause: hunting a ticket',
-          hunterGateFresh: 'ticket still fresh',
-          hunterNeedsAuto: 'hunter inactive: enable automatic takeover first',
-          // A bare `@` is vue-i18n's linked-message prefix and throws in production builds; use {'@'}.
-          hunterLast: "last {result} {'@'}{proxy} {time}",
-          hunterLastNone: 'no probe yet',
-          hunterResultHit: '{chars}✓',
-          hunterResultMiss: '{chars}',
-          hunterResultAnswerHit: '{chars}·answered {answer}✓',
-          hunterResultAnswerMiss: '{chars}·answered {answer}✗',
-          hunterResultError: 'error {status} {error}',
-          hunterDetail: "{time} {model} {'@'}{proxy}{exit}: {result}, took {latency}",
         },
         compactMode: 'Compact mode',
         compactModeDesc:

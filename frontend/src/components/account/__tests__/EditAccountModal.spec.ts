@@ -34,16 +34,7 @@ vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
       update: updateAccountMock,
-      checkMixedChannelRisk: checkMixedChannelRiskMock,
-      // turn-state 覆写表的模型下拉走这个接口（AccountTestModal 同款）。
-      getAvailableModels: vi.fn().mockResolvedValue([{ id: 'gpt-5.6-luna' }, { id: 'gpt-6-astra' }])
-    },
-    proxies: {
-      // 292 猎手的代理多选走这个接口，懒加载。
-      getAll: vi.fn().mockResolvedValue([
-        { id: 20, name: 'webshare', protocol: 'socks5', host: 'p.webshare.io', port: 1080 },
-        { id: 21, name: 'b2proxy', protocol: 'http', host: 'gw.b2proxy.example', port: 8000 }
-      ])
+      checkMixedChannelRisk: checkMixedChannelRiskMock
     },
     settings: {
       getWebSearchEmulationConfig: vi.fn().mockResolvedValue({ enabled: false, providers: [] }),
@@ -1183,30 +1174,15 @@ describe('EditAccountModal', () => {
     expect(wrapper.find('[data-testid="edit-openai-gwpool-section"]').exists()).toBe(false)
   })
 
-  // 「一轮最多试几张票」现在是常驻旋钮：降智防护 2026-10-03 删成零档，预热无条件跑，
-  // 所以那个下拉和「跟着档位显示」都没了。
-  it('replaces the ticket-count limit with shared recovery including explicit zero', async () => {
+  // 票数上限、档位下拉与异常恢复次数都已删除：预热无条件跑，准备阶段失败票直接换下一张。
+  it('has no ticket-count, guard-mode or recovery-attempt knobs', async () => {
     const account = buildAccount()
     account.type = 'oauth'
     account.extra = { openai_gwpool: true, openai_gwpool_base_url: 'https://pool.0102400.xyz' }
-    updateAccountMock.mockReset().mockResolvedValue(account)
-    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
-
     const wrapper = mountModal(account)
-    const knob = '[data-testid="edit-openai-gwpool-prepare-retries"]'
-    expect(wrapper.find('[data-testid="edit-openai-gwpool-warm-tickets"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="edit-openai-gwpool-guard"]').exists(), '档位下拉已删').toBe(false)
-    expect(wrapper.find(knob).exists()).toBe(true)
-
-    await wrapper.get(knob).setValue('0')
-    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
-    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_gwpool_prepare_retries).toBe(0)
-
-    // 清空 = 回到后端默认值（5）= 不落键，别在 extra 里堆默认项。
-    updateAccountMock.mockReset().mockResolvedValue(account)
-    await wrapper.get(knob).setValue('')
-    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
-    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_gwpool_prepare_retries')
+    for (const testid of ['edit-openai-gwpool-warm-tickets', 'edit-openai-gwpool-guard', 'edit-openai-gwpool-prepare-retries']) {
+      expect(wrapper.find(`[data-testid="${testid}"]`).exists(), testid).toBe(false)
+    }
   })
 
   // 四个旋钮：留空 = 用后端默认值，所以默认形态下一个键都不该落（避免 extra 堆默认项）。
@@ -1265,7 +1241,7 @@ describe('EditAccountModal', () => {
     const details = wrapper.get<HTMLDetailsElement>('[data-testid="edit-openai-gwpool-details"]')
     expect(details.element.open).toBe(false)
     expect(details.get('summary').text()).toBe('admin.accounts.openai.gwpoolDetails')
-    for (const key of ['gwpoolGatewayWindowDesc', 'gwpoolFetchTimeoutDesc', 'gwpoolListTimeoutDesc', 'gwpoolPrepareRetriesDesc']) {
+    for (const key of ['gwpoolGatewayWindowDesc', 'gwpoolFetchTimeoutDesc', 'gwpoolListTimeoutDesc']) {
       expect(wrapper.get('[data-testid="edit-openai-gwpool-section"]').text()).toContain(`admin.accounts.openai.${key}`)
     }
     expect(details.text()).toContain('admin.accounts.openai.gwpoolGuardDetails')
@@ -1470,8 +1446,7 @@ describe('EditAccountModal', () => {
   it('saves ticket timeout independently and restores defaults on clear or account switch', async () => {
     const account = buildAccount()
     account.type = 'oauth'
-    account.extra = { openai_gwpool: true, openai_gwpool_base_url: 'https://pool.example.test',
-      openai_gwpool_prepare_retries: 1 }
+    account.extra = { openai_gwpool: true, openai_gwpool_base_url: 'https://pool.example.test' }
     updateAccountMock.mockReset().mockResolvedValue(account)
     checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
     const wrapper = mountModal(account)
@@ -1479,12 +1454,10 @@ describe('EditAccountModal', () => {
     expect(timeout.attributes('placeholder')).toBe('10')
     expect(timeout.attributes('min')).toBe('1')
     expect(timeout.attributes('max')).toBe('120')
-    expect(wrapper.get('[data-testid="edit-openai-gwpool-prepare-retries"]').attributes('placeholder')).toBe('0')
     await timeout.setValue(10)
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
     const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
     expect(extra?.openai_gwpool_probe_timeout_s).toBe(10)
-    expect(extra?.openai_gwpool_prepare_retries).toBe(1)
     expect(extra).not.toHaveProperty('openai_gwpool_max_wait_s')
     await wrapper.setProps({ account: { ...account, id: 99, extra } })
     expect(timeout.element.value).toBe('10')
@@ -1586,8 +1559,8 @@ describe('EditAccountModal', () => {
     )
   })
 
-  // turn-state 的接管/覆写界面已删（2026-09-21 起手段全灭），只剩读数。
-  it('no longer renders the turn-state override or hunter controls', async () => {
+  // turn-state 的接管/覆写/猎手/恢复探测界面都已删（2026-09-21 起手段全灭），只剩读数。
+  it('no longer renders any turn-state controls', async () => {
     const account = buildAccount()
     account.type = 'oauth'
     const wrapper = mountModal(account)
@@ -1597,12 +1570,11 @@ describe('EditAccountModal', () => {
       'edit-openai-turn-state-override',
       'edit-openai-turn-state-hunter',
       'edit-openai-turn-state-hunter-section',
-      'edit-openai-turn-state-hunter-hold'
+      'edit-openai-turn-state-hunter-hold',
+      'edit-openai-turn-state-recovery'
     ]) {
       expect(wrapper.find(`[data-testid="${testid}"]`).exists()).toBe(false)
     }
-    // 恢复探测（做题判定，仍然有效）留着。
-    expect(wrapper.find('[data-testid="edit-openai-turn-state-recovery"]').exists()).toBe(true)
   })
 
   it('writes images_url_to_b64_json into extra when toggled on', async () => {

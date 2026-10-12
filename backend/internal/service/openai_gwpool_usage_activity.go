@@ -119,10 +119,8 @@ func (r *gatewayPoolUsageLedger) idleCutoff(now time.Time) time.Time {
 				continue
 			}
 			for _, ticket := range round.Tickets {
-				for _, at := range []time.Time{ticket.At, ticket.UseObservedAt} {
-					if at.After(last) {
-						last = at
-					}
+				if ticket.At.After(last) {
+					last = ticket.At
 				}
 			}
 		}

@@ -126,7 +126,7 @@ func cooldownResetService(t *testing.T, now time.Time) (*OpenAIGatewayService, *
 			},
 		}
 		account.Extra["unrelated"] = "preserved"
-		account.Extra[openAIGatewayPoolMetricsExtraKey] = map[string]any{"unrelated_counter": 71}
+		account.Extra["unrelated_runtime"] = map[string]any{"unrelated_counter": 71}
 		repo.rows[id] = &gatewayRuntimeRepo{account: *account}
 	}
 	svc := &OpenAIGatewayService{accountRepo: repo}
@@ -146,7 +146,7 @@ func TestGatewayPoolCooldownResetPersistsClonesAndSurvivesRestart(t *testing.T) 
 	account, _ := repo.GetByID(ctx, 1)
 	stale, _ := repo.GetByID(ctx, 2)
 	before, _ := readOpenAIGatewayHistory(account)
-	pair := openAIGatewayPoolPair{gateway: "recent", version: "live", until: now.Add(time.Hour), routeExpiresAt: now.Add(time.Hour)}
+	pair := openAIGatewayPoolPair{gateway: "recent", version: "live", routeExpiresAt: now.Add(time.Hour)}
 	svc.codexCookies.poolPairs.Store(identity, pair)
 	mark := gatewayPoolVerifiedMark{version: "live", at: now}
 	svc.codexCookies.poolVerified.Store(identity, mark)
@@ -165,7 +165,7 @@ func TestGatewayPoolCooldownResetPersistsClonesAndSurvivesRestart(t *testing.T) 
 		require.Equal(t, before.Current, history.Current)
 		require.Equal(t, before.PoolLive, history.PoolLive)
 		require.Equal(t, "preserved", fresh.Extra["unrelated"])
-		require.Equal(t, account.Extra[openAIGatewayPoolMetricsExtraKey], fresh.Extra[openAIGatewayPoolMetricsExtraKey])
+		require.Equal(t, account.Extra["unrelated_runtime"], fresh.Extra["unrelated_runtime"])
 	}
 	gotPair, _ := svc.codexCookies.poolPairs.Load(identity)
 	gotMark, _ := svc.codexCookies.poolVerified.Load(identity)

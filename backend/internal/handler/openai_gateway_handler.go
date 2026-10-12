@@ -832,7 +832,6 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			upstreamEndpoint := resolveOpenAIUpstreamEndpoint(c, account, res)
 			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 			sessionID := service.ExtractClientSessionID(c)
-			turnStateSource := service.OpenAITurnStateUsageSource(c)
 			turnStateSent := service.OpenAITurnStateUsageSent(c)
 			cyberBlocked := service.GetOpsCyberPolicy(c) != nil
 			h.submitOpenAIUsageRecordTask(c.Request.Context(), res, func(ctx context.Context) {
@@ -850,7 +849,6 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					APIKeyService:      h.apiKeyService,
 					QuotaPlatform:      quotaPlatform,
 					SessionID:          sessionID,
-					TurnStateSource:    turnStateSource,
 					TurnStateSent:      turnStateSent,
 					ChannelUsageFields: clientRequestedUsageFields(c, channelMapping, reqModel, res.UpstreamModel),
 					PricingAt:          pricingAt,
@@ -1448,7 +1446,6 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			upstreamEndpoint := resolveOpenAIUpstreamEndpoint(c, account, res)
 			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 			sessionID := service.ExtractClientSessionID(c)
-			turnStateSource := service.OpenAITurnStateUsageSource(c)
 			turnStateSent := service.OpenAITurnStateUsageSent(c)
 			cyberBlocked := service.GetOpsCyberPolicy(c) != nil
 			h.submitOpenAIUsageRecordTask(c.Request.Context(), res, func(ctx context.Context) {
@@ -1466,7 +1463,6 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					APIKeyService:      h.apiKeyService,
 					QuotaPlatform:      quotaPlatform,
 					SessionID:          sessionID,
-					TurnStateSource:    turnStateSource,
 					TurnStateSent:      turnStateSent,
 					ChannelUsageFields: clientRequestedUsageFields(c, channelMappingMsg, reqModel, res.UpstreamModel),
 					PricingAt:          pricingAt,
@@ -1676,34 +1672,19 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 		h.anthropicStreamingAwareError(c, status, "api_error", failoverErr.ClientMessage, streamStarted)
 		return
 	}
-	if failoverErr != nil && failoverErr.Reason == service.OpenAITurnStateHoldReason {
-		// Claude 兼容桥是服务端注入 turn-state 的主要消费者，降智暂停在这里同样要说清原因，
-		// 不能被 mapUpstreamError 归一成「上游暂时不可用」的 502。
-		status, message := turnStateHoldClientResponse(failoverErr)
-		service.SetOpsUpstreamError(c, status, message, "")
-		h.anthropicStreamingAwareError(c, status, "api_error", message, streamStarted)
-		return
-	}
-	if failoverErr != nil && failoverErr.Reason == service.OpenAIGatewayPoolReason {
-		status, message := turnStateHoldClientResponse(failoverErr)
-		h.anthropicStreamingAwareError(c, status, "api_error", message, streamStarted)
+	// 与 Responses 入口同口径：只有带说明的池失败才原样转给客户端。同账号重试截止耗尽后
+	// 冒出来的池失败可能不带说明（重试失败被改标成池原因），那时按上游状态码归一。
+	if failoverErr != nil && failoverErr.Reason == service.OpenAIGatewayPoolReason && strings.TrimSpace(failoverErr.ClientMessage) != "" {
+		status := failoverErr.ClientStatusCode
+		if status <= 0 {
+			status = http.StatusServiceUnavailable
+		}
+		service.SetOpsUpstreamError(c, status, failoverErr.ClientMessage, "")
+		h.anthropicStreamingAwareError(c, status, "api_error", failoverErr.ClientMessage, streamStarted)
 		return
 	}
 	status, errType, errMsg := h.mapUpstreamError(failoverErr.StatusCode)
 	h.anthropicStreamingAwareError(c, status, errType, errMsg, streamStarted)
-}
-
-// turnStateHoldClientResponse 取降智暂停给客户端的状态码与说明（两个入口共用）。
-func turnStateHoldClientResponse(failoverErr *service.UpstreamFailoverError) (int, string) {
-	status := failoverErr.ClientStatusCode
-	if status <= 0 {
-		status = http.StatusServiceUnavailable
-	}
-	message := strings.TrimSpace(failoverErr.ClientMessage)
-	if message == "" {
-		message = "account is paused until a healthy x-codex-turn-state is found"
-	}
-	return status, message
 }
 
 // ensureAnthropicErrorResponse writes a fallback Anthropic error if no response was written.
@@ -2367,15 +2348,13 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 		if result != openAISlotAcquireOK || !selection.Account.UsesGatewayPool() {
 			return
 		}
-		if selection.Account.GatewayPoolLongWaitEnabled() {
-			if err := service.EnableConcurrencySlotRenewal(c.Request.Context()); err != nil {
-				if release != nil {
-					release()
-				}
-				writeError(http.StatusServiceUnavailable, "api_error", "", "Unable to retain request concurrency slots")
-				release, result = nil, openAISlotAcquireFailed
-				return
+		if err := service.EnableConcurrencySlotRenewal(c.Request.Context()); err != nil {
+			if release != nil {
+				release()
 			}
+			writeError(http.StatusServiceUnavailable, "api_error", "", "Unable to retain request concurrency slots")
+			release, result = nil, openAISlotAcquireFailed
+			return
 		}
 		service.MaintainGatewayPoolWaitKeepalive(c, reqStream)
 	}()
@@ -3012,7 +2991,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		// captured by the previous failover account before credential lookup.
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 		currentAccountRelease = wrapReleaseOnDone(ctx, accountReleaseFunc)
-		if account.GatewayPoolLongWaitEnabled() {
+		if account.UsesGatewayPool() {
 			if err := service.EnableConcurrencySlotRenewal(ctx); err != nil {
 				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "request concurrency slot unavailable")
 				return
@@ -3287,7 +3266,6 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				upstreamEndpoint := resolveOpenAIUpstreamEndpoint(c, account, result)
 				quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 				sessionID := service.ExtractClientSessionID(c)
-				turnStateSource := service.OpenAITurnStateUsageSource(c)
 				turnStateSent := service.OpenAITurnStateUsageSent(c)
 				turnRecordPricingAt := turnPricing.currentOr(turnStart)
 				turnBillingAPIKey := turnBillingAPIKeys.forTurn(turn, apiKey)
@@ -3307,7 +3285,6 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 						APIKeyService:      h.apiKeyService,
 						QuotaPlatform:      quotaPlatform,
 						SessionID:          sessionID,
-						TurnStateSource:    turnStateSource,
 						TurnStateSent:      turnStateSent,
 						ChannelUsageFields: turnUsageFields,
 						PricingAt:          turnRecordPricingAt,
@@ -3706,14 +3683,6 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		}
 		service.SetOpsUpstreamError(c, failoverErr.StatusCode, message, "")
 		h.handleStreamingAwareErrorWithCode(c, status, "upstream_error", service.OpenAIImagesInsufficientBalanceCode, message, streamStarted, false)
-		return
-	}
-	if failoverErr.Reason == service.OpenAITurnStateHoldReason {
-		// 降智暂停：账号缺 292 被停调度，池里又没别的号。说明文字带模型名，客户端一眼能看出
-		// 不是上游故障。
-		status, message := turnStateHoldClientResponse(failoverErr)
-		service.SetOpsUpstreamError(c, status, message, "")
-		h.handleStreamingAwareError(c, status, "server_error", message, streamStarted)
 		return
 	}
 	if failoverErr.Reason == service.OpenAIGatewayPoolReason && strings.TrimSpace(failoverErr.ClientMessage) != "" {

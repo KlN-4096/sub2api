@@ -89,6 +89,7 @@ export interface GatewayPoolQueueView {
 }
 
 export interface GatewayPoolProgress {
+  inactive?: boolean
   run_id?: string
   sequence?: number
   phase: 'idle' | 'pending' | 'fetching' | 'verifying' | 'waiting' | 'ready' | 'exhausted' | 'unknown' | 'cancelled'
@@ -104,7 +105,7 @@ export interface GatewayPoolProgress {
     observed_at: string
     tickets: Array<{ gateway: string; region: string; expires_at?: string; verified_at?: string; verified_models: string[] }>
     rounds: GatewayPoolUsageRound[]
-    archived: Record<string, { rounds: number; attempted: number; full: number; duration_ms: number; active_duration_ms?: number; active_duration_incomplete?: boolean; incomplete?: boolean; duration_incomplete?: boolean }> | null
+    archived: Record<string, { rounds: number; attempted: number; full: number; active_duration_ms?: number; active_duration_incomplete?: boolean; incomplete?: boolean }> | null
     incomplete?: boolean
     history?: Record<string, unknown>
     contacts?: Record<string, unknown>
@@ -114,7 +115,7 @@ export interface GatewayPoolProgress {
     concurrency_limit?: number
     cooldown_estimate?: { resume_gateways: number; eligible_at?: string }
     queues?: GatewayPoolQueueView | null
-    rest?: { active: boolean; changed_at?: string; started_at?: string; resume_at?: string; next_check?: string; reason?: string }
+    rest?: { active: boolean; changed_at?: string; started_at?: string; resume_at?: string; reason?: string }
   }
 }
 
@@ -126,10 +127,8 @@ export interface GatewayPoolUsageRound {
   end_reason?: string
   attempted: number
   full: number
-  full_started_at?: string
   full_duration_ms?: number
   full_usage_mode?: string
-  full_active_until?: string[]
   duration_incomplete?: boolean
   incomplete?: boolean
 }
