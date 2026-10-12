@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -53,14 +54,16 @@ func TestGatewayPoolDegradedObservationKeepsLongerConfiguredBase(t *testing.T) {
 func TestGatewayPoolCooldownReportRetriesSameEvent(t *testing.T) {
 	got := make(chan gwpool.CooldownReport, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var report gwpool.CooldownReport
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&report))
-		got <- report
-		if len(got) == 1 {
+		if len(got) == 0 {
+			var in struct {
+				Reports []gwpool.CooldownReport `json:"reports"`
+			}
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&in))
+			got <- in.Reports[0]
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		_, _ = io.WriteString(w, `{"ok":true}`)
+		got <- ackGatewayPoolBatch[gwpool.CooldownReport](t, w, r, nil)[0]
 	}))
 	defer server.Close()
 	account := gwpoolTestAccount(1)
@@ -110,16 +113,14 @@ func TestGatewayPoolCooldownReportStopsOnPermanentFailureAndBacksOffTemporary(t 
 func TestGatewayPoolCooldownReportIsAnonymousAndUsesExistingObservation(t *testing.T) {
 	got := make(chan gwpool.CooldownReport, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/cooldown/report", r.URL.Path)
+		require.Equal(t, "/cooldown/reports", r.URL.Path)
 		raw, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
 		require.NotContains(t, string(raw), "acc-a")
 		require.NotContains(t, string(raw), "test-consumer")
 		require.NotContains(t, string(raw), "cookie")
-		var report gwpool.CooldownReport
-		require.NoError(t, json.Unmarshal(raw, &report))
-		got <- report
-		_, _ = io.WriteString(w, `{"ok":true}`)
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		got <- ackGatewayPoolBatch[gwpool.CooldownReport](t, w, r, nil)[0]
 	}))
 	defer server.Close()
 	account := gwpoolTestAccount(1)
@@ -171,4 +172,23 @@ func TestGatewayPoolRecommendationListCannotOverrideLocalEligibility(t *testing.
 	require.True(t, tagSeen)
 	require.NotContains(t, query, "exclude=unified-142", "local cooldown has ended; a pool recommendation cannot extend it")
 	require.Contains(t, query, "gateway=unified-142", "local eligibility wins even when a legacy switch remains saved")
+}
+
+// A catalogue's own part can be up to two hours old; it is dated by when the
+// pool reported it, so it cannot revoke a policy a newer ACK set.
+func TestGatewayPoolBatchOlderCataloguePartCannotRevokeNewerAck(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	account.Extra[openAIGatewayPoolBaseURLExtraKey] = "http://127.0.0.1:1"
+	account.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = "test-key"
+	svc, _ := gatewayRuntimeService(account)
+	now := time.Now().UTC()
+	binding := gatewayPoolAccountReportBinding(account, gwpoolTestIdentity)
+	box := gatewayPoolOutbox{Policies: map[string]gatewayPoolFeedbackPolicy{"g": stableFeedbackPolicy(binding, now)}}
+	revocation := &gwpool.CooldownRecommendation{Seconds: 7200, Samples: 2, Source: "account"}
+	for _, observed := range []time.Time{now.Add(-time.Hour), now.Add(time.Second)} {
+		svc.codexCookies.gatewayPoolPick(context.Background(), account, gwpoolTestIdentity,
+			[]gwpool.Gateway{{Name: "g", Cooldown: revocation, MemberAt: observed}}, nil)
+		svc.codexCookies.syncGatewayPoolFeedbackPolicies(&box, now)
+		require.Equal(t, observed.Before(now), box.Policies["g"].stable(binding, now), "observed at %v", observed)
+	}
 }

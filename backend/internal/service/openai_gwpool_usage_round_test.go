@@ -42,14 +42,14 @@ func TestGatewayPoolUsageClosedCycleFreezesAndSameTicketCanStartNewCycle(t *test
 	state.note("luna", "v", at, true)
 	state.Rounds[0].syncActiveUsage([]gatewayPoolActiveUseEvent{
 		{roundID: state.Rounds[0].ID, ticket: "v", start: at, end: at.Add(time.Minute)},
-	}, "session", at.Add(time.Minute))
+	}, at.Add(time.Minute))
 	state.end(at.Add(time.Minute))
-	view := state.Rounds[0].fullUsageView("session", at.Add(time.Hour))
+	view := state.Rounds[0].fullUsageView(at.Add(time.Hour))
 	require.EqualValues(t, 60000, view.FullDurationMS)
 	require.True(t, state.note("luna", "v", at.Add(2*time.Minute), true))
 	state.Rounds[1].syncActiveUsage([]gatewayPoolActiveUseEvent{{
 		roundID: state.Rounds[1].ID, ticket: "v", start: at.Add(2 * time.Minute), end: at.Add(2*time.Minute + time.Second),
-	}}, "session", at.Add(2*time.Minute+time.Second))
+	}}, at.Add(2*time.Minute+time.Second))
 	require.Len(t, state.Rounds, 2)
 	require.EqualValues(t, 60000, state.Rounds[0].ActiveUsage.duration(at.Add(time.Hour)))
 	require.EqualValues(t, 1000, state.Rounds[1].ActiveUsage.duration(at.Add(2*time.Minute+time.Second)))
@@ -64,7 +64,7 @@ func TestGatewayPoolUsageArchivesWithoutLosingTotals(t *testing.T) {
 		round := &state.Rounds[len(state.Rounds)-1]
 		round.syncActiveUsage([]gatewayPoolActiveUseEvent{
 			{roundID: round.ID, ticket: fmt.Sprint(i), start: start, end: start.Add(20 * time.Second)},
-		}, "offline", start.Add(20*time.Second))
+		}, start.Add(20*time.Second))
 		state.end(start.Add(time.Minute))
 		state.prune()
 	}

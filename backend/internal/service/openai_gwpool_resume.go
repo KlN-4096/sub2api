@@ -167,10 +167,10 @@ func (s *OpenAIGatewayService) writeGatewayPoolRest(ctx context.Context, account
 
 func gatewayPoolRestReason(account *Account, qualityGateways ...string) string {
 	if len(qualityGateways) > 0 {
-		return fmt.Sprintf("网关候选低于1，等%d个优质网关全部冷却或%d个本地冷却截止恢复 / Gateway candidates below 1; resume after all %d quality gateways or %d local cooldowns",
+		return fmt.Sprintf("网关候选低于1，等%d个优质网关冷却或%d个本地冷却截止恢复，都不等剩余冷却离群的网关 / Gateway candidates below 1; resume after the %d quality gateways or %d local cooldowns, waiting for no remaining-cooldown outlier",
 			len(qualityGateways), account.gatewayPoolResumeGateways(), len(qualityGateways), account.gatewayPoolResumeGateways())
 	}
-	return fmt.Sprintf("网关候选低于%d，按%d个本地冷却截止恢复 / Gateway candidates below %d; resume after %d local cooldowns",
+	return fmt.Sprintf("网关候选低于%d，按%d个本地冷却截止恢复，不等剩余冷却离群的网关 / Gateway candidates below %d; resume after %d local cooldowns, waiting for no remaining-cooldown outlier",
 		1, account.gatewayPoolResumeGateways(),
 		1, account.gatewayPoolResumeGateways())
 }
@@ -178,6 +178,15 @@ func gatewayPoolRestReason(account *Account, qualityGateways ...string) string {
 func gatewayPoolOwnsTempBlock(account *Account) bool {
 	return account != nil && strings.HasPrefix(account.TempUnschedulableReason, "网关候选低于") &&
 		strings.Contains(account.TempUnschedulableReason, " / Gateway candidates below ")
+}
+
+// since is when this rest began, the fixed point its outlier waits are
+// measured from; outside a rest, or for a record without a start, it is now.
+func (s gatewayPoolRestState) since(now time.Time) time.Time {
+	if !s.Active || s.StartedAt.IsZero() {
+		return now
+	}
+	return s.StartedAt
 }
 
 func (s *gatewayPoolRestState) advance(now time.Time) {
@@ -222,7 +231,7 @@ func (s *OpenAIGatewayService) enterGatewayPoolRest(ctx context.Context, account
 		state.StartedAt = at
 		state.QualityGateways = append([]string(nil), plan.qualityGateways...)
 	} else {
-		until = s.codexCookies.gatewayPoolLocalResumeAt(identity, fresh, state.QualityGateways...)
+		until = s.codexCookies.gatewayPoolLocalResumeAt(identity, fresh, state.since(at), state.QualityGateways...)
 	}
 	state.Active, state.ResumeAt = true, until
 	state.advance(at)
@@ -294,7 +303,7 @@ func (s *OpenAIGatewayService) gatewayPoolResumeAllowed(ctx context.Context, acc
 		return false, errors.New("gateway local recovery work still in flight")
 	}
 	now := time.Now().UTC()
-	until := s.codexCookies.gatewayPoolLocalResumeAt(identity, fresh, state.QualityGateways...)
+	until := s.codexCookies.gatewayPoolLocalResumeAt(identity, fresh, state.since(now), state.QualityGateways...)
 	if until.After(now) {
 		if state.ResumeAt.Equal(until) {
 			return false, nil

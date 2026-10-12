@@ -44,12 +44,12 @@ type gatewayPoolHistoryDisplay struct {
 }
 
 type gatewayPoolSeenDisplay struct {
-	At         time.Time                   `json:"at"`
-	Region     string                      `json:"region,omitempty"`
-	Verdict    string                      `json:"verdict,omitempty"`
-	FullAt     time.Time                   `json:"full_at,omitzero"`
-	FullHeldMs int64                       `json:"full_held_ms,omitempty"`
-	Cooldown   *gatewayPoolCooldownDisplay `json:"cooldown,omitempty"`
+	At        time.Time                   `json:"at"`
+	Region    string                      `json:"region,omitempty"`
+	Verdict   string                      `json:"verdict,omitempty"`
+	FullAt    time.Time                   `json:"full_at,omitzero"`
+	FullUseMs int64                       `json:"full_use_ms,omitempty"`
+	Cooldown  *gatewayPoolCooldownDisplay `json:"cooldown,omitempty"`
 }
 
 type gatewayPoolCooldownDisplay struct {
@@ -70,17 +70,16 @@ type gatewayPoolContactsDisplay struct {
 type gatewayPoolContactRoundDisplay struct {
 	VersionHash string                          `json:"version_hash"`
 	Report      gatewayPoolContactReportDisplay `json:"report"`
+	FullUseMs   int64                           `json:"full_use_ms,omitempty"`
 }
 
 type gatewayPoolContactReportDisplay struct {
-	ID           string    `json:"id"`
-	Gateway      string    `json:"gateway"`
-	Model        string    `json:"model"`
-	Source       string    `json:"source"`
-	At           time.Time `json:"at"`
-	Outcome      string    `json:"outcome"`
-	FullWindowMS int64     `json:"full_window_ms"`
-	WindowFinal  bool      `json:"window_final"`
+	ID      string    `json:"id"`
+	Gateway string    `json:"gateway"`
+	Model   string    `json:"model"`
+	Source  string    `json:"source"`
+	At      time.Time `json:"at"`
+	Outcome string    `json:"outcome"`
 }
 
 func (h openAIGatewayHistory) display() gatewayPoolHistoryDisplay {
@@ -90,7 +89,7 @@ func (h openAIGatewayHistory) display() gatewayPoolHistoryDisplay {
 	}
 	for gateway, seen := range h.Seen {
 		row := gatewayPoolSeenDisplay{At: seen.At, Region: seen.Region, Verdict: seen.Verdict,
-			FullAt: seen.FullAt, FullHeldMs: seen.FullHeldMs}
+			FullAt: seen.FullAt, FullUseMs: seen.FullUseMs}
 		if c := seen.Cooldown; c != nil {
 			row.Cooldown = &gatewayPoolCooldownDisplay{Cleared: c.Cleared, WindowSeconds: c.WindowSeconds,
 				FixedSeconds: c.FixedSeconds, Until: c.Until, RecommendedSeconds: c.LegacyRecommendedSeconds}
@@ -107,10 +106,8 @@ func (c gatewayPoolContacts) display() gatewayPoolContactsDisplay {
 	}
 	for i, round := range c.Rounds {
 		r := round.Report
-		out.Rounds[i] = gatewayPoolContactRoundDisplay{VersionHash: round.VersionHash, Report: gatewayPoolContactReportDisplay{
-			ID: r.ID, Gateway: r.Gateway, Model: r.Model, Source: r.Source, At: r.At,
-			Outcome: r.Outcome, FullWindowMS: r.FullWindowMS, WindowFinal: r.WindowFinal,
-		}}
+		out.Rounds[i] = gatewayPoolContactRoundDisplay{VersionHash: round.VersionHash, FullUseMs: round.FullUseMs,
+			Report: gatewayPoolContactReportDisplay{ID: r.ID, Gateway: r.Gateway, Model: r.Model, Source: r.Source, At: r.At, Outcome: r.Outcome}}
 	}
 	return out
 }
@@ -208,7 +205,7 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 		}
 		runtime.Rest = gatewayPoolRestDisplay(account, rest)
 		if estimate {
-			cooldown := gatewayPoolCooldownEstimate(account, cooldownDeadlines(), rest)
+			cooldown := gatewayPoolCooldownEstimate(account, cooldownDeadlines(), rest, runtime.ObservedAt)
 			runtime.CooldownEstimate = &cooldown
 		}
 		runtime.LedgerTag, runtime.ConcurrencyLimit = tag, account.Concurrency
@@ -217,7 +214,6 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 			runtime.CurrentConcurrency = &count
 		}
 		activeEvents := s.codexCookies.activeUsageTracker(identity).snapshot()
-		session := s.codexCookies.gatewayPoolUsageSession()
 		blockedAt := gatewayPoolUsageBlockedAt(account)
 		var idleAt time.Time
 		inventory := s.codexCookies.gatewayPoolInventory(identity)
@@ -237,7 +233,7 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 					round.EndedAt, round.EndReason = blockedAt, "temporarily_unschedulable"
 				}
 			}
-			runtime.Rounds[i] = round.fullUsageView(session, runtime.ObservedAt, activeEvents...)
+			runtime.Rounds[i] = round.fullUsageView(runtime.ObservedAt, activeEvents...)
 		}
 		if pair, live := s.codexCookies.cachedPoolPair(identity); live == openAIGatewayPoolPairLive {
 			ticket := GatewayPoolLiveTicket{Gateway: pair.gateway, Region: pair.region, ExpiresAt: pair.routeExpiresAt, VerifiedModels: []string{}}
