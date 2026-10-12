@@ -44,7 +44,7 @@ func TestCatalogNewWaiterDoesNotJoinCanceledFlight(t *testing.T) {
 	go func() { _, err := client.Catalog(ctx, "member", "", "", 0); done <- err }()
 	<-entered
 	client.catalog.mu.Lock()
-	oldFlight := client.catalog.entries[catalogKey{"member", "", ""}].flight
+	oldFlight := client.catalog.lists[""].flights[catalogMemberKey{"member", ""}]
 	client.catalog.mu.Unlock()
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
@@ -156,7 +156,7 @@ func TestCatalogExpiryGenerationIsolationAndFailure(t *testing.T) {
 		t.Fatalf("identity/model/permission isolation failed: %d", hits.Load())
 	}
 	fail.Store(true)
-	failed, err := client.Catalog(ctx, "member-a", "", "model-a", newer.Generation)
+	failed, err := client.FreshCatalog(ctx, "member-a", "", "model-a")
 	if err == nil || failed.Generation != 0 || len(failed.Gateways) != 0 {
 		t.Fatal("failure exposed stale inventory as fresh")
 	}
@@ -182,7 +182,7 @@ func TestCatalogBoundsEntriesAndThirtySecondFreshness(t *testing.T) {
 		}
 		now = now.Add(time.Millisecond)
 	}
-	if len(client.catalog.entries) != maxCatalogEntries {
+	if len(client.catalog.members) != maxCatalogEntries {
 		t.Fatal("cache grew beyond its bound")
 	}
 	before := hits.Load()
@@ -214,7 +214,7 @@ func TestCatalogSharesRefreshAndIndependentCancellation(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for {
 		client.catalog.mu.Lock()
-		waiters := client.catalog.entries[catalogKey{"member", "", ""}].flight.waiters
+		waiters := client.catalog.lists[""].flights[catalogMemberKey{"member", ""}].waiters
 		client.catalog.mu.Unlock()
 		if waiters == 2 {
 			break

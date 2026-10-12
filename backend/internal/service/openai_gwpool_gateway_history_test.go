@@ -277,7 +277,7 @@ func TestGatewayPoolCooldownFreshPersistenceAndCrossRowRestart(t *testing.T) {
 	persisted.Extra = written
 	history, _ := readOpenAIGatewayHistory(&persisted)
 	require.NotNil(t, history.Seen["unified-142"].Cooldown)
-	require.EqualValues(t, 75000, history.Seen["unified-142"].FullHeldMs)
+	require.EqualValues(t, 75000, history.Seen["unified-142"].FullUseMs)
 
 	// 新进程从另一克隆行进入，仍从共享标签查回前一行持久化的状态。
 	clone := gwpoolTestAccount(35)

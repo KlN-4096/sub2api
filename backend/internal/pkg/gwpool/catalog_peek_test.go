@@ -24,15 +24,15 @@ func TestPeekCatalogIsIsolatedReadOnlyAndExpires(t *testing.T) {
 	now := time.Now()
 	client.catalog.now = func() time.Time { return now }
 	tag := strings.Repeat("a", 64)
-	if _, _, ok := client.PeekCatalog("member", tag, "model"); ok || len(client.catalog.entries) != 0 || hits.Load() != 0 {
+	if _, _, ok := client.PeekCatalog("member", tag, "model"); ok || len(client.catalog.lists) != 0 || len(client.catalog.members) != 0 || hits.Load() != 0 {
 		t.Fatal("unknown peek populated a cache or made a request")
 	}
 	loaded, err := client.Catalog(context.Background(), "member", tag, "model", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry := client.catalog.entries[makeCatalogKey("member", tag, "model")]
-	used, until := entry.used, entry.until
+	list, member := client.catalog.lists["model"], client.catalog.members[catalogMemberKey{"member", tag}]
+	listUsed, memberUsed, until := list.used, member.used, list.until
 	now = now.Add(5 * time.Second)
 	value, deadline, ok := client.PeekCatalog("member", tag, "model")
 	if !ok || !deadline.Equal(until) || value.Generation != loaded.Generation {
@@ -40,7 +40,7 @@ func TestPeekCatalogIsIsolatedReadOnlyAndExpires(t *testing.T) {
 	}
 	value.Gateways[0].Name = "mutated-output"
 	again, _, _ := client.PeekCatalog("member", tag, "model")
-	if again.Gateways[0].Name != "g1" || !entry.used.Equal(used) || !entry.until.Equal(until) || hits.Load() != 1 {
+	if again.Gateways[0].Name != "g1" || !list.used.Equal(listUsed) || !member.used.Equal(memberUsed) || !list.until.Equal(until) || hits.Load() != 1 {
 		t.Fatal("peek mutated shared data, LRU, TTL, or made an extra request")
 	}
 	for _, key := range []catalogKey{
@@ -54,11 +54,11 @@ func TestPeekCatalogIsIsolatedReadOnlyAndExpires(t *testing.T) {
 	if _, _, ok := otherClient.PeekCatalog("member", tag, "model"); ok {
 		t.Fatal("client credentials share a catalog")
 	}
-	entry.flight = &catalogFlight{}
+	list.flights = map[catalogMemberKey]*catalogFlight{{"other-member", ""}: {}}
 	if _, _, ok := client.PeekCatalog("member", tag, "model"); ok {
 		t.Fatal("in-flight refresh must not be presented as a settled snapshot")
 	}
-	entry.flight = nil
+	list.flights = nil
 	now = until
 	if _, _, ok := client.PeekCatalog("member", tag, "model"); ok || hits.Load() != 1 {
 		t.Fatal("expiry boundary must remain unknown without a refresh")
@@ -166,9 +166,10 @@ func TestPeekCatalogCanceledRefreshStaysUnknownUntilSuccess(t *testing.T) {
 func (c *Client) PeekCatalog(account, tag, model string) (Catalog, time.Time, bool) {
 	c.catalog.mu.Lock()
 	defer c.catalog.mu.Unlock()
-	entry := c.catalog.entries[makeCatalogKey(account, tag, model)]
-	if entry == nil || entry.flight != nil || entry.displayUnknown || entry.value.Generation == 0 || !c.catalog.timeNow().Before(entry.until) {
+	key := makeCatalogKey(account, tag, model)
+	list, member := c.catalog.lists[key.model], c.catalog.members[key.member()]
+	if list == nil || member == nil || len(list.flights) > 0 || list.displayUnknown || list.generation == 0 || !c.catalog.timeNow().Before(list.until) {
 		return Catalog{}, time.Time{}, false
 	}
-	return cloneCatalog(entry.value), entry.until, true
+	return member.view(list.gateways, list.generation), list.until, true
 }

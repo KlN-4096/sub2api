@@ -11,13 +11,13 @@ type GatewayPoolCooldownEstimate struct {
 
 // deadlines are the display cooldown deadlines and rest the merged rest
 // snapshot, both already computed for the same runtime view.
-func gatewayPoolCooldownEstimate(account *Account, deadlines map[string]time.Time, rest gatewayPoolRestState) GatewayPoolCooldownEstimate {
+func gatewayPoolCooldownEstimate(account *Account, deadlines map[string]time.Time, rest gatewayPoolRestState, now time.Time) GatewayPoolCooldownEstimate {
 	result := GatewayPoolCooldownEstimate{ResumeGateways: account.gatewayPoolResumeGateways()}
 	var qualityGateways []string
 	if rest.Active && !account.GatewayPoolContinuousWaitEnabled() {
 		qualityGateways = rest.QualityGateways
 	}
-	result.EligibleAt = gatewayPoolRecoveryDeadline(deadlines, result.ResumeGateways, qualityGateways)
+	result.EligibleAt = gatewayPoolRecoveryDeadline(deadlines, result.ResumeGateways, qualityGateways, rest.since(now))
 	return result
 }
 

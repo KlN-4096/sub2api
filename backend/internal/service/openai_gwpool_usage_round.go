@@ -23,19 +23,18 @@ type gatewayPoolUsageTicket struct {
 }
 
 type GatewayPoolUsageRound struct {
-	ID                 string                            `json:"id"`
-	Model              string                            `json:"model"`
-	StartedAt          time.Time                         `json:"started_at"`
-	EndedAt            time.Time                         `json:"ended_at,omitzero"`
-	EndReason          string                            `json:"end_reason,omitempty"`
-	Attempted          int                               `json:"attempted"`
-	Full               int                               `json:"full"`
-	Incomplete         bool                              `json:"incomplete,omitempty"`
-	Tickets            map[string]gatewayPoolUsageTicket `json:"tickets,omitempty"`
-	FullDurationMS     int64                             `json:"full_duration_ms"`
-	DurationIncomplete bool                              `json:"duration_incomplete,omitempty"`
-	ActiveUsage        *gatewayPoolActiveUsage           `json:"active_usage,omitempty"`
-	FullUsageMode      string                            `json:"full_usage_mode,omitempty"`
+	ID             string                            `json:"id"`
+	Model          string                            `json:"model"`
+	StartedAt      time.Time                         `json:"started_at"`
+	EndedAt        time.Time                         `json:"ended_at,omitzero"`
+	EndReason      string                            `json:"end_reason,omitempty"`
+	Attempted      int                               `json:"attempted"`
+	Full           int                               `json:"full"`
+	Incomplete     bool                              `json:"incomplete,omitempty"`
+	Tickets        map[string]gatewayPoolUsageTicket `json:"tickets,omitempty"`
+	FullDurationMS int64                             `json:"full_duration_ms"`
+	ActiveUsage    *gatewayPoolActiveUsage           `json:"active_usage,omitempty"`
+	FullUsageMode  string                            `json:"full_usage_mode,omitempty"`
 }
 
 type GatewayPoolUsageArchive struct {
@@ -44,7 +43,6 @@ type GatewayPoolUsageArchive struct {
 	Full             int64  `json:"full"`
 	Incomplete       bool   `json:"incomplete,omitempty"`
 	ActiveDurationMS *int64 `json:"active_duration_ms,omitempty"`
-	ActiveIncomplete bool   `json:"active_duration_incomplete,omitempty"`
 }
 
 type gatewayPoolUsageLedger struct {
@@ -133,7 +131,7 @@ func (s *OpenAIGatewayService) changeGatewayPoolUsage(ctx context.Context, accou
 	mutated = state.bindActiveUsage(activeEvents) || mutated
 	observedAt := time.Now().UTC()
 	activeEvents = activeTracker.snapshot()
-	activeChanged := state.syncActiveUsage(activeEvents, s.codexCookies.gatewayPoolUsageSession(), observedAt)
+	activeChanged := state.syncActiveUsage(activeEvents, observedAt)
 	if !mutated && !boundary && !activeChanged {
 		s.codexCookies.poolUsageCache.Store(tag, &state)
 		activeTracker.acknowledge(activeEvents, &state)
@@ -300,7 +298,6 @@ func (r *gatewayPoolUsageLedger) prune() {
 				total.ActiveDurationMS = new(int64)
 			}
 			*total.ActiveDurationMS += round.ActiveUsage.duration(round.EndedAt)
-			total.ActiveIncomplete = total.ActiveIncomplete || round.ActiveUsage.Incomplete
 		}
 		total.Incomplete = total.Incomplete || round.Incomplete
 		r.Archived[round.Model] = total
@@ -361,15 +358,12 @@ func (s *OpenAIGatewayService) finishGatewayPoolUsageIfExhausted(ctx context.Con
 	if err != nil {
 		return
 	}
-	catalog, err := pool.FreshCatalog(ctx, gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(fresh, identity), "")
-	if err != nil {
+	// A cached route is no proof here: a stale one would hold the round open
+	// past its real end, so this boundary always asks for a fresh directory.
+	member, tag := gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(fresh, identity)
+	catalog, err := pool.FreshCatalog(ctx, member, tag, "")
+	if err != nil || s.codexCookies.gatewayPoolCatalogHasRoute(fresh, identity, catalog.Gateways) {
 		return
-	}
-	for _, gateway := range catalog.Gateways {
-		_, cooling := s.codexCookies.gatewayPoolUsedAt(identity, gateway.Name, fresh.gatewayPoolGatewayWindow())
-		if gateway.ReadyAt(time.Now()) && !cooling {
-			return
-		}
 	}
 	// Only fresh eligible candidates or work in flight can keep the cycle open.
 	s.changeGatewayPoolUsage(ctx, fresh, identity, func(state *gatewayPoolUsageLedger) bool {

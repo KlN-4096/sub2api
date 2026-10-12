@@ -16,8 +16,9 @@ type gatewayPoolRestPlan struct {
 }
 
 // Capture quality from the same fresh directory that proved exhaustion, before
-// cooldown filtering. Display queues are empty at this boundary and stale
-// catalog snapshots must never decide a durable recovery policy.
+// cooldown filtering; its list is fresh, its member part up to two hours old.
+// Display queues are empty at this boundary and stale catalog snapshots must
+// never decide a durable recovery policy.
 func (s *OpenAIGatewayService) gatewayPoolExhaustedRestQuality(ctx context.Context, account *Account) *gatewayPoolRestPlan {
 	exhausted := s.gatewayPoolExhaustedCatalog(ctx, account)
 	if exhausted == nil {

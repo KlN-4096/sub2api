@@ -14,7 +14,7 @@ func gatewayPoolTestCooldownEstimate(store *openAICodexCookieStore, identity str
 	history openAIGatewayHistory, now time.Time, peers ...Account,
 ) GatewayPoolCooldownEstimate {
 	return gatewayPoolCooldownEstimate(account, store.gatewayPoolDisplayCooldownDeadlines(identity, account, history, now),
-		store.gatewayPoolRestSnapshot(account, identity, peers))
+		store.gatewayPoolRestSnapshot(account, identity, peers), now)
 }
 
 func TestGatewayPoolCooldownEstimateIsUnclampedAndReadOnly(t *testing.T) {

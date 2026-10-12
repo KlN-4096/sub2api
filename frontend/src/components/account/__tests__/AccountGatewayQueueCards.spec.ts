@@ -48,7 +48,7 @@ describe('gateway compact queue cards', () => {
       ledger_tag: 'member', tracking_since: at(300),
       rounds: [
         { report: { id: 'full', gateway: 'unified-124', model: 'luna', source: 'foreground',
-          at: at(300), outcome: 'full', window_final: true, full_window_ms: 124000 } },
+          at: at(300), outcome: 'full' }, full_use_ms: 124000 },
         ...Array.from({ length: 34 }, (_, index) => ({
           version_hash: `ticket-${index}`, report: { id: `bad-${index}`, gateway: 'unified-120',
             model: 'luna', source: 'foreground', at: at(100 - index), outcome: 'refreshed' }
@@ -57,7 +57,7 @@ describe('gateway compact queue cards', () => {
     }
     value.runtime!.history = { seen: {
       'unified-120': { at: at(10), verdict: 'degraded' },
-      'unified-124': { at: at(176), full_at: at(300), full_held_ms: 124000,
+      'unified-124': { at: at(176), full_at: at(300), full_use_ms: 124000,
         cooldown: { until: new Date(now + 65*60000).toISOString(), window_seconds: 3600 } }
     } }
     const wrapper = mount(AccountGatewayCell, { props: { account, progress: value } })
@@ -174,8 +174,8 @@ describe('gateway compact queue cards', () => {
     value.runtime!.history = {
       current: 'unified-178',
       seen: {
-        'unified-178': { at: new Date().toISOString(), region: 'east-asia', verdict: 'full', full_held_ms: 87000 },
-        'unified-26': { at: new Date(Date.now() - 60_000).toISOString(), region: 'europe', verdict: 'degraded', full_held_ms: 43000 }
+        'unified-178': { at: new Date().toISOString(), region: 'east-asia', verdict: 'full', full_use_ms: 87000 },
+        'unified-26': { at: new Date(Date.now() - 60_000).toISOString(), region: 'europe', verdict: 'degraded', full_use_ms: 43000 }
       }
     }
     const wrapper = mount(AccountGatewayCell, { props: { account, progress: value } })
@@ -246,9 +246,9 @@ describe('gateway compact queue cards', () => {
     const ago = (seconds: number) => new Date(Date.now() - seconds * 1000).toISOString()
     value.runtime!.tickets[0].region = 'us-east'
     value.runtime!.history = { seen: {
-      'unified-178': { at: ago(15_000), region: 'us-east', verdict: 'full', full_held_ms: 87000 },
-      'unified-101': { at: ago(10), region: 'country-us', verdict: 'degraded', full_held_ms: 43000, cooldown: { cleared: true } },
-      'unified-201': { at: ago(7200), region: 'us-west', verdict: 'degraded', full_held_ms: 19000, cooldown: { until: ago(-1200), window_seconds: 3600 } },
+      'unified-178': { at: ago(15_000), region: 'us-east', verdict: 'full', full_use_ms: 87000 },
+      'unified-101': { at: ago(10), region: 'country-us', verdict: 'degraded', full_use_ms: 43000, cooldown: { cleared: true } },
+      'unified-201': { at: ago(7200), region: 'us-west', verdict: 'degraded', full_use_ms: 19000, cooldown: { until: ago(-1200), window_seconds: 3600 } },
       'unified-202': { at: ago(10_000), region: 'north-america', verdict: 'degraded', cooldown: { until: ago(-60), window_seconds: 3600 } },
       'unified-300': { at: ago(20_000), region: 'private-route' },
       invalid: { at: 'not-a-date', region: 'east-asia' }
@@ -283,7 +283,7 @@ describe('gateway compact queue cards', () => {
     value.gateway = 'unified-178'
     value.runtime!.tickets[0].verified_models = []
     value.runtime!.history = { seen: {
-      'unified-178': { at: new Date().toISOString(), full_held_ms: 99000 },
+      'unified-178': { at: new Date().toISOString(), full_use_ms: 99000 },
       'unified-26': { at: new Date(Date.now() - 60_000).toISOString() }
     } }
     const wrapper = mount(AccountGatewayCell, { props: { account, progress: value }, global: { stubs: { teleport: true } } })

@@ -811,7 +811,9 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 	//     选择、报数和耗尽共用同一准入；/cookie 仍执行池端短期保护和真实退避。
 	window := account.gatewayPoolGatewayWindow()
 	for _, candidate := range gateways {
-		s.noteGatewayPoolFeedbackPolicy(account, identity, candidate.Name, candidate.Cooldown)
+		if !candidate.MemberAt.IsZero() {
+			s.noteGatewayPoolFeedbackPolicy(account, identity, candidate.Name, candidate.Cooldown, candidate.MemberAt)
+		}
 		_, burned := s.gatewayPoolUsedAt(identity, candidate.Name, window)
 		if !candidate.ReadyAt(time.Now()) || blocked[candidate.Name] {
 			continue
@@ -1133,13 +1135,13 @@ type OpenAIGatewayPoolApplied struct {
 	// 关系，相减会出负数，夹到 0 就成了「池子用完了」——而池子可能正有几十个落点可交付。
 	// 只在 PoolLive > 0 时有意义；那时 0 是**真的 0**（全烧过了），不是「没测到」。
 	PoolFree int
-	// FullHeldMs 是这一发判降智时量到的满血时长（毫秒）：从「这张票验出满血」那一刻到
-	// 「判成降智」那一刻。0 = 没量到（这张票没验过满血，没有窗口起点）。
+	// FullUseMs 是这一发判降智时量到的：这张票**本周期**里满血承载业务的时长（毫秒，
+	// 见 gatewayPoolTicketFullUse）。0 = 没量到（没有业务在验满的这张票上跑过）。
 	//
-	// 两头都在**同一张票的生命里**，所以有界。卡片上那一段只能用这个数 —— 拿账本里的
-	// 「判满血的时刻」和「判降智的时刻」相减是错的：后者要等下一次真的打到这个网关才会写，
-	// 中间空闲全算进去，现网实测能得出 22655 秒。
-	FullHeldMs int64
+	// 卡片上那一段只能用这个数。墙钟相减都会把空闲算进去：账本里「判满血 − 判降智」实测出过
+	// 22655 秒；「验满 → 判降智」在同一票号隔周期回来时（2026-10-11 unified-132）也算出 1237 秒，
+	// 实际只用了几秒。
+	FullUseMs int64
 }
 
 // openAIGatewayPoolSink 是 ctx 里承载的那个指针。
@@ -1323,9 +1325,9 @@ func (s *openAIGatewayPoolSink) notePoolCounts(live, free int) {
 	s.poolLive, s.poolFree = live, free
 }
 
-// noteFullHeld 只补到同一账号、网关、票号的尝试。换票时 mark 必须清掉旧时长，
+// noteFullUse 只补到同一账号、网关、票号的尝试。换票时 mark 必须清掉旧时长，
 // 否则上一网关被判死的时长会跟着成功重试落到下一网关。
-func (s *openAIGatewayPoolSink) noteFullHeld(attempt OpenAIGatewayPoolApplied, d time.Duration) {
+func (s *openAIGatewayPoolSink) noteFullUse(attempt OpenAIGatewayPoolApplied, d time.Duration) {
 	if s == nil || d <= 0 {
 		return
 	}
@@ -1333,7 +1335,7 @@ func (s *openAIGatewayPoolSink) noteFullHeld(attempt OpenAIGatewayPoolApplied, d
 	defer s.mu.Unlock()
 	if s.applied.AccountID == attempt.AccountID && s.applied.Gateway == attempt.Gateway &&
 		s.applied.Version == attempt.Version {
-		s.applied.FullHeldMs = d.Milliseconds()
+		s.applied.FullUseMs = d.Milliseconds()
 	}
 }
 
