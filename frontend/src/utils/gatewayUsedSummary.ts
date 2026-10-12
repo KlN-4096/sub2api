@@ -4,7 +4,7 @@ interface UsedGateway {
   name: string
   at: string
   fullAt: string
-  fullHeldMs: number
+  fullUseMs: number
 }
 
 export type GatewayUsedSummary<T> =
@@ -33,9 +33,9 @@ export function gatewayUsedSummary<T extends UsedGateway>(
     const item = items.get(round.gateway)
     if (excluded.has(round.gateway)) {
       events.push({ ...base, kind: 'boundary' })
-    } else if (round.windowMs !== null && item) {
+    } else if (round.fullUseMs !== null && item) {
       measuredGateways.add(round.gateway)
-      events.push({ ...base, kind: 'full', item: { ...item, fullHeldMs: round.windowMs } })
+      events.push({ ...base, kind: 'full', item: { ...item, fullUseMs: round.fullUseMs } })
     } else if (round.outcome === 'refreshed' && round.source !== 'business') {
       events.push({ ...base, kind: 'degraded', count: 1, atLeast: false })
     } else {
@@ -51,7 +51,7 @@ export function gatewayUsedSummary<T extends UsedGateway>(
   // full_at, not a later failed touch, positions the old full window.
   for (const item of history) {
     if (excluded.has(item.name) || measuredGateways.has(item.name)
-      || !Number.isFinite(item.fullHeldMs) || item.fullHeldMs <= 0) continue
+      || !Number.isFinite(item.fullUseMs) || item.fullUseMs <= 0) continue
     const fullAt = Date.parse(item.fullAt)
     const at = Number.isFinite(fullAt) && fullAt > 0 ? fullAt : Date.parse(item.at)
     if (Number.isFinite(at) && at > 0) events.push({ kind: 'full', key: `history:${item.name}`, at, item })

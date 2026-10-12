@@ -20,19 +20,7 @@ func TestCooldownBatchDoesNotFallbackToLegacyEndpoint(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Error(err)
-		}
-		if _, exists := body["observed_at"]; exists || r.Header.Get(cooldownObservedHeader) != at.Format(time.RFC3339Nano) {
-			t.Error("legacy JSON shape or stable event header changed")
-		}
-		id, ok := body["id"].(string)
-		if !ok {
-			t.Error("missing report ID")
-			return
-		}
-		singles = append(singles, id)
+		singles = append(singles, r.URL.Path)
 		_, _ = fmt.Fprint(w, `{"ok":true}`)
 	}))
 	defer server.Close()
@@ -85,5 +73,45 @@ func TestCooldownBatchAcceptsFullAcknowledgementWithRecommendations(t *testing.T
 	got, err := New(server.URL, "test-key", time.Second).ReportCooldownBatch(context.Background(), reports)
 	if err != nil || len(got) != CooldownBatchLimit || got[CooldownBatchLimit-1].Recommendation == nil {
 		t.Fatalf("full acknowledgement rejected: %v (%d results)", err, len(got))
+	}
+}
+
+// Contact reports of several members share one request, and each keeps its
+// own acknowledgement.
+func TestContactBatchCarriesMembersAndPerReportStatus(t *testing.T) {
+	reports := []ContactReport{
+		{ID: strings.Repeat("a", 64), AccountTag: strings.Repeat("c", 64), Gateway: "g", Model: "m", Criterion: ContactCriterion},
+		{ID: strings.Repeat("b", 64), AccountTag: strings.Repeat("d", 64), Gateway: "g", Model: "m", Criterion: ContactCriterion},
+	}
+	hits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		var in struct {
+			Reports []ContactReport `json:"reports"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || r.URL.Path != "/contact/reports" || len(in.Reports) != 2 ||
+			in.Reports[1].AccountTag != reports[1].AccountTag {
+			t.Errorf("contact batch wire changed: %s %+v %v", r.URL.Path, in, err)
+		}
+		_, _ = fmt.Fprintf(w, `{"ok":true,"results":[{"id":%q,"status":200},{"id":%q,"status":409}]}`, reports[1].ID, reports[0].ID)
+	}))
+	defer server.Close()
+	client := New(server.URL, "test-key", time.Second)
+	results, err := client.ReportContactBatch(context.Background(), reports)
+	if err != nil || len(results) != 2 || results[0] != (ContactReportResult{ID: reports[1].ID, Status: 200}) ||
+		results[1] != (ContactReportResult{ID: reports[0].ID, Status: 409}) {
+		t.Fatalf("per-report acknowledgements lost: %+v %v", results, err)
+	}
+	for _, bad := range [][]ContactReport{
+		{reports[0], reports[0]},
+		{{ID: "short", AccountTag: reports[0].AccountTag, Gateway: "g", Model: "m", Criterion: ContactCriterion}},
+		make([]ContactReport, ContactBatchLimit+1),
+	} {
+		if _, err := client.ReportContactBatch(context.Background(), bad); err == nil {
+			t.Fatalf("invalid batch sent: %d reports", len(bad))
+		}
+	}
+	if hits != 1 {
+		t.Fatalf("invalid batches reached the pool: hits=%d", hits)
 	}
 }

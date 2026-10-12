@@ -24,12 +24,12 @@ type Snapshot = { history: Json; contacts: Json }
 const SENT = [
   'history.current', 'history.current_region', 'history.updated_at',
   'history.seen.*.at', 'history.seen.*.region', 'history.seen.*.verdict', 'history.seen.*.full_at',
-  'history.seen.*.full_held_ms', 'history.seen.*.cooldown.cleared', 'history.seen.*.cooldown.window_seconds',
+  'history.seen.*.full_use_ms', 'history.seen.*.cooldown.cleared', 'history.seen.*.cooldown.window_seconds',
   'history.seen.*.cooldown.fixed_seconds', 'history.seen.*.cooldown.until', 'history.seen.*.cooldown.recommended_seconds',
   'contacts.ledger_tag', 'contacts.tracking_since', 'contacts.history_truncated', 'contacts.rounds.*.version_hash',
   'contacts.rounds.*.report.id', 'contacts.rounds.*.report.gateway', 'contacts.rounds.*.report.model',
   'contacts.rounds.*.report.source', 'contacts.rounds.*.report.at', 'contacts.rounds.*.report.outcome',
-  'contacts.rounds.*.report.full_window_ms', 'contacts.rounds.*.report.window_final'
+  'contacts.rounds.*.full_use_ms'
 ]
 
 const isObject = (value: unknown): value is Json => typeof value === 'object' && value !== null
