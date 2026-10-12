@@ -57,7 +57,7 @@ func TestGatewayPoolManualClearPersistsAndKeepsLiveTicket(t *testing.T) {
 		history, _ := readOpenAIGatewayHistory(fresh)
 		require.False(t, history.CooldownReset.ClearedAt.IsZero())
 		require.Equal(t, before.Seen["recent"].At, history.Seen["recent"].At)
-		require.Equal(t, before.Seen["recent"].FullHeldMs, history.Seen["recent"].FullHeldMs)
+		require.Equal(t, before.Seen["recent"].FullUseMs, history.Seen["recent"].FullUseMs)
 		require.True(t, history.Seen["recent"].Cooldown.Cleared)
 		require.Zero(t, history.Seen["recent"].Cooldown.FixedSeconds)
 		require.Empty(t, history.Seen["recent"].Cooldown.Successes)

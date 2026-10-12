@@ -234,6 +234,9 @@ type Gateway struct {
 	Contacts          []ContactStats
 	Priority          *GatewayPriority
 	DatacenterCountry string
+	// MemberAt is when the pool reported this member's Cooldown and Contacts;
+	// zero when the member's last own catalog did not list this gateway.
+	MemberAt time.Time
 }
 
 func (g Gateway) ReadyAt(now time.Time) bool {
@@ -408,6 +411,19 @@ func refusal(resp *http.Response) error {
 	return out
 }
 
+// memberRefusal is the pool refusing the asking member's own directory request
+// (a malformed account). It says nothing about the shared list.
+type memberRefusal int
+
+func (status memberRefusal) Error() string {
+	return fmt.Sprintf("gateways request returned HTTP %d", int(status))
+}
+
+func isMemberRefusal(err error) bool {
+	var refusal memberRefusal
+	return errors.As(err, &refusal)
+}
+
 func (c *Client) fetchGateways(ctx context.Context, account, accountTag, model string) ([]Gateway, error) {
 	endpoint := c.endpoint("gateways")
 	query := url.Values{}
@@ -434,7 +450,11 @@ func (c *Client) fetchGateways(ctx context.Context, account, accountTag, model s
 		return nil, errors.Join(ErrCatalogUnavailable, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusBadRequest:
+		return nil, fmt.Errorf("%w: %w", ErrPool, memberRefusal(resp.StatusCode))
+	default:
 		cause := ErrPool
 		if resp.StatusCode >= http.StatusInternalServerError {
 			cause = ErrCatalogUnavailable

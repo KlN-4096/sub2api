@@ -344,6 +344,31 @@ it('失联仍保留已观测时长，归档同排展示且不混入旧模型墙�
   wrapper.unmount()
 })
 
+it('时长不带下界标记：统计不到的部分直接不计', () => {
+  // Fields an older backend still sends for unobserved time must not bring back a marker.
+  const wrapper = mount(AccountGatewayCell, { props: {
+    account: account(undefined),
+    progress: {
+      phase: 'idle', attempt: 0, limit: 8, rejected: 0, elapsed_ms: 0,
+      started_at: '', updated_at: '', active_requests: 0,
+      runtime: {
+        observed_at: new Date().toISOString(), tickets: [],
+        rounds: [
+          { id: 'active', model: 'all', started_at: isoAgo(1000), full: 1, attempted: 1, full_duration_ms: 5000, full_usage_mode: 'business_active_v1', duration_incomplete: true },
+          { id: 'ended', model: 'all', started_at: isoAgo(3000), ended_at: isoAgo(2000), full: 1, attempted: 1, full_duration_ms: 2000, full_usage_mode: 'business_active_v1', duration_incomplete: true }
+        ],
+        archived: { all: { rounds: 1, full: 1, attempted: 1, active_duration_ms: 1000, active_duration_incomplete: true } }
+      }
+    }
+  } })
+  expect(wrapper.get('[data-testid="gateway-cycle-duration"]').text()).toBe('00:00:05')
+  expect(wrapper.get('[data-testid="gateway-total-duration"]').text()).toBe('00:00:03')
+  for (const id of ['account-gateway-usage-round', 'account-gateway-usage-history']) {
+    expect(wrapper.get(`[data-testid="${id}"]`).attributes('title')).toBe('admin.accounts.openai.gatewayRuntime.activeHint')
+  }
+  wrapper.unmount()
+})
+
 const idleProgress = (runtime: Record<string, unknown> = {}): GatewayPoolProgress => {
   const at = new Date().toISOString()
   return {
@@ -357,7 +382,7 @@ it('全部历史浮层当前验满置顶、其余按最近排列，失焦期间�
   const now = Date.now()
   const iso = (ms: number) => new Date(now - ms).toISOString()
   const seen = {
-    'unified-1': { at: iso(60_000), region: 'europe', verdict: 'degraded', full_held_ms: 43_000 },
+    'unified-1': { at: iso(60_000), region: 'europe', verdict: 'degraded', full_use_ms: 43_000 },
     'unified-2': { at: iso(120_000), region: 'east-asia' },
     'unified-3': { at: iso(2 * 3_600_000), region: 'us-east' }
   }
@@ -427,7 +452,7 @@ it('失焦期间才打开全部历史，浮层仍是失焦那一刻的读数', a
   const now = Date.now()
   const iso = (ms: number) => new Date(now - ms).toISOString()
   const seen = {
-    'unified-1': { at: iso(60_000), region: 'europe', verdict: 'degraded', full_held_ms: 43_000 },
+    'unified-1': { at: iso(60_000), region: 'europe', verdict: 'degraded', full_use_ms: 43_000 },
     'unified-2': { at: iso(120_000), region: 'east-asia' }
   }
   const runtime = (live: boolean) => ({ history: { current: 'unified-2', seen }, tickets: live
@@ -454,7 +479,7 @@ it('失焦期间才打开全部历史，浮层仍是失焦那一刻的读数', a
 })
 
 it('全部历史的状态、颜色与提示只在浮层打开时生成，关上时只给网关与大区', async () => {
-  const seen = { 'unified-1': { at: isoAgo(60), region: 'europe', verdict: 'degraded', full_held_ms: 43_000 } }
+  const seen = { 'unified-1': { at: isoAgo(60), region: 'europe', verdict: 'degraded', full_use_ms: 43_000 } }
   const w = mount(AccountGatewayCell, { props: { account: account({ seen }) }, global: { stubs: { teleport: true } } })
   const items = () => w.findComponent(GatewayUsedHistory).props('items')
   const closed = [{ name: 'unified-1', region: 'europe', title: '', duration: '', status: '', tone: 'idle' }]
@@ -634,9 +659,9 @@ function accountWithSamples(history: { current: string; seen: Record<string, { a
     report: {
       id: `sample-${bucket}-${index}`, gateway: 'unified-sample', model: 'gpt-6-astra',
       criterion: 'state-echo-v1', source: 'foreground', first: 'repeat', at: isoAgo(8 * 3600 + index),
-      gap_known: true, elapsed_seconds: gap, outcome: index < 3 ? 'full' : 'refreshed',
-      window_final: index < 3, full_window_ms: index < 3 ? 120000 : 0
-    }
+      gap_known: true, elapsed_seconds: gap, outcome: index < 3 ? 'full' : 'refreshed'
+    },
+    full_use_ms: index < 3 ? 120000 : 0
   })))
   return account(history, {
     openai_gwpool_ledger_tag: 'same-ledger',
@@ -746,7 +771,7 @@ describe('AccountGatewayCell', () => {
       seen: {
         'unified-73': { at: isoAgo(61 * 60), region: 'east-asia' },
         'unified-142': {
-          at: isoAgo(60), region: 'us-east', full_held_ms: 75000,
+          at: isoAgo(60), region: 'us-east', full_use_ms: 75000,
           cooldown: { until: isoAgo(-119 * 60), window_seconds: 7200, fixed_seconds: 7200 }
         }
       }
@@ -959,19 +984,21 @@ describe('AccountGatewayCell', () => {
     w.unmount()
   })
 
-  it('周期结束后当前计数时长归零，新周期不累计上一周期', async () => {
+  it('周期结束后本轮格保留刚结束那一轮，新周期从零起算不累计上一周期', async () => {
     const runtime = { observed_at: new Date().toISOString(), tickets: [],
       rounds: [{ id: 'old', model: 'all', started_at: isoAgo(3600), ended_at: isoAgo(1800),
-        attempted: 8, full: 3, full_duration_ms: 65000, full_usage_mode: 'business_active_v1' }], archived: null }
+        attempted: 8, full: 3, full_duration_ms: 65000, full_usage_mode: 'business_active_v1' },
+      { id: 'older', model: 'all', started_at: isoAgo(9000), ended_at: isoAgo(7200),
+        attempted: 4, full: 2, full_duration_ms: 1000, full_usage_mode: 'business_active_v1' }], archived: null }
     const progress = { phase: 'idle' as const, attempt: 0, limit: 5, rejected: 0, elapsed_ms: 0,
       started_at: '', updated_at: '', active_requests: 0, runtime }
     const w = mount(AccountGatewayCell, { props: { account: account({}), progress } })
-    // Between cycles the tile stays and shows zeros.
-    expect(w.get('[data-testid="gateway-cycle-tickets"]').text()).toContain('"full":0,"attempted":0')
-    expect(w.get('[data-testid="gateway-cycle-duration"]').text()).toBe('00:00:00')
+    // Between cycles the tile keeps the latest ended round instead of zeros.
+    expect(w.get('[data-testid="gateway-cycle-tickets"]').text()).toContain('"full":3,"attempted":8')
+    expect(w.get('[data-testid="gateway-cycle-duration"]').text()).toBe('00:01:05')
     const history = w.get('[data-testid="account-gateway-usage-history"]').text()
-    expect(history).toContain('"count":1')
-    expect(w.get('[data-testid="gateway-total-duration"]').text()).toBe('00:01:05')
+    expect(history).toContain('"count":2')
+    expect(w.get('[data-testid="gateway-total-duration"]').text()).toBe('00:01:06')
     await w.setProps({ progress: { ...progress, runtime: { ...runtime,
       rounds: [...runtime.rounds, { id: 'new', model: 'all', started_at: isoAgo(30), ended_at: '',
         attempted: 1, full: 1, full_duration_ms: 5000, full_usage_mode: 'business_active_v1' }] } } })
@@ -1056,7 +1083,7 @@ describe('AccountGatewayCell', () => {
             region: 'east-asia',
             verdict: 'degraded',
             full_at: isoAgo(240),
-            full_held_ms: 180_000
+            full_use_ms: 180_000
           },
           'unified-95': { at: isoAgo(180), region: 'us-east' }
         },
@@ -1212,7 +1239,7 @@ describe('AccountGatewayCell', () => {
     expect(w.find('[data-testid="account-gateway-forecast"]').exists()).toBe(false)
   })
 
-  // 没有 full_held_ms 就写「未计时」，**绝不拿 at − full_at 顶上**。
+  // 没有 full_use_ms 就写「未计时」，**绝不拿 at − full_at 顶上**。
   //
   // 第一版就是那个减法：full_at 是粘滞的，而 degraded 判定要等下一次真的打到这个网关才会
   // 写，中间空几个小时就白算几个小时 —— 现网渲染出了 22655s / 21738s（满血窗口才 183 秒）。
@@ -1244,6 +1271,11 @@ describe('AccountGatewayCell', () => {
     const stale = cell(w, 'us-east').attributes('title') ?? ''
     expect(stale).toContain(`-${base}.fullUntimed-`)
     expect(stale).not.toMatch(/-\d{4,}s-/)
+    // 量到了但不足 1 秒（新周期第一发就判降）：写 <1s，不写成像「没用过」的 0s。
+    await w.setProps({ account: account({ current: 'unified-95', seen: {
+      'unified-95': { at: isoAgo(30), region: 'us-east', verdict: 'degraded', full_use_ms: 300 }
+    } }) })
+    expect(cell(w, 'us-east').attributes('title')).toContain('-<1s-')
   })
 
   // 满血分钟预测：每个网关各算一个单位，使用同层实测率和时长，不是保底。

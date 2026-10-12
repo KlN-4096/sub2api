@@ -22,8 +22,8 @@ func TestGatewayPoolFullUsageStopsWhenBusinessBodyFinishes(t *testing.T) {
 	require.NoError(t, response.Body.Close())
 	view, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{account.ID}, true)
 	require.NoError(t, err)
-	round := view[account.ID].Runtime.Rounds[0]
-	require.True(t, round.ActiveUsage == nil || !round.ActiveUsage.Open,
+	require.Equal(t, gatewayPoolActiveUsageMode, view[account.ID].Runtime.Rounds[0].FullUsageMode)
+	require.Empty(t, svc.codexCookies.activeUsageTracker(gwpoolTestIdentity).snapshot(),
 		"EOF/Close must stop usage even while the verified ticket remains live")
 }
 
@@ -75,13 +75,15 @@ func TestGatewayPoolFullUsageStartsOnBusinessWriteBeforeResponse(t *testing.T) {
 	}
 	fresh, readErr := repo.stored(1)
 	writesBeforeResponse := repo.writes
+	inFlight := svc.codexCookies.activeUsageTracker(gwpoolTestIdentity).snapshot()
 	close(upstream.release)
 	<-done
 	require.NoError(t, readErr)
 	state := readGatewayPoolUsage(fresh, gatewayPoolLedgerTag(gwpoolTestIdentity))
 	require.Len(t, state.Rounds, 1)
 	require.NotNil(t, state.Rounds[0].ActiveUsage)
-	require.True(t, state.Rounds[0].ActiveUsage.Open)
+	require.Len(t, inFlight, 1)
+	require.True(t, inFlight[0].end.IsZero(), "the write happened while the business request was still running")
 	require.Equal(t, 1, state.Rounds[0].Full)
 	require.Equal(t, 1, state.Rounds[0].Attempted)
 	require.Equal(t, 2, writesBeforeResponse, "one request-begin write plus one combined business-send write")
