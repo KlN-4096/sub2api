@@ -283,7 +283,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		// internal_chat_message_metadata_passthrough，而投影正是靠它的 create_time
 		// 定位消息时刻。只有 isResponsesShape 分支会原样转发客户端 body（:237
 		// sjson.SetBytes(body, ...)），其余分支的体由网关现造、带不进该字段，此处为 no-op。
-		// 与 Forward / WS 三处同形，重复执行幂等。
+		// 与 Forward / WS 三处同形；请求构造器不再补第二遍，这里是这条路径唯一一遍。
 		responsesBody = rewriteCodexEnvironmentTimezone(c, account, responsesBody)
 		var reqBody map[string]any
 		if err := json.Unmarshal(responsesBody, &reqBody); err != nil {

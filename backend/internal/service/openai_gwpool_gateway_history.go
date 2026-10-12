@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"sort"
 	"strings"
@@ -127,28 +126,9 @@ type openAIGatewaySeen struct {
 	Cooldown   *gatewayPoolCooldown `json:"cooldown,omitempty"`
 }
 
-// readOpenAIGatewayHistory 读这条记录。解析失败按「没有」处理。
-//
-// 走 marshal/unmarshal 而不是裸类型断言：extra 是 JSONB，同一个键在「刚写进去」和
-// 「从 DB / Redis 读回来」两条路径上的具体 Go 类型不保证相同，裸断言失败是静默的
-// （照 readOpenAITurnStateObservation）。
+// readOpenAIGatewayHistory 读这条记录。解析失败按「没有」处理（decodeExtraJSON）。
 func readOpenAIGatewayHistory(a *Account) (openAIGatewayHistory, bool) {
-	if a == nil {
-		return openAIGatewayHistory{}, false
-	}
-	raw, ok := a.Extra[openAIGatewayHistoryExtraKey]
-	if !ok || raw == nil {
-		return openAIGatewayHistory{}, false
-	}
-	encoded, err := json.Marshal(raw)
-	if err != nil {
-		return openAIGatewayHistory{}, false
-	}
-	var rec openAIGatewayHistory
-	if err := json.Unmarshal(encoded, &rec); err != nil {
-		return openAIGatewayHistory{}, false
-	}
-	return rec, true
+	return decodeExtraJSON[openAIGatewayHistory](a, openAIGatewayHistoryExtraKey)
 }
 
 // noteOpenAIGatewayUse 记一发请求落在了哪个网关，以及这一发的 state-echo 读数
@@ -278,12 +258,8 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 	rec.UpdatedAt = now
 	pruneOpenAIGatewayHistory(&rec)
 
-	encoded, err := json.Marshal(rec)
-	if err != nil {
-		return
-	}
-	var generic map[string]any
-	if err := json.Unmarshal(encoded, &generic); err != nil {
+	generic, ok := extraJSONMap(rec)
+	if !ok {
 		return
 	}
 	if account.Extra == nil {
