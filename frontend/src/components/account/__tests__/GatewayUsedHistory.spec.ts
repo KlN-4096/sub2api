@@ -73,6 +73,48 @@ describe('gateway history hover', () => {
     } finally { wrapper.unmount() }
   })
 
+  it('keeps Escape from mount, listens for outside clicks, scrolling and resizing only while open, and announces each toggle', async () => {
+    const spies = [document, window].flatMap(target => [vi.spyOn(target, 'addEventListener'), vi.spyOn(target, 'removeEventListener')])
+    const page = ['pointerdown', 'keydown', 'scroll', 'resize']
+    // Whole argument lists: a capture listener removed without its flag stays attached.
+    const calls = (...indexes: number[]) => indexes.flatMap(index => spies[index].mock.calls.filter(call => page.includes(String(call[0]))))
+    try {
+      const wrapper = mount(GatewayUsedHistory, { props: { items: items(1) }, global: { stubs: { teleport: true } } })
+      try {
+        expect(calls(0, 2)).toEqual([['keydown', expect.any(Function)]])
+        await wrapper.get(selector('trigger')).trigger('click')
+        const opened = calls(0, 2).slice(1)
+        expect(opened).toEqual([['pointerdown', expect.any(Function)], ['scroll', expect.any(Function), true], ['resize', expect.any(Function)]])
+        await wrapper.get(selector('close')).trigger('click')
+        expect(calls(1, 3)).toEqual(opened)
+        await wrapper.get(selector('trigger')).trigger('mouseenter')
+        expect(wrapper.emitted('toggle')).toEqual([[true], [false], [true]])
+      } finally { wrapper.unmount() }
+      // Every registration is removed as often as it was added.
+      const byType = (list: unknown[][]) => [...list].sort((x, y) => String(x[0]).localeCompare(String(y[0])))
+      expect(byType(calls(1, 3))).toEqual(byType(calls(0, 2)))
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+    }
+  })
+
+  it('closes every open panel on Escape in mount order, so the last mounted trigger keeps the focus', async () => {
+    const first = mount(GatewayUsedHistory, { props: { items: items(1) }, attachTo: document.body })
+    const second = mount(GatewayUsedHistory, { props: { items: items(1) }, attachTo: document.body })
+    try {
+      await second.get(selector('trigger')).trigger('click')
+      await first.get(selector('trigger')).trigger('mouseenter')
+      expect(document.body.querySelectorAll(selector('panel'))).toHaveLength(2)
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      await first.vm.$nextTick()
+      expect(document.body.querySelector(selector('panel'))).toBeNull()
+      expect(document.activeElement).toBe(second.get(selector('trigger')).element)
+    } finally {
+      first.unmount()
+      second.unmount()
+    }
+  })
+
   it('supports Escape and outside clicks, and removes a teleported panel on unmount', async () => {
     const wrapper = mount(GatewayUsedHistory, { props: { items: items(1) }, attachTo: document.body })
     try {

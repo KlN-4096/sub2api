@@ -43,7 +43,8 @@ func codexGuardianCreditsRequested(c *gin.Context, account *Account, payload []b
 // /responses（旧式 /responses/compact 的请求体没有 client_metadata，不补）。client_metadata 缺失就新建，
 // 存在但不是对象不动。
 func applyCodexGuardianCreditsRequested(c *gin.Context, account *Account, targetURL string, body []byte) []byte {
-	if !gjson.ParseBytes(body).IsObject() || !codexRequestBodyCompressionEnabled(c, account, targetURL) ||
+	// 门控在前：ParseBytes 会整拷一次体，非双开账号不该付这份代价。三个判据都无副作用，换序不改结果。
+	if !codexRequestBodyCompressionEnabled(c, account, targetURL) || !gjson.ParseBytes(body).IsObject() ||
 		!codexGuardianCreditsRequested(c, account, body) {
 		return body
 	}

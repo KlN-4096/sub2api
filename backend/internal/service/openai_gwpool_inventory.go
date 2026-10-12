@@ -14,9 +14,7 @@ type gatewayPoolInventoryState struct {
 }
 
 func (s *openAICodexCookieStore) gatewayPoolInventory(identity string) *gatewayPoolInventoryState {
-	value, _ := s.poolInventory.LoadOrStore(identity, &gatewayPoolInventoryState{})
-	state, _ := value.(*gatewayPoolInventoryState)
-	return state
+	return gatewayPoolLoadOrNew[gatewayPoolInventoryState](&s.poolInventory, identity)
 }
 
 func (s *openAICodexCookieStore) gatewayPoolInventoryOperation(identity string) func() {
@@ -43,15 +41,8 @@ func (s *openAICodexCookieStore) gatewayPoolInventoryCandidates(identity string)
 	if state.active > 0 {
 		return state.generation, true, candidates
 	}
-	domain := identity
-	s.poolPairs.Range(func(key, _ any) bool {
-		other, ok := key.(string)
-		if ok && other == domain {
-			if pair, live := s.cachedPoolPair(other); live == openAIGatewayPoolPairLive {
-				candidates[pair.gateway] = struct{}{}
-			}
-		}
-		return true
-	})
+	if pair, live := s.cachedPoolPair(identity); live == openAIGatewayPoolPairLive {
+		candidates[pair.gateway] = struct{}{}
+	}
 	return state.generation, false, candidates
 }

@@ -1330,6 +1330,9 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		// 里、由凭据投影保留；cpr 的在 extra 里，不进白名单就只剩 DB 回退那一次
 		// 能看到，Redis 命中路径上恒被当作非订阅号降到第二梯队。
 		service.CPRPlanTypeExtraKey,
+		// 网关池开关：选路只对投影里开池的行做 fresh 读，裁掉它池账号会被当成普通行。
+		// 它不是中立键，改开关的写入走 outbox 并立即 SetAccount，投影几乎不滞后。
+		service.OpenAIGatewayPoolExtraKey,
 		"auto_pause_5h_threshold",
 		"auto_pause_7d_threshold",
 		"auto_pause_5h_disabled",

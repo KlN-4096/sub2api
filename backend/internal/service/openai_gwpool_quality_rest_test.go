@@ -87,7 +87,7 @@ func TestGatewayPoolQualityRestBothEntrypointsFreezeSameFreshLunaCohort(t *testi
 			svc.codexCookies.poolContactPicks.Store(gatewayPoolLedgerTag(gwpoolTestIdentity), counter)
 			if entry == "rotation" {
 				failure := &UpstreamFailoverError{GatewayPoolRotation: true, NextAccountAction: NextAccountStop}
-				svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, failure)
+				svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, failure, nil)
 				require.True(t, failure.ShouldRetryNextAccount())
 			} else {
 				require.False(t, svc.gatewayPoolRoundSelectionAllowed(ctx, &group, &AccountSelectionResult{Account: account}))
@@ -119,7 +119,7 @@ func TestGatewayPoolQualityRestFreezeSurvivesRestartAndLaterEntry(t *testing.T) 
 		svc.codexCookies.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, name), now)
 	}
 	require.NoError(t, svc.enterGatewayPoolRest(ctx, account, gwpoolTestIdentity, now, now.Add(time.Hour), gatewayPoolRestPlan{qualityGateways: []string{"first-quality"}}))
-	restarted := &OpenAIGatewayService{accountRepo: svc.accountRepo}
+	restarted := withGatewayPoolRowRead(&OpenAIGatewayService{accountRepo: svc.accountRepo})
 	for _, name := range []string{"first-quality", "new-quality", "ordinary"} {
 		at := now
 		if name == "first-quality" {
@@ -182,7 +182,7 @@ func TestGatewayPoolQualityRestUsesFreshPeerEvidenceAndRejectsUnknownOrChangedIn
 			repo := &gatewayQualityRestRepo{gatewayRotationRepo: gatewayRotationRepo{
 				schedulerTestOpenAIAccountRepo{accounts: []Account{*account, *peer}},
 			}}
-			svc := &OpenAIGatewayService{accountRepo: repo}
+			svc := withGatewayPoolRowRead(&OpenAIGatewayService{accountRepo: repo})
 			for _, name := range []string{"good", "bad"} {
 				svc.codexCookies.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, name), now)
 			}
@@ -217,15 +217,15 @@ func TestGatewayPoolQualityRestEstimateUsesNewestPeerCohortWithoutWriting(t *tes
 		"late":  {At: now},
 	}}
 	svc := &OpenAIGatewayService{}
-	estimate := svc.codexCookies.gatewayPoolCooldownEstimate(gwpoolTestIdentity, account, history, now, *peer)
+	estimate := gatewayPoolTestCooldownEstimate(&svc.codexCookies, gwpoolTestIdentity, account, history, now, *peer)
 	require.Equal(t, now.Add(10*time.Minute), estimate.EligibleAt)
-	require.Contains(t, svc.gatewayPoolRestDisplay(account, gwpoolTestIdentity, []Account{*peer}).Reason, "or 3 local cooldowns")
+	require.Contains(t, gatewayPoolRestDisplay(account, svc.codexCookies.gatewayPoolRestSnapshot(account, gwpoolTestIdentity, []Account{*peer})).Reason, "or 3 local cooldowns")
 	require.Equal(t, older, readGatewayPoolRest(account, tag))
 	_, cached := svc.codexCookies.poolRestState.Load(tag)
 	require.False(t, cached, "display cannot publish a runtime policy")
 	newer.Active, newer.QualityGateways = false, nil
 	peer.Extra[gatewayPoolRestStateKey] = newer
-	estimate = svc.codexCookies.gatewayPoolCooldownEstimate(gwpoolTestIdentity, account, history, now, *peer)
+	estimate = gatewayPoolTestCooldownEstimate(&svc.codexCookies, gwpoolTestIdentity, account, history, now, *peer)
 	require.Equal(t, now.Add(time.Hour), estimate.EligibleAt, "a newer tombstone must not reuse an old quality cohort")
 }
 
@@ -241,7 +241,7 @@ func TestGatewayPoolQualityRestChangedInventoryCannotPublishAtEitherEntrypoint(t
 				repo := &gatewayQualityRestRepo{gatewayRotationRepo: gatewayRotationRepo{
 					schedulerTestOpenAIAccountRepo{accounts: []Account{*account}},
 				}}
-				svc := &OpenAIGatewayService{accountRepo: repo}
+				svc := &OpenAIGatewayService{accountRepo: repo} // read ordinals below assume no injected row read
 				svc.codexCookies.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, "good"), now)
 				reads, changed := 0, false
 				repo.onGet = func() {
@@ -260,7 +260,7 @@ func TestGatewayPoolQualityRestChangedInventoryCannotPublishAtEitherEntrypoint(t
 				}
 				if entry == "rotation" {
 					failure := &UpstreamFailoverError{GatewayPoolRotation: true, NextAccountAction: NextAccountStop}
-					result := svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, failure)
+					result := svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, failure, nil)
 					require.False(t, failure.ShouldRetryNextAccount(), "stale exhaustion cannot authorize rotation")
 					require.Nil(t, gatewayPoolRotationFrom(result))
 				} else {
@@ -295,7 +295,7 @@ func TestGatewayPoolQualityRestPartialReadCannotReplaceFrozenPolicyOrTombstone(t
 			repo := &gatewayQualityRestRepo{gatewayRotationRepo: gatewayRotationRepo{
 				schedulerTestOpenAIAccountRepo{accounts: []Account{*account}},
 			}, fail: true}
-			svc := &OpenAIGatewayService{accountRepo: repo} // restart: cache is empty
+			svc := withGatewayPoolRowRead(&OpenAIGatewayService{accountRepo: repo}) // restart: cache is empty
 			err := svc.enterGatewayPoolRest(ctx, account, gwpoolTestIdentity, now, now.Add(2*time.Hour), gatewayPoolRestPlan{qualityGateways: []string{"replacement"}})
 			require.Error(t, err)
 			require.Equal(t, state, readGatewayPoolRest(account, tag))

@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
+	"github.com/tidwall/gjson"
 )
 
 // 真客户端默认开启 enable_request_compression（16ff14c: features/src/lib.rs:1221-1224，Stable、
@@ -54,6 +56,42 @@ func codexRequestBodyCompressionEnabled(c *gin.Context, account *Account, target
 		return false
 	}
 	return strings.HasSuffix(strings.TrimRight(parsed.Path, "/"), "/responses")
+}
+
+// finalizeCodexWireBody 是两个 HTTP 构造器（buildUpstreamRequest / buildUpstreamRequestOpenAIPassthrough）
+// 共用的请求体定稿链，步骤顺序承重。targetURL 是按路径分流用的出站 URL（自建图片请求是覆盖后的
+// wireTargetURL）。返回的 ctx 可能挂上网关池确认体，调用方必须拿它构造请求；body 是定稿后的明文，
+// 供路由提示与诊断日志读取；wire / enc 是上线字节与 Content-Encoding。
+func (s *OpenAIGatewayService) finalizeCodexWireBody(ctx context.Context, c *gin.Context, account *Account, targetURL string, body []byte) (context.Context, []byte, []byte, string, error) {
+	body, err := filterCodexCompactAccessPrograms(c, account, body)
+	if err != nil {
+		return ctx, nil, nil, "", fmt.Errorf("filter compact access programs: %w", err)
+	}
+
+	// codex 0.156 的两处体内形态：guardian 计费标记、turn-metadata 的 model 跟随出站体。
+	body = applyCodexGuardianCreditsRequested(c, account, targetURL, body)
+	body = alignCodexTurnMetadataExecutionBody(c, account, targetURL, body)
+
+	// 顶层键序：只重排，不改任何值（下面的 user_location 改写与压缩仍会动体）。
+	body = applyCodexBodyFieldOrder(c, account, targetURL, body)
+
+	// environment_context 的时区已在各入口归一化之前投影过（见 Forward 开头的注释）；同一份出口
+	// 解析结果在这里投影到 web_search 的 user_location，否则出站是"出口时区 + 客户端本机城市"
+	// （openai_codex_wire_user_location.go）。
+	body = rewriteCodexWebSearchUserLocation(c, account, body)
+
+	// 趁 body 还是明文，把出站模型名记进本次请求的网关池 sink：queue 档的预热垫话必须用同一个
+	// 模型（后置回声复验沿用本次业务模型），而它跑在传输层、只拿到 *http.Request ——
+	// 到那时双开账号的体已经是 zstd 了，解不出来（openai_gwpool_warm.go 的 gatewayPoolWarmModel）。
+	// 没挂 sink 的路径这一行是空操作。
+	openAIGatewayPoolSinkFrom(ctx).noteModel(gjson.GetBytes(body, "model").String())
+	if account.UsesGatewayPool() {
+		ctx = context.WithValue(ctx, gatewayPoolConfirmBodyKey{}, gatewayPoolConfirmBody(body))
+	}
+
+	// 上线字节：双开 /responses 的请求体按真客户端默认做 zstd 压缩。
+	wire, enc, err := compressCodexRequestBody(c, account, targetURL, body)
+	return ctx, body, wire, enc, err
 }
 
 // compressCodexRequestBody 返回上线的请求体字节与 Content-Encoding。不压缩时原样返回、编码为空。
