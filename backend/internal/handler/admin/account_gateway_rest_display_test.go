@@ -50,7 +50,7 @@ func TestAccountGatewayRestStatusPersistsPastRecheckWithoutChangingOtherBlocks(t
 				account.TempUnschedulableReason = "auth-block"
 			}
 			admin := restDisplayAdmin{rest: service.GatewayPoolRestView{
-				Active: mode != "inactive", NextCheck: past, ChangedAt: past.Add(-time.Hour),
+				Active: mode != "inactive", ChangedAt: past.Add(-time.Hour),
 				StartedAt: past.Add(-2 * time.Hour), ResumeAt: future,
 				Reason: "网关候选低于10，休息后达到40才恢复",
 			}, fail: mode == "unavailable" || mode == "ordinary-unavailable"}

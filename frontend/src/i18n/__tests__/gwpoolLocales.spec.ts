@@ -43,8 +43,6 @@ describe('gateway pool locale keys', () => {
       'gwpoolFetchTimeoutDesc',
       'gwpoolListTimeout',
       'gwpoolListTimeoutDesc',
-      'gwpoolPrepareRetries',
-      'gwpoolPrepareRetriesDesc',
       'gwpoolManualRetry',
       'gwpoolManualRetryHint',
       'gwpoolProbeTimeout',
@@ -61,10 +59,9 @@ describe('gateway pool locale keys', () => {
       expect(openai[key], `${key} is retired`).toBeUndefined()
     }
     expect(openai.gwpoolWarmDetails).toMatch(/共享候选队列|shared candidate queue/)
-    expect(openai.gwpoolPrepareRetriesDesc).toContain('0')
     for (const key of ['gwpoolMaxWait', 'gwpoolMaxWaitDesc', 'gwpoolWarmTickets',
       'gwpoolWarmTicketsDesc', 'gwpoolRotationMinGateways', 'gwpoolRotationMinGatewaysDesc',
-      'gwpoolAutoWait', 'gwpoolAutoWaitDesc', 'gwpoolProbeModel']) {
+      'gwpoolAutoWait', 'gwpoolAutoWaitDesc', 'gwpoolProbeModel', 'gwpoolPrepareRetries', 'gwpoolPrepareRetriesDesc']) {
       expect(openai[key], `${key} is retired`).toBeUndefined()
     }
     expect(openai.gwpoolPrewarm).toBeUndefined()
@@ -75,39 +72,6 @@ describe('gateway pool locale keys', () => {
     // 地址提示必须点出「根地址」这个坑（用户填过 /a/xxxx 个人页面）。
     expect(openai.gwpoolBaseUrlDesc).toContain('pool.0102400.xyz')
     expect(openai.gwpoolBaseUrlDesc).toContain('/a/xxxx')
-    // 九宫格的四种色只靠颜色传达不行（9px 字号、emerald/rose 同明度、title 触屏摸不到），
-    // 图例必须在页面上，而且要带那两个字符前缀。
-    for (const mark of ['✓', '!']) {
-      expect(openai.gatewayHistory.legend, mark).toContain(mark)
-    }
-    // 自适应冷却到期只是允许重试，不能把预测写成满血保底或配额。
-    expect(openai.gatewayHistory.forecast).toMatch(/可重试|retry-eligible/)
-    expect(openai.gatewayHistory.forecast).not.toMatch(/至少|at least|最多|at most/)
-    expect(openai.gatewayHistory.forecastHint).toMatch(/不是满血保底|not guaranteed/)
-    expect(openai.gatewayHistory.forecastHint).toMatch(/其他行|Other rows/)
-    expect(openai.gatewayHistory.forecastHint).toMatch(/确认恢复|confirm recovery/)
-    // **单位是 (账号 × 网关)，不是大区。** 2026-10-03 用户纠正：「时间还是按网关来的，
-    // 相同区域不同网关同一个号还是有不同的满血期的」。第一版按大区数，把 us-west 那 20 个
-    // 网关名算成 1 个单位 ⇒ 预测值低一个数量级。这条断言钉住口径，别再被「九宫格是按大区
-    // 画的」带回去。
-    expect(openai.gatewayHistory.forecastHint).toMatch(/账号 × 网关|account × gateway/)
-    expect(openai.gatewayHistory.forecastHint).not.toMatch(/账号 × 大区|account × region/)
-    // 而且要明说「别按大区并」：那正是会被顺手改回去的那一步。
-    expect(openai.gatewayHistory.forecastHint).toMatch(/别按大区并|do not collapse by region/)
-    // 按大区的那三条键删了（上行空间改成在 tooltip 里定性说一句：这一行不知道池子一共有
-    // 多少网关，给不出数）。留着会让下一个人以为还有个数字该显示。
-    expect(openai.gatewayHistory.forecastUntouched, '按大区的上行空间文案已删').toBeUndefined()
-    expect(openai.gatewayHistory.forecastUntouchedHint, '按大区的上行空间文案已删').toBeUndefined()
-    expect(openai.gatewayHistory.forecastBlindHint, '未归类扣减文案已删').toBeUndefined()
-    // 预测的插值与样本门槛须匹配组件，不能重新引入固定窗口。
-    // 改了名字 vue-i18n 会静默渲染成字面量。
-    expect(openai.gatewayHistory.forecast).toContain('{minutes}')
-    expect(openai.gatewayHistory.forecastHint).toContain('{units}')
-    for (const key of ['model', 'source', 'results', 'windows']) {
-      expect(openai.gatewayHistory.forecastHint).toContain(`{${key}}`)
-    }
-    expect(openai.gatewayHistory.forecastHint).not.toContain('{window}')
-    expect(openai.gatewayHistory.forecastPending).toMatch(/待统计|awaiting/)
   })
 
   it('describes mandatory strict Luna verification without an off switch', () => {

@@ -12,17 +12,9 @@ func (s *OpenAIGatewayService) gatewayPoolStatePeers(ctx context.Context, tag, k
 	if repo, ok := s.accountRepo.(gatewayPoolStatePeerRepository); ok {
 		return repo.FindGatewayPoolStatePeers(ctx, tag, kind)
 	}
-	keys := []string{gatewayPoolUsageTagKey, gatewayPoolUsagePreviousTagKey}
+	key := gatewayPoolUsageTagKey
 	if kind == "rest" {
-		keys = []string{gatewayPoolRestTagKey, gatewayPoolRestPreviousTagKey}
+		key = gatewayPoolRestTagKey
 	}
-	var peers []Account
-	for _, key := range keys {
-		rows, err := s.accountRepo.FindByExtraField(ctx, key, tag)
-		if err != nil {
-			return nil, err
-		}
-		peers = append(peers, rows...)
-	}
-	return peers, nil
+	return s.accountRepo.FindByExtraField(ctx, key, tag)
 }

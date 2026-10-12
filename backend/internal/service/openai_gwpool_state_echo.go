@@ -173,8 +173,7 @@ func (s *openAICodexCookieStore) gatewayPoolMarkStaleMatched(identity, version s
 //
 // 调用点在**读到响应头之后、往下游写第一个字节之前**：doOpenAIUpstream 是传输层，调用方要等它
 // 返回才开始解析响应、写下游。所以这里关掉响应体就是干净的截断，不会留一个半截的 SSE 流。
-// 不读响应体还有一个副作用是想要的：提前 Close 让 HTTP/2 发 RST_STREAM，上游立刻停止生成
-// （与猎手「头到手即断」同一手法，openai_turn_state_hunter.go）。
+// 不读响应体还有一个副作用是想要的：提前 Close 让 HTTP/2 发 RST_STREAM，上游立刻停止生成。
 //
 // 这条日志是**唯一**能事后回答「我的请求为什么被截断了」的东西。按明确约定：
 // 票本体、cookie 本体都不进日志，票只记 sha256 前缀指纹（openAICodexTurnStateKey，与溯源表同一个

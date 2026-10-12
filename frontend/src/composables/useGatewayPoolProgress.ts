@@ -53,14 +53,17 @@ export function useGatewayPoolProgress(ids: ComputedRef<number[]>) {
     const timeout = setTimeout(() => request.abort(), REQUEST_TIMEOUT_MS)
     try {
       const snapshots = await getGatewayPoolProgress(requested, request.signal)
+      // Every ID must be answered; an inactive row (deleted / pool off) has no runtime.
       const complete = requested.every(id => {
+        if (snapshots?.[id]?.inactive === true) return true
         const runtime = snapshots?.[id]?.runtime
         return runtime && Number.isFinite(Date.parse(runtime.observed_at)) &&
           Array.isArray(runtime.tickets) && Array.isArray(runtime.rounds) &&
           typeof runtime.rest?.active === 'boolean'
       })
       if (current === generation && active() && complete) {
-        progress.value = Object.fromEntries(Object.entries(snapshots).filter(([id]) => requested.includes(Number(id))))
+        progress.value = Object.fromEntries(Object.entries(snapshots).filter(([id, value]) =>
+          requested.includes(Number(id)) && value.inactive !== true))
         paused.value = false
       }
     } catch {

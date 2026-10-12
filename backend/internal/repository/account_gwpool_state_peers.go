@@ -18,14 +18,10 @@ func (r *accountRepository) FindGatewayPoolStatePeers(ctx context.Context, tag, 
 		query = `SELECT id, jsonb_build_object(
 			'openai_gwpool_usage_rounds', extra->'openai_gwpool_usage_rounds',
 			'openai_gwpool_usage_blocked_at', extra->'openai_gwpool_usage_blocked_at')
-			FROM accounts WHERE deleted_at IS NULL AND
-			(extra->>'openai_gwpool_usage_tag' = $1 OR extra->>'openai_gwpool_usage_previous_tag' = $1)
-			ORDER BY CASE WHEN extra->>'openai_gwpool_usage_tag' = $1 THEN 0 ELSE 1 END`
+			FROM accounts WHERE deleted_at IS NULL AND extra->>'openai_gwpool_usage_tag' = $1 ORDER BY id`
 	case "rest":
 		query = `SELECT id, jsonb_build_object('openai_gwpool_rest_state', extra->'openai_gwpool_rest_state')
-			FROM accounts WHERE deleted_at IS NULL AND
-			(extra->>'openai_gwpool_rest_tag' = $1 OR extra->>'openai_gwpool_rest_previous_tag' = $1)
-			ORDER BY CASE WHEN extra->>'openai_gwpool_rest_tag' = $1 THEN 0 ELSE 1 END`
+			FROM accounts WHERE deleted_at IS NULL AND extra->>'openai_gwpool_rest_tag' = $1 ORDER BY id`
 	default:
 		return nil, fmt.Errorf("unsupported gateway-pool state kind %q", kind)
 	}

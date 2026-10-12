@@ -199,27 +199,23 @@ func TestNormalizeCodexZstdFrameHeaderRejectsFlagBits(t *testing.T) {
 	for name, fhd := range map[string]byte{"dict_id": 0x01, "checksum": 1 << 2, "reserved": 1 << 3, "unused": 1 << 4} {
 		t.Run(name, func(t *testing.T) {
 			frame := []byte{0x28, 0xb5, 0x2f, 0xfd, fhd, 0x58, 0x01, 0x00, 0x00}
-			_, err := normalizeCodexZstdFrameHeader(frame)
+			_, err := normalizeOwnedCodexZstdFrameHeader(frame)
 			require.Error(t, err)
 		})
 	}
 }
 
-func TestNormalizeOwnedCodexZstdFrameMatchesCopyWithoutChangingInputContract(t *testing.T) {
+func TestNormalizeOwnedCodexZstdFrameRewritesHeaderInPlace(t *testing.T) {
 	body := forkPerformanceBody(1 << 20)
 	enc, ok := codexRequestZstdEncoders.Get().(*zstd.Encoder)
 	require.True(t, ok)
 	defer codexRequestZstdEncoders.Put(enc)
 	frame := enc.EncodeAll(body, nil)
-	before := bytes.Clone(frame)
-	want, err := normalizeCodexZstdFrameHeader(frame)
-	require.NoError(t, err)
-	require.Equal(t, before, frame, "non-owned normalization must not mutate its input")
 	got, err := normalizeOwnedCodexZstdFrameHeader(frame)
 	require.NoError(t, err)
-	require.Equal(t, want, got)
+	require.Equal(t, codexZstdStreamFrameHeader, got[len(codexZstdFrameMagic):len(codexZstdFrameMagic)+len(codexZstdStreamFrameHeader)])
 	require.Same(t, &frame[0], &got[0])
-	again, err := normalizeCodexZstdFrameHeader(got)
+	again, err := normalizeOwnedCodexZstdFrameHeader(got)
 	require.NoError(t, err)
 	require.Same(t, &got[0], &again[0])
 	decoder, err := zstd.NewReader(nil)
@@ -240,8 +236,7 @@ func TestNormalizeOwnedCodexZstdFrameMatchesCopyWithoutChangingInputContract(t *
 	} {
 		frame := append(bytes.Clone(codexZstdFrameMagic), header...)
 		frame = append(frame, 1, 2, 3, 4, 5)
-		want, err := normalizeCodexZstdFrameHeader(frame)
-		require.NoError(t, err)
+		want := append(append(bytes.Clone(codexZstdFrameMagic), codexZstdStreamFrameHeader...), 1, 2, 3, 4, 5)
 		got, err := normalizeOwnedCodexZstdFrameHeader(frame)
 		require.NoError(t, err)
 		require.Equal(t, want, got, "all supported header length variants keep exact block bytes")

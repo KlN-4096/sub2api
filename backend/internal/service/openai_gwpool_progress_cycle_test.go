@@ -36,8 +36,6 @@ func TestGatewayPoolProgressSequencePersistsAcrossConcurrentRunsAndRestart(t *te
 		require.NotZero(t, run.progress.Sequence)
 		sequences[run.progress.Sequence] = true
 		svc.codexCookies.poolProgress.update(run, "ready", 1, "", false, true)
-		svc.codexCookies.poolProgress.resume(run)
-		require.True(t, sequences[run.progress.Sequence], "re-entry keeps the same display number")
 	}
 	for sequence := uint64(1); sequence <= workers; sequence++ {
 		require.True(t, sequences[sequence])

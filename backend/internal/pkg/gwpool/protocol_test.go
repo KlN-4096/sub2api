@@ -34,16 +34,16 @@ func TestCookieRequestCarriesNewParams(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	many := make([]string, 0, MaxExcludeItems+12)
-	for i := 0; i < MaxExcludeItems+10; i++ {
-		many = append(many, "unified-"+strconv.Itoa(i))
+	many := make([]string, 0, maxExcludeItems+12)
+	for i := 0; i < maxExcludeItems+10; i++ {
+		many = append(many, "tkt-"+strconv.Itoa(i))
 	}
 	many = append(many, "", strings.Repeat("x", maxExcludeItemLen+1))
 
 	pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), CookieRequest{
 		Account: "acc-a", Gateway: "unified-9",
-		Exclude: many, ExcludeVersions: []string{"tkt-1", "tkt-2"},
-		MinRemaining: 60 * time.Second,
+		ExcludeVersions: many,
+		MinRemaining:    60 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("取票失败: %v", err)
@@ -56,27 +56,27 @@ func TestCookieRequestCarriesNewParams(t *testing.T) {
 		t.Fatalf("查询串解不开 %q: %v", gotQuery, err)
 	}
 	for key, want := range map[string]string{
-		"account": "acc-a", "gateway": "unified-9", "force": "",
-		"exclude_versions": "tkt-1,tkt-2", "min_remaining": "60", "wait": "",
+		"account": "acc-a", "gateway": "unified-9", "force": "", "exclude": "",
+		"min_remaining": "60", "wait": "",
 	} {
 		if got := query.Get(key); got != want {
 			t.Fatalf("%s=%q，期望 %q", key, got, want)
 		}
 	}
-	excluded := strings.Split(query.Get("exclude"), ",")
-	if len(excluded) != MaxExcludeItems {
-		t.Fatalf("exclude 应裁到 %d 项，实际 %d", MaxExcludeItems, len(excluded))
+	excluded := strings.Split(query.Get("exclude_versions"), ",")
+	if len(excluded) != maxExcludeItems {
+		t.Fatalf("exclude_versions 应裁到 %d 项，实际 %d", maxExcludeItems, len(excluded))
 	}
-	// 裁的是**尾部**：调用方把最近烧的放前面，那些最可能还在冷却期里。
-	if excluded[0] != "unified-0" {
-		t.Fatalf("exclude 头一项应是调用方给的第一项，实际 %q", excluded[0])
+	// 裁的是**尾部**，调用方给的顺序原样保留。
+	if excluded[0] != "tkt-0" {
+		t.Fatalf("exclude_versions 头一项应是调用方给的第一项，实际 %q", excluded[0])
 	}
-	if last := excluded[MaxExcludeItems-1]; last != "unified-"+strconv.Itoa(MaxExcludeItems-1) {
-		t.Fatalf("exclude 末项 %q 不对", last)
+	if last := excluded[maxExcludeItems-1]; last != "tkt-"+strconv.Itoa(maxExcludeItems-1) {
+		t.Fatalf("exclude_versions 末项 %q 不对", last)
 	}
 	for _, item := range excluded {
 		if item == "" || len(item) > maxExcludeItemLen {
-			t.Fatalf("非法 exclude 项上了线: %q", item)
+			t.Fatalf("非法 exclude_versions 项上了线: %q", item)
 		}
 	}
 }
@@ -275,12 +275,12 @@ func TestCookieSanitizesGateway(t *testing.T) {
 }
 
 // 传输错误里的 URL 不许带 query：那一条会随消费端的 Ops 错误日志落库，而 query 里有
-// account=<上游 account_id> 与 exclude / exclude_versions。
+// account=<上游 account_id> 与 exclude_versions。
 func TestTransportErrorDropsQuery(t *testing.T) {
 	// 连一个必然拒绝的地址：错误是 *url.Error，URL 字段就是我们发出去的那条。
 	client := New("http://127.0.0.1:1", "k", 0)
 	_, err := client.Cookie(context.Background(), CookieRequest{
-		Account: "acc-secret", Gateway: "g", Exclude: []string{"unified-7"}, ExcludeVersions: []string{"tkt-9"},
+		Account: "acc-secret", Gateway: "g", ExcludeVersions: []string{"tkt-9"},
 	})
 	if err == nil {
 		t.Fatal("打不通应当报错")
@@ -300,37 +300,6 @@ func TestTransportErrorDropsQuery(t *testing.T) {
 	}
 	if transport.URL != "http://127.0.0.1:1/cookie" {
 		t.Fatalf("URL 应只剩路径: %q", transport.URL)
-	}
-}
-
-// pair_remaining_s 是续期闸的唯一判据（消费端的 openAIGatewayPoolRenewBelow），所以缺失必须是 0
-// （= 不续），畸形值要么是 0 要么远在阈值之上，不能变成一个「刚好低于阈值」的值。
-func TestCookieReadsPairRemaining(t *testing.T) {
-	for _, tc := range []struct {
-		field string
-		want  time.Duration
-	}{
-		{field: `,"pair_remaining_s":3000`, want: 3000 * time.Second},
-		{field: `,"pair_remaining_s":600`, want: 600 * time.Second},
-		{field: "", want: 0},                                     // 老池子没这个字段
-		{field: `,"pair_remaining_s":-5`, want: 0},               // 负数 ⇒ 不续
-		{field: `,"pair_remaining_s":999999`, want: maxValidFor}, // 钳到物理上限，仍远在阈值之上
-	} {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = io.WriteString(w, `{"gateway":"g","cookie":"__cflb=a; __oailb=b","valid_for_s":150`+
-				tc.field+`}`)
-		}))
-		pair, err := New(srv.URL, "k", 0).Cookie(context.Background(), testCookieRequest())
-		srv.Close()
-		if err != nil {
-			t.Fatalf("%q 不该整票作废: %v", tc.field, err)
-		}
-		if pair.PairRemaining != tc.want {
-			t.Fatalf("%q ⇒ PairRemaining=%v，想要 %v", tc.field, pair.PairRemaining, tc.want)
-		}
-		if pair.ValidFor != 150*time.Second {
-			t.Fatalf("%q 不该动满血窗口: %v", tc.field, pair.ValidFor)
-		}
 	}
 }
 
