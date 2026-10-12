@@ -88,6 +88,7 @@ export interface GatewayPoolQueueView {
 }
 
 export interface GatewayPoolProgress {
+  inactive?: boolean
   run_id?: string
   sequence?: number
   phase: 'idle' | 'pending' | 'fetching' | 'verifying' | 'waiting' | 'ready' | 'exhausted' | 'unknown' | 'cancelled'

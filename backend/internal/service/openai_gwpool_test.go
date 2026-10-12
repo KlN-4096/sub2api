@@ -1719,3 +1719,42 @@ func (s *openAICodexCookieStore) gatewayPoolRestDuration(identity string, accoun
 	}
 	return 0
 }
+
+// The edit modal submits the extra snapshot taken when the list loaded. Saving it
+// must neither roll back nor drop gateway-maintained pool runtime state.
+func TestUpdateAccountKeepsGatewayPoolRuntimeState(t *testing.T) {
+	accountID := int64(203)
+	fresh := map[string]any{
+		openAIGatewayPoolContactsExtraKey: map[string]any{"ledger_tag": "fresh"},
+		openAIGatewayLedgerTagExtraKey:    "fresh",
+		openAIGatewayHistoryExtraKey:      map[string]any{"ledger_tag": "fresh"},
+		openAIGatewayPoolOutboxExtraKey:   map[string]any{"pending": []any{"fresh"}},
+		gatewayPoolRestStateKey:           map[string]any{"tag": "fresh", "active": true},
+		gatewayPoolRestTagKey:             "fresh",
+		GatewayPoolUsageBlockedAtKey:      "2026-10-10T10:00:00Z",
+		gatewayPoolUsageExtraKey:          map[string]any{"tag": "fresh"},
+		gatewayPoolUsageTagKey:            "fresh",
+	}
+	stored := map[string]any{openAIGatewayPoolExtraKey: true, openAIGatewayPoolBaseURLExtraKey: "http://127.0.0.1:8099",
+		OpenAIGatewayPoolConsumerKeyExtraKey: "stored-ck"}
+	submitted := map[string]any{openAIGatewayPoolExtraKey: true, openAIGatewayPoolBaseURLExtraKey: "http://127.0.0.1:8099",
+		OpenAIGatewayPoolConsumerKeyExtraKey: true}
+	stale := true
+	for key, value := range fresh {
+		stored[key] = value
+		if stale { // half the keys arrive stale, the rest are missing from the snapshot
+			submitted[key] = "stale"
+		}
+		stale = !stale
+	}
+	repo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{
+		accountID: {ID: accountID, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+			Credentials: map[string]any{"chatgpt_account_id": "acc-a"}, Extra: stored},
+	}}
+	svc := &adminServiceImpl{accountRepo: repo}
+	_, err := svc.UpdateAccount(context.Background(), accountID, &UpdateAccountInput{Extra: submitted})
+	require.NoError(t, err)
+	for key, value := range fresh {
+		require.Equal(t, value, repo.accounts[accountID].Extra[key], key)
+	}
+}
