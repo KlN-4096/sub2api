@@ -529,6 +529,7 @@ type OpenAIGatewayService struct {
 	openaiCompatSessionResponses        sync.Map
 	// openaiCompatBridgeSessions：双开兼容桥会话键 → openAICompatBridgeSession（会话/上下文窗口 v7）
 	openaiCompatBridgeSessions          sync.Map
+	openaiCompatBridgeMints             atomic.Uint64 // 新铸计数，驱动 sweepOpenAICompatBridgeSessions
 	openaiCompatAnthropicDigestSessions sync.Map
 	// openaiCodexTurnStateOrigins: x-codex-turn-state blob 的哈希 → openAICodexTurnStateOrigin
 	// （铸造者 = 凭证域身份），供出站守卫剥离跨账号回带（设计见 openai_codex_turn_state.go）。

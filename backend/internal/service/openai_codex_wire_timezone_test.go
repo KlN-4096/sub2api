@@ -141,6 +141,38 @@ func TestCodexWireTimezoneNameResolutionOrder(t *testing.T) {
 	require.Empty(t, codexWireTimezoneName(account), "两个值都非法则不改写")
 }
 
+// 加载成功的时区按（trim 后的）名字缓存，失败的不缓存。
+func TestCodexWireTimezoneLocationCachesOnlySuccess(t *testing.T) {
+	first, err := codexWireTimezoneLocation(" " + wireTimezoneTestExit + " ")
+	require.NoError(t, err)
+	second, err := codexWireTimezoneLocation(wireTimezoneTestExit)
+	require.NoError(t, err)
+	require.Same(t, first, second)
+	require.Equal(t, wireTimezoneTestExit, second.String())
+
+	for i := 0; i < 2; i++ {
+		_, err := codexWireTimezoneLocation("Mars/Olympus")
+		require.Error(t, err)
+	}
+	_, cached := codexWireTimezoneLocations.Load("Mars/Olympus")
+	require.False(t, cached, "加载失败不缓存")
+}
+
+// 目录型 tzdata 下 "Asia//Shanghai" 这类客户端写法都能加载成功，名字集合无上界：满表只加载不缓存。
+func TestCodexWireTimezoneLocationCacheStopsGrowingWhenFull(t *testing.T) {
+	const name = "Pacific/Chatham"
+	codexWireTimezoneLocations.Delete(name)
+	cached := codexWireTimezoneCached.Load()
+	codexWireTimezoneCached.Store(codexWireTimezoneCacheLimit)
+	t.Cleanup(func() { codexWireTimezoneCached.Store(cached) })
+
+	loc, err := codexWireTimezoneLocation(name)
+	require.NoError(t, err)
+	require.Equal(t, name, loc.String())
+	_, stored := codexWireTimezoneLocations.Load(name)
+	require.False(t, stored)
+}
+
 // envBlock 造一个最小的 environment_context 块：改写只在这个区间内发生，
 // 用裸标签写夹具会因为"根本没进区间"而假绿。
 func envBlock(date, tz string) string {
@@ -266,20 +298,42 @@ func TestCodexWireTimezoneExtraUpdates(t *testing.T) {
 		codexWireExit{ip: "1.2.3.4"}, now))
 }
 
+// WS 帧的时区在各入口归一化之前投影，发送边界不再重复，所以只能经真实入口验：ctx_pool 与透传两条
+// 入站、首帧与后续帧，断言真正写到上游的帧。
 func TestCodexDeviceWireProfileWSFrameRewritesTimezone(t *testing.T) {
-	account := wireProfileTestAccount(true)
-	account.Extra[codexWireTimezoneExtraKey] = wireTimezoneTestExit
-	payload := []byte(`{"type":"response.create","model":"gpt-5.5","input":[` +
-		wireTimezoneTestMessage(wireTimezoneTestEnvContext(t), wireTimezoneTestCreatedAt) + `]}`)
-	c := newConvTestContext(t, payload)
+	frame := `{"type":"response.create","model":"gpt-5.5","input":[` +
+		wireTimezoneTestMessage(wireTimezoneTestEnvContext(t), wireTimezoneTestCreatedAt) + `]}`
+	for _, mode := range []string{OpenAIWSIngressModeCtxPool, OpenAIWSIngressModePassthrough} {
+		t.Run(mode, func(t *testing.T) {
+			upstream := newCodexWSRealUpstream(t)
+			dialer := &codexWSRealDialer{upstream: upstream}
+			cfg := codexWSWireProfileConfig()
+			svc := codexWSWireProfileService(cfg)
+			if mode == OpenAIWSIngressModePassthrough {
+				svc.openaiWSPassthroughDialer = dialer
+			} else {
+				pool := newOpenAIWSConnPool(cfg)
+				pool.setClientDialerForTest(dialer)
+				svc.openaiWSPool = pool
+			}
+			account := wireProfileTestAccount(true)
+			account.Extra[codexWireTimezoneExtraKey] = wireTimezoneTestExit
+			account.Extra["openai_oauth_responses_websockets_v2_mode"] = mode
 
-	out := string(applyCodexWSFrameWireProfile(c, account, payload, ""))
+			runCodexWSIngress(t, svc, account, codexWSIngressInbound(), []string{frame, frame})
 
-	require.Contains(t, out, "<timezone>"+wireTimezoneTestExit+"</timezone>")
-	require.Contains(t, out, "<current_date>"+wireTimezoneExpectedDate(t, wireTimezoneTestExit)+"</current_date>")
-	require.NotContains(t, out, "Asia/Shanghai")
-	require.Contains(t, out, "<cwd>/home/dev/proj</cwd>")
-	require.True(t, gjson.ValidBytes([]byte(out)))
+			frames := upstream.Frames()
+			require.Len(t, frames, 2, "首帧与后续帧")
+			for _, out := range frames {
+				text := gjson.GetBytes(out, "input.0.content.0.text").Str
+				require.Contains(t, text, "<timezone>"+wireTimezoneTestExit+"</timezone>")
+				require.Contains(t, text, "<current_date>"+wireTimezoneExpectedDate(t, wireTimezoneTestExit)+"</current_date>")
+				require.NotContains(t, string(out), "Asia/Shanghai")
+				require.Contains(t, text, "<cwd>/home/dev/proj</cwd>")
+				require.True(t, gjson.ValidBytes(out))
+			}
+		})
+	}
 }
 
 // 区间配对必须是线性的。旧实现"边配对边回头验区间"在客户端可控的体上是 O(n²)：

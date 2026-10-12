@@ -620,11 +620,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 			targetURL = buildOpenAIResponsesURLForPlatform(account.Platform, validatedURL)
 		}
 	case AccountTypeCPR:
-		baseURL := account.GetCPRGatewayBaseURL()
-		if baseURL == "" {
-			return nil, errors.New("cpr account requires credentials.base_url")
-		}
-		validatedURL, err := s.validateUpstreamBaseURL(baseURL)
+		validatedURL, err := s.validatedCPRBaseURL(account)
 		if err != nil {
 			return nil, err
 		}
@@ -639,29 +635,8 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	// DeepSeek / Kimi 原生 Responses 端点为无状态实现（见 normalizeDeepSeekResponsesRequestBody）。
 	body = normalizeDeepSeekResponsesRequestBody(account, body)
 
-	body, err := filterCodexCompactAccessPrograms(c, account, body)
-	if err != nil {
-		return nil, fmt.Errorf("filter compact access programs: %w", err)
-	}
-
-	// 与非透传路径同一条规则。透传的入站若本就是真客户端形态，这一步是恒等变换。
-	body = applyCodexGuardianCreditsRequested(c, account, targetURL, body)
-	body = alignCodexTurnMetadataExecutionBody(c, account, targetURL, body)
-	body = applyCodexBodyFieldOrder(c, account, targetURL, body)
-
-	// 双开出站时区收口：真客户端把本机时区与当天日期写进 environment_context，客户端在国内、
-	// 出口在美国时两者矛盾。按出口时区改写这两个标签（openai_codex_wire_timezone.go）。
-	body = rewriteCodexEnvironmentTimezone(c, account, body)
-	// 与非透传路径同一条规则（openai_codex_wire_user_location.go）。
-	body = rewriteCodexWebSearchUserLocation(c, account, body)
-
-	openAIGatewayPoolSinkFrom(ctx).noteModel(gjson.GetBytes(body, "model").String())
-	if account.UsesGatewayPool() {
-		ctx = context.WithValue(ctx, gatewayPoolConfirmBodyKey{}, gatewayPoolConfirmBody(body))
-	}
-
-	// 上线字节：双开 /responses 的请求体按真客户端默认做 zstd 压缩，与非透传路径同一条规则。
-	wireBody, contentEncoding, err := compressCodexRequestBody(c, account, targetURL, body)
+	// 与非透传路径同一条定稿链。透传的入站若本就是真客户端形态，其中 guardian、turn-metadata、键序三步是恒等变换。
+	ctx, body, wireBody, contentEncoding, err := s.finalizeCodexWireBody(ctx, c, account, targetURL, body)
 	if err != nil {
 		return nil, err
 	}
