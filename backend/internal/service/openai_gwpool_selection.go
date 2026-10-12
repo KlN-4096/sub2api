@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -51,7 +50,13 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 		if !accounts[i].IsOpenAIOAuthLike() {
 			continue
 		}
-		poolIDs[accounts[i].ID] = accounts[i].UsesGatewayPool()
+		if !accounts[i].UsesGatewayPool() {
+			// The switch is in the scheduler projection and every write of it
+			// syncs the snapshot, so an ordinary row needs no fresh read.
+			s.codexCookies.poolRotationAccounts.Store(accounts[i].ID, false)
+			continue
+		}
+		poolIDs[accounts[i].ID] = true
 		account, err := s.accountRepo.GetByID(ctx, accounts[i].ID)
 		if err != nil {
 			complete = false
@@ -61,7 +66,6 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 		if !gatewayPoolRotationAccount(account, *req.GroupID) || !gatewayPoolWaitHealth(account) {
 			continue
 		}
-		poolIDs[account.ID] = true
 		identity, err := s.codexCookies.gatewayPoolIdentity(ctx, account)
 		if err != nil {
 			complete = false
@@ -85,13 +89,7 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 			continue
 		}
 		identities[account.ID] = identity
-		contacts := readGatewayPoolContacts(account, gatewayPoolLedgerTag(identity))
-		var lastContact time.Time
-		for _, seen := range contacts.Seen {
-			if seen.LastAt.After(lastContact) {
-				lastContact = seen.LastAt
-			}
-		}
+		lastContact := gatewayPoolContactsLastAt(account, gatewayPoolLedgerTag(identity))
 		if account.LastUsedAt != nil && account.LastUsedAt.After(lastContact) {
 			lastContact = *account.LastUsedAt
 		}
@@ -101,24 +99,13 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 		}
 		// Merge all matching credential-domain rows. Counting distinct names in
 		// the hydrated ledger avoids treating clones as extra gateway capacity.
-		prefix := identity + "\x00"
 		pref := gatewayPoolAccountPreference{verified: s.codexCookies.gatewayPoolVerifiedFull(identity)}
 		known := pref.verified
-		s.codexCookies.poolUsed.Range(func(key, value any) bool {
-			name, validKey := key.(string)
-			at, validTime := value.(time.Time)
-			if !validKey || !validTime || at.IsZero() {
-				return true
-			}
-			gateway, matches := strings.CutPrefix(name, prefix)
-			if !matches || gateway == "" {
-				return true
-			}
+		s.codexCookies.rangeGatewayPoolUsed(identity, func(gateway string, _ time.Time) {
 			known = true
 			if _, cooling := s.codexCookies.gatewayPoolUsedAt(identity, gateway, account.gatewayPoolGatewayWindow()); !cooling {
 				pref.cooled++
 			}
-			return true
 		})
 		if !known {
 			pref.cooled = gatewayPoolCooledUnknown

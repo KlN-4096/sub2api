@@ -64,3 +64,26 @@ func TestAccountGatewayPoolProgressValidatesIDsAndReturnsRuntimeOnly(t *testing.
 		}
 	}
 }
+
+type gatewayEstimateAdmin struct {
+	service.AdminService
+	estimates *[]bool
+}
+
+func (a gatewayEstimateAdmin) GatewayPoolRuntimeProgress(_ context.Context, ids []int64, estimate bool) (map[int64]service.GatewayPoolProgress, error) {
+	*a.estimates = append(*a.estimates, estimate)
+	return map[int64]service.GatewayPoolProgress{ids[0]: {Phase: "idle"}}, nil
+}
+
+func TestAccountGatewayPoolProgressAsksForEstimateOnlyWhenRequested(t *testing.T) {
+	var estimates []bool
+	handler := &AccountHandler{adminService: gatewayEstimateAdmin{estimates: &estimates}}
+	for _, query := range []string{"?ids=1", "?ids=1&estimate=1", "?ids=1&estimate=0"} {
+		w := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(w)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/"+query, nil)
+		handler.GatewayPoolProgress(ctx)
+		require.Equal(t, 200, w.Code)
+	}
+	require.Equal(t, []bool{false, true, false}, estimates)
+}

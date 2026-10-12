@@ -51,12 +51,7 @@ func (s *OpenAIGatewayService) gatewayPoolExhaustedRestQuality(ctx context.Conte
 	projection := gatewayPoolRankProjection{
 		state: contacts, model: gatewayPoolProbeModelLuna, source: "foreground",
 		now: now, complete: s.accountRepo != nil,
-		retryAfter: func(gateway string) time.Duration {
-			if cooldown, found := s.codexCookies.cooldownEntry(identity, gateway); found {
-				return time.Duration(cooldown.WindowSeconds) * time.Second
-			}
-			return time.Duration(gatewayPoolCooldownBase(fresh.gatewayPoolGatewayWindow())) * time.Second
-		},
+		retryAfter: s.codexCookies.gatewayPoolReuseDelay(identity, fresh),
 	}
 	ranking := projection.rank(exhausted.gateways)
 	quality := make([]string, 0, len(ranking.preferred))

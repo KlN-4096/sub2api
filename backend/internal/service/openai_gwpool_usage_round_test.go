@@ -181,7 +181,7 @@ func TestGatewayPoolRuntimeViewOnlyShowsLiveExactModelProofWithoutPoolIO(t *test
 	svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, "v", "gpt-6-luna")
 	svc.noteGatewayPoolUsage(context.Background(), account, identity, "gpt-6-luna",
 		OpenAIGatewayPoolApplied{AccountID: 1, Gateway: "g", Version: "v"}, time.Now(), true)
-	snapshot, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{1})
+	snapshot, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{1}, true)
 	require.NoError(t, err)
 	require.Equal(t, "idle", snapshot[1].Phase)
 	require.Equal(t, []string{"gpt-6-luna"}, snapshot[1].Runtime.Tickets[0].VerifiedModels)
@@ -191,7 +191,7 @@ func TestGatewayPoolRuntimeViewOnlyShowsLiveExactModelProofWithoutPoolIO(t *test
 	require.Nil(t, snapshot[1].Runtime.Rounds[0].Tickets)
 	pair.routeExpiresAt = time.Now().Add(-time.Second)
 	svc.codexCookies.poolPairs.Store(identity, pair)
-	snapshot, err = svc.GatewayPoolRuntimeProgress(context.Background(), []int64{1})
+	snapshot, err = svc.GatewayPoolRuntimeProgress(context.Background(), []int64{1}, true)
 	require.NoError(t, err)
 	require.Empty(t, snapshot[1].Runtime.Tickets)
 	require.Zero(t, fake.hits.Load())

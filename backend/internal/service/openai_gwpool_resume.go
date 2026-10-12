@@ -42,9 +42,8 @@ func readGatewayPoolRest(account *Account, tag string) gatewayPoolRestState {
 }
 
 func (s *OpenAIGatewayService) lockGatewayPoolRest(ctx context.Context, tag string) (func(), error) {
-	value, _ := s.codexCookies.poolRestLocks.LoadOrStore(tag, &sync.Mutex{})
-	lock, ok := value.(*sync.Mutex)
-	if !ok || lock == nil || !gatewayPoolLockWithin(ctx, lock) {
+	lock := gatewayPoolLoadOrNew[sync.Mutex](&s.codexCookies.poolRestLocks, tag)
+	if !gatewayPoolLockWithin(ctx, lock) {
 		return nil, errors.New("gateway rest lock unavailable")
 	}
 	return lock.Unlock, nil
@@ -66,30 +65,17 @@ func (s *OpenAIGatewayService) loadGatewayPoolRest(ctx context.Context, account 
 			return gatewayPoolRestState{}, nil, errors.New("gateway rest identity changed")
 		}
 	}
-	state := readGatewayPoolRest(fresh, tag)
 	if fresh.GatewayPoolContinuousWaitEnabled() {
-		return state, fresh, nil // this row does not consume another clone's rest latch
+		return readGatewayPoolRest(fresh, tag), fresh, nil // this row does not consume another clone's rest latch
 	}
-	adopt := func(other gatewayPoolRestState) {
-		if other.ChangedAt.After(state.ChangedAt) {
-			state = other
-		}
-	}
+	var peers []Account
 	if s.accountRepo != nil {
-		peers, err := s.gatewayPoolStatePeers(ctx, tag, "rest")
-		if err != nil {
-			return state, fresh, err
-		}
-		for i := range peers {
-			adopt(readGatewayPoolRest(&peers[i], tag))
+		var err error
+		if peers, err = s.gatewayPoolStatePeers(ctx, tag, "rest", 0); err != nil {
+			return readGatewayPoolRest(fresh, tag), fresh, err // own row only, never the cache
 		}
 	}
-	if cached, ok := s.codexCookies.poolRestState.Load(tag); ok {
-		if other, valid := cached.(gatewayPoolRestState); valid {
-			adopt(other)
-		}
-	}
-	return state, fresh, nil
+	return s.codexCookies.gatewayPoolRestSnapshot(fresh, identity, peers), fresh, nil
 }
 
 // Production repositories commit the rest latch and temporary block together.
@@ -138,9 +124,8 @@ func (s *OpenAIGatewayService) writeGatewayPoolRest(ctx context.Context, account
 		s.codexCookies.poolRestState.Store(state.Tag, state)
 		return nil
 	}
-	value, _ := s.codexCookies.poolHistoryLocks.LoadOrStore(account.ID, &sync.Mutex{})
-	lock, ok := value.(*sync.Mutex)
-	if !ok || lock == nil || !gatewayPoolLockWithin(ctx, lock) {
+	lock := gatewayPoolLoadOrNew[sync.Mutex](&s.codexCookies.poolHistoryLocks, account.ID)
+	if !gatewayPoolLockWithin(ctx, lock) {
 		return errors.New("gateway rest history lock unavailable")
 	}
 	defer lock.Unlock()

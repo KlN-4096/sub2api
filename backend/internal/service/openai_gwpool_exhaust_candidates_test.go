@@ -121,7 +121,7 @@ func TestGatewayPoolExhaustCandidatesStillHonors429Deadline(t *testing.T) {
 	group := int64(7)
 	failure := &UpstreamFailoverError{StatusCode: http.StatusTooManyRequests, RetryableOnSameAccount: true,
 		SameAccountRetryDeadline: time.Now().Add(time.Minute)}
-	ctx := svc.PrepareGatewayPoolAccountRotation(request.Context(), &group, account, failure)
+	ctx := svc.PrepareGatewayPoolAccountRotation(request.Context(), &group, account, failure, nil)
 	require.True(t, failure.SameAccountRetryOnly)
 	retry := gatewayPoolRetryOnlyFrom(ctx)
 	require.Equal(t, failure.SameAccountRetryDeadline, retry.deadline)

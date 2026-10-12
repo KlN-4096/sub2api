@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -12,18 +13,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// gatewayPoolTestTried sends n distinct tickets for verification, the only way
+// a run's attempt count grows.
+func gatewayPoolTestTried(tracker *gatewayPoolProgressTracker, run *gatewayPoolProgressRun, n int) {
+	for i := range n {
+		tracker.tried(run, strconv.Itoa(i+1))
+	}
+}
+
 func TestGatewayPoolProgressShowsActiveAttemptAndRetiresCompletedRun(t *testing.T) {
 	var tracker gatewayPoolProgressTracker
-	first := tracker.start(1, 5)
-	tracker.update(first, "verifying", 2, "unified-142", true, false)
-	second := tracker.start(1, 3)
-	tracker.update(second, "unknown", 1, "", false, true)
+	first := tracker.start(1)
+	first.progress.Limit = 5
+	gatewayPoolTestTried(&tracker, first, 2)
+	tracker.update(first, "verifying", "unified-142", true, false)
+	second := tracker.start(1)
+	second.progress.Limit = 3
+	gatewayPoolTestTried(&tracker, second, 1)
+	tracker.update(second, "unknown", "", false, true)
 	snapshot := tracker.snapshot([]int64{1, 2}, time.Now())
 	require.Equal(t, 2, snapshot[1].Attempt, "a completed concurrent request cannot hide an active request")
 	require.Equal(t, 5, snapshot[1].Limit)
 	require.Equal(t, 1, snapshot[1].ActiveRequests)
 	require.NotContains(t, snapshot, int64(2))
-	tracker.update(first, "ready", 2, "", false, true)
+	tracker.update(first, "ready", "", false, true)
 	require.Zero(t, tracker.snapshot([]int64{1}, time.Now())[1].ActiveRequests)
 	require.Equal(t, "ready", tracker.snapshot([]int64{1}, time.Now().Add(2*time.Hour))[1].Phase)
 }
@@ -57,11 +70,11 @@ func TestGatewayPoolProgressWiredToActualWarmLoop(t *testing.T) {
 
 func TestGatewayPoolProgressCountsTwoTicketsNotFourShots(t *testing.T) {
 	var tracker gatewayPoolProgressTracker
-	run := tracker.start(1, 8)
+	run := tracker.start(1)
 	for _, ticket := range []string{"v1", "v1", "v2", "v2"} {
 		tracker.tried(run, ticket)
 	}
-	tracker.update(run, "ready", 0, "", false, true)
+	tracker.update(run, "ready", "", false, true)
 	require.Equal(t, 2, tracker.snapshot([]int64{1}, time.Now())[1].Attempt)
 }
 
@@ -98,13 +111,13 @@ func TestGatewayPoolProgressEndsWithUsageCycle(t *testing.T) {
 	err = svc.gatewayPoolWarmUpWith(req, account, gwpoolTestIdentity, gwpoolWarmModel,
 		func(context.Context, string, string) (int, string, error) { return 200, "same-state", nil })
 	require.NoError(t, err)
-	before, err := svc.GatewayPoolRuntimeProgress(ctx, []int64{1})
+	before, err := svc.GatewayPoolRuntimeProgress(ctx, []int64{1}, true)
 	require.NoError(t, err)
 	require.Equal(t, "ready", before[1].Phase)
 	svc.changeGatewayPoolUsage(ctx, account, gwpoolTestIdentity, func(state *gatewayPoolUsageLedger) bool {
 		return state.end(time.Now().UTC(), "temporarily_unschedulable")
 	})
-	after, err := svc.GatewayPoolRuntimeProgress(ctx, []int64{1})
+	after, err := svc.GatewayPoolRuntimeProgress(ctx, []int64{1}, true)
 	require.NoError(t, err)
 	require.Equal(t, "idle", after[1].Phase)
 	require.Empty(t, after[1].RunID)
@@ -116,7 +129,7 @@ func TestGatewayPoolProgressEndsWithUsageCycle(t *testing.T) {
 func TestGatewayPoolProgressShowsWaitingDuringShortageSleep(t *testing.T) {
 	account := gwpoolTestAccount(1)
 	svc := &OpenAIGatewayService{}
-	progress := svc.codexCookies.poolProgress.start(account.ID, 0)
+	progress := svc.codexCookies.poolProgress.start(account.ID)
 	ctx := context.WithValue(context.Background(), gatewayPoolPreparationKey{}, true)
 	ctx = context.WithValue(ctx, gatewayPoolProgressRunKey{}, progress)
 	ctx = context.WithValue(ctx, gatewayPoolPreparationSleepKey{}, func(context.Context, time.Duration) error {

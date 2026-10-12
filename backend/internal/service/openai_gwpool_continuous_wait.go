@@ -174,11 +174,7 @@ func (s *OpenAIGatewayService) gatewayPoolPrepareUntilReady(
 		if shortage, ok := gatewayPoolRetryableShortage(err); ok && shortage.RetryAfter > 0 {
 			gap = shortage.RetryAfter
 		}
-		counter, _ := s.codexCookies.poolContinuousWaiters.LoadOrStore(identity, &atomic.Int32{})
-		waiters, valid := counter.(*atomic.Int32)
-		if !valid {
-			return errors.New("gateway wait counter unavailable")
-		}
+		waiters := gatewayPoolLoadOrNew[atomic.Int32](&s.codexCookies.poolContinuousWaiters, identity)
 		waiters.Add(1)
 		retry, waitErr := s.waitGatewayPoolRetry(ctx, account, gap)
 		waiters.Add(-1)

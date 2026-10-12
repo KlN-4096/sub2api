@@ -53,6 +53,40 @@ func TestGatewayPoolLocalRestDeadlineIsUnclampedAndCapsKnownCount(t *testing.T) 
 		"fewer than the configured threshold means wait for all known gateways, without a 10-minute clamp")
 }
 
+func TestGatewayPoolLocalResumeDeadlineFollowsCooldownFormula(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 1
+	window := account.gatewayPoolGatewayWindow()
+	base := time.Duration(gatewayPoolCooldownBase(window)) * time.Second
+	now := time.Now().UTC()
+	touched := now.Add(-10 * time.Minute)
+	for _, tc := range []struct {
+		name     string
+		cooldown *gatewayPoolCooldown
+		want     time.Time
+	}{
+		{"no learned cooldown", nil, touched.Add(base)},
+		{"local floor", &gatewayPoolCooldown{SourcesKnown: true, CycleAt: touched.Add(-time.Hour), UpdatedAt: touched,
+			LocalFloorSeconds: 4 * 3600, WindowSeconds: 4 * 3600}, touched.Add(4 * time.Hour)},
+		{"fixed tier", &gatewayPoolCooldown{SourcesKnown: true, CycleAt: touched, UpdatedAt: touched,
+			FixedSeconds: 2 * 3600, WindowSeconds: 2 * 3600}, touched.Add(2 * time.Hour)},
+		{"manual clear", &gatewayPoolCooldown{Cleared: true, Until: now.Add(-5 * time.Minute), WindowSeconds: 3600}, now.Add(-5 * time.Minute)},
+		{"unseen entry", &gatewayPoolCooldown{}, touched},
+	} {
+		store := &openAICodexCookieStore{}
+		key := gatewayPoolLedgerKey(gwpoolTestIdentity, "g")
+		store.poolUsed.Store(key, touched)
+		if tc.cooldown != nil {
+			store.poolCooldown = map[string]gatewayPoolCooldown{key: *tc.cooldown}
+		}
+		got := store.gatewayPoolLocalResumeAt(gwpoolTestIdentity, account)
+		require.True(t, got.Equal(tc.want), "%s: got %v, want %v", tc.name, got, tc.want)
+		at, cooling := store.gatewayPoolUsedAt(gwpoolTestIdentity, "g", window)
+		require.True(t, at.Equal(touched), tc.name)
+		require.Equal(t, time.Now().Before(tc.want), cooling, tc.name)
+	}
+}
+
 func TestGatewayPoolLocalResumeKeepsOtherAccountBlocks(t *testing.T) {
 	account := rotationAccount(1, 7)
 	until := time.Now().Add(time.Hour)
@@ -189,8 +223,8 @@ func TestGatewayPoolLocalDeadlineKeepsClearedKnownGatewaysAfterNewTouchAndRestar
 	restarted.codexCookies.gatewayPoolHydrateUsed(fresh, identity)
 	require.True(t, restarted.codexCookies.beginGatewayPoolAttempt(identity, "recent", time.Hour))
 	require.False(t, restarted.codexCookies.gatewayPoolLocalResumeAt(identity, fresh).After(time.Now()))
-	view, _ := restarted.gatewayPoolDisplaySnapshot(fresh, identity, nil)
-	display := restarted.codexCookies.gatewayPoolCooldownEstimate(identity, fresh, view, time.Now())
+	view, _ := restarted.gatewayPoolDisplaySnapshot(fresh, identity, nil, nil)
+	display := gatewayPoolTestCooldownEstimate(&restarted.codexCookies, identity, fresh, view, time.Now())
 	require.Equal(t, restarted.codexCookies.gatewayPoolLocalResumeAt(identity, fresh), display.EligibleAt)
 }
 

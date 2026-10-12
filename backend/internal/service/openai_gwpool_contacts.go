@@ -2,8 +2,6 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -68,13 +66,8 @@ type gatewayPoolContactEvent struct {
 	Steps                            []gatewayPoolProbeStep
 }
 
-func gatewayPoolContactHash(value string) string {
-	sum := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(sum[:])
-}
-
 func gatewayPoolContactRoundID(identity, version string, at time.Time) string {
-	return gatewayPoolContactHash("contact-round-v1\x00" + identity + "\x00" + version + "\x00" + at.UTC().Format(time.RFC3339Nano))
+	return gatewayPoolDigest("contact-round-v1\x00" + identity + "\x00" + version + "\x00" + at.UTC().Format(time.RFC3339Nano))
 }
 
 func readGatewayPoolContacts(account *Account, tag string) gatewayPoolContacts {
@@ -91,6 +84,29 @@ func readGatewayPoolContacts(account *Account, tag string) gatewayPoolContacts {
 	}
 	pruneGatewayPoolContacts(&state, time.Now())
 	return state
+}
+
+// gatewayPoolContactsLastAt is the newest contact in tag's ledger. Selection
+// needs nothing else, and prune only drops the oldest entries, so this equals
+// the maximum over readGatewayPoolContacts without decoding every round.
+func gatewayPoolContactsLastAt(account *Account, tag string) time.Time {
+	var state struct {
+		LedgerTag string `json:"ledger_tag"`
+		Seen      map[string]struct {
+			LastAt time.Time `json:"last_at"`
+		} `json:"seen"`
+	}
+	raw, _ := json.Marshal(account.Extra[openAIGatewayPoolContactsExtraKey])
+	_ = json.Unmarshal(raw, &state)
+	var last time.Time
+	if state.LedgerTag == tag {
+		for _, seen := range state.Seen {
+			if seen.LastAt.After(last) {
+				last = seen.LastAt
+			}
+		}
+	}
+	return last
 }
 
 func pruneGatewayPoolContacts(state *gatewayPoolContacts, now time.Time) {
@@ -195,11 +211,7 @@ func (s *OpenAIGatewayService) changeGatewayPoolContacts(ctx context.Context, ac
 		return
 	}
 	tag := gatewayPoolLedgerTag(identity)
-	value, _ := s.codexCookies.poolContactLocks.LoadOrStore(tag, &sync.Mutex{})
-	lock, ok := value.(*sync.Mutex)
-	if !ok {
-		panic("gwpool contact lock has an invalid type")
-	}
+	lock := gatewayPoolLoadOrNew[sync.Mutex](&s.codexCookies.poolContactLocks, tag)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gatewayPoolWarmNoteTimeout)
 	defer cancel()
 	lock.Lock()
@@ -216,7 +228,7 @@ func (s *OpenAIGatewayService) changeGatewayPoolContacts(ctx context.Context, ac
 		return
 	}
 	state := readGatewayPoolContacts(fresh, tag)
-	peers, err := s.accountRepo.FindByExtraField(ctx, openAIGatewayLedgerTagExtraKey, tag)
+	peers, err := s.gatewayPoolStatePeers(ctx, tag, "contacts", fresh.ID)
 	if err != nil {
 		slog.Warn("gwpool_contact_history_incomplete", "account_id", account.ID)
 		state.HistoryTruncated = true
@@ -240,7 +252,7 @@ func (s *OpenAIGatewayService) changeGatewayPoolContacts(ctx context.Context, ac
 		patch[openAIGatewayPoolOutboxExtraKey] = box
 	}
 	// Contact classification and its outbox item commit in the same extra patch.
-	if err := s.accountRepo.UpdateExtra(ctx, fresh.ID, patch); err != nil {
+	if err := s.updateGatewayPoolRuntimeExtra(ctx, fresh.ID, patch); err != nil {
 		slog.Warn("gwpool_contact_persist_failed", "account_id", account.ID)
 		return
 	}
@@ -278,8 +290,7 @@ func (s *OpenAIGatewayService) noteGatewayPoolContact(ctx context.Context, accou
 			}
 			actualCountry := country
 			if step.ActualGateway != "" && step.ActualGateway != event.Applied.Gateway {
-				value, _ := s.codexCookies.poolDatacenterCountries.Load(account.gatewayPoolBaseURL() + "\x00" + step.ActualGateway)
-				actualCountry, _ = value.(string)
+				actualCountry = s.codexCookies.gatewayPoolDatacenterCountry(account, step.ActualGateway)
 			}
 			touchedUS = touchedUS || actualCountry == "US"
 		}
@@ -291,7 +302,7 @@ func (s *OpenAIGatewayService) noteGatewayPoolContact(ctx context.Context, accou
 		if state.TrackingSince.IsZero() {
 			state.TrackingSince = at
 		}
-		version := gatewayPoolContactHash(event.Applied.Version)
+		version := gatewayPoolDigest(event.Applied.Version)
 		index := -1
 		for i, r := range state.Rounds {
 			if r.Report.Gateway != gateway {
@@ -325,7 +336,7 @@ func (s *OpenAIGatewayService) noteGatewayPoolContact(ctx context.Context, accou
 			tag := gatewayPoolAccountTag(fresh, event.Identity)
 			r := gatewayPoolContactRound{RoundID: event.Applied.RoundID, VersionHash: version, LastAt: last,
 				LastProbeOutcome: event.Outcome, Steps: event.Steps,
-				Report: gwpool.ContactReport{ID: gatewayPoolContactHash("contact-report-v1\x00" + tag + "\x00" + event.Applied.RoundID),
+				Report: gwpool.ContactReport{ID: gatewayPoolDigest("contact-report-v1\x00" + tag + "\x00" + event.Applied.RoundID),
 					AccountTag: tag, Gateway: gateway, Model: event.Model, Criterion: gwpool.ContactCriterion, Source: event.Source,
 					First: first, At: at, GapKnown: gapKnown, ElapsedSeconds: gap, Outcome: event.Outcome}}
 			state.Rounds = append(state.Rounds, r)
@@ -413,6 +424,11 @@ func (s *OpenAIGatewayService) noteGatewayPoolProbeAndContact(ctx context.Contex
 
 func (s *OpenAIGatewayService) noteGatewayPoolBusinessContact(request *http.Request, account *Account, identity string,
 	applied OpenAIGatewayPoolApplied, started time.Time, responses ...*http.Response) {
+	// Every write below (contact, verified mark via identity, usage) needs this
+	// account's applied route; ordinary responses must not re-decode the body.
+	if account == nil || applied.AccountID != account.ID {
+		return
+	}
 	if len(responses) > 0 && responses[0] != nil {
 		for _, cookie := range responses[0].Cookies() {
 			if cookie.Name != "__oailb" {
@@ -420,8 +436,7 @@ func (s *OpenAIGatewayService) noteGatewayPoolBusinessContact(request *http.Requ
 			}
 			actual := openAICodexRouteGateway("__oailb=" + cookie.Value)
 			if actual != "" && actual != applied.Gateway {
-				value, _ := s.codexCookies.poolDatacenterCountries.Load(account.gatewayPoolBaseURL() + "\x00" + actual)
-				applied.DatacenterCountry, _ = value.(string)
+				applied.DatacenterCountry = s.codexCookies.gatewayPoolDatacenterCountry(account, actual)
 			}
 		}
 	}

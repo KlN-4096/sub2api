@@ -37,7 +37,7 @@ func (r *forkPerformanceRepo) UpdateExtra(ctx context.Context, id int64, patch m
 	return r.gatewayRuntimeRepo.UpdateExtra(ctx, id, patch)
 }
 
-func (r *forkPerformanceRepo) FindGatewayPoolStatePeers(_ context.Context, _ string, kind string) ([]Account, error) {
+func (r *forkPerformanceRepo) FindGatewayPoolStatePeers(_ context.Context, _ string, kind string, _ int64) ([]Account, error) {
 	r.scans++
 	r.mu.Lock()
 	defer r.mu.Unlock()

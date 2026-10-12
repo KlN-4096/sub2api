@@ -20,7 +20,7 @@ func TestGatewayPoolFullUsageStopsWhenBusinessBodyFinishes(t *testing.T) {
 	_, err = io.ReadAll(response.Body)
 	require.NoError(t, err)
 	require.NoError(t, response.Body.Close())
-	view, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{account.ID})
+	view, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{account.ID}, true)
 	require.NoError(t, err)
 	round := view[account.ID].Runtime.Rounds[0]
 	require.True(t, round.ActiveUsage == nil || !round.ActiveUsage.Open,

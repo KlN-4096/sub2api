@@ -362,3 +362,44 @@ func TestGatewayPoolCooldownResetRejectsFutureState(t *testing.T) {
 	require.False(t, (gatewayPoolCooldownResetState{IntervalHours: -1}).valid(now))
 	require.True(t, (gatewayPoolCooldownResetState{}).valid(now))
 }
+
+func TestGatewayPoolBarrierWritersShareHistoryViewGuards(t *testing.T) {
+	now := time.Now().UTC()
+	writers := map[string]func(*OpenAIGatewayService, context.Context, int64, string, bool) error{
+		"clear": func(svc *OpenAIGatewayService, ctx context.Context, id int64, identity string, owner bool) error {
+			return svc.writeGatewayPoolCooldownClear(ctx, id, identity, now, owner)
+		},
+		"reset": func(svc *OpenAIGatewayService, ctx context.Context, id int64, identity string, owner bool) error {
+			return svc.writeGatewayPoolCooldownReset(ctx, id, identity, now, now, owner)
+		},
+	}
+	for name, write := range writers {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			svc, repo, identity := cooldownResetService(t, now)
+			history, _ := readOpenAIGatewayHistory(&repo.rows[2].account)
+			history.LedgerTag = "another-ledger"
+			repo.rows[2].account.Extra[openAIGatewayHistoryExtraKey] = history
+			before, err := json.Marshal(repo.rows[2].account.Extra)
+			require.NoError(t, err)
+			require.NoError(t, write(svc, ctx, 2, identity, false), "a peer on another ledger is skipped")
+			require.EqualError(t, write(svc, ctx, 2, "gwpool-member:other/member", true), "gateway cooldown "+name+" identity changed")
+			after, err := json.Marshal(repo.rows[2].account.Extra)
+			require.NoError(t, err)
+			require.JSONEq(t, string(before), string(after))
+			canceled, cancel := context.WithCancel(ctx)
+			cancel()
+			err = write(svc, canceled, 1, identity, true)
+			if name == "reset" {
+				require.ErrorIs(t, err, context.Canceled)
+			} else {
+				require.EqualError(t, err, "gateway cooldown clear history lock unavailable")
+			}
+			require.NoError(t, write(svc, ctx, 1, identity, true))
+			fresh, err := repo.GetByID(ctx, 1)
+			require.NoError(t, err)
+			written, _ := readOpenAIGatewayHistory(fresh)
+			require.Equal(t, now, written.CooldownReset.LastAt)
+		})
+	}
+}
