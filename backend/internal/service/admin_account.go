@@ -762,6 +762,12 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 				normalizedExtra[key] = v
 			}
 		}
+		for _, key := range gatewayPoolRuntimeExtraKeys {
+			delete(normalizedExtra, key)
+			if v, ok := account.Extra[key]; ok {
+				normalizedExtra[key] = v
+			}
+		}
 		// 网关池 consumer key 是凭据：页面不回显原值，只有非空字符串才算改动（openai_gwpool.go）。
 		// 不能进上面那个无条件保留清单——那会让真正改 key 的提交被旧值顶回去。
 		mergeOpenAIGatewayPoolConsumerKey(account.Extra, normalizedExtra)

@@ -22,6 +22,8 @@ type GatewayPoolProgress struct {
 	UpdatedAt      time.Time               `json:"updated_at"`
 	ElapsedMS      int64                   `json:"elapsed_ms"`
 	ActiveRequests int                     `json:"active_requests"`
+	// Inactive: the row is deleted or no longer a pool account; no runtime follows.
+	Inactive bool `json:"inactive,omitempty"`
 }
 
 type gatewayPoolProgressRun struct {

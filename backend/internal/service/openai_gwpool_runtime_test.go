@@ -394,3 +394,23 @@ func TestGatewayPoolSideRequestsDoNotStartPairAgeFromSharedSink(t *testing.T) {
 		require.True(t, pair.firstSent.IsZero(), "共享sink的侧请求没有使用池子票，不能给它计龄")
 	}
 }
+
+// Every requested ID is answered: a deleted or no-longer-pool row is explicitly
+// inactive, so the admin page's complete-batch freeze cannot wait forever.
+func TestGatewayPoolRuntimeProgressAnswersEveryRequestedID(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	svc, _ := gatewayRuntimeService(account)
+	view, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{1, 999})
+	require.NoError(t, err)
+	require.NotNil(t, view[1].Runtime)
+	require.False(t, view[1].Inactive)
+	require.True(t, view[999].Inactive, "deleted row")
+	require.Nil(t, view[999].Runtime)
+
+	off := gwpoolTestAccount(1)
+	off.Extra[openAIGatewayPoolExtraKey] = false
+	svc, _ = gatewayRuntimeService(off)
+	view, err = svc.GatewayPoolRuntimeProgress(context.Background(), []int64{1})
+	require.NoError(t, err)
+	require.True(t, view[1].Inactive, "pool switched off")
+}

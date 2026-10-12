@@ -189,6 +189,14 @@ func (a *Account) UsesGatewayPool() bool {
 	return a != nil && a.IsOpenAIOAuthLike() && a.getExtraBool(openAIGatewayPoolExtraKey)
 }
 
+// gatewayPoolRuntimeExtraKeys are written only by the gateway. An admin save
+// carries a stale page snapshot of them, so updates keep the stored values.
+var gatewayPoolRuntimeExtraKeys = []string{
+	openAIGatewayPoolContactsExtraKey, openAIGatewayLedgerTagExtraKey, openAIGatewayHistoryExtraKey,
+	openAIGatewayPoolOutboxExtraKey, gatewayPoolRestStateKey, gatewayPoolRestTagKey,
+	GatewayPoolUsageBlockedAtKey, gatewayPoolUsageExtraKey, gatewayPoolUsageTagKey,
+}
+
 // openAIGatewayPoolConfigExtraKeys 是有**跨字段约束**的网关池 extra 键：开关开着就必须配齐
 // 地址与凭据。部分更新（UpdateAccountExtra / 批量）只在碰到它们时才去加载账号做合并校验。
 //
