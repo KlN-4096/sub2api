@@ -51,10 +51,26 @@ func (r *gatewayPoolContactPeersRepo) FindByExtraField(ctx context.Context, key 
 	var out []Account
 	for _, row := range append([]Account{*self}, r.rows...) {
 		if row.Extra[key] == value {
-			out = append(out, row)
+			out = append(out, gatewayPoolWithoutLedgers(row))
 		}
 	}
 	return out, nil
+}
+
+func (r *gatewayPoolContactPeersRepo) LoadGatewayPoolLedgers(_ context.Context, ids []int64, keys []string) (map[int64]map[string]json.RawMessage, error) {
+	self, err := r.stored(r.account.ID)
+	if err != nil {
+		return nil, err
+	}
+	return fakeGatewayPoolLedgers(append([]Account{*self}, r.rows...), ids, keys)
+}
+
+func (r *gatewayPoolContactPeersRepo) LoadGatewayPoolLedgerWithout(_ context.Context, id int64, kind string, omit ...string) (json.RawMessage, error) {
+	self, err := r.stored(r.account.ID)
+	if err != nil {
+		return nil, err
+	}
+	return fakeGatewayPoolLedgerWithout(append([]Account{*self}, r.rows...), id, kind, omit)
 }
 
 // Mirrors the repository's contacts projection: same ledger, minus exclude,
@@ -64,17 +80,20 @@ type gatewayPoolContactNarrowRepo struct {
 	calls []string
 }
 
-func (r *gatewayPoolContactNarrowRepo) FindGatewayPoolStatePeers(ctx context.Context, tag, kind string, exclude int64) ([]Account, error) {
+func (r *gatewayPoolContactNarrowRepo) FindGatewayPoolStatePeers(_ context.Context, tag, kind string, exclude int64) ([]Account, error) {
 	r.calls = append(r.calls, kind+"/"+strconv.FormatInt(exclude, 10))
-	rows, err := r.gatewayPoolContactPeersRepo.FindByExtraField(ctx, openAIGatewayLedgerTagExtraKey, tag)
+	self, err := r.stored(r.account.ID)
+	if err != nil {
+		return nil, err
+	}
 	var out []Account
-	for _, row := range rows {
-		if row.ID != exclude {
+	for _, row := range append([]Account{*self}, r.rows...) {
+		if row.ID != exclude && row.Extra[openAIGatewayLedgerTagExtraKey] == tag {
 			out = append(out, Account{ID: row.ID, Extra: map[string]any{
 				openAIGatewayPoolContactsExtraKey: row.Extra[openAIGatewayPoolContactsExtraKey]}})
 		}
 	}
-	return out, err
+	return out, nil
 }
 
 func (r *gatewayPoolContactNarrowRepo) FindByExtraField(context.Context, string, any) ([]Account, error) {
@@ -99,14 +118,14 @@ func TestGatewayPoolContactsWriteMergesSameLedgerPeers(t *testing.T) {
 			repo = narrowRepo
 		}
 		svc := &OpenAIGatewayService{accountRepo: repo}
-		svc.codexCookies.accountByID = peers.GetByID
+		svc.codexCookies.accountByID = svc.gatewayPoolLedgerRow
 		for _, gateway := range []string{"unified-own", "unified-own-later"} {
 			svc.noteGatewayPoolContact(context.Background(), account, gatewayPoolContactEvent{
 				Applied:  OpenAIGatewayPoolApplied{AccountID: account.ID, Gateway: gateway, RoundID: gatewayPoolDigest(gateway), Version: "v"},
 				Identity: gwpoolTestIdentity, Source: "business", FirstSent: time.Now().UTC(),
 			})
 		}
-		fresh, err := peers.GetByID(context.Background(), account.ID)
+		fresh, err := peers.stored(account.ID)
 		require.NoError(t, err)
 		seen := readGatewayPoolContacts(fresh, tag).Seen
 		require.Contains(t, seen, "unified-own")
@@ -166,7 +185,7 @@ func TestGatewayPoolContactsDeduplicatePersistAndMeasureActualGap(t *testing.T) 
 	later.FirstSent = at.Add(time.Minute)
 	later.LastSent = later.FirstSent
 	svc.noteGatewayPoolContact(context.Background(), account, later)
-	current, _ := repo.GetByID(context.Background(), 1)
+	current, _ := repo.stored(1)
 	state := readGatewayPoolContacts(current, gatewayPoolLedgerTag(gwpoolTestIdentity))
 	require.Len(t, state.Rounds, 1)
 	require.Equal(t, "tracked_first", state.Rounds[0].Report.First)
@@ -177,7 +196,7 @@ func TestGatewayPoolContactsDeduplicatePersistAndMeasureActualGap(t *testing.T) 
 	restarted := &OpenAIGatewayService{accountRepo: repo}
 	restarted.noteGatewayPoolContact(context.Background(), account, second)
 	restarted.finishGatewayPoolContact(context.Background(), account, gwpoolTestIdentity, second.Applied, 80*time.Second)
-	current, _ = repo.GetByID(context.Background(), 1)
+	current, _ = repo.stored(1)
 	state = readGatewayPoolContacts(current, gatewayPoolLedgerTag(gwpoolTestIdentity))
 	require.Len(t, state.Rounds, 2)
 	require.Equal(t, "repeat", state.Rounds[1].Report.First)
@@ -201,24 +220,24 @@ func TestGatewayPoolContactsUnsentLegacyAndWriteFailureStayUnknown(t *testing.T)
 	unsent := event
 	unsent.FirstSent = time.Time{}
 	svc.noteGatewayPoolContact(context.Background(), account, unsent)
-	current, _ := repo.GetByID(context.Background(), 1)
+	current, _ := repo.stored(1)
 	require.Nil(t, current.Extra[openAIGatewayPoolContactsExtraKey])
 	repo.fail = true
 	svc.noteGatewayPoolContact(context.Background(), account, event)
-	current, _ = repo.GetByID(context.Background(), 1)
+	current, _ = repo.stored(1)
 	require.Nil(t, current.Extra[openAIGatewayPoolContactsExtraKey])
 	require.Empty(t, readGatewayPoolOutbox(current, time.Now()).Pending)
 	repo.fail = false
 	event.Outcome = "unknown"
 	svc.noteGatewayPoolContact(context.Background(), account, event)
-	current, _ = repo.GetByID(context.Background(), 1)
+	current, _ = repo.stored(1)
 	state := readGatewayPoolContacts(current, gatewayPoolLedgerTag(gwpoolTestIdentity))
 	require.Equal(t, "unknown", state.Rounds[0].Report.First)
 	require.Equal(t, "unknown", state.Rounds[0].Report.Outcome)
 	require.False(t, state.Rounds[0].Report.GapKnown)
 	event.Outcome = "full"
 	svc.noteGatewayPoolContact(context.Background(), account, event)
-	current, _ = repo.GetByID(context.Background(), 1)
+	current, _ = repo.stored(1)
 	state = readGatewayPoolContacts(current, gatewayPoolLedgerTag(gwpoolTestIdentity))
 	require.Len(t, state.Rounds, 1)
 	require.Equal(t, "unknown", state.Rounds[0].Report.Outcome, "later result must not create a second initial-contact sample")
@@ -242,7 +261,7 @@ func TestGatewayPoolContactOutboxKeepsFinalUpdateDuringInitialSend(t *testing.T)
 	svc, repo := gatewayRuntimeService(account)
 	event := contactEvent(time.Now().UTC(), "first")
 	svc.noteGatewayPoolContact(context.Background(), account, event)
-	current, _ := repo.GetByID(context.Background(), 1)
+	current, _ := repo.stored(1)
 	pending := readGatewayPoolOutbox(current, time.Now()).Pending[0]
 	done := make(chan struct{})
 	go func() { defer close(done); svc.sendGatewayPoolPending(context.Background(), 1, pending) }()
@@ -254,12 +273,12 @@ func TestGatewayPoolContactOutboxKeepsFinalUpdateDuringInitialSend(t *testing.T)
 	svc.finishGatewayPoolContact(context.Background(), account, gwpoolTestIdentity, event.Applied, 80*time.Second)
 	close(proceed)
 	<-done
-	current, _ = repo.GetByID(context.Background(), 1)
+	current, _ = repo.stored(1)
 	box := readGatewayPoolOutbox(current, time.Now())
 	require.Len(t, box.Pending, 1, "initial acknowledgement must not delete a newer window payload")
 	require.True(t, box.Pending[0].Contact.WindowFinal)
 	svc.flushGatewayPoolReports(context.Background())
-	current, _ = repo.GetByID(context.Background(), 1)
+	current, _ = repo.stored(1)
 	require.Empty(t, readGatewayPoolOutbox(current, time.Now()).Pending)
 	require.EqualValues(t, 2, calls.Load())
 }
@@ -273,7 +292,7 @@ func TestGatewayPoolContactsMergedProbeCanFinishThroughEitherRound(t *testing.T)
 	concurrent := contactEvent(first.FirstSent.Add(time.Second), "same-ticket")
 	svc.noteGatewayPoolContact(context.Background(), account, concurrent)
 	svc.finishGatewayPoolContact(context.Background(), account, gwpoolTestIdentity, concurrent.Applied, 50*time.Second)
-	current, _ := repo.GetByID(context.Background(), 1)
+	current, _ := repo.stored(1)
 	state := readGatewayPoolContacts(current, gatewayPoolLedgerTag(gwpoolTestIdentity))
 	require.Len(t, state.Rounds, 1)
 	require.True(t, state.Rounds[0].Report.WindowFinal, "a coalesced probe must retain its round association")
@@ -288,7 +307,7 @@ func TestGatewayPoolContactsLateOlderRoundIsNotTrackedFirst(t *testing.T) {
 	svc.noteGatewayPoolContact(context.Background(), account, recent)
 	older := contactEvent(recent.FirstSent.Add(-time.Hour), "older")
 	svc.noteGatewayPoolContact(context.Background(), account, older)
-	current, _ := repo.GetByID(context.Background(), 1)
+	current, _ := repo.stored(1)
 	state := readGatewayPoolContacts(current, gatewayPoolLedgerTag(gwpoolTestIdentity))
 	require.Len(t, state.Rounds, 2)
 	require.Equal(t, "unknown", state.Rounds[0].Report.First)
@@ -310,7 +329,7 @@ func TestGatewayPoolContactsLatestProbeContextIsSeparateFromInitialAndBusiness(t
 	business.FirstSent, business.LastSent = first.FirstSent.Add(2*time.Minute), first.LastSent.Add(2*time.Minute)
 	svc.noteGatewayPoolContact(context.Background(), account, business)
 	svc.noteGatewayPoolContact(context.Background(), account, first) // out-of-order older completion
-	current, _ := repo.GetByID(context.Background(), 1)
+	current, _ := repo.stored(1)
 	state := readGatewayPoolContacts(current, gatewayPoolLedgerTag(gwpoolTestIdentity))
 	require.Len(t, state.Rounds, 1)
 	round := state.Rounds[0]

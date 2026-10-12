@@ -112,7 +112,7 @@ func TestGatewayPoolMemberSwitchRejectsLateOldHistory(t *testing.T) {
 	repo.account.Credentials = replacement.Credentials
 	repo.mu.Unlock()
 	svc.noteOpenAIGatewayUse(context.Background(), account, "g", "", openAIGatewayVerdictFull, true, 0, 0, 0, oldTag)
-	fresh, _ := repo.GetByID(context.Background(), 1)
+	fresh, _ := repo.stored(1)
 	require.Nil(t, fresh.Extra[openAIGatewayHistoryExtraKey])
 }
 
@@ -166,7 +166,7 @@ func TestGatewayPoolLedgerWritesCarryNoPreviousArchive(t *testing.T) {
 	ctx := context.Background()
 	svc.noteOpenAIGatewayUse(ctx, account, "unified-1", "", openAIGatewayVerdictFull, true, 0, 0, 0, tag)
 	require.True(t, svc.changeGatewayPoolUsage(ctx, account, identity, func(*gatewayPoolUsageLedger) bool { return true }))
-	fresh, err := repo.GetByID(ctx, account.ID)
+	fresh, err := repo.stored(account.ID)
 	require.NoError(t, err)
 	raw, err := json.Marshal(fresh.Extra)
 	require.NoError(t, err)
@@ -190,7 +190,7 @@ func TestGatewayPoolMemberWaitingRejectsCredentialSwitch(t *testing.T) {
 				parent.ID: parent, requestAccount.ID: requestAccount,
 			}}
 			svc := &OpenAIGatewayService{accountRepo: repo}
-			svc.codexCookies.accountByID = repo.GetByID
+			svc.codexCookies.accountByID = svc.gatewayPoolLedgerRow
 			svc.codexCookies.identity = svc.codexCredentialIdentity
 			ctx := svc.gatewayPoolWaitContext(context.Background(), requestAccount)
 			require.NotNil(t, gatewayPoolWaitFrom(ctx))
@@ -211,6 +211,6 @@ func TestGatewayPoolMemberHistoryFailsClosedWhenIdentityCannotBeRead(t *testing.
 		return "", errors.New("credential source unavailable")
 	}
 	svc.noteOpenAIGatewayUse(context.Background(), account, "g", "", openAIGatewayVerdictFull, true, 0, 0, 0, "old")
-	fresh, _ := repo.GetByID(context.Background(), 1)
+	fresh, _ := repo.stored(1)
 	require.Nil(t, fresh.Extra[openAIGatewayHistoryExtraKey])
 }

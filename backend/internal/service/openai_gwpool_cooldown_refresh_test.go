@@ -52,7 +52,7 @@ func TestGatewayPoolCooldownRefreshIsNotNewContactOrSample(t *testing.T) {
 	require.Equal(t, before.ElapsedSeconds, after.ElapsedSeconds)
 	require.True(t, validGatewayPoolCooldown(&after, time.Now(), 3600))
 	svc.persistGatewayPoolCooldownRefresh(context.Background(), account, gwpoolTestIdentity)
-	fresh, err := repo.GetByID(context.Background(), 1)
+	fresh, err := repo.stored(1)
 	require.NoError(t, err)
 	saved, ok := readOpenAIGatewayHistory(fresh)
 	require.True(t, ok)

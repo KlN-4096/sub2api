@@ -119,7 +119,7 @@ func TestGatewayPoolQualityRestFreezeSurvivesRestartAndLaterEntry(t *testing.T) 
 		svc.codexCookies.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, name), now)
 	}
 	require.NoError(t, svc.enterGatewayPoolRest(ctx, account, gwpoolTestIdentity, now, now.Add(time.Hour), gatewayPoolRestPlan{qualityGateways: []string{"first-quality"}}))
-	restarted := &OpenAIGatewayService{accountRepo: svc.accountRepo}
+	restarted := withGatewayPoolRowRead(&OpenAIGatewayService{accountRepo: svc.accountRepo})
 	for _, name := range []string{"first-quality", "new-quality", "ordinary"} {
 		at := now
 		if name == "first-quality" {
@@ -182,7 +182,7 @@ func TestGatewayPoolQualityRestUsesFreshPeerEvidenceAndRejectsUnknownOrChangedIn
 			repo := &gatewayQualityRestRepo{gatewayRotationRepo: gatewayRotationRepo{
 				schedulerTestOpenAIAccountRepo{accounts: []Account{*account, *peer}},
 			}}
-			svc := &OpenAIGatewayService{accountRepo: repo}
+			svc := withGatewayPoolRowRead(&OpenAIGatewayService{accountRepo: repo})
 			for _, name := range []string{"good", "bad"} {
 				svc.codexCookies.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, name), now)
 			}
@@ -241,7 +241,7 @@ func TestGatewayPoolQualityRestChangedInventoryCannotPublishAtEitherEntrypoint(t
 				repo := &gatewayQualityRestRepo{gatewayRotationRepo: gatewayRotationRepo{
 					schedulerTestOpenAIAccountRepo{accounts: []Account{*account}},
 				}}
-				svc := &OpenAIGatewayService{accountRepo: repo}
+				svc := &OpenAIGatewayService{accountRepo: repo} // read ordinals below assume no injected row read
 				svc.codexCookies.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, "good"), now)
 				reads, changed := 0, false
 				repo.onGet = func() {
@@ -295,7 +295,7 @@ func TestGatewayPoolQualityRestPartialReadCannotReplaceFrozenPolicyOrTombstone(t
 			repo := &gatewayQualityRestRepo{gatewayRotationRepo: gatewayRotationRepo{
 				schedulerTestOpenAIAccountRepo{accounts: []Account{*account}},
 			}, fail: true}
-			svc := &OpenAIGatewayService{accountRepo: repo} // restart: cache is empty
+			svc := withGatewayPoolRowRead(&OpenAIGatewayService{accountRepo: repo}) // restart: cache is empty
 			err := svc.enterGatewayPoolRest(ctx, account, gwpoolTestIdentity, now, now.Add(2*time.Hour), gatewayPoolRestPlan{qualityGateways: []string{"replacement"}})
 			require.Error(t, err)
 			require.Equal(t, state, readGatewayPoolRest(account, tag))

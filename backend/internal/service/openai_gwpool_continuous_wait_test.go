@@ -38,7 +38,7 @@ func TestGatewayPoolContinuousWaitRetriesEmptyPoolWithoutBusinessOrRest(t *testi
 	account.Extra[openAIGatewayPoolRotationMinGatewaysExtraKey] = 20
 	repo.account = *account
 	fake.refuseStatus, fake.refuseCode, fake.refuseRetryAfter = 503, gwpool.CodeNoLivePair, 1
-	account, err := repo.GetByID(context.Background(), account.ID)
+	account, err := repo.stored(account.ID)
 	require.NoError(t, err)
 	ctx, _ := withOpenAIGatewayPoolSink(context.Background(), nil)
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
@@ -76,7 +76,7 @@ func TestGatewayPoolContinuousWaitCancellationAndConfigChange(t *testing.T) {
 			svc, repo, fake, account, request, _ := ticketWaitFixture(t)
 			account.Extra[OpenAIGatewayPoolContinuousWaitKey] = true
 			repo.account = *account
-			account, err := repo.GetByID(context.Background(), account.ID)
+			account, err := repo.stored(account.ID)
 			require.NoError(t, err)
 			fake.refuseStatus, fake.refuseCode = 503, gwpool.CodeAllCooling
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -144,7 +144,7 @@ func TestGatewayPoolContinuousWaitDoesNotRecoverOrdinaryClone(t *testing.T) {
 	allowed, err := svc.gatewayPoolResumeAllowed(context.Background(), account, true)
 	require.NoError(t, err)
 	require.True(t, allowed)
-	fresh, err := repo.GetByID(context.Background(), account.ID)
+	fresh, err := repo.stored(account.ID)
 	require.NoError(t, err)
 	require.Nil(t, fresh.TempUnschedulableUntil)
 	require.True(t, readGatewayPoolRest(fresh, tag).Active, "do not overwrite the shared rest history")
@@ -198,12 +198,12 @@ func continuousWaitClones(t *testing.T, secondContinuous bool) (*OpenAIGatewaySe
 		account.Extra[OpenAIGatewayPoolContinuousWaitKey] = id == 1 || secondContinuous
 		account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = true
 		repo.rows[id] = &gatewayRuntimeRepo{account: *account}
-		fresh, err := repo.GetByID(context.Background(), id)
+		fresh, err := repo.stored(id)
 		require.NoError(t, err)
 		accounts = append(accounts, fresh)
 	}
 	svc := &OpenAIGatewayService{accountRepo: repo}
-	svc.codexCookies.accountByID = repo.GetByID
+	svc.codexCookies.accountByID = svc.gatewayPoolLedgerRow
 	return svc, repo, fake, accounts
 }
 
@@ -314,7 +314,7 @@ func TestGatewayPoolContinuousWaitOrdinaryFollowerTriesLastCandidate(t *testing.
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	require.NoError(t, repo.UpdateExtra(ctx, accounts[1].ID, map[string]any{openAIGatewayPoolRotationMinGatewaysExtraKey: 2}))
-	ordinary, err := repo.GetByID(ctx, accounts[1].ID)
+	ordinary, err := repo.stored(accounts[1].ID)
 	require.NoError(t, err)
 	firstCookie, nextCookie := gwpoolTestPairCookie(t, "unified-142"), gwpoolTestPairCookie(t, "unified-143")
 	fake.cookieForHit = func(hit int64) string {
@@ -390,7 +390,7 @@ func TestGatewayPoolContinuousWaitRefreshesBearerBeforeBusiness(t *testing.T) {
 	account.Extra[OpenAIGatewayPoolContinuousWaitKey] = true
 	account.Credentials["access_token"] = "old-offline-token"
 	repo.account = *account
-	original, err := repo.GetByID(context.Background(), account.ID)
+	original, err := repo.stored(account.ID)
 	require.NoError(t, err)
 	ctx, _ := withOpenAIGatewayPoolSink(context.Background(), nil)
 	ctx = svc.gatewayPoolWaitContext(ctx, original)

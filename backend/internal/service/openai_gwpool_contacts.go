@@ -86,17 +86,28 @@ func readGatewayPoolContacts(account *Account, tag string) gatewayPoolContacts {
 	return state
 }
 
+// gatewayPoolContactsSummary is a row's contacts ledger without its rounds,
+// most of its size, which gatewayPoolContactsLastAt never reads.
+func (s *OpenAIGatewayService) gatewayPoolContactsSummary(ctx context.Context, account *Account) (any, error) {
+	repo, ok := s.accountRepo.(gatewayPoolLedgerRepository)
+	if !ok {
+		return account.Extra[openAIGatewayPoolContactsExtraKey], nil
+	}
+	summary, err := repo.LoadGatewayPoolLedgerWithout(ctx, account.ID, openAIGatewayPoolContactsExtraKey, "rounds")
+	return summary, err
+}
+
 // gatewayPoolContactsLastAt is the newest contact in tag's ledger. Selection
 // needs nothing else, and prune only drops the oldest entries, so this equals
 // the maximum over readGatewayPoolContacts without decoding every round.
-func gatewayPoolContactsLastAt(account *Account, tag string) time.Time {
+func gatewayPoolContactsLastAt(contacts any, tag string) time.Time {
 	var state struct {
 		LedgerTag string `json:"ledger_tag"`
 		Seen      map[string]struct {
 			LastAt time.Time `json:"last_at"`
 		} `json:"seen"`
 	}
-	raw, _ := json.Marshal(account.Extra[openAIGatewayPoolContactsExtraKey])
+	raw, _ := json.Marshal(contacts)
 	_ = json.Unmarshal(raw, &state)
 	var last time.Time
 	if state.LedgerTag == tag {
@@ -218,7 +229,7 @@ func (s *OpenAIGatewayService) changeGatewayPoolContacts(ctx context.Context, ac
 	defer lock.Unlock()
 	unlock := s.codexCookies.gatewayPoolHistoryLock(account.ID)
 	defer unlock()
-	fresh, err := s.accountRepo.GetByID(ctx, account.ID)
+	fresh, err := s.gatewayPoolLedgerRow(ctx, account.ID, openAIGatewayPoolContactsExtraKey, openAIGatewayPoolOutboxExtraKey, openAIGatewayHistoryExtraKey)
 	if err != nil || fresh == nil {
 		slog.Warn("gwpool_contact_read_failed", "account_id", account.ID)
 		return

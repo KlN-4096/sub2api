@@ -263,7 +263,7 @@ func TestGatewayPoolCooldownFreshPersistenceAndCrossRowRestart(t *testing.T) {
 	repo := newTurnStateTestRepo()
 	repo.latest = account
 	svc := &OpenAIGatewayService{accountRepo: repo}
-	svc.codexCookies.accountByID = repo.GetByID
+	svc.codexCookies.accountByID = svc.gatewayPoolLedgerRow
 	identity := openAIGatewayPoolAccountKey(account)
 	require.True(t, svc.codexCookies.beginGatewayPoolAttempt(identity, "unified-142", 30*time.Minute))
 	svc.codexCookies.observeGatewayPoolCooldown(identity, "unified-142", openAIGatewayVerdictDegraded, 30*time.Minute, time.Time{})
@@ -282,8 +282,8 @@ func TestGatewayPoolCooldownFreshPersistenceAndCrossRowRestart(t *testing.T) {
 	// 新进程从另一克隆行进入，仍从共享标签查回前一行持久化的状态。
 	clone := gwpoolTestAccount(35)
 	restarted := &openAICodexCookieStore{
-		accountByID: func(context.Context, int64) (*Account, error) { return clone, nil },
-		historyByTag: func(_ context.Context, tag string) ([]Account, error) {
+		accountByID: func(context.Context, int64, ...string) (*Account, error) { return clone, nil },
+		historyByTag: func(_ context.Context, tag string, _ ...string) ([]Account, error) {
 			if tag == persisted.Extra[openAIGatewayLedgerTagExtraKey] {
 				return []Account{persisted}, nil
 			}

@@ -59,7 +59,7 @@ func TestGatewayPoolLocalEvidenceOverridesPoolAndExistingQueue(t *testing.T) {
 			}
 			account := fake.account(1)
 			svc, repo := gatewayRuntimeService(account)
-			svc.codexCookies.historyByTag = func(context.Context, string) ([]Account, error) { return nil, nil }
+			svc.codexCookies.historyByTag = func(context.Context, string, ...string) ([]Account, error) { return nil, nil }
 			require.NoError(t, repo.UpdateExtra(context.Background(), 1, map[string]any{
 				openAIGatewayPoolContactsExtraKey: localRankHistory(time.Now(), "good", "bad", 5),
 			}))
@@ -117,12 +117,16 @@ func TestGatewayPoolLocalEvidenceMustBeFreshScopedAndSufficient(t *testing.T) {
 				state.Rounds = append(state.Rounds, state.Rounds...)
 			}
 			require.NoError(t, repo.UpdateExtra(context.Background(), 1, map[string]any{openAIGatewayPoolContactsExtraKey: state}))
-			svc.codexCookies.historyByTag = func(context.Context, string) ([]Account, error) { return nil, nil }
+			svc.codexCookies.historyByTag = func(context.Context, string, ...string) ([]Account, error) { return nil, nil }
 			if mode == "fresh-failure" {
-				svc.codexCookies.accountByID = func(context.Context, int64) (*Account, error) { return nil, errors.New("offline read failure") }
+				svc.codexCookies.accountByID = func(context.Context, int64, ...string) (*Account, error) {
+					return nil, errors.New("offline read failure")
+				}
 			}
 			if mode == "peer-failure" {
-				svc.codexCookies.historyByTag = func(context.Context, string) ([]Account, error) { return nil, errors.New("offline peer failure") }
+				svc.codexCookies.historyByTag = func(context.Context, string, ...string) ([]Account, error) {
+					return nil, errors.New("offline peer failure")
+				}
 			}
 			if mode == "changed-identity" {
 				svc.codexCookies.identity = func(context.Context, *Account) (string, error) { return "different-member", nil }
@@ -189,7 +193,7 @@ func TestGatewayPoolLocalWindowsReplacePoolAdaptiveWindows(t *testing.T) {
 	peer := *account
 	peer.ID = 2
 	peer.Extra = map[string]any{openAIGatewayPoolContactsExtraKey: state}
-	svc.codexCookies.historyByTag = func(context.Context, string) ([]Account, error) { return []Account{peer}, nil }
+	svc.codexCookies.historyByTag = func(context.Context, string, ...string) ([]Account, error) { return []Account{peer}, nil }
 	require.NoError(t, repo.UpdateExtra(context.Background(), 1, map[string]any{openAIGatewayPoolContactsExtraKey: state}))
 	var candidates []gwpool.Gateway
 	for _, name := range []string{"bad", "good"} {

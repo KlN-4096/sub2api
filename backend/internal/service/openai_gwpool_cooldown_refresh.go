@@ -79,7 +79,7 @@ func (s *OpenAIGatewayService) persistGatewayPoolCooldownRefresh(ctx context.Con
 	}
 	unlock := s.codexCookies.gatewayPoolHistoryLock(account.ID)
 	defer unlock()
-	fresh, err := s.accountRepo.GetByID(ctx, account.ID)
+	fresh, err := s.gatewayPoolLedgerRow(ctx, account.ID, openAIGatewayHistoryExtraKey)
 	if err != nil || fresh == nil {
 		return
 	}

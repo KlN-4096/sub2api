@@ -58,6 +58,10 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 		}
 		poolIDs[accounts[i].ID] = true
 		account, err := s.accountRepo.GetByID(ctx, accounts[i].ID)
+		var contacts any
+		if err == nil {
+			contacts, err = s.gatewayPoolContactsSummary(ctx, account)
+		}
 		if err != nil {
 			complete = false
 			continue
@@ -89,7 +93,7 @@ func (s *OpenAIGatewayService) withGatewayPoolAccountPreferences(ctx context.Con
 			continue
 		}
 		identities[account.ID] = identity
-		lastContact := gatewayPoolContactsLastAt(account, gatewayPoolLedgerTag(identity))
+		lastContact := gatewayPoolContactsLastAt(contacts, gatewayPoolLedgerTag(identity))
 		if account.LastUsedAt != nil && account.LastUsedAt.After(lastContact) {
 			lastContact = *account.LastUsedAt
 		}

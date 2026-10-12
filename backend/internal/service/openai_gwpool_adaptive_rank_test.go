@@ -151,7 +151,7 @@ func TestGatewayPoolRankReuseDelayFallsBackToTheLocalBase(t *testing.T) {
 			account.Extra[openAIGatewayPoolGatewayWindowExtraKey] = windowSeconds
 		}
 		svc, repo := gatewayRuntimeService(account)
-		svc.codexCookies.historyByTag = func(context.Context, string) ([]Account, error) { return nil, nil }
+		svc.codexCookies.historyByTag = func(context.Context, string, ...string) ([]Account, error) { return nil, nil }
 		require.NoError(t, repo.UpdateExtra(ctx, account.ID, map[string]any{
 			openAIGatewayPoolContactsExtraKey: adaptiveHistory(time.Now(), names...),
 		}))
@@ -199,7 +199,7 @@ func TestGatewayPoolAdaptiveFreshIdentityPeersAndFifthFallback(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			account := gwpoolTestAccount(1)
 			svc, repo := gatewayRuntimeService(account)
-			svc.codexCookies.historyByTag = func(context.Context, string) ([]Account, error) { return nil, nil }
+			svc.codexCookies.historyByTag = func(context.Context, string, ...string) ([]Account, error) { return nil, nil }
 			state := adaptiveHistory(time.Now(), "a", "b")
 			if mode == "identity-change" {
 				state.LedgerTag = "another-identity"
@@ -207,12 +207,12 @@ func TestGatewayPoolAdaptiveFreshIdentityPeersAndFifthFallback(t *testing.T) {
 			require.NoError(t, repo.UpdateExtra(context.Background(), 1,
 				map[string]any{openAIGatewayPoolContactsExtraKey: state}))
 			if mode == "fresh-error" {
-				svc.codexCookies.accountByID = func(context.Context, int64) (*Account, error) {
+				svc.codexCookies.accountByID = func(context.Context, int64, ...string) (*Account, error) {
 					return nil, errors.New("offline read failed")
 				}
 			}
 			if mode == "peer-error" {
-				svc.codexCookies.historyByTag = func(context.Context, string) ([]Account, error) {
+				svc.codexCookies.historyByTag = func(context.Context, string, ...string) ([]Account, error) {
 					return nil, errors.New("offline peer read failed")
 				}
 			}
@@ -273,7 +273,7 @@ func TestGatewayPoolAdaptivePickUsesRankingWithoutBypassingCooldown(t *testing.T
 	account.Extra[openAIGatewayPoolBaseURLExtraKey] = server.URL
 	account.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = "offline"
 	svc, repo := gatewayRuntimeService(account)
-	svc.codexCookies.historyByTag = func(context.Context, string) ([]Account, error) { return nil, nil }
+	svc.codexCookies.historyByTag = func(context.Context, string, ...string) ([]Account, error) { return nil, nil }
 	require.NoError(t, repo.UpdateExtra(context.Background(), 1, map[string]any{
 		openAIGatewayPoolContactsExtraKey: adaptiveHistory(time.Now(), "a", "b", "c", "cooling"),
 	}))
