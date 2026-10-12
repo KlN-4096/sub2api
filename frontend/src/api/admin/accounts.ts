@@ -104,7 +104,7 @@ export interface GatewayPoolProgress {
     observed_at: string
     tickets: Array<{ gateway: string; region: string; expires_at?: string; verified_at?: string; verified_models: string[] }>
     rounds: GatewayPoolUsageRound[]
-    archived: Record<string, { rounds: number; attempted: number; full: number; active_duration_ms?: number; active_duration_incomplete?: boolean; incomplete?: boolean }> | null
+    archived: Record<string, { rounds: number; attempted: number; full: number; active_duration_ms?: number; incomplete?: boolean }> | null
     incomplete?: boolean
     history?: Record<string, unknown>
     contacts?: Record<string, unknown>
@@ -128,7 +128,6 @@ export interface GatewayPoolUsageRound {
   full: number
   full_duration_ms?: number
   full_usage_mode?: string
-  duration_incomplete?: boolean
   incomplete?: boolean
 }
 

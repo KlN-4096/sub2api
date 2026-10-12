@@ -675,7 +675,7 @@ export default {
           coolingCount: '{count} cooling',
           cooledCount: '{count} cooled',
           heldFull: 'full {duration}',
-          hint: 'The current ticket appears above. Up to two summary rows combine consecutive confirmed degraded tickets and retain measured full-strength history. Counts are deduplicated ticket records; incomplete history shows “at least”. Unknown results are not degraded. Duration is a measured full-strength window, not business-active time or the cycle total. All history retains per-gateway details; cooled does not guarantee availability or full strength.',
+          hint: 'The current ticket appears above. Up to two summary rows combine consecutive confirmed degraded tickets and retain measured full-strength history. Counts are deduplicated ticket records; incomplete history shows “at least”. Unknown results are not degraded. Duration is the business time the ticket served at full strength in its cycle, settled when it degraded (no idle time, other tickets or earlier cycles). All history retains per-gateway details; cooled does not guarantee availability or full strength.',
           degradedTickets: '{count} degraded in a row',
           degradedTicketsAtLeast: 'At least {count} degraded in a row',
           allHistory: 'All history',
@@ -699,9 +699,7 @@ export default {
           totalFull: 'Total full',
           cycleTickets: '{full}/{attempted}',
           totalRounds: '{count} rounds',
-          incompleteHint: 'Some duration unobserved; actual is at least this value',
-          activeHint: 'Counts active business intervals on verified tickets, with overlaps counted once. Excludes idle time, ticket preparation, verification and retry waits. Legacy durations are hidden.',
-          incomplete: ' (counts are lower bounds)'
+          activeHint: 'Counts active business intervals on verified tickets, with overlaps counted once. Excludes idle time, ticket preparation, verification and retry waits. Legacy durations are hidden.'
         },
         gatewayProgress: {
           run: 'probe {id}',
@@ -893,11 +891,11 @@ export default {
           // scan picks out the one that comes back first.
           regionHot: 'CD left: {minutes}min',
           regionCooled: 'retry eligible',
-          // Segment 3 is how LONG full strength held (full verdict → degraded verdict),
-          // rendered straight as `180s` with no i18n key. This one is the placeholder when
-          // there is no duration to show: window still running, never verified full, or both
-          // readings landed in one write so the length cannot be measured — same thing to the
-          // reader, so one label.
+          // Segment 3 is how long the ticket served business at full strength in its cycle,
+          // settled when it degraded, rendered straight as `180s` with no i18n key. This one is
+          // the placeholder when there is no duration to show: not degraded yet, never verified
+          // full, or no business in the cycle after verification — same thing to the reader,
+          // so one label.
           fullUntimed: 'not timed',
           cooldownFixed: 'fixed {minutes}min',
           cooldownRecommended: 'pool suggests {minutes}min',
