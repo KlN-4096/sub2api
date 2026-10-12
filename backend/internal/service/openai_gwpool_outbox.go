@@ -2,8 +2,6 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -79,8 +77,12 @@ type gatewayPoolReporter struct {
 }
 
 func gatewayPoolReportBinding(account *Account, tag string) string {
-	sum := sha256.Sum256([]byte(account.gatewayPoolBaseURL() + "\x00" + tag))
-	return hex.EncodeToString(sum[:])
+	return gatewayPoolDigest(account.gatewayPoolBaseURL() + "\x00" + tag)
+}
+
+// gatewayPoolAccountReportBinding is the binding of reports the member sends now.
+func gatewayPoolAccountReportBinding(account *Account, identity string) string {
+	return gatewayPoolReportBinding(account, gatewayPoolAccountTag(account, identity))
 }
 
 func readGatewayPoolOutbox(account *Account, now time.Time) gatewayPoolOutbox {
@@ -134,7 +136,7 @@ func (s *OpenAIGatewayService) changeGatewayPoolOutbox(ctx context.Context, id i
 	}
 	unlock := s.codexCookies.gatewayPoolHistoryLock(id)
 	defer unlock()
-	account, err := s.accountRepo.GetByID(ctx, id)
+	account, err := s.gatewayPoolLedgerRow(ctx, id, openAIGatewayPoolOutboxExtraKey)
 	if err != nil {
 		return err
 	}
@@ -147,11 +149,7 @@ func (s *OpenAIGatewayService) changeGatewayPoolOutbox(ctx context.Context, id i
 		box.Discarded += int64(len(box.Pending) - gatewayPoolOutboxLimit)
 		box.Pending = box.Pending[len(box.Pending)-gatewayPoolOutboxLimit:]
 	}
-	return s.accountRepo.UpdateExtra(ctx, id, map[string]any{openAIGatewayPoolOutboxExtraKey: box})
-}
-
-func (s *OpenAIGatewayService) enqueueGatewayPoolReport(account *Account, report gwpool.CooldownReport) {
-	s.enqueueGatewayPoolPending(account, gatewayPoolPendingReport{Report: report})
+	return s.updateGatewayPoolRuntimeExtra(ctx, id, map[string]any{openAIGatewayPoolOutboxExtraKey: box})
 }
 
 func (s *OpenAIGatewayService) enqueueGatewayPoolPending(account *Account, pending gatewayPoolPendingReport) {
@@ -252,6 +250,9 @@ func (s *OpenAIGatewayService) flushGatewayPoolReports(ctx context.Context) {
 	}
 	scanCtx, scanCancel := context.WithTimeout(ctx, gatewayPoolReportTimeout)
 	accounts, err := s.accountRepo.FindByExtraField(scanCtx, openAIGatewayPoolExtraKey, true)
+	if err == nil {
+		err = s.hydrateGatewayPoolLedgers(scanCtx, gatewayPoolRowPointers(accounts), openAIGatewayPoolOutboxExtraKey, gatewayPoolUsageExtraKey)
+	}
 	scanCancel()
 	if err != nil {
 		slog.Warn("gwpool_feedback_scan_failed")
@@ -291,7 +292,7 @@ func (s *OpenAIGatewayService) flushGatewayPoolReports(ctx context.Context) {
 		if identityErr != nil {
 			continue
 		}
-		binding := gatewayPoolReportBinding(account, gatewayPoolAccountTag(account, identity))
+		binding := gatewayPoolAccountReportBinding(account, identity)
 		var batch []gatewayPoolPendingReport
 		contactSent := false
 		for _, pending := range box.Pending {
@@ -317,21 +318,31 @@ func (s *OpenAIGatewayService) flushGatewayPoolReports(ctx context.Context) {
 	}
 }
 
+// gatewayPoolReportSender re-reads the account before a send: only a current
+// pool member sends, and only reports carrying its current binding.
+func (s *OpenAIGatewayService) gatewayPoolReportSender(ctx context.Context, accountID int64) (*Account, string, bool) {
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil || account == nil || !account.UsesGatewayPool() {
+		return nil, "", false
+	}
+	identity, err := s.codexCookies.gatewayPoolIdentity(ctx, account)
+	if err != nil {
+		return nil, "", false
+	}
+	return account, gatewayPoolAccountReportBinding(account, identity), true
+}
+
 func (s *OpenAIGatewayService) sendGatewayPoolPending(ctx context.Context, accountID int64, pending gatewayPoolPendingReport) {
 	startedAt := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(ctx, gatewayPoolReportTimeout)
 	defer cancel()
-	account, err := s.accountRepo.GetByID(ctx, accountID)
-	if err != nil || account == nil || !account.UsesGatewayPool() {
+	account, binding, ok := s.gatewayPoolReportSender(ctx, accountID)
+	if !ok {
 		return
 	}
-	identity, err := s.codexCookies.gatewayPoolIdentity(ctx, account)
-	if err != nil {
-		return
-	}
-	tag := gatewayPoolAccountTag(account, identity)
-	bindingChanged := pending.Binding != gatewayPoolReportBinding(account, tag)
+	bindingChanged := pending.Binding != binding
 	var recommendation *gwpool.CooldownRecommendation
+	var err error
 	if !bindingChanged {
 		pool, poolErr := s.codexCookies.poolClient(account)
 		err = poolErr
@@ -350,15 +361,10 @@ func (s *OpenAIGatewayService) sendGatewayPoolCooldownBatch(ctx context.Context,
 	startedAt := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(ctx, gatewayPoolReportTimeout)
 	defer cancel()
-	account, err := s.accountRepo.GetByID(ctx, accountID)
-	if err != nil || account == nil || !account.UsesGatewayPool() {
+	account, binding, ok := s.gatewayPoolReportSender(ctx, accountID)
+	if !ok {
 		return
 	}
-	identity, err := s.codexCookies.gatewayPoolIdentity(ctx, account)
-	if err != nil {
-		return
-	}
-	binding := gatewayPoolReportBinding(account, gatewayPoolAccountTag(account, identity))
 	var sending []gatewayPoolPendingReport
 	var reports []gwpool.CooldownReport
 	for _, pending := range batch {

@@ -525,3 +525,20 @@ func TestBuildOpenAIWSHeaders_CarriesSessionBetaFeatures(t *testing.T) {
 	require.Empty(t, apiKeyHeaders.Get("x-codex-beta-features"),
 		"非 Codex 后端不注入")
 }
+
+// truncateUsageTurnState 是用量表 Turn-State 入站/出站两列的收边：超过列上限才截断，截在字符边界上，
+// 截完为空记 NULL；不超上限的值原样记（不做 UTF-8 清洗）。
+func TestTruncateUsageTurnStateCapsAtColumnLimit(t *testing.T) {
+	require.Nil(t, truncateUsageTurnState(""))
+
+	exact := strings.Repeat("a", maxUsageCodexTurnStateLen)
+	require.Equal(t, exact, *truncateUsageTurnState(exact))
+	short := "blob\xff"
+	require.Equal(t, short, *truncateUsageTurnState(short), "不超上限原样返回")
+
+	require.Equal(t, exact, *truncateUsageTurnState(exact + "overflow"))
+	straddle := strings.Repeat("a", maxUsageCodexTurnStateLen-1) + "é" + "tail"
+	require.Equal(t, strings.Repeat("a", maxUsageCodexTurnStateLen-1), *truncateUsageTurnState(straddle),
+		"不切开多字节字符")
+	require.Nil(t, truncateUsageTurnState("\xff"+exact), "截完为空记 NULL")
+}

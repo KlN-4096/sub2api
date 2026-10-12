@@ -12,7 +12,7 @@ import (
 func TestGatewayPoolDualQueueUsesExistingHighWeightWithoutPersonalMajorityGate(t *testing.T) {
 	account := gwpoolTestAccount(1)
 	svc, _ := gatewayRuntimeService(account)
-	svc.codexCookies.historyByTag = func(context.Context, string) ([]Account, error) { return nil, nil }
+	svc.codexCookies.historyByTag = func(context.Context, string, ...string) ([]Account, error) { return nil, nil }
 	candidates := []gwpool.Gateway{
 		{Name: "unknown", PairReady: true},
 		{Name: "weighted", PairReady: true,
@@ -28,7 +28,7 @@ func TestGatewayPoolDualQueueUsesExistingHighWeightWithoutPersonalMajorityGate(t
 func TestGatewayPoolDualQueueRecoveredQualityBypassesOrdinaryBacklog(t *testing.T) {
 	account := gwpoolTestAccount(1)
 	svc, repo := gatewayRuntimeService(account)
-	svc.codexCookies.historyByTag = func(context.Context, string) ([]Account, error) { return nil, nil }
+	svc.codexCookies.historyByTag = func(context.Context, string, ...string) ([]Account, error) { return nil, nil }
 	require.NoError(t, repo.UpdateExtra(context.Background(), account.ID, map[string]any{
 		openAIGatewayPoolContactsExtraKey: localRankHistory(time.Now(), "good", "bad", 5),
 	}))
@@ -147,7 +147,7 @@ func TestGatewayPoolDualQueueUnknownIsNotBlockedWhenEvidenceIsInsufficient(t *te
 			account := gwpoolTestAccount(1)
 			svc, repo := gatewayRuntimeService(account)
 			state := localRankHistory(time.Now(), "good", "bad", 5)
-			svc.codexCookies.historyByTag = func(context.Context, string) ([]Account, error) { return nil, nil }
+			svc.codexCookies.historyByTag = func(context.Context, string, ...string) ([]Account, error) { return nil, nil }
 			switch mode {
 			case "few":
 				state = localRankHistory(time.Now(), "good", "bad", 4)

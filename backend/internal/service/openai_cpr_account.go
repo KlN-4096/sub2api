@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -51,6 +52,16 @@ func (a *Account) GetCPRGatewayBaseURL() string {
 		return ""
 	}
 	return strings.TrimSpace(a.GetCredential(cprCredentialBaseURL))
+}
+
+// validatedCPRBaseURL 是 CPR 各出站构造器（Responses、透传、input_tokens、alpha search）共用的
+// base_url 守卫：缺地址直接报错，绝不回落到官方端点；拼路径留给调用方。
+func (s *OpenAIGatewayService) validatedCPRBaseURL(account *Account) (string, error) {
+	baseURL := account.GetCPRGatewayBaseURL()
+	if baseURL == "" {
+		return "", errors.New("cpr account requires credentials.base_url")
+	}
+	return s.validateUpstreamBaseURL(baseURL)
 }
 
 // GetCPRClientKey 返回用于 Authorization: Bearer 的 CPR client key。

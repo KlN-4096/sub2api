@@ -9,14 +9,15 @@ type GatewayPoolCooldownEstimate struct {
 	EligibleAt     time.Time `json:"eligible_at,omitzero"`
 }
 
-func (s *openAICodexCookieStore) gatewayPoolCooldownEstimate(identity string, account *Account, history openAIGatewayHistory, now time.Time, peers ...Account) GatewayPoolCooldownEstimate {
+// deadlines are the display cooldown deadlines and rest the merged rest
+// snapshot, both already computed for the same runtime view.
+func gatewayPoolCooldownEstimate(account *Account, deadlines map[string]time.Time, rest gatewayPoolRestState) GatewayPoolCooldownEstimate {
 	result := GatewayPoolCooldownEstimate{ResumeGateways: account.gatewayPoolResumeGateways()}
-	projected := s.gatewayPoolDisplayCooldownDeadlines(identity, account, history, now)
 	var qualityGateways []string
-	if state := s.gatewayPoolRestSnapshot(account, identity, peers); state.Active && !account.GatewayPoolContinuousWaitEnabled() {
-		qualityGateways = state.QualityGateways
+	if rest.Active && !account.GatewayPoolContinuousWaitEnabled() {
+		qualityGateways = rest.QualityGateways
 	}
-	result.EligibleAt = gatewayPoolRecoveryDeadline(projected, result.ResumeGateways, qualityGateways)
+	result.EligibleAt = gatewayPoolRecoveryDeadline(deadlines, result.ResumeGateways, qualityGateways)
 	return result
 }
 
@@ -48,10 +49,7 @@ func (s *openAICodexCookieStore) gatewayPoolDisplayCooldownDeadlines(identity st
 			c.clearCooldown(reset.ClearedAt, base)
 			c.resetBackoff(reset.LastAt, touched, base)
 			s.refreshGatewayPoolCooldown(&c, identity, window, touched, now)
-			until = c.Until
-			if touchedUntil := touched.Add(time.Duration(c.WindowSeconds) * time.Second); !c.Cleared && !touched.IsZero() && touchedUntil.After(until) {
-				until = touchedUntil
-			}
+			until = c.deadline(touched)
 		} else if !touched.IsZero() {
 			until = touched.Add(time.Duration(base) * time.Second)
 		} else if !seen.At.IsZero() && !clearAt.IsZero() {

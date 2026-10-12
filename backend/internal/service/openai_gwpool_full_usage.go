@@ -13,7 +13,7 @@ func (s *openAICodexCookieStore) gatewayPoolUsageSession() string {
 }
 
 func gatewayPoolUsageTicketKey(gateway, version string) string {
-	return gatewayPoolUsageDigest(gateway + "\x00" + version)
+	return gatewayPoolDigest(gateway + "\x00" + version)
 }
 
 func (s *OpenAIGatewayService) noteGatewayPoolFullUse(ctx context.Context, account *Account, identity string,

@@ -28,8 +28,9 @@ type GatewayPoolQueueView struct {
 // Read only already-fetched metadata for this exact URL/Key/member/model. The
 // grouping functions are shared with dispatch, but polling never calls pick,
 // hydrates cooldowns, increments the exploration counter, or contacts the pool.
+// deadlines supplies the display cooldown deadlines once a catalog is known.
 func (s *openAICodexCookieStore) gatewayPoolQueueView(account *Account, identity string,
-	history openAIGatewayHistory, contacts gatewayPoolContacts, now time.Time,
+	contacts gatewayPoolContacts, now time.Time, deadlines func() map[string]time.Time,
 ) *GatewayPoolQueueView {
 	cached, ok := s.poolClients.Load(gatewayPoolClientCacheKey(account))
 	if !ok {
@@ -44,11 +45,11 @@ func (s *openAICodexCookieStore) gatewayPoolQueueView(account *Account, identity
 	if !known {
 		return nil
 	}
-	deadlines := s.gatewayPoolDisplayCooldownDeadlines(identity, account, history, now)
+	cooling := deadlines()
 	pair, pairState := s.cachedPoolPair(identity)
 	eligible := make([]gwpool.Gateway, 0, len(catalog.Gateways))
 	for _, gateway := range catalog.Gateways {
-		if gateway.ReadyAt(catalog.ObservedAt) && !now.Before(deadlines[gateway.Name]) &&
+		if gateway.ReadyAt(catalog.ObservedAt) && !now.Before(cooling[gateway.Name]) &&
 			(pairState == openAIGatewayPoolPairNone || gateway.Name != pair.gateway) {
 			eligible = append(eligible, gateway)
 		}
@@ -62,12 +63,7 @@ func (s *openAICodexCookieStore) gatewayPoolQueueView(account *Account, identity
 	}
 	projection := gatewayPoolRankProjection{
 		state: contacts, model: model, source: "foreground", now: now, complete: true,
-		retryAfter: func(gateway string) time.Duration {
-			if cooldown, ok := s.cooldownEntry(identity, gateway); ok {
-				return time.Duration(cooldown.WindowSeconds) * time.Second
-			}
-			return time.Duration(gatewayPoolCooldownBase(account.gatewayPoolGatewayWindow())) * time.Second
-		},
+		retryAfter: s.gatewayPoolReuseDelay(identity, account),
 	}
 	ranking := projection.rank(eligible)
 	var picks uint64

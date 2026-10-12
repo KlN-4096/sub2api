@@ -70,7 +70,7 @@ func (s *OpenAIGatewayService) observeOpenAITurnStateMint(c *gin.Context, accoun
 	if minted == "" {
 		return
 	}
-	s.noteOpenAITurnStateObservation(c, account, minted, openAITurnStateHealthy(minted))
+	s.noteOpenAITurnStateObservation(c, account, minted)
 }
 
 // openAITurnStateObservation 是这个账号最近一次自然铸造出来的 turn-state 形态。
@@ -108,26 +108,46 @@ type openAITurnStateObservation struct {
 const openAITurnStateObserveInterval = 5 * time.Minute
 
 // readOpenAITurnStateObservation 读形态观测记录。解析失败按「没有」处理。
+func readOpenAITurnStateObservation(a *Account) (openAITurnStateObservation, bool) {
+	return decodeExtraJSON[openAITurnStateObservation](a, openAITurnStateObservedExtraKey)
+}
+
+// decodeExtraJSON 严格读 extra 上的一条 JSON 记录：a 为 nil、缺键、值为 null、解析失败都返回
+// 零值和 false（不返回解了一半的记录）。
 //
 // 走 marshal/unmarshal 而不是裸类型断言：extra 是 JSONB，同一个键在「刚写进去」和
 // 「从 DB / Redis 读回来」两条路径上的具体 Go 类型不保证相同，裸断言失败是静默的。
-func readOpenAITurnStateObservation(a *Account) (openAITurnStateObservation, bool) {
+func decodeExtraJSON[T any](a *Account, key string) (T, bool) {
+	var zero T
 	if a == nil {
-		return openAITurnStateObservation{}, false
+		return zero, false
 	}
-	raw, ok := a.Extra[openAITurnStateObservedExtraKey]
+	raw, ok := a.Extra[key]
 	if !ok || raw == nil {
-		return openAITurnStateObservation{}, false
+		return zero, false
 	}
 	encoded, err := json.Marshal(raw)
 	if err != nil {
-		return openAITurnStateObservation{}, false
+		return zero, false
 	}
-	var rec openAITurnStateObservation
+	var rec T
 	if err := json.Unmarshal(encoded, &rec); err != nil {
-		return openAITurnStateObservation{}, false
+		return zero, false
 	}
 	return rec, true
+}
+
+// extraJSONMap 把一条记录转成写进 extra 的 map[string]any，与从 DB / Redis 读回来的形态一致。
+func extraJSONMap(v any) (map[string]any, bool) {
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		return nil, false
+	}
+	var generic map[string]any
+	if err := json.Unmarshal(encoded, &generic); err != nil {
+		return nil, false
+	}
+	return generic, true
 }
 
 // noteOpenAITurnStateObservation 记一次形态观测。所有 Codex 账号都走这条。
@@ -139,20 +159,22 @@ func readOpenAITurnStateObservation(a *Account) (openAITurnStateObservation, boo
 //
 // 读的是请求手里的账号快照，不是 GetByID：并发写覆盖的是同样有效的读数，快照陈旧最多让
 // 节流多放过几次写。落库放在后台：调用点在响应首字节之前。
-func (s *OpenAIGatewayService) noteOpenAITurnStateObservation(c *gin.Context, account *Account, blob string, healthy bool) {
+func (s *OpenAIGatewayService) noteOpenAITurnStateObservation(c *gin.Context, account *Account, blob string) {
 	if s == nil || s.accountRepo == nil || account == nil {
 		return
 	}
 	now := time.Now().UTC()
+	env, parsed, healthy := openAITurnStateShape(blob)
 	next := openAITurnStateObservation{
 		Model:      openAITurnStateRequestModel(c),
+		Blocks:     env.CipherBlocks,
 		Chars:      len(blob),
 		Healthy:    healthy,
-		MintedAt:   openAITurnStateMintedAt(blob, now),
+		MintedAt:   now, // 解不出信封时用观测时刻兜底
 		ObservedAt: now,
 	}
-	if env, ok := parseOpenAITurnStateEnvelope(blob); ok {
-		next.Blocks = env.CipherBlocks
+	if parsed {
+		next.MintedAt = env.MintedAt
 	}
 
 	if prev, ok := readOpenAITurnStateObservation(account); ok &&
@@ -161,12 +183,8 @@ func (s *OpenAIGatewayService) noteOpenAITurnStateObservation(c *gin.Context, ac
 		return
 	}
 
-	encoded, err := json.Marshal(next)
-	if err != nil {
-		return
-	}
-	var generic map[string]any
-	if err := json.Unmarshal(encoded, &generic); err != nil {
+	generic, ok := extraJSONMap(next)
+	if !ok {
 		return
 	}
 	if account.Extra == nil {

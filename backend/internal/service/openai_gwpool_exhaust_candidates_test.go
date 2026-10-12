@@ -100,7 +100,7 @@ func TestGatewayPoolExhaustCandidatesStopsAtLastFailureInsteadOfWaitingForCooldo
 	require.Equal(t, 2, shots)
 	require.True(t, svc.gatewayPoolNoRemainingRoutes(ctx, account))
 	require.NoError(t, svc.restGatewayPoolAccount(ctx, account, gwpoolTestIdentity, 7))
-	fresh, err := repo.GetByID(ctx, account.ID)
+	fresh, err := repo.stored(account.ID)
 	require.NoError(t, err)
 	require.True(t, readGatewayPoolRest(fresh, gatewayPoolLedgerTag(gwpoolTestIdentity)).Active)
 }
@@ -121,7 +121,7 @@ func TestGatewayPoolExhaustCandidatesStillHonors429Deadline(t *testing.T) {
 	group := int64(7)
 	failure := &UpstreamFailoverError{StatusCode: http.StatusTooManyRequests, RetryableOnSameAccount: true,
 		SameAccountRetryDeadline: time.Now().Add(time.Minute)}
-	ctx := svc.PrepareGatewayPoolAccountRotation(request.Context(), &group, account, failure)
+	ctx := svc.PrepareGatewayPoolAccountRotation(request.Context(), &group, account, failure, nil)
 	require.True(t, failure.SameAccountRetryOnly)
 	retry := gatewayPoolRetryOnlyFrom(ctx)
 	require.Equal(t, failure.SameAccountRetryDeadline, retry.deadline)
@@ -135,7 +135,7 @@ func TestGatewayPoolExhaustCandidatesRefreshesProbeCredentials(t *testing.T) {
 	account.Extra[openAIGatewayPoolGuardEnabledExtraKey] = true
 	account.Credentials["access_token"] = "old-offline-token"
 	repo.account = *account
-	account, err := repo.GetByID(context.Background(), account.ID)
+	account, err := repo.stored(account.ID)
 	require.NoError(t, err)
 	fake.beforeCookie = func() {
 		repo.mu.Lock()

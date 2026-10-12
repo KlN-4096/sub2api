@@ -370,7 +370,13 @@ func extractClientWindowNumber(h http.Header) string {
 			return m[2]
 		}
 	}
-	meta := gjson.Parse(h.Get(openAIWSTurnMetadataHeader))
+	return codexWindowNumberFromTurnMetadata(h.Get(openAIWSTurnMetadataHeader))
+}
+
+// codexWindowNumberFromTurnMetadata 从一段 turn-metadata JSON 取窗口序号：window_number 优先，
+// 其次 window_id 的 "<thread>:<n>"；都没有返回空串。
+func codexWindowNumberFromTurnMetadata(raw string) string {
+	meta := gjson.Parse(raw)
 	if number := codexWindowNumberFromJSON(meta.Get("window_number")); number != "" {
 		return number
 	}
@@ -616,9 +622,6 @@ func codexFingerprintWindowNumberEvidence(clientMetadata any) string {
 	case map[string]any:
 		window, _ = metadata["x-codex-window-id"].(string)
 		embedded, _ = metadata[openAIWSTurnMetadataHeader].(string)
-	case map[string]string:
-		window = metadata["x-codex-window-id"]
-		embedded = metadata[openAIWSTurnMetadataHeader]
 	case gjson.Result:
 		window = codexConvergenceMetadataString(metadata, "x-codex-window-id")
 		embedded = codexConvergenceMetadataString(metadata, openAIWSTurnMetadataHeader)
@@ -626,14 +629,7 @@ func codexFingerprintWindowNumberEvidence(clientMetadata any) string {
 	if m := codexConvergenceWindowIDPattern.FindStringSubmatch(strings.TrimSpace(window)); m != nil {
 		return m[2]
 	}
-	meta := gjson.Parse(embedded)
-	if number := codexWindowNumberFromJSON(meta.Get("window_number")); number != "" {
-		return number
-	}
-	if m := codexConvergenceWindowIDPattern.FindStringSubmatch(meta.Get("window_id").String()); m != nil {
-		return m[2]
-	}
-	return ""
+	return codexWindowNumberFromTurnMetadata(embedded)
 }
 
 // shouldRewriteCodexFingerprintPromptCacheKey 判定 prompt_cache_key 是不是"会话默认键"，

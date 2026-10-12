@@ -43,6 +43,9 @@ func (s *OpenAIGatewayService) maintainGatewayPoolRests(ctx context.Context) tim
 	next := time.Now().Add(gatewayPoolOutboxPoll)
 	scanCtx, cancel := context.WithTimeout(ctx, gatewayPoolWarmNoteTimeout)
 	accounts, err := s.accountRepo.FindByExtraField(scanCtx, openAIGatewayPoolExtraKey, true)
+	if err == nil {
+		err = s.hydrateGatewayPoolLedgers(scanCtx, gatewayPoolRowPointers(accounts), openAIGatewayHistoryExtraKey)
+	}
 	cancel()
 	if err != nil {
 		slog.Warn("gwpool_local_rest_scan_failed")

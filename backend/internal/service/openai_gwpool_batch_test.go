@@ -94,7 +94,7 @@ func TestGatewayPoolBatchHoldsStableSuccessButFlushesNewFailureWithoutDroppingEv
 	require.Equal(t, 2, calls, "failure must flush itself and held raw events in one request")
 	require.Len(t, received, 3)
 	require.True(t, received[1].ObservedAt.Equal(now), "batching preserves the observation clock")
-	current, _ := repo.GetByID(context.Background(), account.ID)
+	current, _ := repo.stored(account.ID)
 	require.Empty(t, readGatewayPoolOutbox(current, time.Now()).Pending)
 }
 
@@ -150,7 +150,7 @@ func TestGatewayPoolBatchAccountPressurePartialAcksAndConcurrentAppend(t *testin
 	restarted.flushGatewayPoolReports(context.Background())
 	require.Equal(t, 1, calls, "32 across all combinations trigger one early batch, including after restart")
 	require.Len(t, received, gwpool.CooldownBatchLimit)
-	current, _ := repo.GetByID(context.Background(), 1)
+	current, _ := repo.stored(1)
 	box := readGatewayPoolOutbox(current, time.Now())
 	require.EqualValues(t, 30, box.Sent)
 	require.Len(t, box.Pending, 3)
@@ -216,7 +216,7 @@ func TestGatewayPoolBatchLateAckCannotReviveRevokedPolicy(t *testing.T) {
 			svc.codexCookies.noteGatewayPoolFeedbackPolicy(account, gwpoolTestIdentity, "g", update)
 			close(release)
 			<-done
-			current, _ := repo.GetByID(context.Background(), 1)
+			current, _ := repo.stored(1)
 			box := readGatewayPoolOutbox(current, time.Now())
 			svc.codexCookies.syncGatewayPoolFeedbackPolicies(&box, time.Now())
 			binding := gatewayPoolReportBinding(account, gatewayPoolAccountTag(account, gwpoolTestIdentity))

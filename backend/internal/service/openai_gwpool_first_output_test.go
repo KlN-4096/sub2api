@@ -60,7 +60,7 @@ func TestGatewayPoolFirstOutputUnsentCancelDoesNotStartTimer(t *testing.T) {
 type gatewayPoolSlowAdmissionRepo struct{ *gatewayRuntimeRepo }
 
 func (r *gatewayPoolSlowAdmissionRepo) GetByID(ctx context.Context, id int64) (*Account, error) {
-	if err := gatewayPoolSleep(ctx, 60*time.Millisecond); err != nil {
+	if err := sleepWithContext(ctx, 60*time.Millisecond); err != nil {
 		return nil, err
 	}
 	return r.gatewayRuntimeRepo.GetByID(ctx, id)
@@ -95,7 +95,7 @@ type gatewayPoolPreparedOutputUpstream struct {
 func (u *gatewayPoolPreparedOutputUpstream) Do(req *http.Request, proxy string, id int64, concurrency int) (*http.Response, error) {
 	if len(u.sentBodies) == 0 {
 		// Preparation takes longer than the configured 1s first-output timeout.
-		if err := gatewayPoolSleep(req.Context(), 1100*time.Millisecond); err != nil {
+		if err := sleepWithContext(req.Context(), 1100*time.Millisecond); err != nil {
 			return nil, err
 		}
 	}

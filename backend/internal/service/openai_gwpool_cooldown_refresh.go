@@ -79,7 +79,7 @@ func (s *OpenAIGatewayService) persistGatewayPoolCooldownRefresh(ctx context.Con
 	}
 	unlock := s.codexCookies.gatewayPoolHistoryLock(account.ID)
 	defer unlock()
-	fresh, err := s.accountRepo.GetByID(ctx, account.ID)
+	fresh, err := s.gatewayPoolLedgerRow(ctx, account.ID, openAIGatewayHistoryExtraKey)
 	if err != nil || fresh == nil {
 		return
 	}
@@ -102,7 +102,7 @@ func (s *OpenAIGatewayService) persistGatewayPoolCooldownRefresh(ctx context.Con
 		}
 	}
 	if changed {
-		if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{openAIGatewayHistoryExtraKey: rec}); err != nil {
+		if err := s.updateGatewayPoolRuntimeExtra(ctx, account.ID, map[string]any{openAIGatewayHistoryExtraKey: rec}); err != nil {
 			slog.Warn("gwpool_cooldown_refresh_persist_failed", "account_id", account.ID)
 		}
 	}
