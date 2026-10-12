@@ -101,6 +101,10 @@ func (s *OpenAIGatewayService) gatewayPoolPrepare(
 	// There is no fixed 5/8-ticket loop or leader-owned 90s deadline.
 	// Every network operation is bounded; only live waiters keep this worker alive.
 	rawURL := request.URL.String()
+	// 临时失败与业务阶段同一条规则（gatewayPoolTransientAttemptsPerTicket）：等一个间隔在同一张
+	// 票上再试，同一张票第二次还失败才退休换票；取票本身的临时错误同样只再试一次。只重验确证
+	// 送达过的票——它的窗口已经烧了，重验不多烧；没送达的票已在本地清掉，照旧退休换票。
+	lastTicket, triesOnTicket, fetchFailures := "", 0, 0
 	for attempt := 1; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -127,8 +131,19 @@ func (s *OpenAIGatewayService) gatewayPoolPrepare(
 			if errors.Is(err, errGatewayPoolGenerationChanged) {
 				continue // a manual clear invalidates old preparation, not the caller's deadline
 			}
+			if fetchFailures++; ctx.Err() == nil && fetchFailures < gatewayPoolTransientAttemptsPerTicket &&
+				gatewayPoolRetryablePreparationError(err) {
+				retry, waitErr := s.waitGatewayPoolRetry(ctx, account, gatewayPoolVerificationRetryGap)
+				if waitErr != nil {
+					return waitErr
+				}
+				if retry {
+					continue
+				}
+			}
 			return err
 		}
+		fetchFailures = 0
 		applied := openAIGatewayPoolSinkFrom(ctx).snapshot()
 		cookie := headers.Get("Cookie")
 		if cookie == "" || applied.Gateway == "" {
@@ -181,8 +196,23 @@ func (s *OpenAIGatewayService) gatewayPoolPrepare(
 			slog.Warn("gwpool_warm_inconclusive", "account_id", account.ID,
 				"gateway", applied.Gateway, "attempt", attempt, "budget_exhausted", false,
 				"error", gatewayPoolWarmErrorText(perr))
-			if ctx.Err() == nil && !errors.Is(perr, context.Canceled) &&
-				gatewayPoolRetryableProbeError(perr) {
+			retryable := !errors.Is(perr, context.Canceled) && gatewayPoolRetryableProbeError(perr)
+			if sent && retryable {
+				if ticketKey != lastTicket {
+					lastTicket, triesOnTicket = ticketKey, 0
+				}
+				if triesOnTicket++; triesOnTicket < gatewayPoolTransientAttemptsPerTicket {
+					s.codexCookies.poolProgress.update(progress, "waiting", 0, applied.Gateway, false, false)
+					retry, waitErr := s.waitGatewayPoolRetry(ctx, account, gatewayPoolVerificationRetryGap)
+					if waitErr != nil {
+						return waitErr
+					}
+					if retry {
+						continue
+					}
+				}
+			}
+			if ctx.Err() == nil && retryable {
 				// An unavailable ticket is not a measured quality failure. Retire
 				// only this version; its existing attempt cooldown keeps it out
 				// of the next selection without training a higher cooldown tier.
