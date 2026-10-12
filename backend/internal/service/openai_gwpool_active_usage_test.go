@@ -51,7 +51,6 @@ func TestGatewayPoolActiveUsageReplaysFailedInitialReadOrWrite(t *testing.T) {
 			require.Equal(t, 1, state.Rounds[0].Full)
 			require.Equal(t, 1, state.Rounds[0].Attempted)
 			require.NotNil(t, state.Rounds[0].ActiveUsage)
-			require.False(t, state.Rounds[0].ActiveUsage.Open)
 		})
 	}
 }
@@ -110,7 +109,7 @@ func TestGatewayPoolActiveUsageUnionsBusinessIntervals(t *testing.T) {
 			"one": {Full: true},
 			"two": {Full: true},
 		}}
-	unmeasured := round.fullUsageView("process", at(3600))
+	unmeasured := round.fullUsageView(at(3600))
 	require.Zero(t, unmeasured.FullDurationMS)
 	require.Empty(t, unmeasured.FullUsageMode)
 	require.Equal(t, 20, unmeasured.Attempted)
@@ -121,12 +120,12 @@ func TestGatewayPoolActiveUsageUnionsBusinessIntervals(t *testing.T) {
 		{roundID: "r", ticket: "one", start: at(40), end: at(50)},
 		{roundID: "other", ticket: "one", start: at(50), end: at(500)},
 	}
-	round.syncActiveUsage(events, "process", at(60))
+	round.syncActiveUsage(events, at(60))
 	require.EqualValues(t, 35000, round.ActiveUsage.duration(at(60)),
 		"overlapping requests and tickets count once; idle 25..40 is excluded")
-	round.syncActiveUsage(events, "process", at(600))
+	round.syncActiveUsage(events, at(600))
 	require.EqualValues(t, 35000, round.ActiveUsage.duration(at(600)), "repeated persistence is idempotent")
-	view := round.fullUsageView("process", at(3600))
+	view := round.fullUsageView(at(3600))
 	require.Equal(t, gatewayPoolActiveUsageMode, view.FullUsageMode)
 	require.EqualValues(t, 35000, view.FullDurationMS)
 	require.Nil(t, view.ActiveUsage, "polling never exports interval detail")
@@ -137,12 +136,14 @@ func TestGatewayPoolActiveUsageRestartKeepsOnlyObservedTime(t *testing.T) {
 	round := GatewayPoolUsageRound{ID: "r", Model: gatewayPoolUsageSharedModel,
 		Tickets: map[string]gatewayPoolUsageTicket{"one": {}}}
 	event := gatewayPoolActiveUseEvent{roundID: "r", ticket: "one", start: start}
-	round.syncActiveUsage([]gatewayPoolActiveUseEvent{event}, "before", start.Add(10*time.Second))
-	require.True(t, round.ActiveUsage.Open)
-	view := round.fullUsageView("after", start.Add(time.Hour))
+	round.syncActiveUsage([]gatewayPoolActiveUseEvent{event}, start.Add(10*time.Second))
+	before := append([]gatewayPoolUsageInterval(nil), round.ActiveUsage.Intervals...)
+	// The new process no longer holds the attempt: its unobserved tail is not counted.
+	view := round.fullUsageView(start.Add(time.Hour))
 	require.EqualValues(t, 10000, view.FullDurationMS)
-	require.True(t, view.DurationIncomplete)
-	require.True(t, round.ActiveUsage.Open, "read-only projection must not modify persisted state")
+	live := gatewayPoolActiveUseEvent{roundID: "r", ticket: "one", start: start.Add(2 * time.Hour)}
+	require.EqualValues(t, 70000, round.fullUsageView(start.Add(2*time.Hour+time.Minute), live).FullDurationMS)
+	require.Equal(t, before, round.ActiveUsage.Intervals, "read-only projection must not modify persisted state")
 }
 
 func TestGatewayPoolActiveUsageClipsInvalidationAndCycleBoundary(t *testing.T) {
@@ -152,7 +153,7 @@ func TestGatewayPoolActiveUsageClipsInvalidationAndCycleBoundary(t *testing.T) {
 		Tickets: map[string]gatewayPoolUsageTicket{"one": {}}}
 	event := gatewayPoolActiveUseEvent{roundID: "r", ticket: "one", start: start,
 		end: start.Add(time.Minute), expires: start.Add(20 * time.Second), invalidatedAt: start.Add(10 * time.Second)}
-	round.syncActiveUsage([]gatewayPoolActiveUseEvent{event}, "p", start.Add(time.Hour))
+	round.syncActiveUsage([]gatewayPoolActiveUseEvent{event}, start.Add(time.Hour))
 	require.EqualValues(t, 10000, round.ActiveUsage.duration(time.Time{}))
 }
 
@@ -162,6 +163,8 @@ func TestGatewayPoolActiveUsageFailedStopWriteCannotAccrueIdle(t *testing.T) {
 	svc.httpUpstream = &gwpoolEchoUpstream{replies: []gwpoolEchoReply{{status: http.StatusOK}}}
 	response, err := svc.doOpenAIUpstream(request, "", account)
 	require.NoError(t, err)
+	// The stop must add observed time to need a write; Windows wall-clock ticks are coarse.
+	time.Sleep(32 * time.Millisecond)
 	repo.fail = true
 	require.NoError(t, response.Body.Close())
 	tracker := svc.codexCookies.activeUsageTracker(gwpoolTestIdentity)
@@ -172,8 +175,8 @@ func TestGatewayPoolActiveUsageFailedStopWriteCannotAccrueIdle(t *testing.T) {
 	require.NoError(t, err)
 	state := readGatewayPoolUsage(fresh, gatewayPoolLedgerTag(gwpoolTestIdentity))
 	now := time.Now().UTC()
-	view := state.Rounds[0].fullUsageView(svc.codexCookies.gatewayPoolUsageSession(), now, events...)
-	later := state.Rounds[0].fullUsageView(svc.codexCookies.gatewayPoolUsageSession(), now.Add(time.Hour), events...)
+	view := state.Rounds[0].fullUsageView(now, events...)
+	later := state.Rounds[0].fullUsageView(now.Add(time.Hour), events...)
 	require.Equal(t, view.FullDurationMS, later.FullDurationMS)
 	repo.fail = false
 	flushGatewayPoolActiveUsage(svc, context.Background(), account, gwpoolTestIdentity)
@@ -238,11 +241,10 @@ func TestGatewayPoolActiveUsageIntervalLimitNeverBridgesIdle(t *testing.T) {
 	at := start.Add(time.Duration(gatewayPoolActiveUsageIntervalLimit) * 2 * time.Second)
 	usage.add(gatewayPoolUsageInterval{Start: at, End: at.Add(time.Second)})
 	require.Len(t, usage.Intervals, gatewayPoolActiveUsageIntervalLimit)
-	require.True(t, usage.Incomplete)
 	require.EqualValues(t, gatewayPoolActiveUsageIntervalLimit*1000, usage.duration(time.Time{}))
 }
 
-func TestGatewayPoolActiveUsagePendingLimitReportsLowerBound(t *testing.T) {
+func TestGatewayPoolActiveUsagePendingLimitLeavesUntrackedTimeUncounted(t *testing.T) {
 	account := gwpoolTestAccount(1)
 	svc, _ := gatewayRuntimeService(account)
 	identity := openAIGatewayPoolAccountKey(account)
@@ -256,10 +258,5 @@ func TestGatewayPoolActiveUsagePendingLimitReportsLowerBound(t *testing.T) {
 	})
 	attempt, _ := svc.registerGatewayPoolActiveUse(ctx, account, identity, "ticket", start, time.Time{})
 	require.Nil(t, attempt)
-	require.Len(t, tracker.attempts, gatewayPoolActiveUsagePendingLimit)
-	round := GatewayPoolUsageRound{ID: "r", Model: gatewayPoolUsageSharedModel, StartedAt: start}
-	round.syncActiveUsage(tracker.snapshot(), "p", start.Add(time.Minute))
-	require.NotNil(t, round.ActiveUsage)
-	require.True(t, round.ActiveUsage.Incomplete)
-	require.Zero(t, round.ActiveUsage.duration(time.Time{}))
+	require.Len(t, tracker.attempts, gatewayPoolActiveUsagePendingLimit, "an untracked attempt is simply not counted")
 }
