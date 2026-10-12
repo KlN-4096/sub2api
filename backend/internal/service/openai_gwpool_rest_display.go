@@ -12,11 +12,10 @@ type GatewayPoolRestView struct {
 
 // Read-only projection of the admission latch. The local timer publishes the
 // inactive tombstone durably; the browser must not infer a successful write.
-func (s *OpenAIGatewayService) gatewayPoolRestDisplay(account *Account, identity string, peers []Account) GatewayPoolRestView {
+func gatewayPoolRestDisplay(account *Account, state gatewayPoolRestState) GatewayPoolRestView {
 	if account.GatewayPoolContinuousWaitEnabled() {
 		return GatewayPoolRestView{}
 	}
-	state := s.codexCookies.gatewayPoolRestSnapshot(account, identity, peers)
 	view := GatewayPoolRestView{Active: state.Active, ChangedAt: state.ChangedAt, StartedAt: state.StartedAt,
 		ResumeAt: state.ResumeAt}
 	if view.Active {

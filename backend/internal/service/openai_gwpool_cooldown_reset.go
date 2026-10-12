@@ -1,8 +1,8 @@
 package service
 
 import (
+	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -31,19 +31,8 @@ func gatewayPoolCooldownResetHours(raw any) (int, bool) {
 	if hours, ok := gatewayPoolInteger(raw, gatewayPoolCooldownResetMaxHours); ok {
 		return hours, true
 	}
-	switch n := raw.(type) {
-	case int:
-		return 0, n == 0
-	case int64:
-		return 0, n == 0
-	case float64:
-		return 0, n == 0
-	case json.Number:
-		value, err := n.Float64()
-		return 0, err == nil && value == 0
-	default:
-		return 0, false
-	}
+	value, ok := gatewayPoolNumber(raw)
+	return 0, ok && value == 0
 }
 
 func (a *Account) gatewayPoolCooldownResetHours() int {
@@ -198,6 +187,60 @@ func gatewayPoolCooldownResetHistory(rec *openAIGatewayHistory, tag string) *ope
 	return nil
 }
 
+// Each barrier keeps its own wording; a nil entry returns the underlying cause.
+type gatewayPoolHistoryViewErrors struct{ lock, read, missing, identity error }
+
+// lockGatewayPoolHistoryView runs write under the row's history lock on a fresh
+// view of identity's ledger. The owner must still hold identity and adopts its
+// tag; a peer row on another tag is skipped.
+func (s *OpenAIGatewayService) lockGatewayPoolHistoryView(ctx context.Context, id int64, identity string, owner bool,
+	errs gatewayPoolHistoryViewErrors, write func(fresh *Account, view *openAIGatewayHistory) error,
+) error {
+	lock := gatewayPoolLoadOrNew[sync.Mutex](&s.codexCookies.poolHistoryLocks, id)
+	if !gatewayPoolLockWithin(ctx, lock) {
+		return cmp.Or(errs.lock, ctx.Err())
+	}
+	defer lock.Unlock()
+	fresh, err := s.gatewayPoolLedgerRow(ctx, id, openAIGatewayHistoryExtraKey)
+	if err != nil {
+		return cmp.Or(errs.read, err)
+	}
+	if fresh == nil {
+		return errs.missing
+	}
+	tag := gatewayPoolLedgerTag(identity)
+	rec, _ := readOpenAIGatewayHistory(fresh)
+	if owner {
+		current, err := s.codexCookies.gatewayPoolIdentity(ctx, fresh)
+		if err != nil || current != identity || !fresh.UsesGatewayPool() {
+			return errs.identity
+		}
+		rec = gatewayPoolHistoryForTag(rec, tag)
+		rec.LedgerTag = tag
+	}
+	view := gatewayPoolCooldownResetHistory(&rec, tag)
+	if view == nil {
+		return nil
+	}
+	return write(fresh, view)
+}
+
+// The durable owner barrier is committed first. Partial peer-write failure
+// cannot resurrect old learning: fresh shared-history hydration sees that barrier.
+func gatewayPoolForOwnerThenPeers(ownerID int64, peers []Account, write func(id int64, owner bool) error) error {
+	if err := write(ownerID, true); err != nil {
+		return err
+	}
+	for i := range peers {
+		if peers[i].ID != ownerID {
+			if err := write(peers[i].ID, false); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (s *OpenAIGatewayService) maintainGatewayPoolCooldownReset(ctx context.Context, account *Account, now time.Time) error {
 	if s.accountRepo == nil || account == nil || !account.UsesGatewayPool() {
 		return nil
@@ -219,18 +262,14 @@ func (s *OpenAIGatewayService) maintainGatewayPoolCooldownReset(ctx context.Cont
 	if !schedule.advance(hours, now, s.codexCookies.gatewayPoolCooldownResetAt(identity)) {
 		return nil // ordinary feedback wakes must not cause extra DB scans/writes
 	}
-	lock, _ := s.codexCookies.poolCooldownResetLocks.LoadOrStore(identity, &sync.Mutex{})
-	mu, ok := lock.(*sync.Mutex)
-	if !ok || mu == nil {
-		return errors.New("invalid gateway cooldown reset lock")
-	}
+	mu := gatewayPoolLoadOrNew[sync.Mutex](&s.codexCookies.poolCooldownResetLocks, identity)
 	if !gatewayPoolLockWithin(ctx, mu) {
 		return ctx.Err()
 	}
 	defer mu.Unlock()
 
 	tag := gatewayPoolLedgerTag(identity)
-	peers, err := s.gatewayPoolHistoryPeers(ctx, tag)
+	peers, err := s.gatewayPoolHistoryPeers(ctx, tag, openAIGatewayHistoryExtraKey)
 	if err != nil {
 		return err
 	}
@@ -249,102 +288,69 @@ func (s *OpenAIGatewayService) maintainGatewayPoolCooldownReset(ctx context.Cont
 			s.codexCookies.gatewayPoolHydrateUsed(&peers[i], identity)
 		}
 	}
-	if err := s.writeGatewayPoolCooldownReset(ctx, account.ID, identity, now, latest, true); err != nil {
-		return err
-	}
-	// The durable owner barrier is committed first. Partial peer-write failure
-	// cannot resurrect old learning: fresh shared-history hydration sees that barrier.
-	for i := range peers {
-		if peers[i].ID != account.ID {
-			if err := s.writeGatewayPoolCooldownReset(ctx, peers[i].ID, identity, now,
-				s.codexCookies.gatewayPoolCooldownResetAt(identity), false); err != nil {
-				return err
-			}
+	return gatewayPoolForOwnerThenPeers(account.ID, peers, func(id int64, owner bool) error {
+		at := latest
+		if !owner {
+			at = s.codexCookies.gatewayPoolCooldownResetAt(identity)
 		}
-	}
-	return nil
+		return s.writeGatewayPoolCooldownReset(ctx, id, identity, now, at, owner)
+	})
+}
+
+var gatewayPoolCooldownResetErrors = gatewayPoolHistoryViewErrors{
+	missing:  errors.New("gateway cooldown reset account missing"),
+	identity: errors.New("gateway cooldown reset identity changed"),
 }
 
 func (s *OpenAIGatewayService) writeGatewayPoolCooldownReset(ctx context.Context, id int64, identity string,
 	now, latest time.Time, advance bool,
 ) error {
-	lock, _ := s.codexCookies.poolHistoryLocks.LoadOrStore(id, &sync.Mutex{})
-	mu, ok := lock.(*sync.Mutex)
-	if !ok || mu == nil {
-		return errors.New("invalid gateway cooldown history lock")
-	}
-	if !gatewayPoolLockWithin(ctx, mu) {
-		return ctx.Err()
-	}
-	defer mu.Unlock()
-	fresh, err := s.accountRepo.GetByID(ctx, id)
-	if err != nil {
-		return err
-	}
-	if fresh == nil {
-		return errors.New("gateway cooldown reset account missing")
-	}
-	rec, _ := readOpenAIGatewayHistory(fresh)
-	tag := gatewayPoolLedgerTag(identity)
-	base := gatewayPoolCooldownBase(fresh.gatewayPoolGatewayWindow())
-	var view *openAIGatewayHistory
-	if advance {
-		current, err := s.codexCookies.gatewayPoolIdentity(ctx, fresh)
-		if err != nil || current != identity || !fresh.UsesGatewayPool() {
-			return errors.New("gateway cooldown reset identity changed")
+	return s.lockGatewayPoolHistoryView(ctx, id, identity, advance, gatewayPoolCooldownResetErrors, func(fresh *Account, view *openAIGatewayHistory) error {
+		base := gatewayPoolCooldownBase(fresh.gatewayPoolGatewayWindow())
+		if !view.CooldownReset.valid(now) {
+			return errors.New("invalid gateway cooldown reset clock")
 		}
-		rec = gatewayPoolHistoryForTag(rec, tag)
-		rec.LedgerTag = tag
-		view = &rec
-	} else {
-		view = gatewayPoolCooldownResetHistory(&rec, tag)
-		if view == nil {
+		changed := false
+		if cleared := s.codexCookies.gatewayPoolCooldownClearAt(identity); cleared.After(view.CooldownReset.ClearedAt) {
+			view.CooldownReset.ClearedAt, changed = cleared, true
+		}
+		if advance {
+			changed = view.CooldownReset.advance(fresh.gatewayPoolCooldownResetHours(), now, latest) || changed
+		} else if latest.After(view.CooldownReset.LastAt) {
+			view.CooldownReset.LastAt, changed = latest, true
+		}
+		at := view.CooldownReset.LastAt
+		for gateway, seen := range view.Seen {
+			cooldown := seen.Cooldown
+			if inMemory, exists := s.codexCookies.cooldownEntry(identity, gateway); exists && newerGatewayPoolCooldown(&inMemory, cooldown) {
+				cooldown = &inMemory
+			}
+			if cooldown == nil {
+				continue
+			}
+			next := cooldown.clone()
+			value, _ := s.codexCookies.poolUsed.Load(gatewayPoolLedgerKey(identity, gateway))
+			touched, _ := value.(time.Time)
+			if seen.At.After(touched) {
+				touched = seen.At
+			}
+			reset := next.clearCooldown(view.CooldownReset.ClearedAt, base)
+			reset = next.resetBackoff(at, touched, base) || reset
+			if reset || newerGatewayPoolCooldown(&next, seen.Cooldown) {
+				seen.Cooldown = &next
+				view.Seen[gateway], changed = seen, true
+			}
+		}
+		if !changed {
+			s.codexCookies.applyGatewayPoolCooldownReset(identity, at, base)
 			return nil
 		}
-	}
-	if !view.CooldownReset.valid(now) {
-		return errors.New("invalid gateway cooldown reset clock")
-	}
-	changed := false
-	if cleared := s.codexCookies.gatewayPoolCooldownClearAt(identity); cleared.After(view.CooldownReset.ClearedAt) {
-		view.CooldownReset.ClearedAt, changed = cleared, true
-	}
-	if advance {
-		changed = view.CooldownReset.advance(fresh.gatewayPoolCooldownResetHours(), now, latest) || changed
-	} else if latest.After(view.CooldownReset.LastAt) {
-		view.CooldownReset.LastAt, changed = latest, true
-	}
-	at := view.CooldownReset.LastAt
-	for gateway, seen := range view.Seen {
-		cooldown := seen.Cooldown
-		if inMemory, exists := s.codexCookies.cooldownEntry(identity, gateway); exists && newerGatewayPoolCooldown(&inMemory, cooldown) {
-			cooldown = &inMemory
+		if err := s.updateGatewayPoolRuntimeExtra(ctx, id, map[string]any{
+			openAIGatewayHistoryExtraKey: *view, openAIGatewayLedgerTagExtraKey: view.LedgerTag,
+		}); err != nil {
+			return err
 		}
-		if cooldown == nil {
-			continue
-		}
-		next := cooldown.clone()
-		value, _ := s.codexCookies.poolUsed.Load(gatewayPoolLedgerKey(identity, gateway))
-		touched, _ := value.(time.Time)
-		if seen.At.After(touched) {
-			touched = seen.At
-		}
-		reset := next.clearCooldown(view.CooldownReset.ClearedAt, base)
-		reset = next.resetBackoff(at, touched, base) || reset
-		if reset || newerGatewayPoolCooldown(&next, seen.Cooldown) {
-			seen.Cooldown = &next
-			view.Seen[gateway], changed = seen, true
-		}
-	}
-	if !changed {
 		s.codexCookies.applyGatewayPoolCooldownReset(identity, at, base)
 		return nil
-	}
-	if err := s.accountRepo.UpdateExtra(ctx, id, map[string]any{
-		openAIGatewayHistoryExtraKey: rec, openAIGatewayLedgerTagExtraKey: rec.LedgerTag,
-	}); err != nil {
-		return err
-	}
-	s.codexCookies.applyGatewayPoolCooldownReset(identity, at, base)
-	return nil
+	})
 }

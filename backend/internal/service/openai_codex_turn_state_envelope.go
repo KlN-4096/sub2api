@@ -95,32 +95,18 @@ func parseOpenAITurnStateEnvelope(blob string) (openAITurnStateEnvelope, bool) {
 	}, true
 }
 
-// openAITurnStateHealthy 判断一条 turn-state 是否落在「不降智」基线上。
+// openAITurnStateShape 只解一次信封，给出形态观测要的全部读数：信封（parsed=false 时为零值）与
+// 这条 turn-state 是否落在「不降智」基线上。
 //
-// 解不出信封时退回字符长度（老判据）：宁可按旧口径判，也不要把一条解不开的
+// 解得出信封按块数判；解不出时退回字符长度（老判据）：宁可按旧口径判，也不要把一条解不开的
 // blob 默认当健康。
-func openAITurnStateHealthy(blob string) bool {
-	if env, ok := parseOpenAITurnStateEnvelope(blob); ok {
-		for _, shape := range openAITurnStateShapes {
-			if env.CipherBlocks == shape.Blocks {
-				return true
-			}
-		}
-		return false
-	}
-	n := len(strings.TrimSpace(blob))
+func openAITurnStateShape(blob string) (env openAITurnStateEnvelope, parsed, healthy bool) {
+	env, parsed = parseOpenAITurnStateEnvelope(blob)
+	chars := len(strings.TrimSpace(blob))
 	for _, shape := range openAITurnStateShapes {
-		if n == shape.Chars {
-			return true
+		if (parsed && env.CipherBlocks == shape.Blocks) || (!parsed && chars == shape.Chars) {
+			return env, parsed, true
 		}
 	}
-	return false
-}
-
-// openAITurnStateMintedAt 返回铸造时刻；解不出来时用 fallback（通常是观测时刻）。
-func openAITurnStateMintedAt(blob string, fallback time.Time) time.Time {
-	if env, ok := parseOpenAITurnStateEnvelope(blob); ok {
-		return env.MintedAt
-	}
-	return fallback
+	return env, parsed, false
 }
