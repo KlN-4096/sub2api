@@ -26,7 +26,7 @@ func (s *OpenAIGatewayService) reserveOpenAIOAuth429RetryAt(account *Account, he
 		return 0, false
 	}
 	for {
-		value, loaded := s.openaiOAuth429RetrySlots.Load(key)
+		value, loaded := s.openaiOAuth429RetryReservations.Load(key)
 		slot := now.Add(delay)
 		if previous, ok := value.(time.Time); ok && previous.Add(openAIOAuth429RetryDelay).After(slot) {
 			slot = previous.Add(openAIOAuth429RetryDelay)
@@ -35,10 +35,10 @@ func (s *OpenAIGatewayService) reserveOpenAIOAuth429RetryAt(account *Account, he
 			return 0, false
 		}
 		if !loaded {
-			if _, raced := s.openaiOAuth429RetrySlots.LoadOrStore(key, slot); raced {
+			if _, raced := s.openaiOAuth429RetryReservations.LoadOrStore(key, slot); raced {
 				continue
 			}
-		} else if !s.openaiOAuth429RetrySlots.CompareAndSwap(key, value, slot) {
+		} else if !s.openaiOAuth429RetryReservations.CompareAndSwap(key, value, slot) {
 			continue
 		}
 		return slot.Sub(now), true

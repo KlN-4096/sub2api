@@ -305,6 +305,9 @@ func TestGatewayPoolClientDispatchExhaustionRefreshesAndFailureIsUnknown(t *test
 	require.NoError(t, err)
 	mode.Store(1)
 	require.False(t, svc.gatewayPoolNoRemainingRoutes(context.Background(), account), "cached empty cannot prove exhaustion")
+	// A cached list that still has a usable route answers without a refresh; once
+	// it has none, the confirming refresh fails and stays unknown.
+	svc.codexCookies.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, "new"), time.Now())
 	mode.Store(2)
 	require.False(t, svc.gatewayPoolNoRemainingRoutes(context.Background(), account), "refresh failure is unknown, never empty")
 	require.EqualValues(t, 3, lists.Load())

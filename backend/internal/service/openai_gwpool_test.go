@@ -1714,7 +1714,7 @@ func (s *openAICodexCookieStore) gatewayPoolInventorySnapshot(identity string) (
 }
 
 func (s *openAICodexCookieStore) gatewayPoolRestDuration(identity string, account *Account, now time.Time) time.Duration {
-	if until := s.gatewayPoolLocalResumeAt(identity, account); until.After(now) {
+	if until := s.gatewayPoolLocalResumeAt(identity, account, now); until.After(now) {
 		return until.Sub(now)
 	}
 	return 0

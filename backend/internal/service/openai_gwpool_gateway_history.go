@@ -116,14 +116,13 @@ type openAIGatewaySeen struct {
 	// omitzero 而不是 omitempty：omitempty 对 struct 不生效，零值会落库成
 	// "0001-01-01T00:00:00Z"。
 	FullAt time.Time `json:"full_at,omitzero"`
-	// FullHeldMs 是这个 (账号 × 网关) 上量到的**满血持续了多久**（毫秒），由判降智那一刻
-	// 从「这张票验出满血」算到「判成降智」—— 两头都在同一张票的生命里，有界。
-	// 0 = 没量到（没验过满血、或者这一格的降智不是从本进程这条路判出来的）。
+	// FullUseMs 是这个 (账号 × 网关) 最近一次判降智时量到的：那张票**本周期**满血承载业务的
+	// 时长（毫秒，见 OpenAIGatewayPoolApplied.FullUseMs）。0 = 没量到。
 	//
-	// **不能用 At − FullAt 代替**：FullAt 是粘滞的，而降智判定要等下一次真的打到这个网关
-	// 才会写，中间的空闲全算进去。2026-10-03 现网照这个减法渲染出 22655 秒。
-	FullHeldMs int64                `json:"full_held_ms,omitempty"`
-	Cooldown   *gatewayPoolCooldown `json:"cooldown,omitempty"`
+	// **不能用 At − FullAt 代替**：FullAt 是粘滞的，中间的空闲全算进去（2026-10-03 渲染出 22655 秒）。
+	// 旧键 full_held_ms 是「验满 → 判降智」的墙钟窗口、同样含空闲，换键后不再读，不折算回填。
+	FullUseMs int64                `json:"full_use_ms,omitempty"`
+	Cooldown  *gatewayPoolCooldown `json:"cooldown,omitempty"`
 }
 
 // readOpenAIGatewayHistory 读这条记录。解析失败按「没有」处理（decodeExtraJSON）。
@@ -145,7 +144,7 @@ func readOpenAIGatewayHistory(a *Account) (openAIGatewayHistory, bool) {
 // 抢同一个键。
 func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 	ctx context.Context, account *Account, gateway, region, verdict string, advanceCurrent bool,
-	poolLive, poolFree int, fullHeldMs int64,
+	poolLive, poolFree int, fullUseMs int64,
 	expectedTags ...string,
 ) {
 	if s == nil || s.accountRepo == nil || account == nil {
@@ -202,7 +201,7 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 	}
 	prev := rec.Seen[gateway]
 	cooldownChanged := newerGatewayPoolCooldown(cooldown, prev.Cooldown)
-	newTiming := fullHeldMs > 0 && fullHeldMs != prev.FullHeldMs
+	newTiming := fullUseMs > 0 && fullUseMs != prev.FullUseMs
 	// 没换网关、这个网关刚写过、大区没新消息、**判定也没变** ⇒ 不写。换了就立刻写。
 	// 判定变了必须穿过节流：「这个落点刚被判降智」正是这张卡要看的事，压住它等于不记。
 	//
@@ -231,14 +230,14 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 		rec.CurrentRegion = region
 	}
 	next := openAIGatewaySeen{At: now, Region: region, Verdict: prev.Verdict, FullAt: prev.FullAt,
-		FullHeldMs: prev.FullHeldMs, Cooldown: prev.Cooldown}
+		FullUseMs: prev.FullUseMs, Cooldown: prev.Cooldown}
 	if cooldownChanged {
 		next.Cooldown = cooldown
 	}
-	// 这一发量到了就刷新，没量到留着上一次的：满血时长是「上一个窗口有多长」，没新读数时
-	// 旧读数仍然是关于这一格最新的事实。
-	if fullHeldMs > 0 {
-		next.FullHeldMs = fullHeldMs
+	// 这一发量到了就刷新，没量到留着上一次的：满血时长是「上一张被判死的票本周期用了多久」，
+	// 没新读数时旧读数仍然是关于这一格最新的事实。
+	if fullUseMs > 0 {
+		next.FullUseMs = fullUseMs
 	}
 	// 这一发没判据时**留着上一次的判定**，和大区同一个道理：没判 ≠ 判不出来。
 	if verdict != "" {

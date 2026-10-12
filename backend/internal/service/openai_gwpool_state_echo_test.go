@@ -173,6 +173,15 @@ func TestStateEchoDegradedTruncatesAndMarksPairStale(t *testing.T) {
 	require.True(t, ok)
 	mark.at = time.Now().Add(-75 * time.Second)
 	svc.codexCookies.poolVerified.Store(gwpoolTestIdentity, mark)
+	// Verified 75s ago; business used it for 30s of that in this cycle.
+	pair, _ := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
+	pair.firstSent = mark.at
+	svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, pair)
+	tag := gatewayPoolLedgerTag(gwpoolTestIdentity)
+	svc.codexCookies.poolUsageCache.Store(tag, &gatewayPoolUsageLedger{Tag: tag, Rounds: []GatewayPoolUsageRound{{
+		ID: "cycle", Model: gatewayPoolUsageSharedModel, StartedAt: mark.at, ActiveUsage: &gatewayPoolActiveUsage{
+			Intervals: []gatewayPoolUsageInterval{{Start: mark.at.Add(10 * time.Second), End: mark.at.Add(40 * time.Second)}}},
+	}}})
 
 	ginCtx, resp, err := gwpoolEchoRun(t, svc, acct, gwpoolEchoLiveTicket)
 	require.Nil(t, resp, "截断不许把降智的响应交给调用方")
@@ -201,8 +210,8 @@ func TestStateEchoDegradedTruncatesAndMarksPairStale(t *testing.T) {
 	discarded := takeDiscardedOpenAIGatewayPoolAttempts(ginCtx)
 	require.Len(t, discarded, 1)
 	require.Equal(t, "unified-142", discarded[0].Applied.Gateway)
-	require.InDelta(t, 75000, discarded[0].Applied.FullHeldMs, 3000,
-		"丢弃行必须携带这一张票刚量出的时长，不能发布计算前的旧快照")
+	require.InDelta(t, 30000, discarded[0].Applied.FullUseMs, 1000,
+		"丢弃行必须携带这张票本周期刚量出的满血使用时长（不是 75 秒的验满窗口），不能发布计算前的旧快照")
 	require.Empty(t, takeDiscardedOpenAIGatewayPoolAttempts(ginCtx), "读数取走即清，不许落重复行")
 }
 
@@ -211,20 +220,20 @@ func TestGatewayPoolSinkPublishesAttemptTimingWithoutLeakingToNextGateway(t *tes
 	sink.notePoolCounts(50, 12)
 	sink.mark(OpenAIGatewayPoolApplied{Gateway: "unified-142", Version: "first"})
 	firstAttempt := sink.snapshot()
-	sink.noteFullHeld(firstAttempt, 75*time.Second)
+	sink.noteFullUse(firstAttempt, 75*time.Second)
 	var first OpenAIForwardResult
 	sink.publish(&first)
-	require.EqualValues(t, 75000, first.GatewayPoolApplied.FullHeldMs)
+	require.EqualValues(t, 75000, first.GatewayPoolApplied.FullUseMs)
 	require.Equal(t, 50, first.GatewayPoolApplied.PoolLive)
 	require.Equal(t, 12, first.GatewayPoolApplied.PoolFree)
 
 	sink.mark(OpenAIGatewayPoolApplied{Gateway: "unified-143", Version: "second"})
-	sink.noteFullHeld(firstAttempt, 90*time.Second)
+	sink.noteFullUse(firstAttempt, 90*time.Second)
 	var second OpenAIForwardResult
 	sink.publish(&second)
-	require.Zero(t, second.GatewayPoolApplied.FullHeldMs,
+	require.Zero(t, second.GatewayPoolApplied.FullUseMs,
 		"换网关后不许把上一发的满血时长归到新网关")
-	require.Zero(t, sink.snapshot().FullHeldMs)
+	require.Zero(t, sink.snapshot().FullUseMs)
 }
 
 // 送了票 + 上游不回新票 ⇒ **满血**，原样透传，什么都不碰。

@@ -195,7 +195,7 @@ func TestGatewayPoolContactsDeduplicatePersistAndMeasureActualGap(t *testing.T) 
 	second := contactEvent(at.Add(90*time.Minute), "second")
 	restarted := &OpenAIGatewayService{accountRepo: repo}
 	restarted.noteGatewayPoolContact(context.Background(), account, second)
-	restarted.finishGatewayPoolContact(context.Background(), account, gwpoolTestIdentity, second.Applied, 80*time.Second)
+	restarted.finishGatewayPoolContact(context.Background(), account, gwpoolTestIdentity, second.Applied, 80*time.Second, 30*time.Second)
 	current, _ = repo.stored(1)
 	state = readGatewayPoolContacts(current, gatewayPoolLedgerTag(gwpoolTestIdentity))
 	require.Len(t, state.Rounds, 2)
@@ -203,9 +203,12 @@ func TestGatewayPoolContactsDeduplicatePersistAndMeasureActualGap(t *testing.T) 
 	require.True(t, state.Rounds[1].Report.GapKnown)
 	require.EqualValues(t, 89*60, state.Rounds[1].Report.ElapsedSeconds)
 	require.EqualValues(t, 80000, state.Rounds[1].Report.FullWindowMS)
+	require.EqualValues(t, 30000, state.Rounds[1].FullUseMs, "the card shows business use; the pool keeps the window")
 	box := readGatewayPoolOutbox(current, time.Now())
 	require.Len(t, box.Pending, 2)
 	require.True(t, box.Pending[1].Contact.WindowFinal)
+	sent, _ := json.Marshal(box)
+	require.NotContains(t, string(sent), "full_use_ms", "the use reading never goes to the pool")
 	raw, _ := json.Marshal(state)
 	require.NotContains(t, string(raw), "offline-cookie")
 	require.NotContains(t, string(raw), gwpoolTestIdentity)
@@ -247,12 +250,12 @@ func TestGatewayPoolContactOutboxKeepsFinalUpdateDuringInitialSend(t *testing.T)
 	started, proceed := make(chan struct{}), make(chan struct{})
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/contact/report", r.URL.Path)
+		require.Equal(t, "/contact/reports", r.URL.Path)
 		if calls.Add(1) == 1 {
 			close(started)
 			<-proceed
 		}
-		_, _ = io.WriteString(w, `{"ok":true}`)
+		ackGatewayPoolBatch[gwpool.ContactReport](t, w, r, nil)
 	}))
 	defer server.Close()
 	account := gwpoolTestAccount(1)
@@ -261,19 +264,17 @@ func TestGatewayPoolContactOutboxKeepsFinalUpdateDuringInitialSend(t *testing.T)
 	svc, repo := gatewayRuntimeService(account)
 	event := contactEvent(time.Now().UTC(), "first")
 	svc.noteGatewayPoolContact(context.Background(), account, event)
-	current, _ := repo.stored(1)
-	pending := readGatewayPoolOutbox(current, time.Now()).Pending[0]
 	done := make(chan struct{})
-	go func() { defer close(done); svc.sendGatewayPoolPending(context.Background(), 1, pending) }()
+	go func() { defer close(done); svc.flushGatewayPoolReports(context.Background()) }()
 	select {
 	case <-started:
 	case <-time.After(time.Second):
 		t.Fatal("report never sent")
 	}
-	svc.finishGatewayPoolContact(context.Background(), account, gwpoolTestIdentity, event.Applied, 80*time.Second)
+	svc.finishGatewayPoolContact(context.Background(), account, gwpoolTestIdentity, event.Applied, 80*time.Second, 20*time.Second)
 	close(proceed)
 	<-done
-	current, _ = repo.stored(1)
+	current, _ := repo.stored(1)
 	box := readGatewayPoolOutbox(current, time.Now())
 	require.Len(t, box.Pending, 1, "initial acknowledgement must not delete a newer window payload")
 	require.True(t, box.Pending[0].Contact.WindowFinal)
@@ -281,6 +282,35 @@ func TestGatewayPoolContactOutboxKeepsFinalUpdateDuringInitialSend(t *testing.T)
 	current, _ = repo.stored(1)
 	require.Empty(t, readGatewayPoolOutbox(current, time.Now()).Pending)
 	require.EqualValues(t, 2, calls.Load())
+}
+
+// A ticket verified more than 10h ago gives the pool no usable window, but the
+// card still gets its use reading; clone copies carry that reading over.
+func TestGatewayPoolContactUseReadingSurvivesAnUnusableWindowAndClones(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	account.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = "test-key"
+	svc, repo := gatewayRuntimeService(account)
+	event := contactEvent(time.Now().UTC(), "first")
+	svc.noteGatewayPoolContact(context.Background(), account, event)
+	svc.finishGatewayPoolContact(context.Background(), account, gwpoolTestIdentity, event.Applied, 11*time.Hour, 20*time.Second)
+	current, _ := repo.stored(1)
+	state := readGatewayPoolContacts(current, gatewayPoolLedgerTag(gwpoolTestIdentity))
+	require.Len(t, state.Rounds, 1)
+	require.EqualValues(t, 20000, state.Rounds[0].FullUseMs)
+	require.False(t, state.Rounds[0].Report.WindowFinal, "an over-long window is not a pool sample")
+	box := readGatewayPoolOutbox(current, time.Now())
+	require.Len(t, box.Pending, 1)
+	require.False(t, box.Pending[0].Contact.WindowFinal, "only the initial report is queued")
+	require.Zero(t, box.Pending[0].Contact.FullWindowMS)
+
+	clone := gatewayPoolContacts{LedgerTag: state.LedgerTag, Seen: map[string]gatewayPoolContactSeen{},
+		Rounds: []gatewayPoolContactRound{state.Rounds[0]}}
+	clone.Rounds[0].FullUseMs = 0
+	mergeGatewayPoolContacts(&clone, state)
+	require.EqualValues(t, 20000, clone.Rounds[0].FullUseMs)
+	clone.Rounds[0].FullUseMs = 0
+	mergeGatewayPoolContacts(&state, clone)
+	require.EqualValues(t, 20000, state.Rounds[0].FullUseMs, "a copy without the reading must not erase it")
 }
 
 func TestGatewayPoolContactsMergedProbeCanFinishThroughEitherRound(t *testing.T) {
@@ -291,7 +321,7 @@ func TestGatewayPoolContactsMergedProbeCanFinishThroughEitherRound(t *testing.T)
 	svc.noteGatewayPoolContact(context.Background(), account, first)
 	concurrent := contactEvent(first.FirstSent.Add(time.Second), "same-ticket")
 	svc.noteGatewayPoolContact(context.Background(), account, concurrent)
-	svc.finishGatewayPoolContact(context.Background(), account, gwpoolTestIdentity, concurrent.Applied, 50*time.Second)
+	svc.finishGatewayPoolContact(context.Background(), account, gwpoolTestIdentity, concurrent.Applied, 50*time.Second, 10*time.Second)
 	current, _ := repo.stored(1)
 	state := readGatewayPoolContacts(current, gatewayPoolLedgerTag(gwpoolTestIdentity))
 	require.Len(t, state.Rounds, 1)

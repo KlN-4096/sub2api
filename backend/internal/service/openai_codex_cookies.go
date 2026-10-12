@@ -55,8 +55,6 @@ type openAICodexCookieStore struct {
 	poolUsageLocks          sync.Map // ledger tag -> *sync.Mutex, durable usage rounds
 	poolUsageCache          sync.Map // ledger tag -> *gatewayPoolUsageLedger, immutable committed snapshot
 	poolActiveUsage         sync.Map // ledger tag -> *gatewayPoolActiveUsageTracker, business intervals only
-	poolUsageSessionOnce    sync.Once
-	poolUsageSession        string
 	poolUsageAttempt        func(context.Context, *Account, string, string, OpenAIGatewayPoolApplied, time.Time, bool)
 	poolUsageFinished       func(context.Context, *Account)
 	poolProgress            gatewayPoolProgressTracker

@@ -51,9 +51,9 @@ func TestStateEchoFinalDeliveryRechecksAfterContactPersistence(t *testing.T) {
 func TestStateEchoReferenceExpiryDoesNotSuppressConfirmedDegradation(t *testing.T) {
 	store := &openAICodexCookieStore{}
 	store.poolPairs.Store("identity", openAIGatewayPoolPair{cookie: "offline", version: "v", gateway: "g"})
-	_, marked := store.gatewayPoolMarkStaleMatched("identity", "v")
+	_, _, marked := store.gatewayPoolMarkStaleMatched("identity", "v")
 	require.True(t, marked)
-	_, marked = store.gatewayPoolMarkStaleMatched("identity", "v")
+	_, _, marked = store.gatewayPoolMarkStaleMatched("identity", "v")
 	require.False(t, marked, "a confirmed rejection is recorded once")
 }
 

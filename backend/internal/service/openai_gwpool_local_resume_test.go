@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -79,12 +80,178 @@ func TestGatewayPoolLocalResumeDeadlineFollowsCooldownFormula(t *testing.T) {
 		if tc.cooldown != nil {
 			store.poolCooldown = map[string]gatewayPoolCooldown{key: *tc.cooldown}
 		}
-		got := store.gatewayPoolLocalResumeAt(gwpoolTestIdentity, account)
+		got := store.gatewayPoolLocalResumeAt(gwpoolTestIdentity, account, time.Now())
 		require.True(t, got.Equal(tc.want), "%s: got %v, want %v", tc.name, got, tc.want)
 		at, cooling := store.gatewayPoolUsedAt(gwpoolTestIdentity, "g", window)
 		require.True(t, at.Equal(touched), tc.name)
 		require.Equal(t, time.Now().Before(tc.want), cooling, tc.name)
 	}
+}
+
+// cooldownCohort touches each named gateway now with a learned cooldown of the given hours.
+func cooldownCohort(store *openAICodexCookieStore, now time.Time, hours int, names ...string) {
+	if store.poolCooldown == nil {
+		store.poolCooldown = map[string]gatewayPoolCooldown{}
+	}
+	for _, name := range names {
+		key := gatewayPoolLedgerKey(gwpoolTestIdentity, name)
+		store.poolUsed.Store(key, now)
+		store.poolCooldown[key] = gatewayPoolCooldown{SourcesKnown: true, CycleAt: now, UpdatedAt: now,
+			LocalFloorSeconds: hours * 3600, WindowSeconds: hours * 3600}
+	}
+}
+
+func cooldownNames(prefix string, n int) []string {
+	names := make([]string, n)
+	for i := range names {
+		names[i] = fmt.Sprint(prefix, i)
+	}
+	return names
+}
+
+// 2026-10-12 pro1: 23 of the 24 quality gateways cooled within 2h, but one at the
+// 6h step disabled the cohort rule and the rest waited for the 30th known gateway.
+func TestGatewayPoolLocalResumeSkipsALongWaitInTheQualityCohort(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 30
+	store := &openAICodexCookieStore{}
+	now := time.Now().UTC()
+	quality := append(cooldownNames("q", 23), "slow")
+	cooldownCohort(store, now, 2, quality[:23]...)
+	cooldownCohort(store, now, 6, "slow")
+	cooldownCohort(store, now, 4, cooldownNames("mid", 5)...)
+	cooldownCohort(store, now, 6, cooldownNames("long", 60)...)
+	got := store.gatewayPoolLocalResumeAt(gwpoolTestIdentity, account, now, quality...)
+	require.True(t, got.Equal(now.Add(2*time.Hour)), "got %v: over 1.5x the cohort's median wait is an outlier", got.Sub(now))
+}
+
+func TestGatewayPoolLocalResumeSkipsLongWaitsInTheKnownCount(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 50
+	store := &openAICodexCookieStore{}
+	now := time.Now().UTC()
+	cooldownCohort(store, now, 1, cooldownNames("short", 35)...)
+	cooldownCohort(store, now, 6, cooldownNames("long", 5)...)
+	got := store.gatewayPoolLocalResumeAt(gwpoolTestIdentity, account, now)
+	require.True(t, got.Equal(now.Add(time.Hour)), "got %v: fewer than N waits for all but the outliers", got.Sub(now))
+	cooldownCohort(store, now, 2, cooldownNames("near", 3)...)
+	got = store.gatewayPoolLocalResumeAt(gwpoolTestIdentity, account, now)
+	require.True(t, got.Equal(now.Add(time.Hour)), "got %v: 2h is over 1.5x the 1h median", got.Sub(now))
+	cleared := &openAICodexCookieStore{}
+	cooldownCohort(cleared, now.Add(-30*time.Minute), 1, cooldownNames("cleared", 40)...)
+	cleared.applyGatewayPoolCooldownClear(gwpoolTestIdentity, now.Add(-time.Minute), 3600)
+	cooldownCohort(cleared, now, 6, "after-clear")
+	key := gatewayPoolLedgerKey(gwpoolTestIdentity, "after-clear")
+	learned := cleared.poolCooldown[key]
+	learned.ResetAt = now.Add(-time.Minute) // learned after the clear
+	cleared.poolCooldown[key] = learned
+	got = cleared.gatewayPoolLocalResumeAt(gwpoolTestIdentity, account, now)
+	require.True(t, got.Equal(now.Add(6*time.Hour)), "got %v: cleared gateways have cooled and never set the median", got.Sub(now))
+}
+
+// All four sit at the 6h step, but three were touched 5h ago: only the one
+// touched just now is a long wait.
+func TestGatewayPoolLocalResumeJudgesOutliersByRemainingWait(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 50
+	store := &openAICodexCookieStore{}
+	now := time.Now().UTC()
+	cooldownCohort(store, now.Add(-5*time.Hour), 6, "a", "b", "c")
+	cooldownCohort(store, now, 6, "fresh")
+	got := store.gatewayPoolLocalResumeAt(gwpoolTestIdentity, account, now, "a", "b", "c", "fresh")
+	require.True(t, got.Equal(now.Add(time.Hour)), "got %v", got.Sub(now))
+}
+
+// A long-step gateway that has already cooled is no outlier and still counts
+// toward N.
+func TestGatewayPoolLocalResumeStillCountsCooledLongSteps(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 2
+	store := &openAICodexCookieStore{}
+	now := time.Now().UTC()
+	cooldownCohort(store, now.Add(-7*time.Hour), 6, "cooled-a", "cooled-b")
+	cooldownCohort(store, now.Add(-30*time.Minute), 1, "s1")
+	cooldownCohort(store, now.Add(-10*time.Minute), 1, "s2")
+	cooldownCohort(store, now.Add(-5*time.Minute), 1, "s3")
+	got := store.gatewayPoolLocalResumeAt(gwpoolTestIdentity, account, now)
+	require.True(t, got.Equal(now.Add(-time.Hour)), "got %v: two gateways have already cooled", got.Sub(now))
+}
+
+// The ladder's 4h->6h step sits exactly on the 1.5x cut and a verdict lands a
+// little after its touch; that lag must not turn the 6h gateway into an outlier.
+func TestGatewayPoolLocalResumeOutlierCutToleratesVerdictLag(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 50
+	store := &openAICodexCookieStore{}
+	now := time.Now().UTC()
+	quality := []string{"q0", "q1", "q2", "slow"}
+	cooldownCohort(store, now, 4, quality[:3]...)
+	cooldownCohort(store, now, 6, "slow")
+	key := gatewayPoolLedgerKey(gwpoolTestIdentity, "slow")
+	lagged := store.poolCooldown[key]
+	lagged.CycleAt = now.Add(time.Microsecond)
+	store.poolCooldown[key] = lagged
+	got := store.gatewayPoolLocalResumeAt(gwpoolTestIdentity, account, now, quality...)
+	require.True(t, got.Equal(now.Add(6*time.Hour+time.Microsecond)), "got %v: exactly 1.5x the median is no outlier", got.Sub(now))
+}
+
+// Half a cohort still cooling is no outlier: an even count takes the upper
+// middle wait (2h here), not the mean (65m) that would skip both 2h gateways.
+func TestGatewayPoolLocalResumeNeverSkipsHalfTheList(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 50
+	store := &openAICodexCookieStore{}
+	now := time.Now().UTC()
+	cooldownCohort(store, now.Add(-50*time.Minute), 1, "a", "b")
+	cooldownCohort(store, now, 2, "c", "d")
+	got := store.gatewayPoolLocalResumeAt(gwpoolTestIdentity, account, now, "a", "b", "c", "d")
+	require.True(t, got.Equal(now.Add(2*time.Hour)), "got %v", got.Sub(now))
+}
+
+// An hour into a rest the 1h gateways have cooled. Measured from the rest's
+// start the 4h and 6h ones stay skipped; measured from now they would become
+// the median and hold the rest for five more hours. The dialog's estimate
+// measures from the same start.
+func TestGatewayPoolRestMeasuresOutlierWaitsFromItsStart(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 50
+	store := &openAICodexCookieStore{}
+	now := time.Now().UTC()
+	started := now.Add(-time.Hour)
+	history := openAIGatewayHistory{LedgerTag: gatewayPoolLedgerTag(gwpoolTestIdentity), Seen: map[string]openAIGatewaySeen{}}
+	for name, hours := range map[string]int{"s0": 1, "s1": 1, "s2": 1, "slow4": 4, "slow6": 6} {
+		cooldownCohort(store, started, hours, name)
+		history.Seen[name] = openAIGatewaySeen{At: started, Cooldown: &gatewayPoolCooldown{SourcesKnown: true, BaseSeconds: 3600,
+			CycleAt: started, UpdatedAt: started, LocalFloorSeconds: hours * 3600, WindowSeconds: hours * 3600,
+			Until: started.Add(time.Duration(hours) * time.Hour)}}
+	}
+	rest := gatewayPoolRestState{Tag: gatewayPoolLedgerTag(gwpoolTestIdentity), Active: true, ChangedAt: started, StartedAt: started}
+	admission := store.gatewayPoolLocalResumeAt(gwpoolTestIdentity, account, rest.since(now))
+	require.True(t, admission.Equal(now), "admission %v", admission.Sub(now))
+	display := gatewayPoolCooldownEstimate(account, store.gatewayPoolDisplayCooldownDeadlines(gwpoolTestIdentity, account, history, now), rest, now)
+	require.True(t, display.EligibleAt.Equal(admission), "display %v", display.EligibleAt.Sub(now))
+	fromNow := store.gatewayPoolLocalResumeAt(gwpoolTestIdentity, account, now)
+	require.True(t, fromNow.Equal(now.Add(5*time.Hour)), "from now %v", fromNow.Sub(now))
+}
+
+func TestGatewayPoolRestAdmissionMeasuresWaitsFromItsStart(t *testing.T) {
+	account := rotationAccount(1, 7)
+	fake := newGwpoolFakePool(t, "offline", 150)
+	fake.configure(account)
+	now := time.Now().UTC()
+	started := now.Add(-time.Hour)
+	account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 50
+	account.Extra[gatewayPoolRestStateKey] = map[string]any{
+		"tag": gatewayPoolLedgerTag(gwpoolTestIdentity), "active": true,
+		"changed_at": started, "started_at": started, "resume_at": now,
+	}
+	svc := rotationService(account)
+	cooldownCohort(&svc.codexCookies, started, 1, "s0", "s1", "s2")
+	cooldownCohort(&svc.codexCookies, started, 4, "slow4")
+	cooldownCohort(&svc.codexCookies, started, 6, "slow6")
+	allowed, err := svc.gatewayPoolResumeAllowed(context.Background(), account, true)
+	require.NoError(t, err)
+	require.True(t, allowed, "the 4h/6h gateways stay skipped after the 1h ones cooled")
 }
 
 func TestGatewayPoolLocalResumeKeepsOtherAccountBlocks(t *testing.T) {
@@ -210,11 +377,11 @@ func TestGatewayPoolLocalDeadlineKeepsClearedKnownGatewaysAfterNewTouchAndRestar
 		time.Sleep(time.Millisecond)
 	}
 	require.True(t, svc.codexCookies.beginGatewayPoolAttempt(identity, "recent", time.Hour))
-	deadline := svc.codexCookies.gatewayPoolLocalResumeAt(identity, account)
+	deadline := svc.codexCookies.gatewayPoolLocalResumeAt(identity, account, time.Now())
 	// Two known, N defaults to 50: both must finish (one has just been touched).
 	require.True(t, deadline.After(now))
 	account.Extra[openAIGatewayPoolResumeGatewaysExtraKey] = 1
-	require.False(t, svc.codexCookies.gatewayPoolLocalResumeAt(identity, account).After(time.Now()),
+	require.False(t, svc.codexCookies.gatewayPoolLocalResumeAt(identity, account, time.Now()).After(time.Now()),
 		"the other cleared known gateway still counts")
 	fresh, err := base.stored(1)
 	require.NoError(t, err)
@@ -222,10 +389,11 @@ func TestGatewayPoolLocalDeadlineKeepsClearedKnownGatewaysAfterNewTouchAndRestar
 	restarted := &OpenAIGatewayService{}
 	restarted.codexCookies.gatewayPoolHydrateUsed(fresh, identity)
 	require.True(t, restarted.codexCookies.beginGatewayPoolAttempt(identity, "recent", time.Hour))
-	require.False(t, restarted.codexCookies.gatewayPoolLocalResumeAt(identity, fresh).After(time.Now()))
+	require.False(t, restarted.codexCookies.gatewayPoolLocalResumeAt(identity, fresh, time.Now()).After(time.Now()))
 	view, _ := restarted.gatewayPoolDisplaySnapshot(fresh, identity, nil, nil)
-	display := gatewayPoolTestCooldownEstimate(&restarted.codexCookies, identity, fresh, view, time.Now())
-	require.Equal(t, restarted.codexCookies.gatewayPoolLocalResumeAt(identity, fresh), display.EligibleAt)
+	checkAt := time.Now()
+	display := gatewayPoolTestCooldownEstimate(&restarted.codexCookies, identity, fresh, view, checkAt)
+	require.Equal(t, restarted.codexCookies.gatewayPoolLocalResumeAt(identity, fresh, checkAt), display.EligibleAt)
 }
 
 func TestGatewayPoolLocalResumePreservesAuthBlockWrittenDuringRest(t *testing.T) {

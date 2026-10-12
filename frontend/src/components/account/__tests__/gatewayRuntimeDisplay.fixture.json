@@ -13,10 +13,9 @@
             "model": "gpt-6-luna",
             "source": "foreground",
             "at": "2026-10-10T23:10:00Z",
-            "outcome": "full",
-            "full_window_ms": 150000,
-            "window_final": true
-          }
+            "outcome": "full"
+          },
+          "full_use_ms": 90000
         },
         {
           "version_hash": "v-106",
@@ -26,9 +25,7 @@
             "model": "gpt-6-luna",
             "source": "background",
             "at": "2026-10-10T23:20:00Z",
-            "outcome": "refreshed",
-            "full_window_ms": 0,
-            "window_final": false
+            "outcome": "refreshed"
           }
         },
         {
@@ -39,9 +36,7 @@
             "model": "gpt-6-luna",
             "source": "background",
             "at": "2026-10-10T23:19:00Z",
-            "outcome": "refreshed",
-            "full_window_ms": 0,
-            "window_final": false
+            "outcome": "refreshed"
           }
         }
       ]
@@ -55,7 +50,7 @@
           "region": "us-east",
           "verdict": "degraded",
           "full_at": "2026-10-10T19:00:00Z",
-          "full_held_ms": 43000,
+          "full_use_ms": 43000,
           "cooldown": {
             "window_seconds": 7200,
             "fixed_seconds": 5400,
@@ -68,7 +63,7 @@
           "region": "east-asia",
           "verdict": "full",
           "full_at": "2026-10-10T22:00:00Z",
-          "full_held_ms": 120000,
+          "full_use_ms": 120000,
           "cooldown": {
             "window_seconds": 7200,
             "recommended_seconds": 10800
@@ -90,7 +85,7 @@
           "region": "country-jp",
           "verdict": "degraded",
           "full_at": "2026-10-10T20:00:00Z",
-          "full_held_ms": 60000
+          "full_use_ms": 60000
         }
       },
       "updated_at": "2026-10-10T23:53:00Z"
@@ -148,7 +143,8 @@
               "actual_gateway": "unified-104",
               "duration_ms": 812
             }
-          ]
+          ],
+          "full_use_ms": 90000
         },
         {
           "round_id": "",
@@ -212,7 +208,7 @@
           "region": "us-east",
           "verdict": "degraded",
           "full_at": "2026-10-10T19:00:00Z",
-          "full_held_ms": 43000,
+          "full_use_ms": 43000,
           "cooldown": {
             "reset_at": "2026-10-10T00:00:00Z",
             "sources_known": true,
@@ -243,7 +239,7 @@
           "region": "east-asia",
           "verdict": "full",
           "full_at": "2026-10-10T22:00:00Z",
-          "full_held_ms": 120000,
+          "full_use_ms": 120000,
           "cooldown": {
             "window_seconds": 7200,
             "recommended_seconds": 10800
@@ -265,7 +261,7 @@
           "region": "country-jp",
           "verdict": "degraded",
           "full_at": "2026-10-10T20:00:00Z",
-          "full_held_ms": 60000
+          "full_use_ms": 60000
         }
       },
       "pool_live": 62,

@@ -10,18 +10,18 @@ function rawContacts() {
       report: {
         id: `id-${i}`, gateway: 'one', model: 'astra', source: 'foreground',
         at: new Date(now - (10 - i) * 60_000).toISOString(),
-        outcome: i < 3 ? 'full' : i < 5 ? 'refreshed' : 'unknown',
-        window_final: i < 3, full_window_ms: i < 3 ? 100000 : 0
-      }
+        outcome: i < 3 ? 'full' : i < 5 ? 'refreshed' : 'unknown'
+      },
+      full_use_ms: i < 3 ? 100000 : 0
     }))
   }
 }
 
 describe('readGatewayContacts', () => {
-  it('reads outcomes and only measured, ended full windows', () => {
+  it('reads outcomes and only measured full use', () => {
     const rounds = readGatewayContacts(rawContacts(), 'tag', now).rounds
     expect(rounds.map((r) => r.outcome)).toEqual(['full', 'full', 'full', 'refreshed', 'refreshed', 'unknown'])
-    expect(rounds.map((r) => r.windowMs)).toEqual([100000, 100000, 100000, null, null, null])
+    expect(rounds.map((r) => r.fullUseMs)).toEqual([100000, 100000, 100000, null, null, null])
   })
 
   it('accepts only the current ledger tag', () => {

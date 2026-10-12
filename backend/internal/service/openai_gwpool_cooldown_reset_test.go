@@ -121,7 +121,7 @@ func cooldownResetService(t *testing.T, now time.Time) (*OpenAIGatewayService, *
 			CooldownReset: gatewayPoolCooldownResetState{IntervalHours: 24, StartedAt: now.Add(-25 * time.Hour)},
 			Seen: map[string]openAIGatewaySeen{
 				"recent": {At: now.Add(-20 * time.Minute), FullAt: now.Add(-time.Hour),
-					Verdict: openAIGatewayVerdictDegraded, FullHeldMs: 1234, Cooldown: resetTestCooldown(now.Add(-20 * time.Minute))},
+					Verdict: openAIGatewayVerdictDegraded, FullUseMs: 1234, Cooldown: resetTestCooldown(now.Add(-20 * time.Minute))},
 				"rested": {At: now.Add(-2 * time.Hour), Cooldown: resetTestCooldown(now.Add(-2 * time.Hour))},
 			},
 		}
@@ -161,7 +161,7 @@ func TestGatewayPoolCooldownResetPersistsClonesAndSurvivesRestart(t *testing.T) 
 		require.Equal(t, now.Add(40*time.Minute), history.Seen["recent"].Cooldown.Until)
 		require.Equal(t, before.Seen["recent"].At, history.Seen["recent"].At)
 		require.Equal(t, before.Seen["recent"].FullAt, history.Seen["recent"].FullAt)
-		require.Equal(t, before.Seen["recent"].FullHeldMs, history.Seen["recent"].FullHeldMs)
+		require.Equal(t, before.Seen["recent"].FullUseMs, history.Seen["recent"].FullUseMs)
 		require.Equal(t, before.Current, history.Current)
 		require.Equal(t, before.PoolLive, history.PoolLive)
 		require.Equal(t, "preserved", fresh.Extra["unrelated"])

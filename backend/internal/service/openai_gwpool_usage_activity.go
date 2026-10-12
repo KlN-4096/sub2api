@@ -113,6 +113,14 @@ func (r *gatewayPoolUsageLedger) idleCutoff(now time.Time) time.Time {
 	if r.LastRequestStartedAt.After(last) {
 		last = r.LastRequestStartedAt
 	}
+	for _, round := range r.Rounds {
+		if round.Model != gatewayPoolUsageSharedModel || !round.EndedAt.IsZero() || round.ActiveUsage == nil {
+			continue
+		}
+		if n := len(round.ActiveUsage.Intervals); n > 0 && round.ActiveUsage.Intervals[n-1].End.After(last) {
+			last = round.ActiveUsage.Intervals[n-1].End // merged intervals: the last one ends latest
+		}
+	}
 	if last.IsZero() {
 		for _, round := range r.Rounds {
 			if round.Model != gatewayPoolUsageSharedModel || !round.EndedAt.IsZero() {

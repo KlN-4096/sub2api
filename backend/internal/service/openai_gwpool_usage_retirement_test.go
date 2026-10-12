@@ -30,7 +30,8 @@ func TestGatewayPoolActiveUsageClosesWhenAttemptFinishes(t *testing.T) {
 	require.Equal(t, 1, round.Attempted)
 	require.Equal(t, 1, round.Full)
 	require.NotNil(t, round.ActiveUsage)
-	require.False(t, round.ActiveUsage.Open)
+	require.Empty(t, svc.codexCookies.activeUsageTracker(gwpoolTestIdentity).snapshot(),
+		"finish persisted and acknowledged the attempt")
 }
 
 func TestGatewayPoolActiveUsageInvalidationSurvivesReplacementAndFailedWrite(t *testing.T) {
@@ -68,6 +69,6 @@ func TestGatewayPoolActiveUsageInvalidationSurvivesReplacementAndFailedWrite(t *
 	require.NoError(t, err)
 	state := readGatewayPoolUsage(fresh, gatewayPoolLedgerTag(gwpoolTestIdentity))
 	require.Len(t, state.Rounds, 1)
-	view := state.Rounds[0].fullUsageView(store.gatewayPoolUsageSession(), time.Now().Add(time.Hour), tracker.snapshot()...)
+	view := state.Rounds[0].fullUsageView(time.Now().Add(time.Hour), tracker.snapshot()...)
 	require.Equal(t, invalidated.invalidatedAt.Sub(start).Milliseconds(), view.FullDurationMS)
 }

@@ -3,14 +3,7 @@ package service
 import (
 	"context"
 	"time"
-
-	"github.com/google/uuid"
 )
-
-func (s *openAICodexCookieStore) gatewayPoolUsageSession() string {
-	s.poolUsageSessionOnce.Do(func() { s.poolUsageSession = uuid.NewString() })
-	return s.poolUsageSession
-}
 
 func gatewayPoolUsageTicketKey(gateway, version string) string {
 	return gatewayPoolDigest(gateway + "\x00" + version)
@@ -59,7 +52,7 @@ func (s *OpenAIGatewayService) noteGatewayPoolFullUse(ctx context.Context, accou
 	return true
 }
 
-func (r GatewayPoolUsageRound) fullUsageView(session string, now time.Time, events ...gatewayPoolActiveUseEvent) GatewayPoolUsageRound {
+func (r GatewayPoolUsageRound) fullUsageView(now time.Time, events ...gatewayPoolActiveUseEvent) GatewayPoolUsageRound {
 	if r.Model != gatewayPoolUsageSharedModel {
 		r.Tickets = nil
 		return r
@@ -68,11 +61,10 @@ func (r GatewayPoolUsageRound) fullUsageView(session string, now time.Time, even
 	if !r.EndedAt.IsZero() && r.EndedAt.Before(now) {
 		now = r.EndedAt
 	}
-	r.syncActiveUsage(events, session, now)
+	r.syncActiveUsage(events, now)
 	if r.ActiveUsage != nil {
 		r.FullDurationMS = r.ActiveUsage.duration(now)
 		r.FullUsageMode = gatewayPoolActiveUsageMode
-		r.DurationIncomplete = r.ActiveUsage.Incomplete
 	}
 	r.ActiveUsage = nil // interval details stay in storage, not the polling API
 	r.Tickets = nil

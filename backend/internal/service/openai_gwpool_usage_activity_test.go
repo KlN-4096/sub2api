@@ -20,7 +20,7 @@ func TestGatewayPoolUsageIdleCutoffExcludesWaitingAndFreezesHistory(t *testing.T
 	state.Rounds[0].syncActiveUsage([]gatewayPoolActiveUseEvent{
 		{roundID: state.Rounds[0].ID, ticket: "one", start: at, end: at.Add(time.Minute)},
 		{roundID: state.Rounds[0].ID, ticket: "two", start: at.Add(4 * time.Minute), end: at.Add(5 * time.Minute)},
-	}, "process", at.Add(5*time.Minute))
+	}, at.Add(5*time.Minute))
 	require.True(t, state.idleCutoff(at.Add(35*time.Minute)).IsZero(), "exactly 30 minutes is not over 30")
 	cutoff := state.idleCutoff(at.Add(36 * time.Minute))
 	require.Equal(t, state.LastRequestCompletedAt, cutoff)
@@ -42,6 +42,21 @@ func TestGatewayPoolUsageBodyCompletesExactlyOnceAtEOFOrClose(t *testing.T) {
 	}
 	wg.Wait()
 	require.EqualValues(t, 1, count.Load())
+}
+
+// A restart cut a request the old process had already observed for 59s; with no
+// completion recorded, the idle end must not fall back to that request's start.
+func TestGatewayPoolUsageIdleEndKeepsTimeObservedBeforeARestart(t *testing.T) {
+	start := time.Now().UTC().Add(-2 * time.Hour)
+	state := gatewayPoolUsageLedger{Tag: "ledger", LastRequestCompletedAt: start, LastRequestStartedAt: start.Add(time.Minute)}
+	state.note("luna", "ticket", start, true)
+	state.Rounds[0].syncActiveUsage([]gatewayPoolActiveUseEvent{{
+		roundID: state.Rounds[0].ID, ticket: "ticket", start: start.Add(time.Minute + time.Second),
+	}}, start.Add(2*time.Minute))
+	end := state.idleCutoff(time.Now().UTC())
+	require.Equal(t, start.Add(2*time.Minute), end, "the cycle ends at the last durable observation")
+	state.end(end, "idle_timeout")
+	require.EqualValues(t, 59000, state.Rounds[0].ActiveUsage.duration(state.Rounds[0].EndedAt))
 }
 
 func TestGatewayPoolUsageInFlightAndSharedWorkPreventIdleEnd(t *testing.T) {
@@ -116,7 +131,7 @@ func TestGatewayPoolUsageBlockAfterRestartDoesNotInventTail(t *testing.T) {
 	state.note("luna", "ticket", start, true)
 	state.Rounds[0].syncActiveUsage([]gatewayPoolActiveUseEvent{{
 		roundID: state.Rounds[0].ID, ticket: "ticket", start: start,
-	}}, "old-process", start.Add(time.Minute))
+	}}, start.Add(time.Minute))
 	account.Extra[gatewayPoolUsageExtraKey] = state
 	account.Extra[GatewayPoolUsageBlockedAtKey] = start.Add(20 * time.Minute).Format(time.RFC3339Nano)
 	svc, repo := gatewayRuntimeService(account)
@@ -124,7 +139,6 @@ func TestGatewayPoolUsageBlockAfterRestartDoesNotInventTail(t *testing.T) {
 	fresh, _ := repo.stored(1)
 	state = readGatewayPoolUsage(fresh, gatewayPoolLedgerTag(identity))
 	require.EqualValues(t, 60000, state.Rounds[0].ActiveUsage.duration(time.Now()))
-	require.True(t, state.Rounds[0].ActiveUsage.Incomplete)
 }
 
 func TestGatewayPoolUsageBlockBeforeFirstAttemptStopsOldRequest(t *testing.T) {
