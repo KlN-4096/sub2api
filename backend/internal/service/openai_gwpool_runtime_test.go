@@ -70,13 +70,12 @@ func gatewayRuntimeService(account *Account) (*OpenAIGatewayService, *gatewayRun
 	repo := &gatewayRuntimeRepo{account: *account}
 	svc := &OpenAIGatewayService{accountRepo: repo}
 	svc.codexCookies.accountByID = repo.GetByID
-	svc.codexCookies.poolProbeObserved = svc.noteGatewayPoolProbe
 	return svc, repo
 }
 
 func TestGatewayPoolFirstSendDoesNotCountShelfWaitOrReset(t *testing.T) {
 	store := &openAICodexCookieStore{}
-	pair := openAIGatewayPoolPair{version: "a", gateway: "g", cookie: "offline-cookie", since: time.Now().Add(-3 * time.Minute), until: time.Now().Add(time.Minute)}
+	pair := openAIGatewayPoolPair{version: "a", gateway: "g", cookie: "offline-cookie"}
 	store.poolPairs.Store("id", pair)
 	first := time.Now()
 	store.gatewayPoolMarkSent("id", "a", first)
@@ -86,33 +85,6 @@ func TestGatewayPoolFirstSendDoesNotCountShelfWaitOrReset(t *testing.T) {
 	require.Equal(t, first, got.firstSent)
 	age := time.Since(got.firstSent)
 	require.Less(t, age, time.Second, "备用架待了3分钟，首次接触仍然是年轻窗口")
-}
-
-func TestGatewayPoolProbeMetricsPersistObservedCounts(t *testing.T) {
-	account := gwpoolTestAccount(1)
-	svc, repo := gatewayRuntimeService(account)
-	shooter := &gwpoolWarmShooter{}
-	full, conclusive, _, first, err := svc.codexCookies.gatewayPoolWarmVerdict(
-		context.Background(), account, gwpoolTestIdentity, OpenAIGatewayPoolApplied{Gateway: "g", Version: "v"},
-		"offline-cookie", 1, shooter.shoot)
-	require.NoError(t, err)
-	require.True(t, full && conclusive)
-	require.False(t, first.IsZero())
-	background := context.WithValue(context.Background(), gatewayPoolProbeSourceKey{}, "background")
-	unknown := &gwpoolWarmShooter{replies: []gwpoolWarmReply{{status: http.StatusTooManyRequests}}}
-	_, _, _, _, _ = svc.codexCookies.gatewayPoolWarmVerdict(
-		background, account, gwpoolTestIdentity, OpenAIGatewayPoolApplied{Gateway: "g", Version: "v2"},
-		"offline-cookie", 1, unknown.shoot)
-	current, _ := repo.GetByID(context.Background(), 1)
-	raw, _ := json.Marshal(current.Extra[openAIGatewayPoolMetricsExtraKey])
-	var metrics gatewayPoolProbeMetrics
-	require.NoError(t, json.Unmarshal(raw, &metrics))
-	require.EqualValues(t, 2, metrics.Foreground.Requests)
-	require.EqualValues(t, 1, metrics.Foreground.Full)
-	require.EqualValues(t, 1, metrics.Background.Requests)
-	require.EqualValues(t, 1, metrics.Background.Inconclusive)
-	require.NotContains(t, string(raw), "offline-cookie")
-	require.NotContains(t, string(raw), "token")
 }
 
 func TestGatewayPoolOutboxPersistsBeforeSendAndResumesAfterRestart(t *testing.T) {
@@ -256,10 +228,10 @@ func TestGatewayPoolProbePreflightFailureDoesNotCountAsSent(t *testing.T) {
 	for _, failure := range []error{gwpoolBareError(), &PluginTransportError{RequestSent: false, Code: "PLUGIN_X"}} {
 		account := gwpoolTestAccount(1)
 		account.Credentials["access_token"] = "fake-token"
-		svc, repo := gatewayRuntimeService(account)
+		svc, _ := gatewayRuntimeService(account)
 		svc.httpUpstream = &gwpoolErrorUpstream{err: failure}
 		svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
-			cookie: "offline-cookie", gateway: "g", version: "v", until: time.Now().Add(time.Minute),
+			cookie: "offline-cookie", gateway: "g", version: "v",
 		})
 		_, conclusive, sent, first, err := svc.codexCookies.gatewayPoolWarmVerdict(
 			context.Background(), account, gwpoolTestIdentity, OpenAIGatewayPoolApplied{Gateway: "g", Version: "v"},
@@ -272,12 +244,6 @@ func TestGatewayPoolProbePreflightFailureDoesNotCountAsSent(t *testing.T) {
 		require.True(t, first.IsZero(), "明确未发出的错误不许启动票龄")
 		pair, _ := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
 		require.True(t, pair.firstSent.IsZero())
-		fresh, _ := repo.GetByID(context.Background(), 1)
-		raw, _ := json.Marshal(fresh.Extra[openAIGatewayPoolMetricsExtraKey])
-		var metrics gatewayPoolProbeMetrics
-		require.NoError(t, json.Unmarshal(raw, &metrics))
-		require.Zero(t, metrics.Foreground.Requests)
-		require.EqualValues(t, 1, metrics.Foreground.Inconclusive)
 	}
 }
 
@@ -341,7 +307,7 @@ func TestGatewayPoolBusinessPreflightFailureDoesNotStartReusedPairAge(t *testing
 	account.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = "test-key"
 	svc := &OpenAIGatewayService{httpUpstream: &gwpoolErrorUpstream{err: &PluginTransportError{RequestSent: false}}}
 	svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
-		cookie: "offline-cookie", gateway: "g", version: "v", until: time.Now().Add(time.Minute),
+		cookie: "offline-cookie", gateway: "g", version: "v",
 	})
 	svc.codexCookies.gatewayPoolMarkVerifiedFull(gwpoolTestIdentity, "v", gatewayPoolProbeModelLuna)
 	request, err := http.NewRequest(http.MethodPost, gwpoolTestURL, nil)
@@ -357,7 +323,7 @@ func TestGatewayPoolBusinessPreflightFailureDoesNotStartReusedPairAge(t *testing
 func TestGatewayPoolProbeDispatchedErrorRetainsContact(t *testing.T) {
 	account := gwpoolTestAccount(1)
 	account.Credentials["access_token"] = "fake-token"
-	svc, repo := gatewayRuntimeService(account)
+	svc, _ := gatewayRuntimeService(account)
 	svc.httpUpstream = &gwpoolErrorUpstream{err: &PluginTransportError{RequestSent: true, Code: "PLUGIN_X"}}
 	_, conclusive, sent, first, err := svc.codexCookies.gatewayPoolWarmVerdict(
 		context.Background(), account, gwpoolTestIdentity, OpenAIGatewayPoolApplied{Gateway: "g", Version: "v"},
@@ -368,11 +334,6 @@ func TestGatewayPoolProbeDispatchedErrorRetainsContact(t *testing.T) {
 	require.False(t, conclusive)
 	require.True(t, sent, "明确已发出但没响应的票不可当成未接触归还")
 	require.False(t, first.IsZero())
-	fresh, _ := repo.GetByID(context.Background(), 1)
-	raw, _ := json.Marshal(fresh.Extra[openAIGatewayPoolMetricsExtraKey])
-	var metrics gatewayPoolProbeMetrics
-	require.NoError(t, json.Unmarshal(raw, &metrics))
-	require.EqualValues(t, 1, metrics.Foreground.Requests)
 }
 
 func TestGatewayPoolStrictGuardReusesResolvedShadowIdentityForSentMark(t *testing.T) {
@@ -392,7 +353,7 @@ func TestGatewayPoolStrictGuardReusesResolvedShadowIdentityForSentMark(t *testin
 		return gwpoolTestIdentity, nil
 	}
 	svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
-		cookie: "offline-cookie", gateway: "g", version: "v", until: time.Now().Add(time.Minute),
+		cookie: "offline-cookie", gateway: "g", version: "v",
 	})
 	svc.codexCookies.gatewayPoolMarkVerifiedFull(gwpoolTestIdentity, "v", "gpt-6-luna")
 	request, err := http.NewRequest(http.MethodPost, gwpoolTestURL, nil)
@@ -418,7 +379,7 @@ func TestGatewayPoolSideRequestsDoNotStartPairAgeFromSharedSink(t *testing.T) {
 		account.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = "test-key"
 		svc := &OpenAIGatewayService{httpUpstream: &cookieRecordingUpstream{}}
 		svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
-			cookie: "offline-cookie", gateway: "g", version: "v", until: time.Now().Add(time.Minute),
+			cookie: "offline-cookie", gateway: "g", version: "v",
 		})
 		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 		ctx, _ := withOpenAIGatewayPoolSink(context.Background(), ginCtx)
@@ -432,4 +393,24 @@ func TestGatewayPoolSideRequestsDoNotStartPairAgeFromSharedSink(t *testing.T) {
 		pair, _ := svc.codexCookies.cachedPoolPair(gwpoolTestIdentity)
 		require.True(t, pair.firstSent.IsZero(), "共享sink的侧请求没有使用池子票，不能给它计龄")
 	}
+}
+
+// Every requested ID is answered: a deleted or no-longer-pool row is explicitly
+// inactive, so the admin page's complete-batch freeze cannot wait forever.
+func TestGatewayPoolRuntimeProgressAnswersEveryRequestedID(t *testing.T) {
+	account := gwpoolTestAccount(1)
+	svc, _ := gatewayRuntimeService(account)
+	view, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{1, 999})
+	require.NoError(t, err)
+	require.NotNil(t, view[1].Runtime)
+	require.False(t, view[1].Inactive)
+	require.True(t, view[999].Inactive, "deleted row")
+	require.Nil(t, view[999].Runtime)
+
+	off := gwpoolTestAccount(1)
+	off.Extra[openAIGatewayPoolExtraKey] = false
+	svc, _ = gatewayRuntimeService(off)
+	view, err = svc.GatewayPoolRuntimeProgress(context.Background(), []int64{1})
+	require.NoError(t, err)
+	require.True(t, view[1].Inactive, "pool switched off")
 }

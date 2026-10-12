@@ -138,7 +138,7 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 		}
 		var guard *openAIFirstOutputHeaderGuard
 		if budget != nil {
-			guardCtx, newGuard := newGatewayPoolFirstOutputGuard(attemptCtx, func() {}, budget)
+			guardCtx, newGuard := newGatewayPoolFirstOutputGuard(attemptCtx, budget)
 			guard = newGuard
 			current = current.WithContext(guardCtx)
 		}

@@ -20,7 +20,7 @@ func TestGatewayPoolRouteDeadlineNeverGuessesMissingTTL(t *testing.T) {
 	require.Equal(t, exp, gatewayPoolRouteExpiresAt(cookie))
 	require.Zero(t, gatewayPoolRouteExpiresAt("__cflb=offline; __oailb=unknown"), "unknown provenance cannot become a hard deadline")
 	store := &openAICodexCookieStore{}
-	pair := openAIGatewayPoolPair{cookie: cookie, version: "v", until: time.Now().Add(-time.Hour), routeExpiresAt: exp}
+	pair := openAIGatewayPoolPair{cookie: cookie, version: "v", routeExpiresAt: exp}
 	store.poolPairs.Store("id", pair)
 	store.gatewayPoolMarkVerifiedFull("id", "v", "gpt-6-luna")
 	_, state := store.cachedPoolPair("id")

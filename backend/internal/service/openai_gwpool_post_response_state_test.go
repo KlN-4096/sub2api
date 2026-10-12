@@ -87,7 +87,6 @@ func TestGatewayPoolPostResponseStateWithoutSent(t *testing.T) {
 				require.Empty(t, discarded)
 			}
 			require.Empty(t, OpenAITurnStateUsageSent(c), "confirmation state is not business outbound state")
-			require.Empty(t, OpenAITurnStateUsageSource(c))
 		})
 	}
 }
@@ -182,7 +181,6 @@ func TestGatewayPoolPostResponseStateCompressedBuilders(t *testing.T) {
 			for _, field := range []string{"prompt_cache_key", "client_metadata.session_id", "client_metadata.thread_id"} {
 				require.Equal(t, gjson.GetBytes(business, field).Raw, gjson.GetBytes(confirmation, field).Raw)
 			}
-			require.NotContains(t, OpenAITurnStateUsageSource(c), "gwpool_")
 		})
 	}
 }

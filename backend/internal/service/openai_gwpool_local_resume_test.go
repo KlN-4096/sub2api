@@ -25,9 +25,9 @@ func TestGatewayPoolLocalResumeIgnoresPoolSupplyAndOldRecheck(t *testing.T) {
 		svc.codexCookies.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, gateway), now.Add(-2*time.Hour))
 	}
 	require.NoError(t, svc.enterGatewayPoolRest(context.Background(), account, gwpoolTestIdentity, now, now.Add(10*time.Minute)))
-	legacy := gatewayPoolRestState{Tag: gatewayPoolLedgerTag(gwpoolTestIdentity), Active: true,
-		ChangedAt: now, NextCheck: now.Add(10 * time.Minute)}
-	require.NoError(t, repo.UpdateExtra(context.Background(), account.ID, map[string]any{gatewayPoolRestStateKey: legacy}))
+	legacy := gatewayPoolRestState{Tag: gatewayPoolLedgerTag(gwpoolTestIdentity), Active: true, ChangedAt: now}
+	require.NoError(t, repo.UpdateExtra(context.Background(), account.ID, map[string]any{gatewayPoolRestStateKey: map[string]any{
+		"tag": legacy.Tag, "active": true, "changed_at": now, "next_check": now.Add(10 * time.Minute)}}))
 	svc.codexCookies.poolRestState.Store(legacy.Tag, legacy)
 	allowed, err := svc.gatewayPoolResumeAllowed(context.Background(), account, true)
 	require.NoError(t, err)
@@ -171,6 +171,10 @@ func TestGatewayPoolLocalDeadlineKeepsClearedKnownGatewaysAfterNewTouchAndRestar
 	account, err := base.GetByID(ctx, 1)
 	require.NoError(t, err)
 	require.NoError(t, svc.clearGatewayPoolCooldown(ctx, account, identity))
+	// 新触碰须严格晚于清除墓碑：Windows 墙钟约 0.5ms 一跳，同一跳内的触碰按清除前的旧触碰算。
+	for clearedAt := svc.codexCookies.gatewayPoolCooldownClearAt(identity); !time.Now().After(clearedAt); {
+		time.Sleep(time.Millisecond)
+	}
 	require.True(t, svc.codexCookies.beginGatewayPoolAttempt(identity, "recent", time.Hour))
 	deadline := svc.codexCookies.gatewayPoolLocalResumeAt(identity, account)
 	// Two known, N defaults to 50: both must finish (one has just been touched).
