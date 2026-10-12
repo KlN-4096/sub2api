@@ -44,7 +44,7 @@ func TestGatewayPoolStatePeersActualPostgresProjectionAndOrder(t *testing.T) {
 	// No fallback SQL executor: this also proves the Ent transaction is used.
 	repo := &accountRepository{}
 	for _, kind := range []string{"usage", "rest"} {
-		rows, readErr := repo.FindGatewayPoolStatePeers(ctx, tag, kind)
+		rows, readErr := repo.FindGatewayPoolStatePeers(ctx, tag, kind, 0)
 		require.NoError(t, readErr)
 		require.Len(t, rows, 1, "exclude legacy previous tags, soft-deleted and unrelated domains")
 		require.EqualValues(t, 2, rows[0].ID)

@@ -20,7 +20,7 @@ func localRankHistory(now time.Time, good, bad string, count int) gatewayPoolCon
 		last := now.Add(-90 * time.Minute)
 		state.Seen[name] = gatewayPoolContactSeen{LastAt: last}
 		for i := 0; i < count; i++ {
-			id := gatewayPoolContactHash(fmt.Sprintf("%s-%d", name, i))
+			id := gatewayPoolDigest(fmt.Sprintf("%s-%d", name, i))
 			report := gwpool.ContactReport{
 				ID: id, Gateway: name, Model: gatewayPoolProbeModelLuna,
 				Criterion: gwpool.ContactCriterion, Source: "foreground", First: "repeat",
@@ -154,7 +154,7 @@ func TestGatewayPoolLocalStatsCountDistinctInitialReportsAndClosedFullWindows(t 
 	state.Rounds = append(state.Rounds, copyWithFinalWindow)
 	state.Rounds = append(state.Rounds, state.Rounds...)
 	unknown := state.Rounds[0]
-	unknown.Report.ID = gatewayPoolContactHash("unknown")
+	unknown.Report.ID = gatewayPoolDigest("unknown")
 	unknown.Report.Outcome = "unknown"
 	state.Rounds = append(state.Rounds, unknown)
 	rows := gatewayPoolLocalContactStats(state, gatewayPoolProbeModelLuna, "foreground", now)

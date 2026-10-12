@@ -96,7 +96,7 @@ func (s *OpenAIGatewayService) gatewayPoolPrepare(
 		} else if errors.Is(resultErr, errOpenAIGatewayPoolWarmExhausted) {
 			phase = "exhausted"
 		}
-		s.codexCookies.poolProgress.update(progress, phase, 0, "", false, true)
+		s.codexCookies.poolProgress.update(progress, phase, "", false, true)
 	}()
 	// There is no fixed 5/8-ticket loop or leader-owned 90s deadline.
 	// Every network operation is bounded; only live waiters keep this worker alive.
@@ -122,7 +122,7 @@ func (s *OpenAIGatewayService) gatewayPoolPrepare(
 		if allowed, err := s.gatewayPoolResumeAllowed(ctx, fresh, false); err != nil || !allowed {
 			return gatewayPoolRestError()
 		}
-		s.codexCookies.poolProgress.update(progress, "fetching", 0, "", false, false)
+		s.codexCookies.poolProgress.update(progress, "fetching", "", false, false)
 		// 借 AttachRoute 取票：取票、本地账本筛选、exclude、force 换网关那一整套都在它里面，
 		// 这里不另写一份选票逻辑。头是个丢弃用的容器，只为把 Cookie 取出来。
 		headers := http.Header{}
@@ -155,11 +155,11 @@ func (s *OpenAIGatewayService) gatewayPoolPrepare(
 		probeCtx, probeCancel := context.WithTimeout(probeCtx, gatewayPoolProbeBudget(probeCtx, fresh))
 		ticketKey := applied.Version
 		if ticketKey == "" {
-			ticketKey = gatewayPoolUsageDigest(cookie)
+			ticketKey = gatewayPoolDigest(cookie)
 		}
 		onTried := func() { s.codexCookies.poolProgress.tried(progress, ticketKey) }
 		probeCtx = context.WithValue(probeCtx, gatewayPoolProgressTriedKey{}, onTried)
-		s.codexCookies.poolProgress.update(progress, "verifying", 0, applied.Gateway, false, false)
+		s.codexCookies.poolProgress.update(progress, "verifying", applied.Gateway, false, false)
 		full, conclusive, sent, firstSent, perr := s.codexCookies.gatewayPoolWarmVerdict(
 			probeCtx, account, identity, applied, cookie, attempt, shoot)
 		probeCancel()
@@ -202,7 +202,7 @@ func (s *OpenAIGatewayService) gatewayPoolPrepare(
 					lastTicket, triesOnTicket = ticketKey, 0
 				}
 				if triesOnTicket++; triesOnTicket < gatewayPoolTransientAttemptsPerTicket {
-					s.codexCookies.poolProgress.update(progress, "waiting", 0, applied.Gateway, false, false)
+					s.codexCookies.poolProgress.update(progress, "waiting", applied.Gateway, false, false)
 					retry, waitErr := s.waitGatewayPoolRetry(ctx, account, gatewayPoolVerificationRetryGap)
 					if waitErr != nil {
 						return waitErr
@@ -251,7 +251,7 @@ func (s *OpenAIGatewayService) gatewayPoolPrepare(
 			applied.FullHeldMs = held.Milliseconds()
 			slog.Info("gwpool_warm_degraded", "account_id", account.ID,
 				"gateway", applied.Gateway, "attempt", attempt)
-			s.codexCookies.poolProgress.update(progress, "fetching", 0, applied.Gateway, true, false)
+			s.codexCookies.poolProgress.update(progress, "fetching", applied.Gateway, true, false)
 			// 判死的落点也记进卡里，但**不推进 `Current`**：没有业务请求会落上去，推进了会把
 			// 「当前网关」写成最后一个被判死的落点。不记的话这一档每轮真烧 4 个 (账号 × 网关)
 			// + 8 发上游配额，而事后在页面上一条痕迹都没有 —— 失败路径不落用量行（RecordUsage

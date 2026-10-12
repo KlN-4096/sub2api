@@ -80,22 +80,13 @@ func (s *openAICodexCookieStore) gatewayPoolRankCandidates(ctx context.Context, 
 	}
 	projection := gatewayPoolRankProjection{
 		state: state, model: model, source: source, now: now, complete: freshComplete,
-		retryAfter: func(gateway string) time.Duration {
-			if cooldown, ok := s.cooldownEntry(identity, gateway); ok {
-				return time.Duration(cooldown.WindowSeconds) * time.Second
-			}
-			return time.Duration(gatewayPoolCooldownBase(fresh.gatewayPoolGatewayWindow())) * time.Second
-		},
+		retryAfter: s.gatewayPoolReuseDelay(identity, fresh),
 	}
 	ranking := projection.rank(candidates)
 	if !ranking.scored {
 		return ranking
 	}
-	value, _ := s.poolContactPicks.LoadOrStore(gatewayPoolLedgerTag(identity), &atomic.Uint64{})
-	counter, ok := value.(*atomic.Uint64)
-	if !ok {
-		panic("gwpool contact pick counter has an invalid type")
-	}
+	counter := gatewayPoolLoadOrNew[atomic.Uint64](&s.poolContactPicks, gatewayPoolLedgerTag(identity))
 	ranking.explore = counter.Add(1)%gatewayPoolContactExploreEvery == 0
 	if ranking.explore {
 		ranking.quality, ranking.adaptive = nil, nil
@@ -169,7 +160,18 @@ func gatewayPoolUSBackoffActive(last, now time.Time) bool {
 func (s *openAICodexCookieStore) noteGatewayPoolCountries(account *Account, gateways []gwpool.Gateway) {
 	for _, gateway := range gateways {
 		if gateway.DatacenterCountry != "" {
-			s.poolDatacenterCountries.Store(account.gatewayPoolBaseURL()+"\x00"+gateway.Name, gateway.DatacenterCountry)
+			s.poolDatacenterCountries.Store(gatewayPoolCountryKey(account, gateway.Name), gateway.DatacenterCountry)
 		}
 	}
+}
+
+func gatewayPoolCountryKey(account *Account, gateway string) string {
+	return account.gatewayPoolBaseURL() + "\x00" + gateway
+}
+
+// gatewayPoolDatacenterCountry is the last country this pool listed for gateway, or "".
+func (s *openAICodexCookieStore) gatewayPoolDatacenterCountry(account *Account, gateway string) string {
+	value, _ := s.poolDatacenterCountries.Load(gatewayPoolCountryKey(account, gateway))
+	country, _ := value.(string)
+	return country
 }

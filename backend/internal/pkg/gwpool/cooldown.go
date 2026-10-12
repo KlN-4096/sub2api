@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -23,12 +24,7 @@ const CooldownBatchLimit = 32
 var cooldownSteps = [...]int{3600, 7200, 14400, 21600, 28800, 36000, 43200, 57600, 72000, 86400}
 
 func IsCooldownStep(seconds int) bool {
-	for _, step := range cooldownSteps {
-		if seconds == step {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(cooldownSteps[:], seconds)
 }
 
 func NextCooldownSeconds(seconds int) int {

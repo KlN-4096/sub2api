@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +24,89 @@ func TestGatewayPoolSelectionLeavesOrdinaryOAuthOutsideFreshGate(t *testing.T) {
 	svc := &OpenAIGatewayService{accountRepo: gatewaySelectionReadFails{}}
 	group := int64(7)
 	require.True(t, svc.gatewayPoolRoundSelectionAllowed(context.Background(), &group, &AccountSelectionResult{Account: account}))
+}
+
+type gatewaySelectionReadCounter struct {
+	gatewayRotationRepo
+	reads map[int64]int
+}
+
+func (r gatewaySelectionReadCounter) GetByID(ctx context.Context, id int64) (*Account, error) {
+	r.reads[id]++
+	return r.gatewayRotationRepo.GetByID(ctx, id)
+}
+
+func TestGatewayPoolSelectionReadsOnlyPoolRowsFresh(t *testing.T) {
+	group := int64(7)
+	pool := preferenceAccount(1, group, 1)
+	ordinary := Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive,
+		Schedulable: true, Concurrency: 1, GroupIDs: []int64{group}, Extra: map[string]any{}}
+	repo := gatewaySelectionReadCounter{gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*pool, ordinary}}}, map[int64]int{}}
+	svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}}
+	svc.codexCookies.poolRotationAccounts.Store(ordinary.ID, true)
+	ctx := svc.withGatewayPoolAccountPreferences(context.Background(), OpenAIAccountScheduleRequest{
+		GroupID: &group, Platform: PlatformOpenAI, RequiredTransport: OpenAIUpstreamTransportHTTPSSE,
+	})
+	require.Contains(t, gatewayPoolPreferences(ctx), pool.ID)
+	require.Positive(t, repo.reads[pool.ID])
+	require.Zero(t, repo.reads[ordinary.ID], "the projected switch already says this row is ordinary")
+	known, _ := svc.codexCookies.poolRotationAccounts.Load(ordinary.ID)
+	require.Equal(t, false, known, "an ordinary row must not keep a stale opt-in for the round gate")
+}
+
+type gatewaySelectionMissingRow struct {
+	gatewayRotationRepo
+	missing int64
+}
+
+func (r gatewaySelectionMissingRow) GetByID(ctx context.Context, id int64) (*Account, error) {
+	if id == r.missing {
+		return nil, ErrAccountNotFound
+	}
+	return r.gatewayRotationRepo.GetByID(ctx, id)
+}
+
+func TestGatewayPoolSelectionUnreadPoolRowLeavesRoundIncomplete(t *testing.T) {
+	group := int64(7)
+	a, b := preferenceAccount(1, group, 1), preferenceAccount(2, group, 2)
+	for _, missing := range []int64{0, b.ID} {
+		repo := gatewaySelectionMissingRow{gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*a, *b}}}, missing}
+		svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}}
+		require.True(t, svc.codexCookies.poolRounds.claim(group, "departed-member", 1))
+		svc.withGatewayPoolAccountPreferences(context.Background(), OpenAIAccountScheduleRequest{
+			GroupID: &group, Platform: PlatformOpenAI, RequiredTransport: OpenAIUpstreamTransportHTTPSSE,
+		})
+		active := svc.codexCookies.poolRounds.groups[group].active
+		require.Equal(t, missing != 0, slices.Contains(active, "departed-member"),
+			"an unread pool row is unknown, so admission must not drop members it cannot see (missing=%d)", missing)
+	}
+}
+
+func TestGatewayPoolSelectionTouchesNewestLedgerContact(t *testing.T) {
+	group := int64(7)
+	now := time.Now().UTC().Truncate(time.Second)
+	account := preferenceAccount(1, group, 1)
+	identity := openAIGatewayPoolAccountKey(account)
+	newest, lastUsed := now.Add(-time.Minute), now.Add(-time.Hour)
+	account.LastUsedAt = &lastUsed
+	seen := map[string]gatewayPoolContactSeen{"unified-newest": {FirstAt: now.Add(-48 * time.Hour), LastAt: newest}}
+	for i := range gatewayPoolContactGatewayLimit + 3 { // more than prune keeps
+		seen[fmt.Sprintf("unified-%d", i)] = gatewayPoolContactSeen{FirstAt: now.Add(-48 * time.Hour), LastAt: now.Add(-time.Duration(i+2) * time.Hour)}
+	}
+	for _, tag := range []string{gatewayPoolLedgerTag(identity), "another-ledger"} {
+		account.Extra[openAIGatewayPoolContactsExtraKey] = gatewayPoolContacts{LedgerTag: tag, Seen: seen,
+			Rounds: []gatewayPoolContactRound{{RoundID: "not-read-by-selection", LastAt: now}}}
+		repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*account}}}
+		svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}}
+		svc.withGatewayPoolAccountPreferences(context.Background(), OpenAIAccountScheduleRequest{
+			GroupID: &group, Platform: PlatformOpenAI, RequiredTransport: OpenAIUpstreamTransportHTTPSSE,
+		})
+		want := lastUsed
+		if tag == gatewayPoolLedgerTag(identity) {
+			want = newest
+		}
+		require.True(t, want.Equal(svc.codexCookies.poolRounds.lastTouch(identity)), "tag %s", tag)
+	}
 }
 
 func TestGatewayPoolSelectionCanReachHealthyFourthAccount(t *testing.T) {
@@ -221,7 +306,7 @@ func TestGatewayPoolSelectionRoundPersistsAcrossRequestsAndRestartsAfterLastAcco
 		}
 		fake.listGateways = []gwpoolFakeGateway{{Name: "unified-200", PairReady: true, UsedByYou: true}}
 		failure := &UpstreamFailoverError{GatewayPoolRotation: true, NextAccountAction: NextAccountStop}
-		next := svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, failure)
+		next := svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, failure, nil)
 		require.True(t, failure.ShouldRetryNextAccount())
 		fake.listGateways = []gwpoolFakeGateway{{Name: "unified-201", PairReady: true}}
 		return next
@@ -320,4 +405,60 @@ func TestGatewayPoolSelectionSharesCloneCooldownWithoutSummingCapacity(t *testin
 	prefs := gatewayPoolPreferences(ctx)
 	require.Equal(t, 1, prefs[a.ID].cooled)
 	require.Equal(t, prefs[a.ID], prefs[clone.ID])
+}
+
+// Selection processes pool rows one by one; the first row's locked rest
+// admission (its rest-peer query, lock waits up to 3s in production) precedes
+// the second row's use. A write to the second row in that gap must be seen, so
+// each row is read right before its own turn, not in one batch up front. The
+// repository returns private copies, as a database does.
+type selectionGapRepo struct {
+	gatewayRotationRepo
+	fired *atomic.Bool
+	write func()
+}
+
+func (r selectionGapRepo) GetByID(ctx context.Context, id int64) (*Account, error) {
+	row, err := r.gatewayRotationRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	copied := *row
+	return &copied, nil
+}
+
+// A batch read must hand out private copies too, or a reintroduced batch read
+// would see the write through the shared slice and pass.
+func (r selectionGapRepo) GetByIDs(ctx context.Context, ids []int64) ([]*Account, error) {
+	var found []*Account
+	for _, id := range ids {
+		if row, err := r.GetByID(ctx, id); err == nil {
+			found = append(found, row)
+		}
+	}
+	return found, nil
+}
+
+func (r selectionGapRepo) FindByExtraField(ctx context.Context, key string, value any) ([]Account, error) {
+	if key == gatewayPoolRestTagKey && r.fired.CompareAndSwap(false, true) {
+		r.write() // lands while the first row's rest admission holds the domain lock
+	}
+	return r.gatewayRotationRepo.FindByExtraField(ctx, key, value)
+}
+
+func TestGatewayPoolSelectionSeesWriteMadeWhileEarlierRowIsAdmitted(t *testing.T) {
+	group := int64(7)
+	a, b := preferenceAccount(1, group, 1), preferenceAccount(2, group, 2)
+	accounts := []Account{*a, *b}
+	repo := selectionGapRepo{gatewayRotationRepo: gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: accounts}},
+		fired: &atomic.Bool{}}
+	repo.write = func() { accounts[1].Schedulable = false } // e.g. an admin disables B
+	svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{}}
+	ctx := svc.withGatewayPoolAccountPreferences(context.Background(), OpenAIAccountScheduleRequest{
+		GroupID: &group, Platform: PlatformOpenAI, RequiredTransport: OpenAIUpstreamTransportHTTPSSE,
+	})
+	require.True(t, repo.fired.Load(), "the first row's rest admission ran")
+	prefs := gatewayPoolPreferences(ctx)
+	require.NotContains(t, prefs, b.ID, "B was disabled before selection used its row")
+	require.Contains(t, prefs, a.ID, "the healthy row keeps the round slot")
 }

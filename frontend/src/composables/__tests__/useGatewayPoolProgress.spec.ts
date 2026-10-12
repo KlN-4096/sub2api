@@ -81,6 +81,23 @@ describe('gateway progress polling', () => {
     expect(getGatewayPoolProgress).toHaveBeenCalledTimes(2)
   })
 
+  it('never asks the backend for the cooldown estimate', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+    vi.mocked(getGatewayPoolProgress).mockResolvedValue({ 1: snapshot() })
+    const wrapper = mount(defineComponent({
+      setup() { useGatewayPoolProgress(computed(() => [1])); return () => null }
+    }))
+    try {
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(vi.mocked(getGatewayPoolProgress).mock.calls.length).toBeGreaterThanOrEqual(2)
+      for (const call of vi.mocked(getGatewayPoolProgress).mock.calls) expect(call[2]).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('does not poll a hidden page or an empty target set', async () => {
     vi.useFakeTimers()
     vi.mocked(getGatewayPoolProgress).mockClear()

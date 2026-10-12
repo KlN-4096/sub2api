@@ -20,20 +20,104 @@ type GatewayPoolRuntimeView struct {
 	Rounds               []GatewayPoolUsageRound            `json:"rounds"`
 	Archived             map[string]GatewayPoolUsageArchive `json:"archived"`
 	Incomplete           bool                               `json:"incomplete,omitempty"`
-	History              openAIGatewayHistory               `json:"history"`
-	Contacts             gatewayPoolContacts                `json:"contacts"`
+	History              gatewayPoolHistoryDisplay          `json:"history"`
+	Contacts             gatewayPoolContactsDisplay         `json:"contacts"`
 	LedgerTag            string                             `json:"ledger_tag"`
 	GatewayWindowSeconds int                                `json:"gateway_window_seconds"`
 	CurrentConcurrency   *int                               `json:"current_concurrency"`
 	ConcurrencyLimit     int                                `json:"concurrency_limit"`
-	CooldownEstimate     GatewayPoolCooldownEstimate        `json:"cooldown_estimate"`
+	CooldownEstimate     *GatewayPoolCooldownEstimate       `json:"cooldown_estimate,omitempty"`
 	Queues               *GatewayPoolQueueView              `json:"queues"`
 	Rest                 GatewayPoolRestView                `json:"rest"`
 }
 
+// The account cell reads only these fields of the merged history and contacts,
+// so the one-second poll sends nothing else. Tags match the stored records.
+// TestGatewayPoolRuntimeDisplayFixtureInSync and AccountGatewayCell.runtimeDisplay.spec.ts
+// fail when the cell reads a field these drop.
+type gatewayPoolHistoryDisplay struct {
+	Current       string                            `json:"current"`
+	CurrentRegion string                            `json:"current_region,omitempty"`
+	Seen          map[string]gatewayPoolSeenDisplay `json:"seen"`
+	UpdatedAt     time.Time                         `json:"updated_at"`
+}
+
+type gatewayPoolSeenDisplay struct {
+	At         time.Time                   `json:"at"`
+	Region     string                      `json:"region,omitempty"`
+	Verdict    string                      `json:"verdict,omitempty"`
+	FullAt     time.Time                   `json:"full_at,omitzero"`
+	FullHeldMs int64                       `json:"full_held_ms,omitempty"`
+	Cooldown   *gatewayPoolCooldownDisplay `json:"cooldown,omitempty"`
+}
+
+type gatewayPoolCooldownDisplay struct {
+	Cleared            bool      `json:"cleared,omitempty"`
+	WindowSeconds      int       `json:"window_seconds"`
+	FixedSeconds       int       `json:"fixed_seconds,omitempty"`
+	Until              time.Time `json:"until,omitzero"`
+	RecommendedSeconds int       `json:"recommended_seconds,omitempty"`
+}
+
+type gatewayPoolContactsDisplay struct {
+	LedgerTag        string                           `json:"ledger_tag"`
+	TrackingSince    time.Time                        `json:"tracking_since"`
+	HistoryTruncated bool                             `json:"history_truncated,omitempty"`
+	Rounds           []gatewayPoolContactRoundDisplay `json:"rounds"`
+}
+
+type gatewayPoolContactRoundDisplay struct {
+	VersionHash string                          `json:"version_hash"`
+	Report      gatewayPoolContactReportDisplay `json:"report"`
+}
+
+type gatewayPoolContactReportDisplay struct {
+	ID           string    `json:"id"`
+	Gateway      string    `json:"gateway"`
+	Model        string    `json:"model"`
+	Source       string    `json:"source"`
+	At           time.Time `json:"at"`
+	Outcome      string    `json:"outcome"`
+	FullWindowMS int64     `json:"full_window_ms"`
+	WindowFinal  bool      `json:"window_final"`
+}
+
+func (h openAIGatewayHistory) display() gatewayPoolHistoryDisplay {
+	out := gatewayPoolHistoryDisplay{Current: h.Current, CurrentRegion: h.CurrentRegion, UpdatedAt: h.UpdatedAt}
+	if h.Seen != nil {
+		out.Seen = make(map[string]gatewayPoolSeenDisplay, len(h.Seen))
+	}
+	for gateway, seen := range h.Seen {
+		row := gatewayPoolSeenDisplay{At: seen.At, Region: seen.Region, Verdict: seen.Verdict,
+			FullAt: seen.FullAt, FullHeldMs: seen.FullHeldMs}
+		if c := seen.Cooldown; c != nil {
+			row.Cooldown = &gatewayPoolCooldownDisplay{Cleared: c.Cleared, WindowSeconds: c.WindowSeconds,
+				FixedSeconds: c.FixedSeconds, Until: c.Until, RecommendedSeconds: c.LegacyRecommendedSeconds}
+		}
+		out.Seen[gateway] = row
+	}
+	return out
+}
+
+func (c gatewayPoolContacts) display() gatewayPoolContactsDisplay {
+	out := gatewayPoolContactsDisplay{LedgerTag: c.LedgerTag, TrackingSince: c.TrackingSince, HistoryTruncated: c.HistoryTruncated}
+	if c.Rounds != nil {
+		out.Rounds = make([]gatewayPoolContactRoundDisplay, len(c.Rounds))
+	}
+	for i, round := range c.Rounds {
+		r := round.Report
+		out.Rounds[i] = gatewayPoolContactRoundDisplay{VersionHash: round.VersionHash, Report: gatewayPoolContactReportDisplay{
+			ID: r.ID, Gateway: r.Gateway, Model: r.Model, Source: r.Source, At: r.At,
+			Outcome: r.Outcome, FullWindowMS: r.FullWindowMS, WindowFinal: r.WindowFinal,
+		}}
+	}
+	return out
+}
+
 // Read-only local snapshot. This endpoint never fetches tickets, lists gateways,
-// ends a round, or probes an upstream model.
-func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, ids []int64) (map[int64]GatewayPoolProgress, error) {
+// ends a round, or probes an upstream model. The cooldown estimate is only
+// computed when estimate is set (the temporary-unschedulable dialog).
+func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, ids []int64, estimate bool) (map[int64]GatewayPoolProgress, error) {
 	if s.accountRepo == nil {
 		return s.GatewayPoolProgress(ids), nil
 	}
@@ -76,7 +160,7 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 				state = *other
 			}
 		} else {
-			usagePeers, err := s.gatewayPoolStatePeers(ctx, tag, "usage")
+			usagePeers, err := s.gatewayPoolStatePeers(ctx, tag, "usage", 0)
 			if err != nil {
 				return nil, err
 			}
@@ -90,18 +174,33 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 		}
 		runtime := &GatewayPoolRuntimeView{ObservedAt: time.Now().UTC(), Tickets: []GatewayPoolLiveTicket{},
 			Rounds: make([]GatewayPoolUsageRound, len(state.Rounds)), Archived: state.Archived, Incomplete: state.Incomplete}
-		runtime.History, runtime.Contacts = s.gatewayPoolDisplaySnapshot(account, identity, peers, displayCache)
-		runtime.Queues = s.codexCookies.gatewayPoolQueueView(account, identity, runtime.History, runtime.Contacts, runtime.ObservedAt)
+		history, contacts := s.gatewayPoolDisplaySnapshot(account, identity, peers, displayCache)
+		runtime.History, runtime.Contacts = history.display(), contacts.display()
+		var deadlines map[string]time.Time
+		cooldownDeadlines := func() map[string]time.Time { // shared by the queue view and the estimate
+			if deadlines == nil {
+				deadlines = s.codexCookies.gatewayPoolDisplayCooldownDeadlines(identity, account, history, runtime.ObservedAt)
+			}
+			return deadlines
+		}
+		runtime.Queues = s.codexCookies.gatewayPoolQueueView(account, identity, contacts, runtime.ObservedAt, cooldownDeadlines)
 		restRows, loaded := restPeers[tag]
 		if !loaded {
-			restRows, err = s.gatewayPoolStatePeers(ctx, tag, "rest")
+			restRows, err = s.gatewayPoolStatePeers(ctx, tag, "rest", 0)
 			if err != nil {
 				return nil, err // an unavailable rest snapshot is not a recovered account
 			}
 			restPeers[tag] = restRows
 		}
-		runtime.Rest = s.gatewayPoolRestDisplay(account, identity, restRows)
-		runtime.CooldownEstimate = s.codexCookies.gatewayPoolCooldownEstimate(identity, account, runtime.History, runtime.ObservedAt, restRows...)
+		var rest gatewayPoolRestState
+		if !account.GatewayPoolContinuousWaitEnabled() {
+			rest = s.codexCookies.gatewayPoolRestSnapshot(account, identity, restRows)
+		}
+		runtime.Rest = gatewayPoolRestDisplay(account, rest)
+		if estimate {
+			cooldown := gatewayPoolCooldownEstimate(account, cooldownDeadlines(), rest)
+			runtime.CooldownEstimate = &cooldown
+		}
 		runtime.LedgerTag, runtime.ConcurrencyLimit = tag, account.Concurrency
 		runtime.GatewayWindowSeconds = int(account.gatewayPoolGatewayWindow().Seconds())
 		if count, known := concurrency[account.ID]; known {
@@ -191,11 +290,11 @@ func (s *OpenAIGatewayService) GatewayPoolRuntimeProgress(ctx context.Context, i
 	return out, nil
 }
 
-func (s *adminServiceImpl) GatewayPoolRuntimeProgress(ctx context.Context, ids []int64) (map[int64]GatewayPoolProgress, error) {
+func (s *adminServiceImpl) GatewayPoolRuntimeProgress(ctx context.Context, ids []int64, estimate bool) (map[int64]GatewayPoolProgress, error) {
 	if reader, ok := s.runtimeBlocker.(interface {
-		GatewayPoolRuntimeProgress(context.Context, []int64) (map[int64]GatewayPoolProgress, error)
+		GatewayPoolRuntimeProgress(context.Context, []int64, bool) (map[int64]GatewayPoolProgress, error)
 	}); ok {
-		return reader.GatewayPoolRuntimeProgress(ctx, ids)
+		return reader.GatewayPoolRuntimeProgress(ctx, ids, estimate)
 	}
 	return s.GatewayPoolProgress(ids), nil
 }

@@ -87,7 +87,7 @@ func TestGatewayPoolQualityRestBothEntrypointsFreezeSameFreshLunaCohort(t *testi
 			svc.codexCookies.poolContactPicks.Store(gatewayPoolLedgerTag(gwpoolTestIdentity), counter)
 			if entry == "rotation" {
 				failure := &UpstreamFailoverError{GatewayPoolRotation: true, NextAccountAction: NextAccountStop}
-				svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, failure)
+				svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, failure, nil)
 				require.True(t, failure.ShouldRetryNextAccount())
 			} else {
 				require.False(t, svc.gatewayPoolRoundSelectionAllowed(ctx, &group, &AccountSelectionResult{Account: account}))
@@ -217,15 +217,15 @@ func TestGatewayPoolQualityRestEstimateUsesNewestPeerCohortWithoutWriting(t *tes
 		"late":  {At: now},
 	}}
 	svc := &OpenAIGatewayService{}
-	estimate := svc.codexCookies.gatewayPoolCooldownEstimate(gwpoolTestIdentity, account, history, now, *peer)
+	estimate := gatewayPoolTestCooldownEstimate(&svc.codexCookies, gwpoolTestIdentity, account, history, now, *peer)
 	require.Equal(t, now.Add(10*time.Minute), estimate.EligibleAt)
-	require.Contains(t, svc.gatewayPoolRestDisplay(account, gwpoolTestIdentity, []Account{*peer}).Reason, "or 3 local cooldowns")
+	require.Contains(t, gatewayPoolRestDisplay(account, svc.codexCookies.gatewayPoolRestSnapshot(account, gwpoolTestIdentity, []Account{*peer})).Reason, "or 3 local cooldowns")
 	require.Equal(t, older, readGatewayPoolRest(account, tag))
 	_, cached := svc.codexCookies.poolRestState.Load(tag)
 	require.False(t, cached, "display cannot publish a runtime policy")
 	newer.Active, newer.QualityGateways = false, nil
 	peer.Extra[gatewayPoolRestStateKey] = newer
-	estimate = svc.codexCookies.gatewayPoolCooldownEstimate(gwpoolTestIdentity, account, history, now, *peer)
+	estimate = gatewayPoolTestCooldownEstimate(&svc.codexCookies, gwpoolTestIdentity, account, history, now, *peer)
 	require.Equal(t, now.Add(time.Hour), estimate.EligibleAt, "a newer tombstone must not reuse an old quality cohort")
 }
 
@@ -260,7 +260,7 @@ func TestGatewayPoolQualityRestChangedInventoryCannotPublishAtEitherEntrypoint(t
 				}
 				if entry == "rotation" {
 					failure := &UpstreamFailoverError{GatewayPoolRotation: true, NextAccountAction: NextAccountStop}
-					result := svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, failure)
+					result := svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, failure, nil)
 					require.False(t, failure.ShouldRetryNextAccount(), "stale exhaustion cannot authorize rotation")
 					require.Nil(t, gatewayPoolRotationFrom(result))
 				} else {

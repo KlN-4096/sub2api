@@ -48,7 +48,7 @@ func TestGatewayPoolNewSessionsFillPrimaryBeforeStandby(t *testing.T) {
 				rateLimitService:   gatewayPoolSchedulerTestSettings(mode),
 			}
 			identity := openAIGatewayPoolAccountKey(a)
-			svc.codexCookies.poolRounds.claim(group, identity)
+			svc.codexCookies.poolRounds.claim(group, identity, gatewayPoolActiveAccountsDefault)
 			svc.codexCookies.poolPairs.Store(identity, openAIGatewayPoolPair{
 				cookie: "offline", gateway: "unified-200", version: "full",
 			})

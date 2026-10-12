@@ -49,7 +49,7 @@ type gatewayPoolProgressTracker struct {
 	next uint64
 }
 
-func (p *gatewayPoolProgressTracker) start(account int64, limit int, scopes ...gatewayPoolProgressScope) *gatewayPoolProgressRun {
+func (p *gatewayPoolProgressTracker) start(account int64, scopes ...gatewayPoolProgressScope) *gatewayPoolProgressRun {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.runs == nil {
@@ -62,7 +62,7 @@ func (p *gatewayPoolProgressTracker) start(account int64, limit int, scopes ...g
 	}
 	p.next++
 	run := &gatewayPoolProgressRun{account: account, order: p.next, scope: scope, tickets: map[string]struct{}{}, progress: GatewayPoolProgress{
-		RunID: strconv.FormatUint(p.next, 10), Sequence: scope.sequence, Phase: "fetching", Limit: limit, StartedAt: now, UpdatedAt: now,
+		RunID: strconv.FormatUint(p.next, 10), Sequence: scope.sequence, Phase: "fetching", StartedAt: now, UpdatedAt: now,
 	}}
 	var active []*gatewayPoolProgressRun
 	var latestDone *gatewayPoolProgressRun
@@ -98,16 +98,13 @@ func (p *gatewayPoolProgressTracker) tried(run *gatewayPoolProgressRun, ticket s
 	run.progress.Attempt = len(run.tickets)
 }
 
-func (p *gatewayPoolProgressTracker) update(run *gatewayPoolProgressRun, phase string, attempt int, gateway string, rejected bool, done bool) {
+func (p *gatewayPoolProgressTracker) update(run *gatewayPoolProgressRun, phase string, gateway string, rejected bool, done bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if run.done {
 		return
 	}
 	run.progress.Phase, run.progress.UpdatedAt = phase, time.Now()
-	if attempt > run.progress.Attempt {
-		run.progress.Attempt = attempt
-	}
 	if gateway != "" {
 		run.progress.Gateway = gateway
 	}

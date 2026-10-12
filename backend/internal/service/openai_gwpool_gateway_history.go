@@ -268,7 +268,7 @@ func (s *OpenAIGatewayService) noteOpenAIGatewayUse(
 	account.Extra[openAIGatewayHistoryExtraKey] = generic
 	account.Extra[openAIGatewayLedgerTagExtraKey] = rec.LedgerTag
 	// 不随请求取消：用量是在响应收尾之后记的，跟着请求 ctx 一起死就等于这条读数永远写不进去。
-	if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
+	if err := s.updateGatewayPoolRuntimeExtra(ctx, account.ID, map[string]any{
 		openAIGatewayHistoryExtraKey:   generic,
 		openAIGatewayLedgerTagExtraKey: rec.LedgerTag,
 	}); err != nil {
