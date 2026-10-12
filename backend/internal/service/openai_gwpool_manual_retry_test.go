@@ -46,7 +46,7 @@ func TestGatewayPoolManualClearPersistsAndKeepsLiveTicket(t *testing.T) {
 	account, _ := repo.GetByID(ctx, 1)
 	stale, _ := repo.GetByID(ctx, 2)
 	before, _ := readOpenAIGatewayHistory(account)
-	pair := openAIGatewayPoolPair{gateway: "recent", version: "live", until: now.Add(time.Hour), routeExpiresAt: now.Add(time.Hour)}
+	pair := openAIGatewayPoolPair{gateway: "recent", version: "live", routeExpiresAt: now.Add(time.Hour)}
 	mark := gatewayPoolVerifiedMark{version: "live", at: now}
 	svc.codexCookies.poolPairs.Store(identity, pair)
 	svc.codexCookies.poolVerified.Store(identity, mark)
@@ -191,11 +191,12 @@ func TestGatewayPoolManualClearRestRetriesPartiallyCommittedClones(t *testing.T)
 	svc.accountRepo = repo
 	for _, id := range []int64{1, 2} {
 		account, _ := repo.GetByID(ctx, id)
-		state := gatewayPoolRestState{Tag: gatewayPoolLedgerTag(identity), Active: true, ChangedAt: now, NextCheck: now.Add(time.Minute),
+		state := gatewayPoolRestState{Tag: gatewayPoolLedgerTag(identity), Active: true, ChangedAt: now,
 			QualityGateways: []string{"quality-before-clear"}}
+		until := now.Add(time.Minute)
 		require.NoError(t, repo.UpdateExtra(ctx, id, map[string]any{gatewayPoolRestStateKey: state}))
 		repo.rows[id].account.TempUnschedulableReason = gatewayPoolRestReason(account)
-		repo.rows[id].account.TempUnschedulableUntil = &state.NextCheck
+		repo.rows[id].account.TempUnschedulableUntil = &until
 	}
 	account, _ := repo.GetByID(ctx, 1)
 	require.Error(t, svc.clearGatewayPoolManualRest(ctx, account, identity))

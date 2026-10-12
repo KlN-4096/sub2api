@@ -2291,8 +2291,7 @@ func hasRecoverableRuntimeState(account *Account) bool {
 		hasNonEmptyMapValue(account.Extra, "antigravity_quota_scopes")
 }
 
-// hasActiveModelRateLimit 只认未到期的模型级限流：降智暂停（openai_turn_state_hold.go）放回或到期后
-// 条目会留在 map 里（仓储没有按 scope 删除），不能让曾被停过的账号每次定时测试成功都误判成
+// hasActiveModelRateLimit 只认未到期的模型级限流：到期后条目会留在 map 里（仓储没有按 scope 删除），不能让曾被停过的账号每次定时测试成功都误判成
 // 「有状态要恢复」而白清一次、白打一行日志。解析不出 map 的形态按原来的非空判定。
 func hasActiveModelRateLimit(account *Account) bool {
 	limits, ok := account.Extra[modelRateLimitsKey].(map[string]any)

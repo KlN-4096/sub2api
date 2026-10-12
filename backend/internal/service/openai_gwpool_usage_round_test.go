@@ -46,7 +46,6 @@ func TestGatewayPoolUsageClosedCycleFreezesAndSameTicketCanStartNewCycle(t *test
 	state.end(at.Add(time.Minute))
 	view := state.Rounds[0].fullUsageView("session", at.Add(time.Hour))
 	require.EqualValues(t, 60000, view.FullDurationMS)
-	require.Empty(t, view.FullActiveUntil)
 	require.True(t, state.note("luna", "v", at.Add(2*time.Minute), true))
 	state.Rounds[1].syncActiveUsage([]gatewayPoolActiveUseEvent{{
 		roundID: state.Rounds[1].ID, ticket: "v", start: at.Add(2 * time.Minute), end: at.Add(2*time.Minute + time.Second),
@@ -73,10 +72,8 @@ func TestGatewayPoolUsageArchivesWithoutLosingTotals(t *testing.T) {
 	require.EqualValues(t, 3, state.Archived[gatewayPoolUsageSharedModel].Rounds)
 	require.EqualValues(t, 3, state.Archived[gatewayPoolUsageSharedModel].Attempted)
 	require.EqualValues(t, 3, state.Archived[gatewayPoolUsageSharedModel].Full)
-	require.Zero(t, state.Archived[gatewayPoolUsageSharedModel].DurationMS, "new cycles cannot write legacy held duration")
 	require.NotNil(t, state.Archived[gatewayPoolUsageSharedModel].ActiveDurationMS)
-	require.EqualValues(t, 60000, *state.Archived[gatewayPoolUsageSharedModel].ActiveDurationMS,
-		"archive new activity separately; do not overwrite legacy lifetime")
+	require.EqualValues(t, 60000, *state.Archived[gatewayPoolUsageSharedModel].ActiveDurationMS)
 }
 
 func TestGatewayPoolUsageConcurrentDedupPersistsAcrossRestart(t *testing.T) {
@@ -179,7 +176,7 @@ func TestGatewayPoolRuntimeViewOnlyShowsLiveExactModelProofWithoutPoolIO(t *test
 	account := fake.account(1)
 	svc, _ := gatewayRuntimeService(account)
 	identity := openAIGatewayPoolAccountKey(account)
-	pair := openAIGatewayPoolPair{cookie: "secret-cookie", gateway: "g", version: "v", until: time.Now().Add(time.Minute)}
+	pair := openAIGatewayPoolPair{cookie: "secret-cookie", gateway: "g", version: "v"}
 	svc.codexCookies.poolPairs.Store(identity, pair)
 	svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, "v", "gpt-6-luna")
 	svc.noteGatewayPoolUsage(context.Background(), account, identity, "gpt-6-luna",
@@ -218,7 +215,7 @@ func TestGatewayPoolUsageEndsOnlyOnStableFreshZeroInventory(t *testing.T) {
 	require.False(t, ended())
 	require.Zero(t, fake.listHits.Load())
 	finish()
-	svc.codexCookies.poolPairs.Store(identity, openAIGatewayPoolPair{cookie: "offline", gateway: "g", version: "v", until: time.Now().Add(time.Minute)})
+	svc.codexCookies.poolPairs.Store(identity, openAIGatewayPoolPair{cookie: "offline", gateway: "g", version: "v"})
 	svc.finishGatewayPoolUsageIfExhausted(context.Background(), account)
 	require.False(t, ended())
 	svc.codexCookies.poolPairs.Delete(identity)

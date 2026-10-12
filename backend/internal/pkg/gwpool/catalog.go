@@ -175,21 +175,6 @@ func (c *Client) FreshCatalog(ctx context.Context, account, tag, model string) (
 	return c.Catalog(ctx, account, tag, model, after)
 }
 
-// PeekCatalog is display-only: no network, refresh, TTL extension, LRU touch,
-// or new cache entry. In-flight, missing and expired snapshots remain unknown.
-func (c *Client) PeekCatalog(account, tag, model string) (Catalog, time.Time, bool) {
-	if c == nil {
-		return Catalog{}, time.Time{}, false
-	}
-	c.catalog.mu.Lock()
-	defer c.catalog.mu.Unlock()
-	entry := c.catalog.entries[makeCatalogKey(account, tag, model)]
-	if entry == nil || entry.flight != nil || entry.displayUnknown || entry.value.Generation == 0 || !c.catalog.timeNow().Before(entry.until) {
-		return Catalog{}, time.Time{}, false
-	}
-	return cloneCatalog(entry.value), entry.until, true
-}
-
 func (c *Client) refreshCatalog(ctx context.Context, key catalogKey, entry *catalogEntry, flight *catalogFlight, started time.Time) {
 	defer flight.cancel()
 	gateways, err := c.fetchGateways(ctx, key.account, key.tag, key.model)

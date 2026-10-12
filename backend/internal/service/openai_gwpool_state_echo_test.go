@@ -401,7 +401,6 @@ func TestGatewayPoolMarkStaleOnlyTouchesTheNamedTicket(t *testing.T) {
 	store := &openAICodexCookieStore{}
 	live := openAIGatewayPoolPair{
 		cookie: "__cflb=a", gateway: "unified-142", version: "tkt-2",
-		until: time.Now().Add(time.Minute),
 	}
 	store.poolPairs.Store(gwpoolTestIdentity, live)
 
@@ -424,7 +423,6 @@ func TestGatewayPoolMarkStalePreservesReplacementOnSameGateway(t *testing.T) {
 	store := &openAICodexCookieStore{}
 	store.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
 		cookie: "__cflb=a", gateway: "unified-142", version: "tkt-2", // 缓存里已经换成 tkt-2
-		until: time.Now().Add(time.Minute),
 	})
 
 	// B 手上还是换票前那张 tkt-1，但判死的是 unified-142 这个落点。

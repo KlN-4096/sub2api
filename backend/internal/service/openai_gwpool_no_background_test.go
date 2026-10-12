@@ -18,7 +18,6 @@ func TestGatewayPoolVerifiedTicketNeverStartsBackgroundPreparation(t *testing.T)
 	now := time.Now()
 	svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
 		cookie: "offline-cookie", gateway: "unified-142", version: "live",
-		until: now.Add(40 * time.Second), since: now.Add(-110 * time.Second),
 	})
 	svc.codexCookies.poolVerified.Store(gwpoolTestIdentity, gatewayPoolVerifiedMark{
 		version: "live", at: now.Add(-110 * time.Second),

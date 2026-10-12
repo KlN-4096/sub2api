@@ -7,14 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// turn-state 的三个运行态键只由网关/猎手维护。UpdateAccount 已经剔除并回填它们；
-// 重授权（UpdateAccountExtra）和批量编辑（BulkUpdateAccounts）是另外两个 extra 写入口，
-// 不剔的话一份候选池会被写进别的账号——注入出站就是跨凭证域回放。
+// turn-state 形态观测只由网关维护。UpdateAccount 已经剔除并回填它；重授权（UpdateAccountExtra）
+// 和批量编辑（BulkUpdateAccounts）是另外两个 extra 写入口，不剔的话一份读数会被写进别的账号。
 func turnStateRuntimeExtraPayload() map[string]any {
 	return map[string]any{
 		"custom":                        "value",
-		openAITurnStatePoolExtraKey:     []any{map[string]any{"blob": "not-mine", "model": "gpt-6-astra"}},
-		openAITurnStateHuntExtraKey:     map[string]any{"hour_count": -5},
 		openAITurnStateObservedExtraKey: map[string]any{"chars": 292},
 	}
 }
@@ -29,17 +26,15 @@ func TestUpdateAccountExtraDropsTurnStateRuntimeKeys(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, "value", repo.accounts[accountID].Extra["custom"])
-	for _, key := range []string{openAITurnStatePoolExtraKey, openAITurnStateHuntExtraKey, openAITurnStateObservedExtraKey} {
-		require.NotContains(t, repo.accounts[accountID].Extra, key)
-	}
+	require.NotContains(t, repo.accounts[accountID].Extra, openAITurnStateObservedExtraKey)
 }
 
-func TestClearOpenAITurnStateRuntimeExtraNullsTheThreeKeys(t *testing.T) {
+func TestClearOpenAITurnStateRuntimeExtraNullsObservation(t *testing.T) {
 	accountID := int64(155)
 	repo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{
 		accountID: {ID: accountID, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{
-			"custom":                    "value",
-			openAITurnStatePoolExtraKey: []any{map[string]any{"blob": "old-account"}},
+			"custom":                        "value",
+			openAITurnStateObservedExtraKey: map[string]any{"chars": 292},
 		}},
 	}}
 
@@ -47,11 +42,10 @@ func TestClearOpenAITurnStateRuntimeExtraNullsTheThreeKeys(t *testing.T) {
 
 	extra := repo.accounts[accountID].Extra
 	require.Equal(t, "value", extra["custom"])
-	// jsonb 顶层合并：写 null 而不是删键，读侧（readOpenAITurnStatePool 等）按空处理。
-	for _, key := range []string{openAITurnStatePoolExtraKey, openAITurnStateHuntExtraKey, openAITurnStateObservedExtraKey} {
-		require.Nil(t, extra[key])
-	}
-	require.Empty(t, readOpenAITurnStatePool(repo.accounts[accountID]))
+	// jsonb 顶层合并：写 null 而不是删键，读侧按空处理。
+	require.Nil(t, extra[openAITurnStateObservedExtraKey])
+	_, ok := readOpenAITurnStateObservation(repo.accounts[accountID])
+	require.False(t, ok)
 }
 
 func TestOpenAITurnStateIdentityChanged(t *testing.T) {
@@ -77,7 +71,5 @@ func TestBulkUpdateAccountsDropsTurnStateRuntimeKeys(t *testing.T) {
 	require.Equal(t, 2, result.Success)
 	require.Len(t, repo.bulkUpdates, 1)
 	require.Equal(t, "value", repo.bulkUpdates[0].Extra["custom"])
-	for _, key := range []string{openAITurnStatePoolExtraKey, openAITurnStateHuntExtraKey, openAITurnStateObservedExtraKey} {
-		require.NotContains(t, repo.bulkUpdates[0].Extra, key)
-	}
+	require.NotContains(t, repo.bulkUpdates[0].Extra, openAITurnStateObservedExtraKey)
 }

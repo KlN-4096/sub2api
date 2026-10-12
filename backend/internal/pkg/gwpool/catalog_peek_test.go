@@ -159,3 +159,16 @@ func TestPeekCatalogCanceledRefreshStaysUnknownUntilSuccess(t *testing.T) {
 		t.Fatalf("successful refresh did not restore known empty inventory: %+v %v", value, ok)
 	}
 }
+
+// PeekCatalog is a test-only probe of the cache state machine: no network,
+// refresh, TTL extension, LRU touch or new entry; in-flight, missing and
+// expired snapshots remain unknown.
+func (c *Client) PeekCatalog(account, tag, model string) (Catalog, time.Time, bool) {
+	c.catalog.mu.Lock()
+	defer c.catalog.mu.Unlock()
+	entry := c.catalog.entries[makeCatalogKey(account, tag, model)]
+	if entry == nil || entry.flight != nil || entry.displayUnknown || entry.value.Generation == 0 || !c.catalog.timeNow().Before(entry.until) {
+		return Catalog{}, time.Time{}, false
+	}
+	return cloneCatalog(entry.value), entry.until, true
+}

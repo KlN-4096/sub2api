@@ -2,7 +2,6 @@ package service
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -10,7 +9,7 @@ import (
 func TestGatewayPoolLateVerificationCannotReplaceCurrentProof(t *testing.T) {
 	store := &openAICodexCookieStore{}
 	store.poolPairs.Store("identity", openAIGatewayPoolPair{
-		cookie: "cookie", version: "new", until: time.Now().Add(time.Minute),
+		cookie: "cookie", version: "new",
 	})
 	store.gatewayPoolMarkVerifiedFull("identity", "new")
 	store.gatewayPoolMarkVerifiedFull("identity", "old")
@@ -22,7 +21,7 @@ func TestGatewayPoolLateVerificationCannotReplaceCurrentProof(t *testing.T) {
 func TestGatewayPoolVerifiedTicketIsSharedAcrossModelsAndKeepsFirstTime(t *testing.T) {
 	store := &openAICodexCookieStore{}
 	store.poolPairs.Store("identity", openAIGatewayPoolPair{
-		cookie: "cookie", version: "v", until: time.Now().Add(time.Minute),
+		cookie: "cookie", version: "v",
 	})
 	store.gatewayPoolMarkVerifiedFull("identity", "v", "gpt-6-luna")
 	before, _ := store.gatewayPoolVerifiedMarkOf("identity")

@@ -296,7 +296,7 @@ func applyCodexAccountIdentityHeaders(headers http.Header, account *Account, api
 }
 
 // stageCodexOAuthIdentity 把 Codex OAuth 请求体里的身份字段收口，并把出站头要用的
-// IDs 暂存进上下文。Forward 与 turn-state 猎手的探测共用这一段，**顺序敏感**：
+// IDs 暂存进上下文。Forward 与 turn-state 探测（网关池预热复用）共用这一段，**顺序敏感**：
 //
 //  1. 带真实 device_id 时补齐 client_metadata 安装标识（compact 形态没有 client_metadata，跳过）。
 //  2. 解析指纹 IDs。compact 形态只跳过请求体侧：真实 Codex 的 compact 请求体同样没有

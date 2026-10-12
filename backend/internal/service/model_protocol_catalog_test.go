@@ -332,9 +332,13 @@ func TestCommandCodeGatewayPassesThroughCatalogProtocols(t *testing.T) {
 		url  string
 		body []byte
 	}
+	// 每次调用一个独立目录键：Windows 时钟粒度下两次调用可能同一纳秒值，而失败的 store 会保留
+	// 上一次的目录，让「目录不可用」的用例读到前一个用例的目录。
+	run, calls := time.Now().UnixNano(), 0
 	forward := func(t *testing.T, ingress routingMatrixIngress, model string, catalog map[string][]string) observation {
 		t.Helper()
-		base := fmt.Sprintf("http://cc-%s-%d.example", strings.ReplaceAll(t.Name(), "/", "-"), time.Now().UnixNano())
+		calls++
+		base := fmt.Sprintf("http://cc-%s-%d-%d.example", strings.ReplaceAll(t.Name(), "/", "-"), run, calls)
 		account := commandCodeTestAccount(12)
 		account.Credentials["api_base_urls"] = map[string]any{
 			APIProtocolChatCompletions: base + "/provider/v1",

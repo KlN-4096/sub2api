@@ -23,6 +23,7 @@ func TestGatewayPoolStatePeersActualPostgresProjectionAndOrder(t *testing.T) {
 		for _, kind := range []string{"usage", "rest"} {
 			key := "openai_gwpool_" + kind + "_tag"
 			if id == 1 {
+				// Legacy previous-ledger key from before 251 must not match.
 				key = "openai_gwpool_" + kind + "_previous_tag"
 			}
 			value := tag
@@ -45,9 +46,8 @@ func TestGatewayPoolStatePeersActualPostgresProjectionAndOrder(t *testing.T) {
 	for _, kind := range []string{"usage", "rest"} {
 		rows, readErr := repo.FindGatewayPoolStatePeers(ctx, tag, kind)
 		require.NoError(t, readErr)
-		require.Len(t, rows, 2, "exclude soft-deleted and unrelated domains")
-		require.EqualValues(t, 2, rows[0].ID, "current precedes previous despite insertion order")
-		require.EqualValues(t, 1, rows[1].ID)
+		require.Len(t, rows, 1, "exclude legacy previous tags, soft-deleted and unrelated domains")
+		require.EqualValues(t, 2, rows[0].ID)
 		for _, row := range rows {
 			require.Nil(t, row.Credentials)
 			require.NotContains(t, row.Extra, "unrelated")

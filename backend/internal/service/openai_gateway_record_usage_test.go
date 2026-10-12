@@ -2974,7 +2974,7 @@ func TestRecordUsageKeepsCompactionSemanticFlagOrthogonalToTransport(t *testing.
 	require.Equal(t, RequestTypeStream, RequestTypeFromLegacy(logStub.lastLog.Stream, logStub.lastLog.OpenAIWSMode))
 }
 
-// 猎手探测通过 input.RequestType 标 probe；CyberBlocked 仍优先。
+// 显式 input.RequestType 生效（已删的猎手探测曾用它标 probe）；CyberBlocked 仍优先。
 func TestRecordUsageHonorsExplicitRequestType(t *testing.T) {
 	logStub := &openAIRecordUsageLogRepoStub{inserted: true}
 	svc := newOpenAIRecordUsageServiceForTest(logStub, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, &openAIUserGroupRateRepoStub{})

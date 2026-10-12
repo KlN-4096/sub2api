@@ -632,7 +632,7 @@ describe('AccountGatewayCell', () => {
         observed_at: new Date().toISOString(),
         tickets: [{ gateway: 'unified-73', region: 'east-asia', expires_at: new Date(Date.now() + 240_000).toISOString(), verified_models: ['gpt-6-luna'] }],
         rounds: [{ id: 'round', model: 'all', started_at: isoAgo(240), attempted: 8, full: 3, full_duration_ms: 65000 }],
-        archived: { 'gpt-6-luna': { rounds: 2, attempted: 20, full: 5, duration_ms: 200_000 } }
+        archived: { 'gpt-6-luna': { rounds: 2, attempted: 20, full: 5 } }
       }
     }
     const w = mount(AccountGatewayCell, { props: {
@@ -701,7 +701,7 @@ describe('AccountGatewayCell', () => {
       attempted: 8, full: 3, full_duration_ms: 65000, full_usage_mode: 'business_active_v1' }
     const runtime = { observed_at: new Date().toISOString(), tickets: [],
       rounds: [active, ended],
-      archived: { all: { rounds: 2, attempted: 10, full: 4, duration_ms: 900000, duration_incomplete: true, active_duration_ms: 95000 } } }
+      archived: { all: { rounds: 2, attempted: 10, full: 4, active_duration_ms: 95000 } } }
     const progress = { phase: 'idle' as const, attempt: 0, limit: 5, rejected: 0, elapsed_ms: 0,
       started_at: '', updated_at: '', active_requests: 0, runtime }
     const w = mount(AccountGatewayCell, { props: { account: account({}), progress } })
@@ -710,7 +710,7 @@ describe('AccountGatewayCell', () => {
     expect(w.get('[data-testid="gateway-total-duration"]').text()).toBe('00:02:40')
     const before = history()
     await w.setProps({ progress: { ...progress, runtime: { ...runtime, rounds: [active],
-      archived: { all: { rounds: 3, attempted: 18, full: 7, duration_ms: 990000, active_duration_ms: 160000 } } } } })
+      archived: { all: { rounds: 3, attempted: 18, full: 7, active_duration_ms: 160000 } } } } })
     expect(history()).toBe(before)
     expect(w.get('[data-testid="gateway-cycle-duration"]').text()).toBe('00:00:05')
     w.unmount()
@@ -727,7 +727,7 @@ describe('AccountGatewayCell', () => {
           { id: 'legacy-ended', model: 'all', started_at: isoAgo(10000), ended_at: isoAgo(6000),
             attempted: 9, full: 4, full_duration_ms: 3000000 }
         ],
-        archived: { all: { rounds: 3, attempted: 30, full: 12, duration_ms: 9000000 } }
+        archived: { all: { rounds: 3, attempted: 30, full: 12 } }
       }
     } } })
     const current = w.get('[data-testid="account-gateway-usage-round"]').text()

@@ -85,7 +85,7 @@ func TestGatewayPoolSelectionPrioritizesFreshCooledCountsAcrossSchedulers(t *tes
 			require.Equal(t, b.ID, selectAccount(context.Background(), nil), "higher known cooled count wins")
 			identity := openAIGatewayPoolAccountKey(a)
 			svc.codexCookies.poolPairs.Store(identity, openAIGatewayPoolPair{
-				cookie: "offline", version: "full", gateway: "unified-200", until: time.Now().Add(time.Minute),
+				cookie: "offline", version: "full", gateway: "unified-200",
 			})
 			svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, "full")
 			require.Equal(t, b.ID, selectAccount(context.Background(), nil), "another live ticket must not evict the active primary")
@@ -139,7 +139,7 @@ func TestGatewayPoolSelectionWeightedSessionKeepsVerifiedWindow(t *testing.T) {
 	for _, account := range []*Account{a, b} {
 		identity := openAIGatewayPoolAccountKey(account)
 		svc.codexCookies.poolPairs.Store(identity, openAIGatewayPoolPair{
-			cookie: "offline", version: "full", gateway: "unified-200", until: time.Now().Add(time.Minute),
+			cookie: "offline", version: "full", gateway: "unified-200",
 		})
 		svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, "full")
 	}

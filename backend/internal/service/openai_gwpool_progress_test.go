@@ -65,20 +65,6 @@ func TestGatewayPoolProgressCountsTwoTicketsNotFourShots(t *testing.T) {
 	require.Equal(t, 2, tracker.snapshot([]int64{1}, time.Now())[1].Attempt)
 }
 
-func TestGatewayPoolProgressResumesAfterConcurrentRunReplacedIt(t *testing.T) {
-	var tracker gatewayPoolProgressTracker
-	first := tracker.start(1, 8)
-	tracker.update(first, "ready", 0, "", false, true)
-	second := tracker.start(1, 8)
-	tracker.resume(first)
-	tracker.tried(first, "next")
-	snapshot := tracker.snapshot([]int64{1}, time.Now())[1]
-	require.Equal(t, first.progress.RunID, snapshot.RunID)
-	require.Equal(t, 2, snapshot.ActiveRequests)
-	tracker.update(second, "ready", 0, "", false, true)
-	require.Equal(t, 1, tracker.snapshot([]int64{1}, time.Now())[1].ActiveRequests)
-}
-
 func TestGatewayPoolProgressDoesNotCountMissingOrUnconfirmedTicket(t *testing.T) {
 	for _, missing := range []bool{false, true} {
 		fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)

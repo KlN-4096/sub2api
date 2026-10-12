@@ -104,7 +104,7 @@ func TestGatewayPoolQueueViewBoundsSamplesAndKeepsReadonlyFIFO(t *testing.T) {
 	queue := store.gatewayPoolCandidateQueue(gwpoolTestIdentity)
 	queue.names = []string{"g4", "gone", "g5"}
 	store.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
-		gateway: "g0", cookie: "offline", version: "ticket", until: now.Add(time.Minute),
+		gateway: "g0", cookie: "offline", version: "ticket",
 	})
 	view := store.gatewayPoolQueueView(account, gwpoolTestIdentity, history, gatewayPoolContacts{}, now)
 	require.NotNil(t, view)

@@ -195,9 +195,6 @@ func gatewayPoolCooldownResetHistory(rec *openAIGatewayHistory, tag string) *ope
 	if rec.LedgerTag == tag {
 		return rec
 	}
-	if rec.Previous != nil && rec.Previous.LedgerTag == tag {
-		return rec.Previous
-	}
 	return nil
 }
 
@@ -343,13 +340,8 @@ func (s *OpenAIGatewayService) writeGatewayPoolCooldownReset(ctx context.Context
 		s.codexCookies.applyGatewayPoolCooldownReset(identity, at, base)
 		return nil
 	}
-	previousTag := ""
-	if rec.Previous != nil {
-		previousTag = rec.Previous.LedgerTag
-	}
 	if err := s.accountRepo.UpdateExtra(ctx, id, map[string]any{
 		openAIGatewayHistoryExtraKey: rec, openAIGatewayLedgerTagExtraKey: rec.LedgerTag,
-		openAIGatewayPreviousLedgerTagExtraKey: previousTag,
 	}); err != nil {
 		return err
 	}

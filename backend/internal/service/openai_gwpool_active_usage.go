@@ -70,7 +70,7 @@ type gatewayPoolActiveUseEvent struct {
 	roundID, ticket string
 	start, end      time.Time
 	expires         time.Time
-	invalidatedAt   time.Time // independent of legacy ticket-lifetime fields
+	invalidatedAt   time.Time
 	sentAt          time.Time
 	requestStarted  time.Time
 	attempt         *gatewayPoolActiveUseAttempt
@@ -342,7 +342,6 @@ func (r *GatewayPoolUsageRound) syncActiveUsage(events []gatewayPoolActiveUseEve
 	}
 	usage.Session, usage.Open = session, false
 	usage.Incomplete = usage.Incomplete || incomplete
-	r.FullActiveUntil = nil
 	for _, event := range matching {
 		end := now
 		if !event.end.IsZero() {
@@ -366,9 +365,6 @@ func (r *GatewayPoolUsageRound) syncActiveUsage(events []gatewayPoolActiveUseEve
 			// Open tracks uncommitted process state, including a paused
 			// confirmation. It must not itself add elapsed time.
 			usage.Open = true
-			if !event.start.IsZero() && !end.Before(now) {
-				r.FullActiveUntil = append(r.FullActiveUntil, event.expires)
-			}
 		}
 	}
 	r.ActiveUsage = &usage

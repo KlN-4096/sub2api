@@ -221,8 +221,9 @@ func TestWarmUpRotatesPastADegradedGatewayAndServesTheFullOne(t *testing.T) {
 	require.Equal(t, "unified-84", pair.gateway)
 
 	// 两个落点都进账本（都真的被碰过了）：下一个窗口挑票时都要排掉。
-	burned := svc.codexCookies.gatewayPoolBurnedGateways(gwpoolTestIdentity, openAIGatewayPoolGatewayWindow, 8)
-	require.ElementsMatch(t, []string{"unified-142", "unified-84"}, burned)
+	for _, gateway := range []string{"unified-142", "unified-84"} {
+		require.True(t, svc.codexCookies.gatewayPoolUsedRecently(gwpoolTestIdentity, gateway, openAIGatewayPoolGatewayWindow))
+	}
 }
 
 // 试满了也没验出满血 ⇒ **按失败处理，绝不降级放行**（queue 档唯一的承诺）。
@@ -272,7 +273,6 @@ func TestWarmUpBlocksInconclusiveShotsWithoutCallingThemDegraded(t *testing.T) {
 			shooter := &gwpoolWarmShooter{replies: replies}
 
 			account := gwpoolWarmAccount(fake)
-			account.Extra[openAIGatewayPoolRecoveryExtraKey] = 0
 			err := gwpoolWarmRun(t, svc, account, shooter)
 			require.Error(t, err, "严格模式下无法判断必须停止业务出站")
 			require.NotErrorIs(t, err, errOpenAIGatewayPoolRouteDegraded, "无法判断不能冒充明确降级")
@@ -585,7 +585,7 @@ func TestGatewayPoolWarmModelPrefersTheSinkOverTheHeaderAndBody(t *testing.T) {
 	require.Equal(t, "gpt-6-astra", gatewayPoolWarmModel(all.WithContext(ctx)))
 
 	// 没有 sink 读数 ⇒ 读头。主转发入口上 sink **一定**有 model（buildUpstreamRequest 必然在
-	// doOpenAIUpstream 之前跑完），所以来源 #1 是常态；后两个来源兜的是桥接口、猎手那类
+	// doOpenAIUpstream 之前跑完），所以来源 #1 是常态；后两个来源兜的是桥接口那类
 	// 不经 buildUpstreamRequest 的调用方。双开账号：体是 zstd 字节，头里有本轮 model。
 	compressed, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("\x28\xb5\x2f\xfd zstd"))
 	require.NoError(t, err)

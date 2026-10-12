@@ -14,12 +14,9 @@ import (
 )
 
 const (
-	openAIGatewayPoolRecoveryExtraKey = "openai_gwpool_prepare_retries"
-	gatewayPoolRecoveryDefault        = 0
-	gatewayPoolRecoveryMax            = 10
-	gatewayPoolWaitDefaultGap         = 30 * time.Second
-	gatewayPoolWaitMinGap             = time.Second
-	gatewayPoolWaitMaxGap             = time.Minute
+	gatewayPoolWaitDefaultGap = 30 * time.Second
+	gatewayPoolWaitMinGap     = time.Second
+	gatewayPoolWaitMaxGap     = time.Minute
 )
 
 type gatewayPoolWaitKey struct{}
@@ -133,20 +130,6 @@ func gatewayPoolInteger(raw any, limit int) (int, bool) {
 	return int(value), true
 }
 
-func (a *Account) gatewayPoolPreparationRecoveries() int {
-	if a == nil {
-		return gatewayPoolRecoveryDefault
-	}
-	raw, exists := a.Extra[openAIGatewayPoolRecoveryExtraKey]
-	if !exists || raw == nil {
-		return gatewayPoolRecoveryDefault
-	}
-	if value, ok := gatewayPoolCooldownResetHours(raw); ok && value <= gatewayPoolRecoveryMax {
-		return value
-	}
-	return 0
-}
-
 func gatewayPoolWaitFrom(ctx context.Context) *gatewayPoolWaitState {
 	state, _ := ctx.Value(gatewayPoolWaitKey{}).(*gatewayPoolWaitState)
 	return state
@@ -173,7 +156,7 @@ func (s *OpenAIGatewayService) gatewayPoolWaitContext(ctx context.Context, accou
 		// requires fresh identity/health/configuration admission.
 		fresh = account
 	}
-	if !fresh.GatewayPoolLongWaitEnabled() {
+	if !fresh.UsesGatewayPool() {
 		return ctx
 	}
 	identity, identityErr := s.codexCookies.gatewayPoolIdentity(ctx, fresh)
@@ -215,7 +198,7 @@ func gatewayPoolRetryableShortage(err error) (*gwpool.PoolError, bool) {
 }
 
 func gatewayPoolWaitAccountMatches(fresh, original *Account) bool {
-	return fresh != nil && gatewayPoolWaitHealth(fresh) && fresh.GatewayPoolLongWaitEnabled() &&
+	return fresh != nil && gatewayPoolWaitHealth(fresh) && fresh.UsesGatewayPool() &&
 		fresh.GatewayPoolContinuousWaitEnabled() == original.GatewayPoolContinuousWaitEnabled() &&
 		gatewayPoolWaitTransportMatches(fresh, original) &&
 		fresh.gatewayPoolBaseURL() == original.gatewayPoolBaseURL() &&

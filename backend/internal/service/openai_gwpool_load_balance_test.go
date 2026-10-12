@@ -50,7 +50,7 @@ func TestGatewayPoolNewSessionsFillPrimaryBeforeStandby(t *testing.T) {
 			identity := openAIGatewayPoolAccountKey(a)
 			svc.codexCookies.poolRounds.claim(group, identity)
 			svc.codexCookies.poolPairs.Store(identity, openAIGatewayPoolPair{
-				cookie: "offline", gateway: "unified-200", version: "full", until: time.Now().Add(time.Minute),
+				cookie: "offline", gateway: "unified-200", version: "full",
 			})
 			svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, "full")
 			selection, _, err := svc.SelectAccountWithSchedulerForCapability(gatewayPoolTestGroupContext(group, 2), &group, "", "", "gpt-6-astra", nil,

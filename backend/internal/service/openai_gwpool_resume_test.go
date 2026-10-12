@@ -25,7 +25,6 @@ func gatewayPoolRestDue(t *testing.T, svc *OpenAIGatewayService, repo gatewayRot
 	fresh, err := repo.GetByID(context.Background(), id)
 	require.NoError(t, err)
 	state := readGatewayPoolRest(fresh, gatewayPoolLedgerTag(identity))
-	state.NextCheck = time.Now().Add(-time.Second)
 	state.advance(time.Now().UTC())
 	require.NoError(t, repo.UpdateExtra(context.Background(), id, map[string]any{gatewayPoolRestStateKey: state}))
 	svc.codexCookies.poolRestState.Store(state.Tag, state)
@@ -165,7 +164,6 @@ func TestGatewayPoolResumeDoesNotCountCachedOrInFlightAsLocalCooldowns(t *testin
 			seedGatewayPoolLocalReady(svc, 49, 50)
 			pair := openAIGatewayPoolPair{
 				gateway: "unified-142", cookie: gwpoolTestPairCookie(t, "unified-142"),
-				until: time.Now().Add(time.Minute),
 			}
 			if cached {
 				svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, pair)

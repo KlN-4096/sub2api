@@ -17,7 +17,7 @@ func TestGatewayPoolFullUseIncludesAttemptInOneDurableMutation(t *testing.T) {
 	at := time.Now().UTC()
 	applied := OpenAIGatewayPoolApplied{AccountID: account.ID, Gateway: "g", Version: "v"}
 	svc.codexCookies.poolPairs.Store(identity, openAIGatewayPoolPair{
-		gateway: "g", version: "v", cookie: "offline", until: at.Add(time.Hour), routeExpiresAt: at.Add(time.Hour),
+		gateway: "g", version: "v", cookie: "offline", routeExpiresAt: at.Add(time.Hour),
 	})
 	require.False(t, svc.noteGatewayPoolFullUse(context.Background(), account, identity, applied, at),
 		"unverified sends must still use ordinary attempt accounting")
@@ -32,7 +32,6 @@ func TestGatewayPoolFullUseIncludesAttemptInOneDurableMutation(t *testing.T) {
 	require.Equal(t, 1, state.Rounds[0].Attempted)
 	require.Equal(t, 1, state.Rounds[0].Full)
 	require.Equal(t, at, state.Rounds[0].Tickets[gatewayPoolUsageTicketKey("g", "v")].At)
-	require.Zero(t, state.Rounds[0].FullStartedAt)
 	require.True(t, svc.noteGatewayPoolFullUse(context.Background(), account, identity, applied, at.Add(time.Second)))
 	require.Equal(t, 1, repo.writes, "checkpoint fast path still avoids duplicate writes")
 	applied.Version = "old"

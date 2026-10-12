@@ -138,7 +138,7 @@ func TestGatewayPoolRuntimeSnapshotClearsReadyWhenVerifiedTicketDies(t *testing.
 	})
 	svc.codexCookies.poolProgress.update(run, "ready", 1, "offline", false, true)
 	svc.codexCookies.poolPairs.Store(identity, openAIGatewayPoolPair{
-		gateway: "offline", cookie: "fixture", version: "v", until: now.Add(time.Minute),
+		gateway: "offline", cookie: "fixture", version: "v",
 	})
 	svc.codexCookies.gatewayPoolMarkVerifiedFull(identity, "v", "gpt-6-luna")
 	before, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{account.ID})

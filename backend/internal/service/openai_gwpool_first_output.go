@@ -52,12 +52,11 @@ func startGatewayPoolFirstOutputGuard(ctx context.Context) {
 	guard.armLocked(deadline)
 }
 
-func newGatewayPoolFirstOutputGuard(ctx context.Context, release context.CancelFunc,
-	budget *gatewayPoolFirstOutputBudget,
+func newGatewayPoolFirstOutputGuard(ctx context.Context, budget *gatewayPoolFirstOutputBudget,
 ) (context.Context, *openAIFirstOutputHeaderGuard) {
 	guarded, cancel := context.WithCancel(ctx)
 	guard := &openAIFirstOutputHeaderGuard{
-		cancel: cancel, release: release, fired: make(chan struct{}), preparedBudget: budget,
+		cancel: cancel, release: func() {}, fired: make(chan struct{}), preparedBudget: budget,
 	}
 	budget.mu.Lock()
 	if !budget.started.IsZero() {

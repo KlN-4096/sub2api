@@ -53,7 +53,7 @@ func (c *Client) ReportCooldownBatch(ctx context.Context, reports []CooldownRepo
 		OK      bool                   `json:"ok"`
 		Results []CooldownReportResult `json:"results"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil || !out.OK || len(out.Results) != len(reports) {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBatchAckBytes)).Decode(&out); err != nil || !out.OK || len(out.Results) != len(reports) {
 		return nil, fmt.Errorf("%w: invalid cooldown batch acknowledgement", ErrPool)
 	}
 	for i := range out.Results {
