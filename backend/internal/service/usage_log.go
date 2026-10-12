@@ -20,8 +20,8 @@ const (
 	RequestTypeWSV2         RequestType = 3
 	RequestTypeCyberBlocked RequestType = 4 // cyber_policy 命中（透传但被上游安全策略拒绝）
 	RequestTypeLive         RequestType = 5
-	// RequestTypeTurnStateProbe 是 292 猎手的探测（openai_turn_state_hunter.go）：挂在配置的
-	// API Key 下按标准路径计费，输入 token 为本地估算、输出恒 0。
+	// RequestTypeTurnStateProbe 是已删除的 292 猎手的探测，只剩历史行；值与 CHECK 约束（迁移 244）
+	// 都要保留。
 	RequestTypeTurnStateProbe RequestType = 6
 	// RequestTypeGatewayPoolDegraded 是被 state-echo 判成降智后整发丢掉的那次上游尝试
 	// （openai_gwpool_state_echo.go）。它真的到了上游、上游真的跑了，所以要落行；但判定点在
@@ -212,13 +212,13 @@ type UsageLog struct {
 	// TurnState 是上游本次响应头里新铸的 x-codex-turn-state（不透明 Fernet 密文）。
 	// 非 Codex 上游、以及拿不到上游响应头的路径为 nil。
 	TurnState *string
-	// TurnStateOverridden 表示本次出站实际注入了 turn-state 覆写值。
-	// nil 表示账号类型不适用（非 Codex 上游）。
+	// TurnStateOverridden 表示本次出站实际注入了 turn-state 覆写值。覆写已于 2026-10-10
+	// 删除，新行不再写，只剩历史行。
 	TurnStateOverridden *bool
-	// TurnStateSource 是覆写来源：manual（手填）/ auto（自动接管）/
-	// auto_stale（自动接管，候选已过保鲜期但仍在用）。没注入为 nil。
+	// TurnStateSource 是历史行的覆写来源：manual（手填）/ auto（自动接管）/
+	// auto_stale（自动接管，候选已过保鲜期但仍在用）。新行不再写。
 	TurnStateSource *string
-	// TurnStateSent 是本次出站实际带的 turn-state（客户端回带的或注入的）。
+	// TurnStateSent 是本次出站实际带的 turn-state（客户端回带的）。
 	// 与 TurnState（上游新铸的）分开：带了 turn-state 的请求只有 8% 会拿到新铸值。
 	TurnStateSent *string
 	// SafetyBufferingEnabled / SafetyBufferingFasterModel 是上游响应头 x-codex-safety-buffering-*

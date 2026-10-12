@@ -34,16 +34,7 @@ vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
       update: updateAccountMock,
-      checkMixedChannelRisk: checkMixedChannelRiskMock,
-      // turn-state 覆写表的模型下拉走这个接口（AccountTestModal 同款）。
-      getAvailableModels: vi.fn().mockResolvedValue([{ id: 'gpt-5.6-luna' }, { id: 'gpt-6-astra' }])
-    },
-    proxies: {
-      // 292 猎手的代理多选走这个接口，懒加载。
-      getAll: vi.fn().mockResolvedValue([
-        { id: 20, name: 'webshare', protocol: 'socks5', host: 'p.webshare.io', port: 1080 },
-        { id: 21, name: 'b2proxy', protocol: 'http', host: 'gw.b2proxy.example', port: 8000 }
-      ])
+      checkMixedChannelRisk: checkMixedChannelRiskMock
     },
     settings: {
       getWebSearchEmulationConfig: vi.fn().mockResolvedValue({ enabled: false, providers: [] }),
@@ -1514,8 +1505,8 @@ describe('EditAccountModal', () => {
     )
   })
 
-  // turn-state 的接管/覆写界面已删（2026-09-21 起手段全灭），只剩读数。
-  it('no longer renders the turn-state override or hunter controls', async () => {
+  // turn-state 的接管/覆写/猎手/恢复探测界面都已删（2026-09-21 起手段全灭），只剩读数。
+  it('no longer renders any turn-state controls', async () => {
     const account = buildAccount()
     account.type = 'oauth'
     const wrapper = mountModal(account)
@@ -1525,12 +1516,11 @@ describe('EditAccountModal', () => {
       'edit-openai-turn-state-override',
       'edit-openai-turn-state-hunter',
       'edit-openai-turn-state-hunter-section',
-      'edit-openai-turn-state-hunter-hold'
+      'edit-openai-turn-state-hunter-hold',
+      'edit-openai-turn-state-recovery'
     ]) {
       expect(wrapper.find(`[data-testid="${testid}"]`).exists()).toBe(false)
     }
-    // 恢复探测（做题判定，仍然有效）留着。
-    expect(wrapper.find('[data-testid="edit-openai-turn-state-recovery"]').exists()).toBe(true)
   })
 
   it('writes images_url_to_b64_json into extra when toggled on', async () => {

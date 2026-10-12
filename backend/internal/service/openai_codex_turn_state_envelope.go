@@ -45,7 +45,7 @@ const (
 // 放在这里，就是为了到时候好找。
 //
 // 2026-09-23 起上游还铸出 780 字符 / 33 块（明文 ~520B，换了结构），判不了是否降智：前端
-// 标黄展示；这里刻意仍判「不健康」——只有认得出的 292/332 才进候选池、才会被注入。
+// 标黄展示；这里刻意仍判「不健康」，只有认得出的 292/332 才算健康。
 var openAITurnStateShapes = [...]struct{ Blocks, Chars int }{
 	{Blocks: 10, Chars: 292}, // individual
 	{Blocks: 12, Chars: 332}, // team
@@ -98,7 +98,7 @@ func parseOpenAITurnStateEnvelope(blob string) (openAITurnStateEnvelope, bool) {
 // openAITurnStateHealthy 判断一条 turn-state 是否落在「不降智」基线上。
 //
 // 解不出信封时退回字符长度（老判据）：宁可按旧口径判，也不要把一条解不开的
-// blob 默认当健康——那会让它进候选池，之后每次注入都白费一轮观测。
+// blob 默认当健康。
 func openAITurnStateHealthy(blob string) bool {
 	if env, ok := parseOpenAITurnStateEnvelope(blob); ok {
 		for _, shape := range openAITurnStateShapes {

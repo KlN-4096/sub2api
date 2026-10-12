@@ -257,9 +257,7 @@ export default {
         creditsExhaustedUntil: 'AI Credits exhausted, expected recovery at {time}',
         overloadedUntil: 'Overloaded until {time}',
         viewTempUnschedDetails: 'View temp unschedulable details',
-        tempUnschedulableUntil: 'Resumes {time}',
-        turnStateHold: 'Degraded pause · {model} is paused on this account while the hunter looks for a ticket; resumes on a hit, re-pauses on the next request after expiry',
-        turnStateHoldShort: 'Degraded'
+        tempUnschedulableUntil: 'Resumes {time}'
       },
       columns: {
         name: 'Name',
@@ -293,7 +291,7 @@ export default {
         hint: 'Displayed as "group / base score / sticky bonus". The base score is computed within the current filtered candidate set and includes priority, load, queue depth, error rate, first-token latency, reset window, quota headroom, billing rate, and related factors. The sticky bonus applies only when sticky weighting is enabled for previous_response_id or session_hash. Higher scores are preferred.'
       },
       gatewayColumnHint: 'Shows the current route ticket, measured full-strength usage and quality/ordinary candidate queues. Green is reserved for a live verified ticket; candidates remain neutral. Queue classification comes from backend evidence for the same member and model, using cached metadata and local cooldowns only. Missing or expired metadata displays — without fetching tickets or probing. Region and gateway names are the pool delivery labels, not proof of the actual upstream landing point.',
-      usageWindowsHint: '"5h / 7d" are the upstream account\'s official rolling usage windows (e.g. OpenAI ChatGPT, Claude). They are imposed by the upstream provider on the account itself — not configured by sub2api, and unrelated to the models you map. Usage resets automatically once each window rolls over, and the limit cannot be lifted from within sub2api. Purple/amber rows are the Codex turn-states currently in effect for this account (one per model); the countdown is the remainder of the one-hour validity from minting, and amber means the ticket looks degraded.',
+      usageWindowsHint: '"5h / 7d" are the upstream account\'s official rolling usage windows (e.g. OpenAI ChatGPT, Claude). They are imposed by the upstream provider on the account itself — not configured by sub2api, and unrelated to the models you map. Usage resets automatically once each window rolls over, and the limit cannot be lifted from within sub2api.',
       ollamaCloud: {
         title: 'Ollama Cloud usage',
         sessionSecurityHint: 'The browser session is encrypted at rest and sent only to the fixed official settings URL.',
@@ -871,21 +869,6 @@ export default {
           GWPOOL_CONSUMER_KEY_REQUIRED:
             'The gateway pool is enabled on this account, so the consumer key is required. Paste the key the pool issued for this account.'
         },
-        turnStateHunterEffort: 'Probe reasoning effort',
-        turnStateHunterUsageKey: 'Usage API key ID (blank = no usage log)',
-        turnStateHunterUsageKeyDesc:
-          'When set, every 200 probe is recorded under this key through the standard usage path (type "Hunter probe", billed normally, bumps last-used); input tokens are estimated locally (base prompt included), output is always 0. Use a dedicated key: probes consume its quota/rate limits, and subscription groups need an active subscription.',
-        turnStateRecovery: 'Degradation recovery probe',
-        turnStateRecoveryDesc:
-          "Asks the candy puzzle through the account's own exit at randomized intervals (a healthy model answers 21, a degraded one 29/36); once at least 'successes' of the last 'window' answers are right the account is marked recovered, while 'window' consecutive failures start a cooldown. Independent of the hunter (works with the hunter off), it only records a marker and a log line and never changes any setting. Probing stops once marked, and a natural 312 from real traffic clears the marker.",
-        turnStateRecoveryModel: 'Probe model',
-        turnStateRecoveryModelAuto: 'blank = gpt-5.6-sol',
-        turnStateRecoveryStreak: 'Window (total probes)',
-        turnStateRecoverySuccess: 'Successes needed',
-        turnStateRecoveryEffortDefault: 'default (medium)',
-        turnStateRecoveryCooldown: 'Failure cooldown (hours)',
-        turnStateRecoveryMin: 'Min interval (minutes)',
-        turnStateRecoveryMax: 'Max interval (minutes)',
         gatewayHistory: {
           empty: 'Gateway -',
           // The tooltip's five segments are region-gateway-fullTime-state-verdict, each
@@ -927,43 +910,6 @@ export default {
             'middle-east': 'M.East',
             unknown: 'Unknown'
           }
-        },
-        turnStatePool: {
-          empty: 'Turn-state —',
-          starved: 'Turn-state: no ticket, passing through',
-          manualTag: 'manual',
-          observedTag: 'last minted',
-          summary: '{n} model(s) with a live turn-state',
-          summaryObservedOnly: 'no live ticket, {n} reading(s) only',
-          detail: '{model}: {shape} {health}, minted {minted}, expires {expires}',
-          detailPair: ', pair {n}',
-          detailReminted: ', upstream re-minted {n}x',
-          healthy: 'full',
-          degraded: 'suspect',
-          unknown: 'unknown shape',
-          hunterSummary: 'hunter (experimental) {count}/{max} this hour · {next} · {last}',
-          hunterNext: 'next {time}',
-          hunterReady: 'ready',
-          hunterProbing: 'probing',
-          recoverySummary: 'recovery {successes}/{window} right (need {success}) · {next}',
-          recoveryCooling: 'cooling until {time}',
-          recoveryDone: 'recovered · {time}',
-          recoveryResultHit: 'answered {answer}✓',
-          recoveryResultMiss: 'answered {answer}✗',
-          recoveryDetail: "{time} {model} {'@'}{proxy}{exit}: {result}, took {latency}",
-          hunterGateIdle: 'paused: no traffic',
-          hunterGateHeld: 'degraded pause: hunting a ticket',
-          hunterGateFresh: 'ticket still fresh',
-          hunterNeedsAuto: 'hunter inactive: enable automatic takeover first',
-          // A bare `@` is vue-i18n's linked-message prefix and throws in production builds; use {'@'}.
-          hunterLast: "last {result} {'@'}{proxy} {time}",
-          hunterLastNone: 'no probe yet',
-          hunterResultHit: '{chars}✓',
-          hunterResultMiss: '{chars}',
-          hunterResultAnswerHit: '{chars}·answered {answer}✓',
-          hunterResultAnswerMiss: '{chars}·answered {answer}✗',
-          hunterResultError: 'error {status} {error}',
-          hunterDetail: "{time} {model} {'@'}{proxy}{exit}: {result}, took {latency}",
         },
         compactMode: 'Compact mode',
         compactModeDesc:

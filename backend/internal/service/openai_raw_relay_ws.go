@@ -93,7 +93,6 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketRawRelay(
 	firstClientMessage []byte,
 	hooks *OpenAIWSIngressHooks,
 ) error {
-	clearOpenAITurnStateInjected(c)
 	if hooks == nil {
 		hooks = &OpenAIWSIngressHooks{}
 	}
