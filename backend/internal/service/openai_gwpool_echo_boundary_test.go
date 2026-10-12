@@ -2,10 +2,8 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/require"
@@ -46,19 +44,13 @@ func TestStateEchoFinalDeliveryRechecksAfterContactPersistence(t *testing.T) {
 			require.ErrorIs(t, err, errOpenAIGatewayPoolWarmUnverified)
 			require.Nil(t, resp)
 			require.True(t, upstream.bodies[0].closed)
-			current, _ := repo.GetByID(context.Background(), 1)
-			raw, _ := json.Marshal(current.Extra[openAIGatewayPoolMetricsExtraKey])
-			var metrics gatewayPoolProbeMetrics
-			require.NoError(t, json.Unmarshal(raw, &metrics))
-			require.EqualValues(t, 1, metrics.Confirmation.Requests)
-			require.Zero(t, metrics.Confirmation.Full+metrics.Confirmation.Degraded)
 		})
 	}
 }
 
 func TestStateEchoReferenceExpiryDoesNotSuppressConfirmedDegradation(t *testing.T) {
 	store := &openAICodexCookieStore{}
-	store.poolPairs.Store("identity", openAIGatewayPoolPair{cookie: "offline", version: "v", gateway: "g", until: time.Now().Add(-time.Second)})
+	store.poolPairs.Store("identity", openAIGatewayPoolPair{cookie: "offline", version: "v", gateway: "g"})
 	_, marked := store.gatewayPoolMarkStaleMatched("identity", "v")
 	require.True(t, marked)
 	_, marked = store.gatewayPoolMarkStaleMatched("identity", "v")

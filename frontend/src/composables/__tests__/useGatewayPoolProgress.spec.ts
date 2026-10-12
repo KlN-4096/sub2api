@@ -188,6 +188,20 @@ describe('gateway progress polling', () => {
     }
   })
 
+  it('accepts a batch whose explicitly inactive rows carry no runtime instead of freezing the page', async () => {
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+    vi.mocked(getGatewayPoolProgress).mockResolvedValue({ 1: snapshot({ attempt: 1 }), 2: { inactive: true } as any })
+    let state!: ReturnType<typeof useGatewayPoolProgress>
+    const wrapper = mount(defineComponent({
+      setup() { state = useGatewayPoolProgress(computed(() => [1, 2])); return () => null }
+    }))
+    try {
+      await flushPromises()
+      expect(state.paused.value).toBe(false)
+      expect(Object.keys(state.progress.value)).toEqual(['1'])
+    } finally { wrapper.unmount() }
+  })
+
   it('keeps all rows paused through empty or incomplete successful replies, then swaps a complete batch', async () => {
     vi.useFakeTimers()
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)

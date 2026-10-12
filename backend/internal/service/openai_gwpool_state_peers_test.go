@@ -14,10 +14,10 @@ type gatewayPoolOrderedStateRepo struct {
 }
 
 func (r *gatewayPoolOrderedStateRepo) FindGatewayPoolStatePeers(context.Context, string, string) ([]Account, error) {
-	return r.peers, nil // SQL contract separately asserts current-first ordering.
+	return r.peers, nil
 }
 
-func TestGatewayPoolStatePeersEqualTimeKeepsCurrentBeforePrevious(t *testing.T) {
+func TestGatewayPoolStatePeersIgnoreLegacyNestedPrevious(t *testing.T) {
 	account := gwpoolTestAccount(1)
 	tag := gatewayPoolLedgerTag(gwpoolTestIdentity)
 	at := time.Now().UTC()
@@ -25,19 +25,19 @@ func TestGatewayPoolStatePeersEqualTimeKeepsCurrentBeforePrevious(t *testing.T) 
 		gatewayPoolRestStateKey:  gatewayPoolRestState{Tag: tag, ChangedAt: at, Active: false},
 		gatewayPoolUsageExtraKey: gatewayPoolUsageLedger{Tag: tag, UpdatedAt: at, VerificationSequence: 9},
 	}}
-	previous := Account{ID: 3, Extra: map[string]any{
-		gatewayPoolRestStateKey: gatewayPoolRestState{Tag: "other", Previous: &gatewayPoolRestState{
-			Tag: tag, ChangedAt: at, Active: true,
-		}},
-		gatewayPoolUsageExtraKey: gatewayPoolUsageLedger{Tag: "other", Previous: &gatewayPoolUsageLedger{
-			Tag: tag, UpdatedAt: at, VerificationSequence: 99,
-		}},
+	later := at.Add(time.Minute)
+	// Rows written before migration 251 nested an old identity's ledger under "previous".
+	legacy := Account{ID: 3, Extra: map[string]any{
+		gatewayPoolRestStateKey: map[string]any{"tag": "other",
+			"previous": map[string]any{"tag": tag, "changed_at": later, "active": true}},
+		gatewayPoolUsageExtraKey: map[string]any{"tag": "other",
+			"previous": map[string]any{"tag": tag, "updated_at": later, "verification_sequence": 99}},
 	}}
-	repo := &gatewayPoolOrderedStateRepo{gatewayRuntimeRepo: &gatewayRuntimeRepo{account: *account}, peers: []Account{current, previous}}
+	repo := &gatewayPoolOrderedStateRepo{gatewayRuntimeRepo: &gatewayRuntimeRepo{account: *account}, peers: []Account{current, legacy}}
 	svc := &OpenAIGatewayService{accountRepo: repo}
 	rest, _, err := svc.loadGatewayPoolRest(context.Background(), account, gwpoolTestIdentity)
 	require.NoError(t, err)
-	require.False(t, rest.Active, "equal-time previous state must not revive current inactive tombstone")
+	require.False(t, rest.Active, "a nested legacy archive is not this ledger's state")
 	require.True(t, svc.changeGatewayPoolUsage(context.Background(), account, gwpoolTestIdentity,
 		func(state *gatewayPoolUsageLedger) bool {
 			require.EqualValues(t, 9, state.VerificationSequence)

@@ -438,7 +438,7 @@ func TestAttachRouteMatchesAttachGuards(t *testing.T) {
 func TestRoutePairInUseFallsBackToJarWhenDisabled(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	acct := gwpoolTestAccount(1)
-	svc.codexCookies.Store(acct, openAITurnStatePairCookieURL, codexCookieUpstreamResponse())
+	svc.codexCookies.Store(acct, chatgptCodexURL, codexCookieUpstreamResponse())
 	pair, fromPool, poolGateway, _ := svc.routePairInUse(acct, http.Header{}, OpenAIGatewayPoolApplied{})
 	require.Equal(t, "__cflb=lb-1; __oailb=jwt-1", pair)
 	require.False(t, fromPool, "没接管就不是覆写")
@@ -1253,7 +1253,7 @@ func TestRoutePairInUsePrefersGatewayPoolPair(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	acct := fake.account(1)
 	// 罐里存着另一个网关的 pair，它不该再被当成这一发的读数。
-	svc.codexCookies.Store(acct, openAITurnStatePairCookieURL, codexCookieUpstreamResponse())
+	svc.codexCookies.Store(acct, chatgptCodexURL, codexCookieUpstreamResponse())
 
 	headers := http.Header{}
 	applied := attachRouteApplied(t, &svc.codexCookies, acct, gwpoolTestURL, headers)
@@ -1695,4 +1695,66 @@ func TestPoolClientCacheKeyFollowsCallTimeout(t *testing.T) {
 	swapped, err := store.poolClient(acct)
 	require.NoError(t, err)
 	require.Same(t, tuned, swapped)
+}
+
+// Test-only probes over production state (no production caller).
+
+func (s *openAICodexCookieStore) gatewayPoolUsedRecently(identity, gateway string, window time.Duration) bool {
+	_, used := s.gatewayPoolUsedAt(identity, gateway, window)
+	return used
+}
+
+func (s *openAICodexCookieStore) beginGatewayPoolAttempt(identity, gateway string, window time.Duration) bool {
+	return s.beginGatewayPoolAttemptAt(identity, gateway, window, nil)
+}
+
+func (s *openAICodexCookieStore) gatewayPoolInventorySnapshot(identity string) (generation uint64, pending bool) {
+	generation, active, candidates := s.gatewayPoolInventoryCandidates(identity)
+	return generation, active || len(candidates) > 0
+}
+
+func (s *openAICodexCookieStore) gatewayPoolRestDuration(identity string, account *Account, now time.Time) time.Duration {
+	if until := s.gatewayPoolLocalResumeAt(identity, account); until.After(now) {
+		return until.Sub(now)
+	}
+	return 0
+}
+
+// The edit modal submits the extra snapshot taken when the list loaded. Saving it
+// must neither roll back nor drop gateway-maintained pool runtime state.
+func TestUpdateAccountKeepsGatewayPoolRuntimeState(t *testing.T) {
+	accountID := int64(203)
+	fresh := map[string]any{
+		openAIGatewayPoolContactsExtraKey: map[string]any{"ledger_tag": "fresh"},
+		openAIGatewayLedgerTagExtraKey:    "fresh",
+		openAIGatewayHistoryExtraKey:      map[string]any{"ledger_tag": "fresh"},
+		openAIGatewayPoolOutboxExtraKey:   map[string]any{"pending": []any{"fresh"}},
+		gatewayPoolRestStateKey:           map[string]any{"tag": "fresh", "active": true},
+		gatewayPoolRestTagKey:             "fresh",
+		GatewayPoolUsageBlockedAtKey:      "2026-10-10T10:00:00Z",
+		gatewayPoolUsageExtraKey:          map[string]any{"tag": "fresh"},
+		gatewayPoolUsageTagKey:            "fresh",
+	}
+	stored := map[string]any{openAIGatewayPoolExtraKey: true, openAIGatewayPoolBaseURLExtraKey: "http://127.0.0.1:8099",
+		OpenAIGatewayPoolConsumerKeyExtraKey: "stored-ck"}
+	submitted := map[string]any{openAIGatewayPoolExtraKey: true, openAIGatewayPoolBaseURLExtraKey: "http://127.0.0.1:8099",
+		OpenAIGatewayPoolConsumerKeyExtraKey: true}
+	stale := true
+	for key, value := range fresh {
+		stored[key] = value
+		if stale { // half the keys arrive stale, the rest are missing from the snapshot
+			submitted[key] = "stale"
+		}
+		stale = !stale
+	}
+	repo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{
+		accountID: {ID: accountID, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+			Credentials: map[string]any{"chatgpt_account_id": "acc-a"}, Extra: stored},
+	}}
+	svc := &adminServiceImpl{accountRepo: repo}
+	_, err := svc.UpdateAccount(context.Background(), accountID, &UpdateAccountInput{Extra: submitted})
+	require.NoError(t, err)
+	for key, value := range fresh {
+		require.Equal(t, value, repo.accounts[accountID].Extra[key], key)
+	}
 }

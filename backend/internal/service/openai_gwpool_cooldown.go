@@ -292,7 +292,6 @@ func (s *openAICodexCookieStore) hydrateCooldown(identity, gateway string, c *ga
 }
 
 const openAIGatewayLedgerTagExtraKey = "openai_gwpool_ledger_tag"
-const openAIGatewayPreviousLedgerTagExtraKey = "openai_gwpool_previous_ledger_tag"
 
 func gatewayPoolLedgerTag(identity string) string {
 	sum := sha256.Sum256([]byte("gwpool-ledger\x00" + identity))
@@ -322,10 +321,6 @@ func (s *openAICodexCookieStore) hydrateGatewayPoolSharedHistory(ctx context.Con
 		return nil, nil
 	})
 	return err
-}
-
-func (s *openAICodexCookieStore) beginGatewayPoolAttempt(identity, gateway string, window time.Duration) bool {
-	return s.beginGatewayPoolAttemptAt(identity, gateway, window, nil)
 }
 
 func (s *openAICodexCookieStore) beginGatewayPoolAttemptAt(identity, gateway string, window time.Duration, expected *time.Time) bool {

@@ -110,3 +110,12 @@ func TestUsageLogSyncRequestTypeAndLegacyFieldsNilReceiver(t *testing.T) {
 	var log *UsageLog
 	log.SyncRequestTypeAndLegacyFields()
 }
+
+// request_type=6 是旧猎手探测的历史用量行，枚举与 "probe" 文案要一直能往返。
+func TestRequestTypeProbeRoundTrip(t *testing.T) {
+	parsed, err := ParseUsageRequestType("probe")
+	require.NoError(t, err)
+	require.Equal(t, RequestTypeTurnStateProbe, parsed)
+	require.Equal(t, "probe", RequestTypeTurnStateProbe.String())
+	require.True(t, RequestTypeTurnStateProbe.IsValid())
+}

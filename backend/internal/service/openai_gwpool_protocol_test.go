@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// 2026-10-02 池子新协议的消费侧：exclude（本地账本）/ 按错误码退避 / min_remaining / wait /
+// 2026-10-02 池子新协议的消费侧：按错误码退避 / min_remaining / wait /
 // cookie_version + exclude_versions / POST /release。一律打 httptest 假池子，**绝不打真实上游**。
 
 // gwpoolBackoffLeft 只要剩余时长那一半，给 require.Zero / require.LessOrEqual 当表达式用。
@@ -32,46 +31,6 @@ func TestGatewayPoolRetiredProbeSettingsDoNotRejectAccountUpdates(t *testing.T) 
 			OpenAIGatewayPoolConsumerKeyExtraKey: "key", openAIGatewayPoolProbeModelExtraKey: model,
 		}))
 	}
-}
-
-// ---------------------------------------------------------------------------
-// 1. 本地账本当 exclude 带上去
-// ---------------------------------------------------------------------------
-
-// 账本里还在窗口内的网关要全部带成 exclude，**最近烧的在前**（超 64 项时裁尾），
-// 过了窗口的不带，别的身份的不带。
-func TestGatewayPoolExcludesRecentlyBurntGateways(t *testing.T) {
-	store := &openAICodexCookieStore{}
-	now := time.Now()
-	// 时间戳自己写进账本：两笔真实取票相差微秒，Windows 的时钟粒度会把它们记成同一刻，
-	// 钉顺序就只能钉在可控的时间上。
-	store.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, "unified-old"), now.Add(-5*time.Hour))
-	store.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, "unified-1"), now.Add(-3*time.Minute))
-	store.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, "unified-2"), now.Add(-time.Minute))
-	store.poolUsed.Store(gatewayPoolLedgerKey("chatgpt:acc-b", "unified-other"), now)
-
-	burnt := store.gatewayPoolBurnedGateways(gwpoolTestIdentity, openAIGatewayPoolGatewayWindow, gwpool.MaxExcludeItems)
-	require.Equal(t, []string{"unified-2", "unified-1"}, burnt,
-		"窗口内的两个、最近烧的在前；5 小时前那个出了 4 小时窗口，别的身份的不算")
-
-	// A different member under the same workspace has its own cooldown.
-	require.Empty(t, store.gatewayPoolBurnedGateways("gwpool-member:acc-a/user-b",
-		openAIGatewayPoolGatewayWindow, gwpool.MaxExcludeItems))
-
-	// 上限：裁到 limit 项，裁掉的是最久的那些。
-	for i := range 80 {
-		store.poolUsed.Store(gatewayPoolLedgerKey(gwpoolTestIdentity, "unified-bulk-"+strconv.Itoa(i)),
-			now.Add(-time.Duration(i)*time.Second))
-	}
-	capped := store.gatewayPoolBurnedGateways(gwpoolTestIdentity, openAIGatewayPoolGatewayWindow, gwpool.MaxExcludeItems)
-	require.Len(t, capped, gwpool.MaxExcludeItems)
-	require.Equal(t, "unified-bulk-0", capped[0], "最近烧的必须留在表里")
-	require.NotContains(t, capped, "unified-bulk-79", "裁掉的是最久的那些")
-
-	// 没有账本 / 没有身份时不带这个参数，别给池子发一个空 exclude。
-	require.Empty(t, store.gatewayPoolBurnedGateways("", openAIGatewayPoolGatewayWindow, gwpool.MaxExcludeItems))
-	require.Empty(t, (&openAICodexCookieStore{}).gatewayPoolBurnedGateways(gwpoolTestIdentity,
-		openAIGatewayPoolGatewayWindow, gwpool.MaxExcludeItems))
 }
 
 // ---------------------------------------------------------------------------
@@ -461,7 +420,7 @@ func TestGatewayPoolDoesNotReleaseReusedTicket(t *testing.T) {
 	// 先把一张活票塞进缓存：这一发是复用它，不是自己取的 ⇒ 失败时不许还、也不许删。
 	svc.codexCookies.poolPairs.Store(gwpoolTestIdentity, openAIGatewayPoolPair{
 		cookie: gwpoolTestPairCookie(t, "unified-9"), gateway: "unified-9",
-		version: "tkt-reused", until: time.Now().Add(time.Minute)})
+		version: "tkt-reused"})
 	req, err := http.NewRequest(http.MethodPost, gwpoolTestURL, strings.NewReader("{}"))
 	require.NoError(t, err)
 	_, err = gwpoolRunOnce(svc, req, acct)
@@ -490,26 +449,6 @@ func TestGatewayPoolSkipsReleaseWithoutTicketVersion(t *testing.T) {
 // ---------------------------------------------------------------------------
 // 票的可用期判据（2026-10-02 协调方点名核查）
 // ---------------------------------------------------------------------------
-
-// 缓存的到点必须来自池子的 valid_for_s（满血窗口，最多 150s），**不是**账号级的
-// openai_gwpool_gateway_window_s（默认 4h —— 那是本地账本窗口，管「别重用烧过的网关」，
-// 不是票的可用期）。认错了的后果是窗口之后每一发都在拿降智的路由跑业务。
-func TestGatewayPoolPairExpiresByValidForNotLedgerWindow(t *testing.T) {
-	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)
-	store := &openAICodexCookieStore{}
-	acct := fake.account(1)
-	// 把账本窗口配成和默认值不同的另一个大数：到点若按它算就会被这条用例抓到。
-	acct.Extra[openAIGatewayPoolGatewayWindowExtraKey] = 7200
-
-	before := time.Now()
-	require.NoError(t, attachRoute(context.Background(), store, acct, gwpoolTestURL, http.Header{}))
-	pair, state := store.cachedPoolPair(gwpoolTestIdentity)
-	require.Equal(t, openAIGatewayPoolPairLive, state)
-	require.WithinDuration(t, before.Add(150*time.Second), pair.until, 2*time.Second,
-		"到点 = 取票时刻 + valid_for_s")
-	require.Less(t, pair.until.Sub(before), 10*time.Minute,
-		"绝不能按账本窗口（这里 2h、默认 4h）算：那会让一张票在满血窗口之后继续出站")
-}
 
 // 还票判据必须覆盖 doOpenAIUpstreamRoundTrip 的**两条出口**的全部错误形态。
 // 插件那条的 *PluginTransportError 没有 Unwrap ⇒ 只看 *url.Error 的判据会把「已经发出去的」

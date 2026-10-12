@@ -99,7 +99,7 @@ func TestGatewayPoolRotationOnlyAfterFreshCompleteExhaustion(t *testing.T) {
 			group := int64(7)
 			ctx := svc.PrepareGatewayPoolAccountRotation(context.Background(), &group, account, failure)
 			require.Equal(t, tc.rotate, failure.ShouldRetryNextAccount())
-			require.Equal(t, tc.rotate, GatewayPoolAccountRotationActive(ctx))
+			require.Equal(t, tc.rotate, gatewayPoolRotationFrom(ctx) != nil)
 			if tc.rotate {
 				remaining, _ := svc.codexCookies.gatewayPoolBackoffFor(gwpoolTestIdentity)
 				require.Positive(t, remaining)
@@ -168,7 +168,7 @@ func TestGatewayPoolRotationPreservesConfirmedTransient429SameAccountRetry(t *te
 	require.Equal(t, map[int64]struct{}{account.ID: {}}, allowed)
 	require.False(t, gatewayPoolRotationRecheck(ctx, repo, allowed, &AccountSelectionResult{Account: other}))
 	require.True(t, failure.SameAccountRetryOnly)
-	require.False(t, GatewayPoolAccountRotationActive(ctx), "waiting must not start a shortage rotation")
+	require.False(t, gatewayPoolRotationFrom(ctx) != nil, "waiting must not start a shortage rotation")
 	ctx = svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, failure)
 	require.True(t, failure.SameAccountRetryOnly, "preparing an already-classified retry is idempotent")
 	firstDeadline := failure.SameAccountRetryDeadline
@@ -328,8 +328,7 @@ func TestGatewayPoolRotationDoesNotConfuseDeliveredWithTried(t *testing.T) {
 			account := rotationAccount(40, 2)
 			fake.configure(account)
 			svc := rotationService(account)
-			pair := openAIGatewayPoolPair{cookie: "offline-cookie", gateway: "unified-71", version: "unused",
-				until: time.Now().Add(150 * time.Second), since: time.Now()}
+			pair := openAIGatewayPoolPair{cookie: "offline-cookie", gateway: "unified-71", version: "unused"}
 			if state == "in-flight" {
 				finish := svc.codexCookies.gatewayPoolInventoryOperation(gwpoolTestIdentity)
 				defer finish()

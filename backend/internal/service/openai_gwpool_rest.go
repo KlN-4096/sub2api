@@ -92,13 +92,6 @@ func gatewayPoolRecoveryDeadline(deadlines map[string]time.Time, threshold int, 
 	return countAt
 }
 
-func (s *openAICodexCookieStore) gatewayPoolRestDuration(identity string, account *Account, now time.Time) time.Duration {
-	if until := s.gatewayPoolLocalResumeAt(identity, account); until.After(now) {
-		return until.Sub(now)
-	}
-	return 0
-}
-
 func (s *OpenAIGatewayService) restGatewayPoolAccount(ctx context.Context, account *Account, identity string, group int64, plans ...gatewayPoolRestPlan) error {
 	if account.GatewayPoolContinuousWaitEnabled() {
 		return nil

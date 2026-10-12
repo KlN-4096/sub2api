@@ -59,6 +59,29 @@ func TestGatewayPoolRetryUsesDeadlineInsteadOfAttemptCount(t *testing.T) {
 	require.False(t, sameAccountRetryAllowed(failure, 0, 10))
 }
 
+// 同账号重试截止耗尽后冒出来的池错误可能不带说明（重试失败被改标成池原因）：Messages 入口
+// 不能因此回 turn-state 暂停文案，要与 Responses 入口一样按上游状态码归一。
+func TestGatewayPoolMessagelessFailureMatchesResponsesMapping(t *testing.T) {
+	failure := func() *service.UpstreamFailoverError {
+		return &service.UpstreamFailoverError{StatusCode: http.StatusBadGateway, Reason: service.OpenAIGatewayPoolReason}
+	}
+	h := &OpenAIGatewayHandler{}
+	messages := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(messages)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	h.handleAnthropicFailoverExhausted(c, failure(), false)
+	responses := httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(responses)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	h.handleFailoverExhausted(c, failure(), false)
+
+	require.NotContains(t, messages.Body.String(), "turn-state")
+	status, _, message := h.mapUpstreamError(http.StatusBadGateway)
+	require.Equal(t, status, responses.Code)
+	require.Equal(t, status, messages.Code)
+	require.Contains(t, messages.Body.String(), message)
+}
+
 func TestGatewayPoolRetryMessagesFailureAfterHeartbeatIsTerminalSSE(t *testing.T) {
 	for _, fallback := range []bool{false, true} {
 		t.Run(map[bool]string{false: "failover", true: "fallback"}[fallback], func(t *testing.T) {

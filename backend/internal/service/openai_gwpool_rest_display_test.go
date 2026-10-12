@@ -14,13 +14,12 @@ func TestGatewayPoolRestDisplayIgnoresRecheckExpiryAndHonorsTombstones(t *testin
 	tag := gatewayPoolLedgerTag(gwpoolTestIdentity)
 	now := time.Now().UTC()
 	account.Extra[gatewayPoolRestStateKey] = gatewayPoolRestState{
-		Tag: tag, Active: true, ChangedAt: now.Add(-time.Hour), NextCheck: now.Add(-time.Minute),
+		Tag: tag, Active: true, ChangedAt: now.Add(-time.Hour),
 	}
 	svc, repo := gatewayRuntimeService(account)
 	view, err := svc.GatewayPoolRuntimeProgress(context.Background(), []int64{1})
 	require.NoError(t, err)
 	require.True(t, view[1].Runtime.Rest.Active)
-	require.True(t, view[1].Runtime.Rest.NextCheck.Before(now))
 	require.Nil(t, repo.account.TempUnschedulableUntil, "read-only display must not recreate a cleared generic block")
 	peer := *gwpoolTestAccount(2)
 	peer.Extra[gatewayPoolRestStateKey] = gatewayPoolRestState{Tag: tag, ChangedAt: now}

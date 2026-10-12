@@ -37,30 +37,21 @@ func TestGatewayPoolFailedProbeRetiresTicketAndContinues(t *testing.T) {
 	require.Zero(t, svc.GatewayPoolProgress([]int64{account.ID})[account.ID].Rejected)
 }
 
-func TestGatewayPoolFailedProbeHonorsRecoveryThenMovesOn(t *testing.T) {
-	for _, retries := range []int{0, 1} {
-		t.Run(string(rune('0'+retries)), func(t *testing.T) {
-			svc, repo, fake, account, request, wait := ticketWaitFixture(t)
-			account.Extra[openAIGatewayPoolRecoveryExtraKey] = retries
-			repo.account = *account
-			fake.cookieForHit = func(hit int64) string {
-				if hit == 1 {
-					return gwpoolTestPairCookie(t, "unified-142")
-				}
-				return gwpoolTestPairCookie(t, "unified-84")
-			}
-			sleeps := 0
-			wait.sleep = func(context.Context, time.Duration) error { sleeps++; return nil }
-			shooter := &gwpoolWarmShooter{}
-			for i := 0; i <= retries; i++ {
-				shooter.replies = append(shooter.replies, gwpoolWarmReply{status: http.StatusOK}) // no state
-			}
-			require.NoError(t, svc.gatewayPoolWarmUpWith(request, account, gwpoolTestIdentity, gwpoolWarmModel, shooter.shoot))
-			require.Equal(t, retries, sleeps)
-			require.Len(t, shooter.shots, retries+3)
-			require.Equal(t, "unified-84", openAICodexRouteGateway(shooter.shots[retries+1].cookie))
-		})
+func TestGatewayPoolFailedProbeMovesOnWithoutRetryingTheTicket(t *testing.T) {
+	svc, _, fake, account, request, wait := ticketWaitFixture(t)
+	fake.cookieForHit = func(hit int64) string {
+		if hit == 1 {
+			return gwpoolTestPairCookie(t, "unified-142")
+		}
+		return gwpoolTestPairCookie(t, "unified-84")
 	}
+	sleeps := 0
+	wait.sleep = func(context.Context, time.Duration) error { sleeps++; return nil }
+	shooter := &gwpoolWarmShooter{replies: []gwpoolWarmReply{{status: http.StatusOK}}} // no state
+	require.NoError(t, svc.gatewayPoolWarmUpWith(request, account, gwpoolTestIdentity, gwpoolWarmModel, shooter.shoot))
+	require.Zero(t, sleeps)
+	require.Len(t, shooter.shots, 3)
+	require.Equal(t, "unified-84", openAICodexRouteGateway(shooter.shots[1].cookie))
 }
 
 func TestGatewayPoolFailedProbeProtectsNewTicketAndClearGeneration(t *testing.T) {
