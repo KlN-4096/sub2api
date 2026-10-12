@@ -130,6 +130,46 @@ func TestGatewayPoolAdaptiveReuseNeedsCoverageAndFuturePersonalStratum(t *testin
 	require.Less(t, short["g0"], short["g1"], "do not invent bridging time from unselected inventory")
 }
 
+func TestGatewayPoolRankReuseDelayFallsBackToTheLocalBase(t *testing.T) {
+	// 29 other measured candidates cover between one and two hours; only g0 has
+	// the 1-2h future stratum, so g0 overtakes g1 iff its reuse delay fits.
+	var candidates []gwpool.Gateway
+	var names []string
+	for i := range 30 {
+		name := fmt.Sprintf("g%d", i)
+		candidates = append(candidates, adaptiveCandidate(name, 9, 10, 3*time.Minute))
+		names = append(names, name)
+	}
+	candidates[0].Contacts[0].WindowMeanMS = (150 * time.Second).Milliseconds()
+	future := candidates[0].Contacts[0]
+	future.Interval = "1-2h"
+	candidates[0].Contacts = append(candidates[0].Contacts, future)
+	ctx := context.WithValue(context.Background(), gatewayPoolProbeModelKey{}, "luna")
+	reused := func(windowSeconds, cooldownSeconds int) bool {
+		account := gwpoolTestAccount(1)
+		if windowSeconds > 0 {
+			account.Extra[openAIGatewayPoolGatewayWindowExtraKey] = windowSeconds
+		}
+		svc, repo := gatewayRuntimeService(account)
+		svc.codexCookies.historyByTag = func(context.Context, string, ...string) ([]Account, error) { return nil, nil }
+		require.NoError(t, repo.UpdateExtra(ctx, account.ID, map[string]any{
+			openAIGatewayPoolContactsExtraKey: adaptiveHistory(time.Now(), names...),
+		}))
+		if cooldownSeconds > 0 {
+			svc.codexCookies.poolCooldown = map[string]gatewayPoolCooldown{
+				gatewayPoolLedgerKey(gwpoolTestIdentity, "g0"): {WindowSeconds: cooldownSeconds},
+			}
+		}
+		ranking := svc.codexCookies.gatewayPoolRankCandidates(ctx, account, gwpoolTestIdentity, candidates)
+		require.Len(t, ranking.adaptive, 30)
+		return ranking.adaptive["g0"] > ranking.adaptive["g1"]
+	}
+	require.True(t, reused(0, 0), "no cooldown record: the default one-hour base fits")
+	require.False(t, reused(2*3600, 0), "no cooldown record: the account's two-hour base does not fit")
+	require.True(t, reused(2*3600, 1800), "a recorded window replaces the base")
+	require.False(t, reused(0, 6*3600), "a recorded window replaces the base")
+}
+
 func TestGatewayPoolAdaptiveQueueReturnAndExploration(t *testing.T) {
 	input := []gwpool.Gateway{{Name: "a", PairReady: true}, {Name: "b", PairReady: true},
 		{Name: "c", PairReady: true}}
@@ -159,7 +199,7 @@ func TestGatewayPoolAdaptiveFreshIdentityPeersAndFifthFallback(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			account := gwpoolTestAccount(1)
 			svc, repo := gatewayRuntimeService(account)
-			svc.codexCookies.historyByTag = func(context.Context, string) ([]Account, error) { return nil, nil }
+			svc.codexCookies.historyByTag = func(context.Context, string, ...string) ([]Account, error) { return nil, nil }
 			state := adaptiveHistory(time.Now(), "a", "b")
 			if mode == "identity-change" {
 				state.LedgerTag = "another-identity"
@@ -167,12 +207,12 @@ func TestGatewayPoolAdaptiveFreshIdentityPeersAndFifthFallback(t *testing.T) {
 			require.NoError(t, repo.UpdateExtra(context.Background(), 1,
 				map[string]any{openAIGatewayPoolContactsExtraKey: state}))
 			if mode == "fresh-error" {
-				svc.codexCookies.accountByID = func(context.Context, int64) (*Account, error) {
+				svc.codexCookies.accountByID = func(context.Context, int64, ...string) (*Account, error) {
 					return nil, errors.New("offline read failed")
 				}
 			}
 			if mode == "peer-error" {
-				svc.codexCookies.historyByTag = func(context.Context, string) ([]Account, error) {
+				svc.codexCookies.historyByTag = func(context.Context, string, ...string) ([]Account, error) {
 					return nil, errors.New("offline peer read failed")
 				}
 			}
@@ -233,7 +273,7 @@ func TestGatewayPoolAdaptivePickUsesRankingWithoutBypassingCooldown(t *testing.T
 	account.Extra[openAIGatewayPoolBaseURLExtraKey] = server.URL
 	account.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = "offline"
 	svc, repo := gatewayRuntimeService(account)
-	svc.codexCookies.historyByTag = func(context.Context, string) ([]Account, error) { return nil, nil }
+	svc.codexCookies.historyByTag = func(context.Context, string, ...string) ([]Account, error) { return nil, nil }
 	require.NoError(t, repo.UpdateExtra(context.Background(), 1, map[string]any{
 		openAIGatewayPoolContactsExtraKey: adaptiveHistory(time.Now(), "a", "b", "c", "cooling"),
 	}))

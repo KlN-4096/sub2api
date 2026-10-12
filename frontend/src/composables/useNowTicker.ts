@@ -7,21 +7,15 @@ import { onUnmounted, ref, type Ref } from 'vue'
  * 同一行里判同一条到期时间的地方都要用它。各自写裸 `new Date()` 的话，那处 computed
  * 没有响应式依赖、永不重算。
  *
- * 每个实例一只表、一个 ref（`<script setup>` 顶层声明本来就是每实例的）。真要改成模块级单例得先解决测试隔离：单例定时器会在 fake timer 安装之前就建好（推不动），
- * 而被 `advanceTimersByTime` 推到未来的共享 ref 会泄漏给同文件的后续用例。
- * 代价是账号列表每行两只表（几十行即上百只 30s 定时器），写的是各自的 ref，可接受。
+ * 同一周期全页共用一只表（useSharedNowTicker），各处同相位刷新；新使用者加入时表若已旧满 1s 就拨到
+ * 当前时间，换页/筛选新挂载的行不会读到最多一个周期前的旧时间（不满 1s 不拨：拨一次同周期全部重渲染）。
+ * 共享表在首个使用者挂载时才建、最后一个卸载即清：只要先前挂载的组件都已卸载（spec
+ * 里用 enableAutoUnmount），先装 fake timer 再挂载就推得动，被推到未来的 ref 也不会漏给后续用例。
  *
  * 30s 粒度：UsageProgressBar 自己那只表是 60s，比它快一档就不会出现「条子还是绿的、
  * 右边已经写着待刷新」这种自相矛盾。
  */
 export const NOW_TICKER_INTERVAL_MS = 30_000
-
-export function useNowTicker(intervalMs = NOW_TICKER_INTERVAL_MS) {
-  const now = ref(Date.now())
-  const timer = setInterval(() => (now.value = Date.now()), intervalMs)
-  onUnmounted(() => clearInterval(timer))
-  return now
-}
 
 interface SharedTicker {
   now: Ref<number>
@@ -30,14 +24,18 @@ interface SharedTicker {
 }
 const sharedTickers = new Map<number, SharedTicker>()
 
-// Opt-in for the gateway cells. Start lazily and dispose on the last unmount:
-// no module-load timer or time value can leak across pages / fake-timer tests.
+// One timer per cadence for all users. Start lazily and dispose on the last unmount:
+// no module-load timer, and nothing outlives the components (pages, test cases) using it.
 export function useSharedNowTicker(intervalMs = NOW_TICKER_INTERVAL_MS) {
   let ticker = sharedTickers.get(intervalMs)
   if (!ticker) {
     const now = ref(Date.now())
     ticker = { now, users: 0, timer: setInterval(() => { now.value = Date.now() }, intervalMs) }
     sharedTickers.set(intervalMs, ticker)
+  } else if (Date.now() - ticker.now.value >= 1000) {
+    // Every subscriber of this cadence re-renders on a bump; under a second is
+    // invisible on second-granular countdowns, and virtualized rows mount on scroll.
+    ticker.now.value = Date.now()
   }
   ticker.users++
   const current = ticker

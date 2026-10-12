@@ -86,9 +86,10 @@ func openAICompatBridgeSessionKey(c *gin.Context, account *Account, promptCacheK
 	return strings.Join([]string{namespace, strconv.FormatInt(apiKeyID, 10), key}, "\x00")
 }
 
-// openAICompatBridgeSession 取（或首铸）该桥会话的身份。sync.Map 上用 LoadOrStore + CompareAndSwap
-// 收口：并发首轮只会有一枚胜出，其余读到它；命中即续期，TTL 是空闲窗口而不是首铸后的定时轮换；
-// 过期或实例重启后重新铸造——上游看到的是一个新会话，不是错形态。
+// openAICompatBridgeSession 取（或首铸）该桥会话的身份。先 Load：命中且未过期就续期返回，不铸 UUID；
+// 未命中或已过期才铸，再用 LoadOrStore / CompareAndSwap 收口——并发首轮只会有一枚胜出，其余读到它。
+// 命中即续期，TTL 是空闲窗口而不是首铸后的定时轮换；过期或实例重启后重新铸造——上游看到的是一个
+// 新会话，不是错形态。
 func (s *OpenAIGatewayService) openAICompatBridgeSession(c *gin.Context, account *Account, promptCacheKey string) (openAICompatBridgeSession, bool) {
 	if s == nil {
 		return openAICompatBridgeSession{}, false
@@ -99,30 +100,59 @@ func (s *OpenAIGatewayService) openAICompatBridgeSession(c *gin.Context, account
 	}
 	now := time.Now()
 	ttl := s.openAIWSResponseStickyTTL()
-	fresh := openAICompatBridgeSession{
-		SessionID:       uuid.Must(uuid.NewV7()).String(),
-		ContextWindowID: uuid.Must(uuid.NewV7()).String(),
-		ExpiresAt:       now.Add(ttl),
-	}
+	var fresh openAICompatBridgeSession
 	for {
-		raw, loaded := s.openaiCompatBridgeSessions.LoadOrStore(key, fresh)
-		if !loaded {
-			return fresh, true
-		}
-		existing, ok := raw.(openAICompatBridgeSession)
-		expired := !existing.ExpiresAt.IsZero() && now.After(existing.ExpiresAt)
-		if !ok || existing.SessionID == "" || expired {
-			if s.openaiCompatBridgeSessions.CompareAndSwap(key, raw, fresh) {
-				return fresh, true
+		raw, loaded := s.openaiCompatBridgeSessions.Load(key)
+		if existing, ok := openAICompatBridgeSessionLive(raw, now); ok {
+			renewed := existing
+			renewed.ExpiresAt = now.Add(ttl)
+			if s.openaiCompatBridgeSessions.CompareAndSwap(key, raw, renewed) {
+				return existing, true
 			}
 			continue
 		}
-		renewed := existing
-		renewed.ExpiresAt = now.Add(ttl)
-		if s.openaiCompatBridgeSessions.CompareAndSwap(key, raw, renewed) {
-			return existing, true
+		if fresh.SessionID == "" {
+			fresh = openAICompatBridgeSession{
+				SessionID:       uuid.Must(uuid.NewV7()).String(),
+				ContextWindowID: uuid.Must(uuid.NewV7()).String(),
+				ExpiresAt:       now.Add(ttl),
+			}
 		}
+		if !loaded {
+			if _, raced := s.openaiCompatBridgeSessions.LoadOrStore(key, fresh); raced {
+				continue
+			}
+		} else if !s.openaiCompatBridgeSessions.CompareAndSwap(key, raw, fresh) {
+			continue
+		}
+		s.sweepOpenAICompatBridgeSessions(now)
+		return fresh, true
 	}
+}
+
+// openAICompatBridgeSessionLive 判断已存条目能否复用：类型对、有会话 ID、没过空闲期。读路径与清扫
+// 共用这一个判据，清扫因此只删下一次访问本来就会替换掉的条目。
+func openAICompatBridgeSessionLive(raw any, now time.Time) (openAICompatBridgeSession, bool) {
+	session, ok := raw.(openAICompatBridgeSession)
+	if !ok || session.SessionID == "" || (!session.ExpiresAt.IsZero() && now.After(session.ExpiresAt)) {
+		return openAICompatBridgeSession{}, false
+	}
+	return session, true
+}
+
+// sweepOpenAICompatBridgeSessions 机会式清扫：键里有客户端可控的会话键、没有上界，不再访问的条目只靠
+// 读路径替换会留到重启。每 256 次新铸全量遍历一轮（同 sweepOpenAICodexTurnStateOrigins）。必须用
+// CompareAndDelete：Range 读到的过期值可能已被并发访问续期或重铸，按键 Delete 会删掉活会话。
+func (s *OpenAIGatewayService) sweepOpenAICompatBridgeSessions(now time.Time) {
+	if s.openaiCompatBridgeMints.Add(1)%256 != 0 {
+		return
+	}
+	s.openaiCompatBridgeSessions.Range(func(key, value any) bool {
+		if _, live := openAICompatBridgeSessionLive(value, now); !live {
+			s.openaiCompatBridgeSessions.CompareAndDelete(key, value)
+		}
+		return true
+	})
 }
 
 // injectOpenAICompatBridgeIdentity 只在桥 + 双开 + 有桥会话键时生效：把合成的客户端原始身份写进

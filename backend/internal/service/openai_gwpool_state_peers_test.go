@@ -13,7 +13,7 @@ type gatewayPoolOrderedStateRepo struct {
 	peers []Account
 }
 
-func (r *gatewayPoolOrderedStateRepo) FindGatewayPoolStatePeers(context.Context, string, string) ([]Account, error) {
+func (r *gatewayPoolOrderedStateRepo) FindGatewayPoolStatePeers(context.Context, string, string, int64) ([]Account, error) {
 	return r.peers, nil
 }
 
@@ -43,4 +43,35 @@ func TestGatewayPoolStatePeersIgnoreLegacyNestedPrevious(t *testing.T) {
 			require.EqualValues(t, 9, state.VerificationSequence)
 			return true
 		}))
+}
+
+type gatewayPoolLedgerWriteRepo struct {
+	*gatewayRuntimeRepo
+	ledgers, tags []map[string]any
+}
+
+func (r *gatewayPoolLedgerWriteRepo) WriteGatewayPoolLedgers(_ context.Context, _ int64, ledgers, tags map[string]any) error {
+	r.ledgers, r.tags = append(r.ledgers, ledgers), append(r.tags, tags)
+	return nil
+}
+
+func TestGatewayPoolLedgerWritesSplitLedgersFromTags(t *testing.T) {
+	ctx := context.Background()
+	account := gwpoolTestAccount(1)
+	base := &gatewayRuntimeRepo{account: *account}
+	repo := &gatewayPoolLedgerWriteRepo{gatewayRuntimeRepo: base}
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	require.True(t, svc.changeGatewayPoolUsage(ctx, account, gwpoolTestIdentity,
+		func(*gatewayPoolUsageLedger) bool { return true }))
+	require.Len(t, repo.ledgers, 1)
+	require.Contains(t, repo.ledgers[0], gatewayPoolUsageExtraKey)
+	require.Len(t, repo.ledgers[0], 1)
+	require.Equal(t, map[string]any{gatewayPoolUsageTagKey: gatewayPoolLedgerTag(gwpoolTestIdentity)}, repo.tags[0])
+	require.NotContains(t, base.account.Extra, gatewayPoolUsageExtraKey, "a ledger write must not reach extra")
+
+	svc.accountRepo = struct{ AccountRepository }{base} // no ledger table
+	require.NoError(t, svc.updateGatewayPoolRuntimeExtra(ctx, account.ID,
+		map[string]any{gatewayPoolUsageExtraKey: "fallback", gatewayPoolUsageTagKey: "fallback"}))
+	require.Equal(t, "fallback", base.account.Extra[gatewayPoolUsageExtraKey])
+	require.Equal(t, "fallback", base.account.Extra[gatewayPoolUsageTagKey])
 }

@@ -44,7 +44,7 @@ func TestGatewayPoolActiveUsageReplaysFailedInitialReadOrWrite(t *testing.T) {
 			repo.failRead, base.fail = false, false
 			flushGatewayPoolActiveUsage(svc, ctx, account, identity)
 			require.Empty(t, tracker.snapshot())
-			fresh, err := repo.GetByID(ctx, account.ID)
+			fresh, err := repo.stored(account.ID)
 			require.NoError(t, err)
 			state := readGatewayPoolUsage(fresh, gatewayPoolLedgerTag(identity))
 			require.Len(t, state.Rounds, 1)
@@ -90,7 +90,7 @@ func TestGatewayPoolActiveUsageFailedNewTicketWriteKeepsExistingCycleCounts(t *t
 	repo.fail = false
 	flushGatewayPoolActiveUsage(svc, ctx, account, identity)
 	require.Empty(t, svc.codexCookies.activeUsageTracker(identity).snapshot())
-	fresh, err := repo.GetByID(ctx, account.ID)
+	fresh, err := repo.stored(account.ID)
 	require.NoError(t, err)
 	state := readGatewayPoolUsage(fresh, gatewayPoolLedgerTag(identity))
 	require.Len(t, state.Rounds, 1)
@@ -168,7 +168,7 @@ func TestGatewayPoolActiveUsageFailedStopWriteCannotAccrueIdle(t *testing.T) {
 	events := tracker.snapshot()
 	require.Len(t, events, 1, "keep failed stop writes until a successful checkpoint")
 	require.False(t, events[0].end.IsZero())
-	fresh, err := repo.GetByID(context.Background(), account.ID)
+	fresh, err := repo.stored(account.ID)
 	require.NoError(t, err)
 	state := readGatewayPoolUsage(fresh, gatewayPoolLedgerTag(gwpoolTestIdentity))
 	now := time.Now().UTC()

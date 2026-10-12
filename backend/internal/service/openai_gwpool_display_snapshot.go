@@ -1,7 +1,6 @@
 package service
 
 import (
-	"strings"
 	"time"
 )
 
@@ -35,12 +34,8 @@ func (cache gatewayPoolDisplayCache) read(account *Account, tag string) gatewayP
 // Read-only merge for the admin display. Preserve the catalog's original
 // UpdatedAt; polling a local snapshot is not a fresh external pool observation.
 func (s *OpenAIGatewayService) gatewayPoolDisplaySnapshot(
-	account *Account, identity string, peers []Account, caches ...gatewayPoolDisplayCache,
+	account *Account, identity string, peers []Account, cache gatewayPoolDisplayCache,
 ) (openAIGatewayHistory, gatewayPoolContacts) {
-	var cache gatewayPoolDisplayCache
-	if len(caches) > 0 {
-		cache = caches[0]
-	}
 	tag := gatewayPoolLedgerTag(identity)
 	history := openAIGatewayHistory{LedgerTag: tag, Seen: map[string]openAIGatewaySeen{}}
 	contacts := gatewayPoolContacts{LedgerTag: tag, Seen: map[string]gatewayPoolContactSeen{}}
@@ -83,32 +78,22 @@ func (s *OpenAIGatewayService) gatewayPoolDisplaySnapshot(
 			merge(&peers[i])
 		}
 	}
-	prefix := identity + "\x00"
 	clearAt := s.codexCookies.gatewayPoolCooldownClearAt(identity)
 	if !clearAt.IsZero() {
-		s.codexCookies.poolKnown.Range(func(key, _ any) bool {
-			name, valid := key.(string)
-			gateway, matches := strings.CutPrefix(name, prefix)
-			if _, exists := history.Seen[gateway]; valid && matches && gateway != "" && !exists {
+		s.codexCookies.rangeGatewayPoolKnown(identity, func(gateway string) {
+			if _, exists := history.Seen[gateway]; !exists {
 				var cleared gatewayPoolCooldown
 				cleared.clearCooldown(clearAt, gatewayPoolCooldownBase(account.gatewayPoolGatewayWindow()))
 				history.Seen[gateway] = openAIGatewaySeen{Cooldown: &cleared}
 			}
-			return true
 		})
 	}
-	s.codexCookies.poolUsed.Range(func(key, value any) bool {
-		name, keyOK := key.(string)
-		at, timeOK := value.(time.Time)
-		gateway, matches := strings.CutPrefix(name, prefix)
-		if keyOK && timeOK && matches && gateway != "" && !at.IsZero() {
-			seen := history.Seen[gateway]
-			if at.After(seen.At) {
-				seen.At = at
-				history.Seen[gateway] = seen
-			}
+	s.codexCookies.rangeGatewayPoolUsed(identity, func(gateway string, at time.Time) {
+		seen := history.Seen[gateway]
+		if at.After(seen.At) {
+			seen.At = at
+			history.Seen[gateway] = seen
 		}
-		return true
 	})
 	for gateway, seen := range history.Seen {
 		if current, ok := s.codexCookies.cooldownEntry(identity, gateway); ok &&

@@ -181,6 +181,42 @@ func TestStateEchoConfirmationPreservesWireIdentityWithoutUserContent(t *testing
 	require.ErrorIs(t, err, errOpenAIGatewayPoolWarmUnverified)
 }
 
+// Pins gjson path semantics for odd bodies: the first occurrence of a key wins,
+// and each metadata field comes from the first client_metadata object holding it.
+func TestStateEchoConfirmationTemplateKeepsFirstMatchSemantics(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want map[string]string // template path -> raw JSON, "" = absent
+	}{
+		{`{"model":"m","prompt_cache_key":"first","service_tier":"flex","prompt_cache_key":"second","service_tier":"priority"}`,
+			map[string]string{"prompt_cache_key": `"first"`, "service_tier": `"flex"`, "client_metadata": ""}},
+		{`{"model":"m","client_metadata":"scalar","client_metadata":[{"turn_id":"in-array"}],` +
+			`"client_metadata":{"session_id":"s1","session_id":"s1-late","unrelated":"private"},` +
+			`"client_metadata":{"session_id":"s2","thread_id":"t2"}}`,
+			map[string]string{"client_metadata.session_id": `"s1"`, "client_metadata.thread_id": `"t2"`,
+				"client_metadata.turn_id": "", "client_metadata.unrelated": ""}},
+		{`{"mod\u0065l":"m","prompt_cache_ke\u0079":"escaped","reasoning":null,` +
+			`"client_metadata":{"x-codex-window-id":null,"x-codex-turn-metadata":{"model":"m"}}}`,
+			map[string]string{"prompt_cache_key": `"escaped"`, "reasoning": `null`, "client_metadata.x-codex-window-id": `null`,
+				"client_metadata.x-codex-turn-metadata": `{"model":"m"}`}},
+		{`{"model":"m","client_metadata":{}}`, map[string]string{"client_metadata": ""}},
+	} {
+		template := gatewayPoolConfirmBody([]byte(tc.body))
+		require.NotNil(t, template, tc.body)
+		for path, raw := range tc.want {
+			got := gjson.GetBytes(template, path)
+			if raw == "" {
+				require.False(t, got.Exists(), "%s in %s", path, tc.body)
+				continue
+			}
+			require.JSONEq(t, raw, got.Raw, "%s in %s", path, tc.body)
+		}
+	}
+	for _, body := range []string{`{"model":"m"`, `[{"model":"m"}]`, `"m"`, `{}`, `{"model":""}`, `{"model":null}`, `{"model":"","model":"m"}`} {
+		require.Nil(t, gatewayPoolConfirmBody([]byte(body)), body)
+	}
+}
+
 func TestStateEchoConfirmationLunaMetadataPreservesScopedIdentity(t *testing.T) {
 	const metadata = `{"model":"gpt-6-astra","session_id":"scoped-session","turn_id":"scoped-turn","parent_thread_id":"parent","reasoning_effort":"high"}`
 	body := []byte(`{"model":"gpt-6-astra","client_metadata":{"x-codex-turn-metadata":"{\"model\":\"gpt-6-astra\",\"session_id\":\"scoped-session\",\"turn_id\":\"scoped-turn\",\"parent_thread_id\":\"parent\",\"reasoning_effort\":\"high\"}"}}`)

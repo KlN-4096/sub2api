@@ -2,6 +2,7 @@ import { computed, shallowRef, watch } from 'vue'
 
 // The inputs are JSON API/display data, not editable state. Snapshot only when
 // pausing; a recycled row must never retain the previous account's frame.
+// read() returns only what the caller renders: every paused row deep-copies it.
 export function usePausedDisplay<T extends object>(
   read: () => T,
   paused: () => boolean,

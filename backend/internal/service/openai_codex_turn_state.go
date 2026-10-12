@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -263,20 +262,10 @@ func usageCodexTurnStatePtr(h http.Header) *string {
 }
 
 // truncateUsageTurnState 收边到列上限；空值返回 nil（列保持 NULL）。
+// truncateUTF8 不切开多字节字符：切在中间会让 Postgres 拒掉整行用量。
 func truncateUsageTurnState(state string) *string {
-	if state == "" {
+	if state = truncateUTF8(state, maxUsageCodexTurnStateLen); state == "" {
 		return nil
-	}
-	if len(state) > maxUsageCodexTurnStateLen {
-		state = state[:maxUsageCodexTurnStateLen]
-		// 与 usageUpstreamRequestIDPtr 同型：切在多字节字符中间会让 Postgres
-		// 拒掉整行用量。blob 是 ASCII base64，实际到不了这里，但对齐是免费的。
-		for len(state) > 0 && !utf8.ValidString(state) {
-			state = state[:len(state)-1]
-		}
-		if state == "" {
-			return nil
-		}
 	}
 	return &state
 }

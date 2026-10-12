@@ -52,7 +52,26 @@ const props = defineProps<{
 }>()
 
 const { t } = useI18n()
-const display = usePausedDisplay(() => props, () => props.progressPaused === true, () => props.account.id)
+// Only the fields rendered below: a paused pool row deep-copies all of it.
+const display = usePausedDisplay(() => {
+  const a = props.account
+  const runtime = props.gatewayProgress?.runtime
+  return {
+    account: {
+      platform: a.platform, type: a.type, extra: { openai_gwpool: a.extra?.openai_gwpool },
+      concurrency: a.concurrency, current_concurrency: a.current_concurrency,
+      window_cost_limit: a.window_cost_limit, current_window_cost: a.current_window_cost,
+      window_cost_sticky_reserve: a.window_cost_sticky_reserve,
+      max_sessions: a.max_sessions, active_sessions: a.active_sessions,
+      session_idle_timeout_minutes: a.session_idle_timeout_minutes,
+      base_rpm: a.base_rpm, current_rpm: a.current_rpm, rpm_strategy: a.rpm_strategy, rpm_sticky_buffer: a.rpm_sticky_buffer,
+      quota_used: a.quota_used, quota_limit: a.quota_limit,
+      quota_daily_used: a.quota_daily_used, quota_daily_limit: a.quota_daily_limit,
+      quota_weekly_used: a.quota_weekly_used, quota_weekly_limit: a.quota_weekly_limit
+    },
+    gatewayProgress: { runtime: { current_concurrency: runtime?.current_concurrency, concurrency_limit: runtime?.concurrency_limit } }
+  }
+}, () => props.progressPaused === true, () => props.account.id)
 
 // ====== 并发 ======
 const usesPool = computed(() => display.value.account.extra?.openai_gwpool === true)

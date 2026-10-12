@@ -28,7 +28,7 @@ type restDisplayAdmin struct {
 	fail bool
 }
 
-func (a restDisplayAdmin) GatewayPoolRuntimeProgress(context.Context, []int64) (map[int64]service.GatewayPoolProgress, error) {
+func (a restDisplayAdmin) GatewayPoolRuntimeProgress(context.Context, []int64, bool) (map[int64]service.GatewayPoolProgress, error) {
 	if a.fail {
 		return nil, errors.New("private diagnostic")
 	}

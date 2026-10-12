@@ -289,10 +289,10 @@ func applyCodexWSFrameWireProfile(c *gin.Context, account *Account, payload []by
 		}
 		payload = alignCodexEmbeddedTurnMetadata(payload, codexTurnMetadataExecutionValues(payload))
 	}
-	timezone := codexWireTimezoneName(account)
-	payload = rewriteCodexEnvironmentTimezoneWithName(timezone, payload)
-	// 与 HTTP 两条路径同一条规则：web_search 的 user_location 跟着出口走
+	// environment_context 的时区已在各 WS 入口归一化之前投影过；这里只取同一个时区名，
+	// 按与 HTTP 两条路径同一条规则让 web_search 的 user_location 跟着出口走
 	// （openai_codex_wire_user_location.go）。
+	timezone := codexWireTimezoneName(account)
 	payload = rewriteCodexWebSearchUserLocationWith(account, timezone, payload)
 	return reorderCodexTopLevelFields(payload, codexWSCreateFieldOrder)
 }
