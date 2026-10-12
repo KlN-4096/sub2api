@@ -85,7 +85,7 @@ func (r *gatewayPoolRounds) exhaust(group int64, identity string, generation uin
 	}
 }
 
-func (r *gatewayPoolRounds) claim(group int64, identity string, limits ...int) bool {
+func (r *gatewayPoolRounds) claim(group int64, identity string, limit int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	state := r.groupLocked(group)
@@ -93,10 +93,7 @@ func (r *gatewayPoolRounds) claim(group int64, identity string, limits ...int) b
 	if _, exhausted := state.exhausted[domain]; exhausted && !state.continuousDomain(domain) {
 		return false
 	}
-	limit := gatewayPoolActiveAccountsDefault
-	if len(limits) > 0 {
-		limit = normalizeGatewayPoolActiveAccounts(limits[0])
-	}
+	limit = normalizeGatewayPoolActiveAccounts(limit)
 	if len(state.active) == 0 && state.current != "" {
 		state.active = []string{state.current}
 	}

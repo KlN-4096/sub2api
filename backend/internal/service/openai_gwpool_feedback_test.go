@@ -98,7 +98,7 @@ func TestGatewayPoolCooldownReportStopsOnPermanentFailureAndBacksOffTemporary(t 
 			svc.flushGatewayPoolReports(context.Background())
 			svc.flushGatewayPoolReports(context.Background())
 			require.Equal(t, 1, calls, "永久失败停发；临时失败退避内也不得立即重发")
-			current, _ := repo.GetByID(context.Background(), 1)
+			current, _ := repo.stored(1)
 			box := readGatewayPoolOutbox(current, time.Now())
 			require.Len(t, box.Pending, 1)
 			require.Equal(t, status == http.StatusConflict, box.Pending[0].Permanent)

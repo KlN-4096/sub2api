@@ -130,9 +130,9 @@ func cooldownResetService(t *testing.T, now time.Time) (*OpenAIGatewayService, *
 		repo.rows[id] = &gatewayRuntimeRepo{account: *account}
 	}
 	svc := &OpenAIGatewayService{accountRepo: repo}
-	svc.codexCookies.accountByID = repo.GetByID
+	svc.codexCookies.accountByID = svc.gatewayPoolLedgerRow
 	svc.codexCookies.historyByTag = svc.gatewayPoolHistoryPeers
-	account, err := repo.GetByID(context.Background(), 1)
+	account, err := repo.stored(1)
 	require.NoError(t, err)
 	identity, err := svc.codexCookies.gatewayPoolIdentity(context.Background(), account)
 	require.NoError(t, err)
@@ -143,8 +143,8 @@ func cooldownResetService(t *testing.T, now time.Time) (*OpenAIGatewayService, *
 func TestGatewayPoolCooldownResetPersistsClonesAndSurvivesRestart(t *testing.T) {
 	ctx, now := context.Background(), time.Now().UTC()
 	svc, repo, identity := cooldownResetService(t, now)
-	account, _ := repo.GetByID(ctx, 1)
-	stale, _ := repo.GetByID(ctx, 2)
+	account, _ := repo.stored(1)
+	stale, _ := repo.stored(2)
 	before, _ := readOpenAIGatewayHistory(account)
 	pair := openAIGatewayPoolPair{gateway: "recent", version: "live", routeExpiresAt: now.Add(time.Hour)}
 	svc.codexCookies.poolPairs.Store(identity, pair)
@@ -153,7 +153,7 @@ func TestGatewayPoolCooldownResetPersistsClonesAndSurvivesRestart(t *testing.T) 
 
 	require.NoError(t, svc.maintainGatewayPoolCooldownReset(ctx, account, now))
 	for _, id := range []int64{1, 2} {
-		fresh, err := repo.GetByID(ctx, id)
+		fresh, err := repo.stored(id)
 		require.NoError(t, err)
 		history, _ := readOpenAIGatewayHistory(fresh)
 		require.Equal(t, now, history.CooldownReset.LastAt)
@@ -175,7 +175,7 @@ func TestGatewayPoolCooldownResetPersistsClonesAndSurvivesRestart(t *testing.T) 
 	cooldown, _ := svc.codexCookies.cooldownEntry(identity, "recent")
 	require.Equal(t, 3600, cooldown.WindowSeconds, "old clone data must not restore 8h")
 
-	restarted := &openAICodexCookieStore{accountByID: repo.GetByID, historyByTag: svc.gatewayPoolHistoryPeers}
+	restarted := &openAICodexCookieStore{accountByID: svc.gatewayPoolLedgerRow, historyByTag: svc.gatewayPoolHistoryPeers}
 	require.NoError(t, restarted.hydrateGatewayPoolSharedHistory(ctx, stale, identity))
 	require.True(t, restarted.gatewayPoolUsedRecently(identity, "recent", time.Hour))
 	require.False(t, restarted.gatewayPoolUsedRecently(identity, "rested", time.Hour))
@@ -186,7 +186,7 @@ func TestGatewayPoolCooldownResetPersistsClonesAndSurvivesRestart(t *testing.T) 
 func TestGatewayPoolCooldownResetFailedWriteDoesNotApply(t *testing.T) {
 	ctx, now := context.Background(), time.Now().UTC()
 	svc, repo, identity := cooldownResetService(t, now)
-	account, _ := repo.GetByID(ctx, 1)
+	account, _ := repo.stored(1)
 	repo.rows[1].fail = true
 	require.Error(t, svc.maintainGatewayPoolCooldownReset(ctx, account, now))
 	require.True(t, svc.codexCookies.gatewayPoolCooldownResetAt(identity).IsZero())
@@ -202,17 +202,17 @@ func TestGatewayPoolCooldownResetUsesLatestCloneTouch(t *testing.T) {
 	ctx, now := context.Background(), time.Now().UTC()
 	svc, repo, identity := cooldownResetService(t, now)
 	for id, age := range map[int64]time.Duration{1: 2 * time.Hour, 2: 10 * time.Minute} {
-		account, _ := repo.GetByID(ctx, id)
+		account, _ := repo.stored(id)
 		history, _ := readOpenAIGatewayHistory(account)
 		history.Seen["recent"] = openAIGatewaySeen{At: now.Add(-age), Cooldown: resetTestCooldown(now.Add(-age))}
 		require.NoError(t, repo.UpdateExtra(ctx, id, map[string]any{openAIGatewayHistoryExtraKey: history}))
 	}
 	svc.codexCookies.poolUsed.Store(gatewayPoolLedgerKey(identity, "recent"), now.Add(-2*time.Hour))
 	svc.codexCookies.poolCooldown[gatewayPoolLedgerKey(identity, "recent")] = *resetTestCooldown(now.Add(-2 * time.Hour))
-	account, _ := repo.GetByID(ctx, 1)
+	account, _ := repo.stored(1)
 	require.NoError(t, svc.maintainGatewayPoolCooldownReset(ctx, account, now))
 	for _, id := range []int64{1, 2} {
-		fresh, _ := repo.GetByID(ctx, id)
+		fresh, _ := repo.stored(id)
 		history, _ := readOpenAIGatewayHistory(fresh)
 		require.Equal(t, now.Add(50*time.Minute), history.Seen["recent"].Cooldown.Until,
 			"the latest touch belongs to the shared credential, not just this row")
@@ -256,12 +256,12 @@ func TestGatewayPoolCooldownResetStaleCloneCannotEraseNewLearning(t *testing.T) 
 func TestGatewayPoolCooldownResetHistoryWriterRejectsOldMemory(t *testing.T) {
 	ctx, now := context.Background(), time.Now().UTC()
 	svc, repo, identity := cooldownResetService(t, now)
-	account, _ := repo.GetByID(ctx, 1)
+	account, _ := repo.stored(1)
 	require.NoError(t, svc.maintainGatewayPoolCooldownReset(ctx, account, now))
 	svc.codexCookies.poolCooldown[gatewayPoolLedgerKey(identity, "recent")] = *resetTestCooldown(now)
 	svc.noteOpenAIGatewayUse(ctx, account, "recent", "new-region", "", true, 0, 0, 0,
 		gatewayPoolLedgerTag(identity))
-	fresh, _ := repo.GetByID(ctx, 1)
+	fresh, _ := repo.stored(1)
 	history, _ := readOpenAIGatewayHistory(fresh)
 	require.Equal(t, 3600, history.Seen["recent"].Cooldown.WindowSeconds)
 	require.Equal(t, now, history.Seen["recent"].Cooldown.ResetAt)
@@ -273,7 +273,7 @@ func TestGatewayPoolCooldownResetWritersKeepNewEpochLearning(t *testing.T) {
 			ctx, now := context.Background(), time.Now().UTC()
 			svc, repo, identity := cooldownResetService(t, now)
 			resetAt := now.Add(-15 * time.Minute)
-			fresh, _ := repo.GetByID(ctx, 1)
+			fresh, _ := repo.stored(1)
 			history, _ := readOpenAIGatewayHistory(fresh)
 			history.CooldownReset.LastAt = resetAt
 			history.Seen["recent"] = openAIGatewaySeen{At: now.Add(-time.Minute), Cooldown: resetTestCooldown(now.Add(-time.Minute))}
@@ -290,7 +290,7 @@ func TestGatewayPoolCooldownResetWritersKeepNewEpochLearning(t *testing.T) {
 				svc.noteOpenAIGatewayUse(ctx, fresh, "recent", "new-region", "", true, 0, 0, 0,
 					gatewayPoolLedgerTag(identity))
 			}
-			fresh, _ = repo.GetByID(ctx, 1)
+			fresh, _ = repo.stored(1)
 			history, _ = readOpenAIGatewayHistory(fresh)
 			require.Equal(t, 7200, history.Seen["recent"].Cooldown.WindowSeconds)
 			svc.codexCookies.gatewayPoolHydrateUsed(fresh, identity)
@@ -335,7 +335,7 @@ func TestGatewayPoolCooldownResetRunsWithoutOutboxOrModelRequests(t *testing.T) 
 func TestGatewayPoolCooldownResetConcurrentPassesAreIdempotent(t *testing.T) {
 	ctx, now := context.Background(), time.Now().UTC()
 	svc, repo, identity := cooldownResetService(t, now)
-	account, _ := repo.GetByID(ctx, 1)
+	account, _ := repo.stored(1)
 	var wg sync.WaitGroup
 	errs := make(chan error, 8)
 	for range 8 {
@@ -351,7 +351,7 @@ func TestGatewayPoolCooldownResetConcurrentPassesAreIdempotent(t *testing.T) {
 		require.NoError(t, err)
 	}
 	require.Equal(t, now, svc.codexCookies.gatewayPoolCooldownResetAt(identity))
-	fresh, _ := repo.GetByID(ctx, 1)
+	fresh, _ := repo.stored(1)
 	history, _ := readOpenAIGatewayHistory(fresh)
 	require.Equal(t, now.Add(40*time.Minute), history.Seen["recent"].Cooldown.Until)
 }
@@ -361,4 +361,45 @@ func TestGatewayPoolCooldownResetRejectsFutureState(t *testing.T) {
 	require.False(t, (gatewayPoolCooldownResetState{LastAt: now.Add(time.Hour)}).valid(now))
 	require.False(t, (gatewayPoolCooldownResetState{IntervalHours: -1}).valid(now))
 	require.True(t, (gatewayPoolCooldownResetState{}).valid(now))
+}
+
+func TestGatewayPoolBarrierWritersShareHistoryViewGuards(t *testing.T) {
+	now := time.Now().UTC()
+	writers := map[string]func(*OpenAIGatewayService, context.Context, int64, string, bool) error{
+		"clear": func(svc *OpenAIGatewayService, ctx context.Context, id int64, identity string, owner bool) error {
+			return svc.writeGatewayPoolCooldownClear(ctx, id, identity, now, owner)
+		},
+		"reset": func(svc *OpenAIGatewayService, ctx context.Context, id int64, identity string, owner bool) error {
+			return svc.writeGatewayPoolCooldownReset(ctx, id, identity, now, now, owner)
+		},
+	}
+	for name, write := range writers {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			svc, repo, identity := cooldownResetService(t, now)
+			history, _ := readOpenAIGatewayHistory(&repo.rows[2].account)
+			history.LedgerTag = "another-ledger"
+			repo.rows[2].account.Extra[openAIGatewayHistoryExtraKey] = history
+			before, err := json.Marshal(repo.rows[2].account.Extra)
+			require.NoError(t, err)
+			require.NoError(t, write(svc, ctx, 2, identity, false), "a peer on another ledger is skipped")
+			require.EqualError(t, write(svc, ctx, 2, "gwpool-member:other/member", true), "gateway cooldown "+name+" identity changed")
+			after, err := json.Marshal(repo.rows[2].account.Extra)
+			require.NoError(t, err)
+			require.JSONEq(t, string(before), string(after))
+			canceled, cancel := context.WithCancel(ctx)
+			cancel()
+			err = write(svc, canceled, 1, identity, true)
+			if name == "reset" {
+				require.ErrorIs(t, err, context.Canceled)
+			} else {
+				require.EqualError(t, err, "gateway cooldown clear history lock unavailable")
+			}
+			require.NoError(t, write(svc, ctx, 1, identity, true))
+			fresh, err := repo.stored(1)
+			require.NoError(t, err)
+			written, _ := readOpenAIGatewayHistory(fresh)
+			require.Equal(t, now, written.CooldownReset.LastAt)
+		})
+	}
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -15,28 +14,11 @@ const (
 // No pool I/O. With fewer than N known gateways, wait for all known cooldowns.
 // No history means no local cooldown rest, not an invented retry interval.
 func (s *openAICodexCookieStore) gatewayPoolLocalResumeAt(identity string, account *Account, qualityGateways ...string) time.Time {
-	prefix := identity + "\x00"
 	deadlines := map[string]time.Time{}
 	known := map[string]time.Time{}
-	s.poolKnown.Range(func(key, _ any) bool {
-		if name, ok := key.(string); ok && strings.HasPrefix(name, prefix) {
-			known[name] = time.Time{}
-		}
-		return true
-	})
-	s.poolUsed.Range(func(key, value any) bool {
-		name, ok := key.(string)
-		at, timeOK := value.(time.Time)
-		if ok && timeOK && strings.HasPrefix(name, prefix) && !at.IsZero() {
-			known[name] = at
-		}
-		return true
-	})
-	for name, at := range known {
-		gateway, matches := strings.CutPrefix(name, prefix)
-		if !matches || gateway == "" {
-			continue
-		}
+	s.rangeGatewayPoolKnown(identity, func(gateway string) { known[gateway] = time.Time{} })
+	s.rangeGatewayPoolUsed(identity, func(gateway string, at time.Time) { known[gateway] = at })
+	for gateway, at := range known {
 		clearAt := s.gatewayPoolCooldownClearAt(identity)
 		if !at.After(clearAt) && !clearAt.IsZero() {
 			deadlines[gateway] = clearAt
@@ -45,16 +27,7 @@ func (s *openAICodexCookieStore) gatewayPoolLocalResumeAt(identity string, accou
 		if at.IsZero() {
 			continue
 		}
-		_, _ = s.gatewayPoolUsedAt(identity, gateway, account.gatewayPoolGatewayWindow())
-		base := gatewayPoolCooldownBase(account.gatewayPoolGatewayWindow())
-		until := at.Add(time.Duration(base) * time.Second)
-		if cooldown, found := s.cooldownEntry(identity, gateway); found {
-			until = cooldown.Until
-			if touched := at.Add(time.Duration(cooldown.WindowSeconds) * time.Second); !cooldown.Cleared && touched.After(until) {
-				until = touched
-			}
-		}
-		deadlines[gateway] = until
+		_, deadlines[gateway] = s.gatewayPoolCooldownUntil(identity, gateway, account.gatewayPoolGatewayWindow())
 	}
 	return gatewayPoolRecoveryDeadline(deadlines, account.gatewayPoolResumeGateways(), qualityGateways)
 }

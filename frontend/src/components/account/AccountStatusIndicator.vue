@@ -164,7 +164,7 @@ import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import type { Account } from '@/types'
 import { formatCountdown, formatDateTime, formatDateTimeToMinute, formatCountdownWithSuffix, formatTime } from '@/utils/format'
-import { useNowTicker } from '@/composables/useNowTicker'
+import { useSharedNowTicker } from '@/composables/useNowTicker'
 import { usePausedDisplay } from '@/composables/usePausedDisplay'
 import { isGatewayPoolRestReason } from '@/utils/gatewayPoolRest'
 
@@ -183,9 +183,26 @@ const emit = defineEmits<{
 
 // 会走的「现在」。本组件原先每处都是裸 new Date()：那不是响应式依赖，computed 算过一次
 // 就再也不重算（账号页自动刷新默认是关的），到期的徽标会一直挂着。
-const wallTime = useNowTicker()
+const wallTime = useSharedNowTicker()
+// Only the fields rendered below: a paused pool row deep-copies all of it.
 const display = usePausedDisplay(
-  () => ({ ...props, now: wallTime.value }),
+  () => {
+    const a = props.account
+    return {
+      account: {
+        status: a.status, schedulable: a.schedulable, error_message: a.error_message,
+        rate_limit_reset_at: a.rate_limit_reset_at, overload_until: a.overload_until,
+        temp_unschedulable_until: a.temp_unschedulable_until, temp_unschedulable_reason: a.temp_unschedulable_reason,
+        quota_used: a.quota_used, quota_limit: a.quota_limit,
+        quota_daily_used: a.quota_daily_used, quota_daily_limit: a.quota_daily_limit,
+        quota_weekly_used: a.quota_weekly_used, quota_weekly_limit: a.quota_weekly_limit,
+        extra: { model_rate_limits: a.extra?.model_rate_limits, allow_overages: a.extra?.allow_overages }
+      },
+      gatewayPoolRest: props.gatewayPoolRest && { active: props.gatewayPoolRest.active },
+      gatewayPoolRestPending: props.gatewayPoolRestPending,
+      now: wallTime.value
+    }
+  },
   () => props.progressPaused === true,
   () => props.account.id
 )

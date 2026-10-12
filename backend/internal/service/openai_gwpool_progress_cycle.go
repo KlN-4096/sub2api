@@ -42,5 +42,5 @@ func (s *OpenAIGatewayService) startGatewayPoolProgress(ctx context.Context, acc
 			scope.sequence = sequence
 		}
 	}
-	return s.codexCookies.poolProgress.start(account.ID, 0, scope)
+	return s.codexCookies.poolProgress.start(account.ID, scope)
 }

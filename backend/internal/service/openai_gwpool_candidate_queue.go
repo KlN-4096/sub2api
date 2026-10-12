@@ -16,12 +16,7 @@ type gatewayPoolCandidateQueue struct {
 }
 
 func (s *openAICodexCookieStore) gatewayPoolCandidateQueue(identity string) *gatewayPoolCandidateQueue {
-	value, _ := s.poolCandidateQueues.LoadOrStore(identity, &gatewayPoolCandidateQueue{})
-	queue, ok := value.(*gatewayPoolCandidateQueue)
-	if !ok || queue == nil {
-		panic("invalid gateway pool candidate queue")
-	}
-	return queue
+	return gatewayPoolLoadOrNew[gatewayPoolCandidateQueue](&s.poolCandidateQueues, identity)
 }
 
 func (q *gatewayPoolCandidateQueue) pick(eligible []gwpool.Gateway, policy ...gatewayPoolCandidateRanking) string {

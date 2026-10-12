@@ -28,10 +28,10 @@ func TestGatewayPoolModelSubsetExhaustionPreservesHealthyActiveAccounts(t *testi
 	a.Credentials["model_mapping"] = map[string]any{"gpt-6-astra": "gpt-6-astra"}
 	b.Credentials["model_mapping"] = map[string]any{"gpt-6-astra": "gpt-6-astra"}
 	c.Credentials["model_mapping"] = map[string]any{"only-other": "only-other"}
-	svc := &OpenAIGatewayService{
+	svc := withGatewayPoolRowRead(&OpenAIGatewayService{
 		accountRepo:      gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*a, *b, *c}}},
 		rateLimitService: gatewayPoolSchedulerTestSettings("legacy"),
-	}
+	})
 	aid, bid, cid := openAIGatewayPoolAccountKey(a), openAIGatewayPoolAccountKey(b), openAIGatewayPoolAccountKey(c)
 	require.True(t, svc.codexCookies.poolRounds.claim(group, aid, 2))
 	require.True(t, svc.codexCookies.poolRounds.claim(group, bid, 2))

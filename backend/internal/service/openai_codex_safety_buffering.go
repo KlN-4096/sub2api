@@ -95,11 +95,5 @@ func usageCodexSafetyBufferingFasterModelPtr(h http.Header) *string {
 	if len(values) == 0 {
 		return nil
 	}
-	v := strings.TrimSpace(values[0])
-	if v == "" {
-		return nil
-	}
-	// 列是 TEXT：截断不切多字节字符，短值里的非法字节也剔掉，否则整行 INSERT 被 PostgreSQL 拒绝。
-	v = strings.ToValidUTF8(truncateUTF8(v, maxUsageSafetyBufferingModelLen), "")
-	return &v
+	return usageTextPtr(strings.TrimSpace(values[0]), maxUsageSafetyBufferingModelLen)
 }

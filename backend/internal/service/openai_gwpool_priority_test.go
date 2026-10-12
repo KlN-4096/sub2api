@@ -93,11 +93,11 @@ func TestGatewayPoolUSBackoffOnlyFromSentContactsAndSurvivesReload(t *testing.T)
 	event.Applied.DatacenterCountry = "US"
 	event.FirstSent = time.Time{}
 	svc.noteGatewayPoolContact(context.Background(), account, event)
-	current, _ := repo.GetByID(context.Background(), 1)
+	current, _ := repo.stored(1)
 	require.Zero(t, readGatewayPoolContacts(current, gatewayPoolLedgerTag(gwpoolTestIdentity)).LastUSAt)
 	event.FirstSent = event.LastSent.Add(-time.Second)
 	svc.noteGatewayPoolContact(context.Background(), account, event)
-	current, _ = repo.GetByID(context.Background(), 1)
+	current, _ = repo.stored(1)
 	reloaded := readGatewayPoolContacts(current, gatewayPoolLedgerTag(gwpoolTestIdentity))
 	require.Equal(t, event.LastSent, reloaded.LastUSAt)
 	other := readGatewayPoolContacts(current, "different-identity")
@@ -114,6 +114,6 @@ func TestGatewayPoolUSBackoffDoesNotGuessDriftCountry(t *testing.T) {
 	event.Applied.DatacenterCountry = "US"
 	event.Steps = []gatewayPoolProbeStep{{Sent: true, Status: 200, ActualGateway: "unknown-location"}}
 	svc.noteGatewayPoolContact(context.Background(), account, event)
-	current, _ := repo.GetByID(context.Background(), 1)
+	current, _ := repo.stored(1)
 	require.Zero(t, readGatewayPoolContacts(current, gatewayPoolLedgerTag(gwpoolTestIdentity)).LastUSAt)
 }

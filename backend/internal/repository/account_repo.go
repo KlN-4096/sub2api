@@ -75,14 +75,9 @@ var schedulerNeutralExtraKeys = map[string]struct{}{
 	"openai_turn_state_observed": {},
 	// CPR 侧的出站代理端点，跟着额度探测刷新，纯展示不参与调度。
 	"cpr_outbound_proxy": {},
-	// 这个账号落过哪些网关、当前在哪个（openai_gwpool_gateway_history.go）。用量路径上
-	// 带节流地写，纯展示不参与调度。
-	"openai_gwpool_gateways":        {},
-	"openai_gwpool_feedback_outbox": {},
-	"openai_gwpool_contacts":        {},
-	// 同一上游身份的历史查询标签；运行态中立键，消费端使用 GetByID / FindByExtraField 新鲜读取。
+	// 网关池运行态留在 extra 的部分：同一上游身份的查询标签与 rest/usage 状态（账本本体在
+	// gateway_pool_ledgers）。运行态中立键，消费端使用 GetByID / FindByExtraField 新鲜读取。
 	"openai_gwpool_ledger_tag":           {},
-	"openai_gwpool_usage_rounds":         {},
 	service.GatewayPoolUsageBlockedAtKey: {},
 	"openai_gwpool_usage_tag":            {},
 	"openai_gwpool_rest_state":           {},
