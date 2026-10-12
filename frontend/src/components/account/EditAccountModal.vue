@@ -4129,6 +4129,21 @@ const openAIGwpoolFetchTimeout = ref<number | null>(null)
 const openAIGwpoolListTimeout = ref<number | null>(null)
 const readGwpoolSeconds = (value: unknown): number | null =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
+// 已删的网关池键。保存时顺手清掉老账号 extra 里的残留，别让一个没人读的键留在库里。
+const RETIRED_GWPOOL_EXTRA_KEYS = [
+  // 2026-10-02 删掉（覆写范围恒为推理面；续期只会把票换到同大区的另一个网关）。
+  'openai_gwpool_all_models', 'openai_gwpool_renew',
+  // 选票始终优先冷却完毕，清除已废弃的关闭开关。
+  'openai_gwpool_steering', 'openai_gwpool_auto_wait', 'openai_gwpool_warm_tickets', 'openai_gwpool_max_wait_s',
+  // 推荐冷却、成员隔离与提前探测的开关已删。
+  'openai_gwpool_use_recommended_cooldown', 'openai_gwpool_member_isolation',
+  'openai_gwpool_early_probe_enabled', 'openai_gwpool_early_probe_state',
+  // 后台预热已移除。
+  'openai_gwpool_prewarm', 'openai_gwpool_rotation', 'openai_gwpool_rotation_min_gateways',
+  // Strict verification and Luna are backend rules, not saved overrides.
+  'openai_gwpool_probe_model', 'openai_gwpool_guard_enabled', 'openai_gwpool_guard',
+  'openai_gwpool_state_echo', 'openai_gwpool_degraded_retries'
+]
 
 const readUpstreamRequestIdHeader = (extra: unknown): string => {
   const value = (extra as Record<string, unknown> | undefined)?.upstream_request_id_header
@@ -6356,15 +6371,7 @@ const handleSubmit = async () => {
         if (gwpoolConsumerKey) {
           newExtra.openai_gwpool_consumer_key = gwpoolConsumerKey
         }
-        // 这两个键 2026-10-02 删掉了（覆写范围恒为推理面；续期只会把票换到同大区的另一个
-        // 网关）。保存时顺手清掉老账号 extra 里的残留，别让一个没人读的键留在库里。
-        delete newExtra.openai_gwpool_all_models
-        delete newExtra.openai_gwpool_renew
-        // 选票始终优先冷却完毕，清除已废弃的关闭开关。
-        delete newExtra.openai_gwpool_steering
-        delete newExtra.openai_gwpool_auto_wait
-        delete newExtra.openai_gwpool_warm_tickets
-        delete newExtra.openai_gwpool_max_wait_s
+        for (const key of RETIRED_GWPOOL_EXTRA_KEYS) delete newExtra[key]
         if (openAIGwpoolEnabled.value && openAIGwpoolContinuousWait.value) {
           newExtra.openai_gwpool_continuous_wait = true
         } else {
@@ -6375,25 +6382,11 @@ const handleSubmit = async () => {
         } else {
           delete newExtra.openai_gwpool_probe_timeout_s
         }
-        delete newExtra.openai_gwpool_use_recommended_cooldown
-        delete newExtra.openai_gwpool_member_isolation
-        delete newExtra.openai_gwpool_early_probe_enabled
-        delete newExtra.openai_gwpool_early_probe_state
-        // 后台预热已移除，保存时清理旧键。
-        delete newExtra.openai_gwpool_prewarm
-        delete newExtra.openai_gwpool_rotation
-        delete newExtra.openai_gwpool_rotation_min_gateways
         if (openAIGwpoolEnabled.value && openAIGwpoolResumeGateways.value !== '') {
           newExtra.openai_gwpool_resume_gateways = openAIGwpoolResumeGateways.value
         } else {
           delete newExtra.openai_gwpool_resume_gateways
         }
-        // Strict verification and Luna are backend rules, not saved overrides.
-        delete newExtra.openai_gwpool_probe_model
-        delete newExtra.openai_gwpool_guard_enabled
-        delete newExtra.openai_gwpool_guard
-        delete newExtra.openai_gwpool_state_echo
-        delete newExtra.openai_gwpool_degraded_retries
         if (openAIGwpoolEnabled.value && typeof openAIGwpoolCooldownResetHours.value === 'number') {
           newExtra.openai_gwpool_cooldown_reset_hours = openAIGwpoolCooldownResetHours.value
         } else {

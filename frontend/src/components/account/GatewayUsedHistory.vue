@@ -8,6 +8,8 @@ const props = defineProps<{ items: Array<{
   name: string; region: string; title: string
   duration: string; status: string; tone: 'full' | 'degraded' | 'idle'
 }> }>()
+// Lets the parent build the full entries only while the panel is open.
+const emit = defineEmits<{ toggle: [open: boolean] }>()
 const { t } = useI18n()
 const PAGE_SIZE = 4
 const EDGE_GAP = 8
@@ -51,6 +53,8 @@ function show(pin = false) {
   cancelClose()
   pinned ||= pin
   open.value = true
+  listen()
+  emit('toggle', true)
   nextTick(() => {
     positionPanel()
     if (pin) panel.value?.querySelector('select')?.focus()
@@ -60,6 +64,8 @@ function close() {
   cancelClose()
   open.value = false
   pinned = false
+  unlisten()
+  emit('toggle', false)
 }
 function leave() {
   if (!pinned) closeTimer = setTimeout(close, HOVER_CLOSE_DELAY_MS)
@@ -82,18 +88,23 @@ watch([() => props.items, region], () => {
   nextTick(positionPanel)
 })
 watch(page, () => nextTick(positionPanel))
-onMounted(() => {
+// Outside clicks, scrolling and resizing only matter while the panel is open.
+function listen() {
   document.addEventListener('pointerdown', onOutside)
-  document.addEventListener('keydown', onKey)
   window.addEventListener('scroll', positionPanel, true)
   window.addEventListener('resize', positionPanel)
-})
-onBeforeUnmount(() => {
-  cancelClose()
+}
+function unlisten() {
   document.removeEventListener('pointerdown', onOutside)
-  document.removeEventListener('keydown', onKey)
   window.removeEventListener('scroll', positionPanel, true)
   window.removeEventListener('resize', positionPanel)
+}
+// Escape stays registered from mount: with two panels open, the handlers run in mount
+// order, and that order decides which trigger ends up with the focus.
+onMounted(() => document.addEventListener('keydown', onKey))
+onBeforeUnmount(() => {
+  close()
+  document.removeEventListener('keydown', onKey)
 })
 </script>
 
