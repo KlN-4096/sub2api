@@ -50,6 +50,14 @@ func (p gatewayPoolPendingReport) tag() string {
 	}
 	return p.Report.AccountTag
 }
+
+// valid reports whether the pool can accept the report as queued.
+func (p gatewayPoolPendingReport) valid() bool {
+	if p.Kind == "contact" {
+		return p.Contact.Valid()
+	}
+	return p.Report.Valid()
+}
 func (p gatewayPoolPendingReport) samePayload(other gatewayPoolPendingReport) bool {
 	if p.Kind != other.Kind || p.Binding != other.Binding || p.Report != other.Report {
 		return false
@@ -258,6 +266,7 @@ func (s *OpenAIGatewayService) flushGatewayPoolReports(ctx context.Context) {
 		slog.Warn("gwpool_feedback_scan_failed")
 		return
 	}
+	outgoing := map[*gwpool.Client][]gatewayPoolReportDelivery{}
 	for i := range accounts {
 		if ctx.Err() != nil {
 			return
@@ -293,28 +302,27 @@ func (s *OpenAIGatewayService) flushGatewayPoolReports(ctx context.Context) {
 			continue
 		}
 		binding := gatewayPoolAccountReportBinding(account, identity)
-		var batch []gatewayPoolPendingReport
-		contactSent := false
+		var ready []gatewayPoolPendingReport
+		contacts, cooldowns := 0, 0
 		for _, pending := range box.Pending {
 			if !gatewayPoolReportReady(box, pending, binding, time.Now().UTC()) {
 				continue
 			}
-			if pending.Kind == "contact" {
-				if !contactSent {
-					s.sendGatewayPoolPending(ctx, account.ID, pending)
-					contactSent = true
-				}
-			} else if len(batch) < gwpool.CooldownBatchLimit {
-				batch = append(batch, pending)
+			// Contacts and cooldown reports travel in separate batches, so contact
+			// finalization cannot starve behind stable success reports.
+			if pending.Kind == "contact" && contacts < gwpool.ContactBatchLimit {
+				ready, contacts = append(ready, pending), contacts+1
+			} else if pending.Kind != "contact" && cooldowns < gwpool.CooldownBatchLimit {
+				ready, cooldowns = append(ready, pending), cooldowns+1
 			}
 		}
-		// One contact request and one bounded cooldown batch per account/pass:
-		// contact finalization cannot starve behind stable success reports.
-		if len(batch) == 1 {
-			s.sendGatewayPoolPending(ctx, account.ID, batch[0])
-		} else if len(batch) > 1 {
-			s.sendGatewayPoolCooldownBatch(ctx, account.ID, batch)
+		if len(ready) != 0 {
+			s.collectGatewayPoolReports(ctx, account.ID, ready, outgoing)
 		}
+	}
+	// Members sharing a pool key share its batches.
+	for pool, deliveries := range outgoing {
+		s.sendGatewayPoolReports(ctx, pool, deliveries)
 	}
 }
 
@@ -332,69 +340,126 @@ func (s *OpenAIGatewayService) gatewayPoolReportSender(ctx context.Context, acco
 	return account, gatewayPoolAccountReportBinding(account, identity), true
 }
 
-func (s *OpenAIGatewayService) sendGatewayPoolPending(ctx context.Context, accountID int64, pending gatewayPoolPendingReport) {
-	startedAt := time.Now().UTC()
-	ctx, cancel := context.WithTimeout(ctx, gatewayPoolReportTimeout)
-	defer cancel()
-	account, binding, ok := s.gatewayPoolReportSender(ctx, accountID)
-	if !ok {
-		return
-	}
-	bindingChanged := pending.Binding != binding
-	var recommendation *gwpool.CooldownRecommendation
-	var err error
-	if !bindingChanged {
-		pool, poolErr := s.codexCookies.poolClient(account)
-		err = poolErr
-		if err == nil {
-			if pending.Kind == "contact" {
-				err = pool.ReportContact(ctx, *pending.Contact)
-			} else {
-				recommendation, err = pool.ReportCooldown(ctx, pending.Report)
-			}
-		}
-	}
-	s.completeGatewayPoolPending(ctx, accountID, pending, recommendation, err, bindingChanged, startedAt)
+type gatewayPoolReportDelivery struct {
+	accountID int64
+	pending   gatewayPoolPendingReport
 }
 
-func (s *OpenAIGatewayService) sendGatewayPoolCooldownBatch(ctx context.Context, accountID int64, batch []gatewayPoolPendingReport) {
+type gatewayPoolReportAck struct {
+	status         int
+	recommendation *gwpool.CooldownRecommendation
+}
+
+// collectGatewayPoolReports queues one member's ready reports under its pool
+// client. A report the pool cannot accept fails here, alone, instead of
+// failing a batch shared with other members.
+func (s *OpenAIGatewayService) collectGatewayPoolReports(ctx context.Context, accountID int64,
+	ready []gatewayPoolPendingReport, outgoing map[*gwpool.Client][]gatewayPoolReportDelivery) {
 	startedAt := time.Now().UTC()
-	ctx, cancel := context.WithTimeout(ctx, gatewayPoolReportTimeout)
-	defer cancel()
-	account, binding, ok := s.gatewayPoolReportSender(ctx, accountID)
+	readCtx, cancel := context.WithTimeout(ctx, gatewayPoolReportTimeout)
+	account, binding, ok := s.gatewayPoolReportSender(readCtx, accountID)
+	cancel()
 	if !ok {
 		return
 	}
-	var sending []gatewayPoolPendingReport
-	var reports []gwpool.CooldownReport
-	for _, pending := range batch {
-		if pending.Binding != binding {
+	pool, poolErr := s.codexCookies.poolClient(account)
+	for _, pending := range ready {
+		switch {
+		case pending.Binding != binding:
 			s.completeGatewayPoolPending(ctx, accountID, pending, nil, nil, true, startedAt)
-			continue
+		case poolErr != nil:
+			s.completeGatewayPoolPending(ctx, accountID, pending, nil, poolErr, false, startedAt)
+		case !pending.valid():
+			s.completeGatewayPoolPending(ctx, accountID, pending, nil, &gwpool.PoolError{Status: http.StatusBadRequest}, false, startedAt)
+		default:
+			outgoing[pool] = append(outgoing[pool], gatewayPoolReportDelivery{accountID: accountID, pending: pending})
 		}
-		sending = append(sending, pending)
-		reports = append(reports, pending.Report)
 	}
-	if len(sending) == 0 {
-		return
-	}
-	pool, err := s.codexCookies.poolClient(account)
-	var results []gwpool.CooldownReportResult
-	if err == nil {
-		results, err = pool.ReportCooldownBatch(ctx, reports)
-	}
-	byID := map[string]gwpool.CooldownReportResult{}
-	for _, result := range results {
-		byID[result.ID] = result
-	}
-	for _, pending := range sending {
-		itemErr := err
-		result := byID[pending.id()]
-		if itemErr == nil && result.Status != http.StatusOK {
-			itemErr = &gwpool.PoolError{Status: result.Status}
+}
+
+func (s *OpenAIGatewayService) sendGatewayPoolReports(ctx context.Context, pool *gwpool.Client, deliveries []gatewayPoolReportDelivery) {
+	var contacts, cooldowns []gatewayPoolReportDelivery
+	for _, delivery := range deliveries {
+		if delivery.pending.Kind == "contact" {
+			contacts = append(contacts, delivery)
+		} else {
+			cooldowns = append(cooldowns, delivery)
 		}
-		s.completeGatewayPoolPending(ctx, accountID, pending, result.Recommendation, itemErr, false, startedAt)
 	}
+	s.sendGatewayPoolReportBatches(ctx, contacts, gwpool.ContactBatchLimit,
+		func(ctx context.Context, batch []gatewayPoolPendingReport) (map[string]gatewayPoolReportAck, error) {
+			reports := make([]gwpool.ContactReport, len(batch))
+			for i, pending := range batch {
+				reports[i] = *pending.Contact
+			}
+			results, err := pool.ReportContactBatch(ctx, reports)
+			acks := make(map[string]gatewayPoolReportAck, len(results))
+			for _, result := range results {
+				acks[result.ID] = gatewayPoolReportAck{status: result.Status}
+			}
+			return acks, err
+		})
+	s.sendGatewayPoolReportBatches(ctx, cooldowns, gwpool.CooldownBatchLimit,
+		func(ctx context.Context, batch []gatewayPoolPendingReport) (map[string]gatewayPoolReportAck, error) {
+			reports := make([]gwpool.CooldownReport, len(batch))
+			for i, pending := range batch {
+				reports[i] = pending.Report
+			}
+			results, err := pool.ReportCooldownBatch(ctx, reports)
+			acks := make(map[string]gatewayPoolReportAck, len(results))
+			for _, result := range results {
+				acks[result.ID] = gatewayPoolReportAck{status: result.Status, recommendation: result.Recommendation}
+			}
+			return acks, err
+		})
+}
+
+func (s *OpenAIGatewayService) sendGatewayPoolReportBatches(ctx context.Context, deliveries []gatewayPoolReportDelivery, limit int,
+	send func(context.Context, []gatewayPoolPendingReport) (map[string]gatewayPoolReportAck, error)) {
+	for _, batch := range packGatewayPoolReports(deliveries, limit) {
+		if ctx.Err() != nil {
+			return // a stopped reporter leaves the rest queued, attempts unspent
+		}
+		pending := make([]gatewayPoolPendingReport, len(batch))
+		for i, delivery := range batch {
+			pending[i] = delivery.pending
+		}
+		startedAt := time.Now().UTC()
+		sendCtx, cancel := context.WithTimeout(ctx, gatewayPoolReportTimeout)
+		acks, err := send(sendCtx, pending)
+		cancel()
+		if ctx.Err() != nil {
+			return // the stop, not the pool, ended this send
+		}
+		for _, delivery := range batch {
+			ack, itemErr := acks[delivery.pending.id()], err
+			if itemErr == nil && ack.status != http.StatusOK {
+				itemErr = &gwpool.PoolError{Status: ack.status}
+			}
+			s.completeGatewayPoolPending(ctx, delivery.accountID, delivery.pending, ack.recommendation, itemErr, false, startedAt)
+		}
+	}
+}
+
+// packGatewayPoolReports fills batches of at most limit reports; a report whose
+// ID already sits in a batch (a clone row's copy) goes to a later one.
+func packGatewayPoolReports(deliveries []gatewayPoolReportDelivery, limit int) [][]gatewayPoolReportDelivery {
+	var batches [][]gatewayPoolReportDelivery
+	var ids []map[string]struct{}
+	for _, delivery := range deliveries {
+		id, placed := delivery.pending.id(), false
+		for i := range batches {
+			if _, taken := ids[i][id]; !taken && len(batches[i]) < limit {
+				batches[i], ids[i][id], placed = append(batches[i], delivery), struct{}{}, true
+				break
+			}
+		}
+		if !placed {
+			batches = append(batches, []gatewayPoolReportDelivery{delivery})
+			ids = append(ids, map[string]struct{}{id: {}})
+		}
+	}
+	return batches
 }
 
 func (s *OpenAIGatewayService) completeGatewayPoolPending(ctx context.Context, accountID int64,

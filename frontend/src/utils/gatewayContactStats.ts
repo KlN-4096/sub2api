@@ -12,7 +12,8 @@ export interface ContactRound {
   source: Source
   at: number
   outcome: Outcome
-  windowMs: number | null
+  /** Business time at full strength this ticket had in its cycle, measured when it degraded. */
+  fullUseMs: number | null
 }
 
 export interface Contacts {
@@ -57,11 +58,11 @@ export function readGatewayContacts(value: unknown, ledgerTag: unknown, now: num
     const gateway = text(report.gateway)
     if (!text(report.model) || !gateway) continue
     ids.add(id)
-    const windowMs = nonnegative(report.full_window_ms)
+    const fullUseMs = nonnegative(round.full_use_ms)
     result.rounds.push({
       id, versionHash: text(round.version_hash), gateway, source, at,
       outcome: report.outcome === 'full' || report.outcome === 'refreshed' ? report.outcome : 'unknown',
-      windowMs: report.outcome === 'full' && report.window_final === true && windowMs > 0 && windowMs <= 10 * HOUR_MS ? windowMs : null
+      fullUseMs: fullUseMs > 0 ? fullUseMs : null
     })
   }
   result.rounds.sort((a, b) => a.at - b.at)

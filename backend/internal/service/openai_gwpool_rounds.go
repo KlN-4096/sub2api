@@ -259,7 +259,7 @@ func (s *OpenAIGatewayService) gatewayPoolRoundSelectionAllowed(ctx context.Cont
 	}
 	if !account.GatewayPoolContinuousWaitEnabled() {
 		plan := s.gatewayPoolExhaustedRestQuality(ctx, account)
-		if plan != nil && s.codexCookies.gatewayPoolLocalResumeAt(identity, account, plan.qualityGateways...).After(time.Now()) {
+		if now := time.Now(); plan != nil && s.codexCookies.gatewayPoolLocalResumeAt(identity, account, now, plan.qualityGateways...).After(now) {
 			plan.roundGeneration = s.codexCookies.poolRounds.generation(*group)
 			_ = s.restGatewayPoolAccount(ctx, account, identity, *group, *plan)
 			return false

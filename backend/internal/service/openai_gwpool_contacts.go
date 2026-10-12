@@ -48,6 +48,9 @@ type gatewayPoolContactRound struct {
 	LastProbeModel   string                 `json:"last_probe_model,omitempty"`
 	LastProbeSource  string                 `json:"last_probe_source,omitempty"`
 	Steps            []gatewayPoolProbeStep `json:"steps,omitempty"`
+	// FullUseMs is the card's reading for this ticket, written when it degrades.
+	// It stays local: the pool and local ranking keep Report.FullWindowMS.
+	FullUseMs int64 `json:"full_use_ms,omitempty"`
 }
 
 type gatewayPoolContacts struct {
@@ -185,6 +188,9 @@ func mergeGatewayPoolContacts(state *gatewayPoolContacts, other gatewayPoolConta
 			target := &state.Rounds[i]
 			if r.Report.WindowFinal && !prev.Report.WindowFinal {
 				target.Report = r.Report
+			}
+			if target.FullUseMs == 0 {
+				target.FullUseMs = r.FullUseMs
 			}
 			if r.LastAt.After(prev.LastAt) {
 				target.LastAt = r.LastAt
@@ -383,8 +389,9 @@ func (r *gatewayPoolContactRound) noteProbe(event gatewayPoolContactEvent) {
 }
 
 func (s *OpenAIGatewayService) finishGatewayPoolContact(ctx context.Context, account *Account, identity string,
-	applied OpenAIGatewayPoolApplied, held time.Duration) {
-	if applied.RoundID == "" || held <= 0 || held > 10*time.Hour {
+	applied OpenAIGatewayPoolApplied, held, used time.Duration) {
+	window := held > 0 && held <= 10*time.Hour
+	if applied.RoundID == "" || (!window && used <= 0) {
 		return
 	}
 	s.changeGatewayPoolContacts(ctx, account, identity, func(_ *Account, state *gatewayPoolContacts) *gwpool.ContactReport {
@@ -392,6 +399,12 @@ func (s *OpenAIGatewayService) finishGatewayPoolContact(ctx context.Context, acc
 			r := &state.Rounds[i]
 			if !r.matchesRound(applied.RoundID) || r.Report.Gateway != applied.Gateway || r.Report.Outcome != "full" || r.Report.WindowFinal {
 				continue
+			}
+			if used > 0 {
+				r.FullUseMs = used.Milliseconds()
+			}
+			if !window {
+				return nil // the use reading stays even when the pool sample is unusable
 			}
 			r.Report.FullWindowMS = held.Milliseconds()
 			r.Report.WindowFinal = true
@@ -419,7 +432,7 @@ func (s *OpenAIGatewayService) noteGatewayPoolProbeAndContact(ctx context.Contex
 			s.noteGatewayPoolCooldownVerdict(ctx, account, observation.Applied, verdict)
 		}
 		s.noteOpenAIGatewayUse(context.WithValue(ctx, gatewayPoolObservationEpochKey{}, observation.Applied.cooldownResetAt), account, observation.Applied.Gateway, observation.Applied.Region, verdict, false,
-			observation.Applied.PoolLive, observation.Applied.PoolFree, observation.Applied.FullHeldMs, observation.Applied.LedgerTag)
+			observation.Applied.PoolLive, observation.Applied.PoolFree, observation.Applied.FullUseMs, observation.Applied.LedgerTag)
 	}
 	outcome := "unknown"
 	if observation.Conclusive {

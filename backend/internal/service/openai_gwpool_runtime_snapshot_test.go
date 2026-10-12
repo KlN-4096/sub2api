@@ -171,18 +171,18 @@ func TestGatewayPoolRuntimeDisplayFixtureInSync(t *testing.T) {
 		LedgerTag: tag, Current: "unified-999", CurrentRegion: "europe", UpdatedAt: ago(7 * time.Minute), PoolLive: 62, PoolFree: 5,
 		CooldownReset: gatewayPoolCooldownResetState{IntervalHours: 6, StartedAt: ago(24 * time.Hour), LastAt: ago(6 * time.Hour), ClearedAt: ago(3 * time.Hour)},
 		Seen: map[string]openAIGatewaySeen{
-			"unified-101": {At: ago(10 * time.Minute), Region: "us-east", Verdict: "degraded", FullAt: ago(5 * time.Hour), FullHeldMs: 43000,
+			"unified-101": {At: ago(10 * time.Minute), Region: "us-east", Verdict: "degraded", FullAt: ago(5 * time.Hour), FullUseMs: 43000,
 				Cooldown: &gatewayPoolCooldown{ResetAt: ago(24 * time.Hour), SourcesKnown: true, BaseSeconds: 3600, LocalFloorSeconds: 1800,
 					CycleAt: ago(10 * time.Minute), ScheduleUpdatedAt: ago(10 * time.Minute), WindowSeconds: 7200, FixedSeconds: 5400,
 					Until: now.Add(3 * time.Hour), UpdatedAt: ago(10 * time.Minute), AttemptAt: ago(10 * time.Minute), AttemptSeconds: 7200,
 					ElapsedSeconds: 600, Outcome: "degraded", Successes: map[int]int{3600: 2}, LastSuccessSeconds: 3600,
 					LastSuccessAt: ago(48 * time.Hour), LegacyRecommendedSeconds: 10800, LegacyRecommendationSource: "pool",
 					LegacyRecommendationUntil: now.Add(time.Hour)}},
-			"unified-102": {At: ago(30 * time.Minute), Region: "east-asia", Verdict: "full", FullAt: ago(2 * time.Hour), FullHeldMs: 120000,
+			"unified-102": {At: ago(30 * time.Minute), Region: "east-asia", Verdict: "full", FullAt: ago(2 * time.Hour), FullUseMs: 120000,
 				Cooldown: &gatewayPoolCooldown{WindowSeconds: 7200, LegacyRecommendedSeconds: 10800}},
 			"unified-103": {At: ago(20 * time.Minute), Region: "europe", Cooldown: &gatewayPoolCooldown{Cleared: true, WindowSeconds: 3600}},
 			"unified-104": {At: ago(3 * time.Hour)},
-			"unified-105": {At: ago(15 * time.Minute), Region: "country-jp", Verdict: "degraded", FullAt: ago(4 * time.Hour), FullHeldMs: 60000},
+			"unified-105": {At: ago(15 * time.Minute), Region: "country-jp", Verdict: "degraded", FullAt: ago(4 * time.Hour), FullUseMs: 60000},
 		},
 	}
 	refreshed := func(id string, at time.Time) gatewayPoolContactRound {
@@ -199,7 +199,7 @@ func TestGatewayPoolRuntimeDisplayFixtureInSync(t *testing.T) {
 				Outcome: "full", FullWindowMS: 150000, WindowFinal: true},
 			LastAt: ago(50 * time.Minute), LastProbeOutcome: "full", LastProbeAt: ago(50 * time.Minute), LastProbeModel: "gpt-6-luna",
 			LastProbeSource: "foreground", Steps: []gatewayPoolProbeStep{{Shot: "verify", Sent: true, Status: 200, GotState: true,
-				EchoAccepted: true, ActualGateway: "unified-104", DurationMS: 812}},
+				EchoAccepted: true, ActualGateway: "unified-104", DurationMS: 812}}, FullUseMs: 90000,
 		}, refreshed("r2", ago(40*time.Minute)), refreshed("r3", ago(41*time.Minute))},
 	}
 	// A field the cell may read must carry a value in the stored form.

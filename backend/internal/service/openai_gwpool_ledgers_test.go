@@ -35,7 +35,7 @@ func TestGatewayPoolListDisplayMatchesFirstProgressPoll(t *testing.T) {
 	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	account.Extra[openAIGatewayLedgerTagExtraKey] = tag
 	account.Extra[openAIGatewayHistoryExtraKey] = openAIGatewayHistory{LedgerTag: tag, Current: "good", UpdatedAt: at,
-		Seen: map[string]openAIGatewaySeen{"good": {At: at, Verdict: openAIGatewayVerdictFull, FullHeldMs: 1000}}}
+		Seen: map[string]openAIGatewaySeen{"good": {At: at, Verdict: openAIGatewayVerdictFull, FullUseMs: 1000}}}
 	account.Extra[openAIGatewayPoolContactsExtraKey] = localRankHistory(at, "good", "bad", 2)
 	svc, repo := gatewayRuntimeService(account)
 	admin := &adminServiceImpl{runtimeBlocker: svc} // the handler reaches the gateway through the admin service

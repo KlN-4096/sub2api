@@ -7,16 +7,16 @@ const iso = (ago: number) => new Date(now - ago * 1000).toISOString()
 function round(id: string, ago: number, outcome = 'refreshed', gateway = 'bad', version = id) {
   return {
     version_hash: version,
-    report: { id, gateway, model: 'luna', source: 'foreground', at: iso(ago), outcome,
-      window_final: outcome === 'full', full_window_ms: outcome === 'full' ? 124000 : 0 }
+    report: { id, gateway, model: 'luna', source: 'foreground', at: iso(ago), outcome },
+    full_use_ms: outcome === 'full' ? 124000 : 0
   }
 }
 function contacts(rounds: ReturnType<typeof round>[], trackingAgo = 300) {
   return readGatewayContacts({ ledger_tag: 'member', tracking_since: iso(trackingAgo), rounds }, 'member', now)
 }
 const history = [
-  { name: 'good', at: iso(176), fullAt: iso(300), fullHeldMs: 124000 },
-  { name: 'bad', at: iso(1), fullAt: '', fullHeldMs: 0 }
+  { name: 'good', at: iso(176), fullAt: iso(300), fullUseMs: 124000 },
+  { name: 'bad', at: iso(1), fullAt: '', fullUseMs: 0 }
 ]
 
 describe('gateway used summary', () => {
@@ -27,13 +27,13 @@ describe('gateway used summary', () => {
     ]), history, new Set())
     expect(rows).toHaveLength(2)
     expect(rows[0]).toMatchObject({ kind: 'degraded', count: 2, atLeast: false })
-    expect(rows[1]).toMatchObject({ kind: 'full', item: { name: 'good', fullHeldMs: 124000 } })
+    expect(rows[1]).toMatchObject({ kind: 'full', item: { name: 'good', fullUseMs: 124000 } })
   })
 
   it('does not count unknown or unmeasured full tickets as degraded, or join runs across them', () => {
     for (const outcome of ['unknown', 'full']) {
       const middle = round('unknown', 50, outcome)
-      middle.report.window_final = false
+      middle.full_use_ms = 0
       const rows = gatewayUsedSummary(contacts([
         round('full', 300, 'full', 'good'), round('older-bad', 100), middle, round('latest-bad', 10)
       ]), history, new Set())
