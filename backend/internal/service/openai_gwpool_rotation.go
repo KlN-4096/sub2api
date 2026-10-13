@@ -261,33 +261,46 @@ func (s *OpenAIGatewayService) gatewayPoolExhaustedCatalog(ctx context.Context, 
 		return nil
 	}
 	generation, active, available := s.codexCookies.gatewayPoolInventoryCandidates(identity)
-	if active {
+	if active || len(available) != 0 {
 		return nil
 	}
 	pool, err := s.codexCookies.poolClient(account)
 	if err != nil {
 		return nil
 	}
+	member, tag := gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(account, identity)
+	// A fresh cached list with a usable route already answers "not exhausted";
+	// only a zero needs a fresh directory to confirm it.
+	if cached, ok := pool.CachedCatalog(member, tag, gatewayPoolProbeModelLuna); ok &&
+		s.codexCookies.gatewayPoolCatalogHasRoute(account, identity, cached.Gateways) {
+		return nil
+	}
 	listCtx, cancel := context.WithTimeout(ctx, account.gatewayPoolListTimeout())
 	defer cancel()
-	catalog, err := pool.FreshCatalog(listCtx, gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(account, identity), gatewayPoolProbeModelLuna)
-	if err != nil {
+	catalog, err := pool.FreshCatalog(listCtx, member, tag, gatewayPoolProbeModelLuna)
+	if err != nil || s.codexCookies.gatewayPoolCatalogHasRoute(account, identity, catalog.Gateways) {
 		return nil // unreadable state is not a zero inventory
 	}
-	for _, gateway := range catalog.Gateways {
-		if !gateway.ReadyAt(time.Now()) {
-			continue
-		}
-		_, cooling := s.codexCookies.gatewayPoolUsedAt(identity, gateway.Name, account.gatewayPoolGatewayWindow())
-		if !cooling {
-			available[gateway.Name] = struct{}{}
-		}
-	}
 	after, pending, _ := s.codexCookies.gatewayPoolInventoryCandidates(identity)
-	if len(available) != 0 || pending || after != generation || ctx.Err() != nil {
+	if pending || after != generation || ctx.Err() != nil {
 		return nil
 	}
 	return &gatewayPoolExhaustion{identity: identity, generation: generation, gateways: catalog.Gateways}
+}
+
+// gatewayPoolCatalogHasRoute reports whether the list still has a ready gateway
+// this credential is not locally cooling on.
+func (s *openAICodexCookieStore) gatewayPoolCatalogHasRoute(account *Account, identity string, gateways []gwpool.Gateway) bool {
+	now, window := time.Now(), account.gatewayPoolGatewayWindow()
+	for _, gateway := range gateways {
+		if !gateway.ReadyAt(now) {
+			continue
+		}
+		if _, cooling := s.gatewayPoolUsedAt(identity, gateway.Name, window); !cooling {
+			return true
+		}
+	}
+	return false
 }
 
 // Read gateway-pool eligibility from the repository, not scheduler snapshots. An explicit
