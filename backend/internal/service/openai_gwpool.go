@@ -811,7 +811,9 @@ func (s *openAICodexCookieStore) gatewayPoolPick(
 	//     选择、报数和耗尽共用同一准入；/cookie 仍执行池端短期保护和真实退避。
 	window := account.gatewayPoolGatewayWindow()
 	for _, candidate := range gateways {
-		s.noteGatewayPoolFeedbackPolicy(account, identity, candidate.Name, candidate.Cooldown)
+		if !candidate.MemberAt.IsZero() {
+			s.noteGatewayPoolFeedbackPolicy(account, identity, candidate.Name, candidate.Cooldown, candidate.MemberAt)
+		}
 		_, burned := s.gatewayPoolUsedAt(identity, candidate.Name, window)
 		if !candidate.ReadyAt(time.Now()) || blocked[candidate.Name] {
 			continue
