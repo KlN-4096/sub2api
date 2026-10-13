@@ -358,15 +358,12 @@ func (s *OpenAIGatewayService) finishGatewayPoolUsageIfExhausted(ctx context.Con
 	if err != nil {
 		return
 	}
-	catalog, err := pool.FreshCatalog(ctx, gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(fresh, identity), "")
-	if err != nil {
+	// A cached route is no proof here: a stale one would hold the round open
+	// past its real end, so this boundary always asks for a fresh directory.
+	member, tag := gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(fresh, identity)
+	catalog, err := pool.FreshCatalog(ctx, member, tag, "")
+	if err != nil || s.codexCookies.gatewayPoolCatalogHasRoute(fresh, identity, catalog.Gateways) {
 		return
-	}
-	for _, gateway := range catalog.Gateways {
-		_, cooling := s.codexCookies.gatewayPoolUsedAt(identity, gateway.Name, fresh.gatewayPoolGatewayWindow())
-		if gateway.ReadyAt(time.Now()) && !cooling {
-			return
-		}
 	}
 	// Only fresh eligible candidates or work in flight can keep the cycle open.
 	s.changeGatewayPoolUsage(ctx, fresh, identity, func(state *gatewayPoolUsageLedger) bool {
