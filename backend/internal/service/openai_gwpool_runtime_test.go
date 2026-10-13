@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 )
 
 type gatewayRuntimeRepo struct {
@@ -183,7 +186,8 @@ func TestGatewayPoolOutboxPersistsBeforeSendAndResumesAfterRestart(t *testing.T)
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		_, _ = io.WriteString(w, `{"ok":true}`)
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		ackGatewayPoolBatch[gwpool.CooldownReport](t, w, r, nil)
 	}))
 	defer server.Close()
 	account := gwpoolTestAccount(1)
@@ -268,7 +272,7 @@ func TestGatewayPoolOutboxCompletionPreservesConcurrentAppend(t *testing.T) {
 		svc.reportGatewayPoolCooldown(account, gwpoolTestIdentity, &gatewayPoolCooldownSample{
 			Gateway: "other", AttemptAt: time.Now(), WindowSeconds: 3600, ElapsedSeconds: 3600, Full: true,
 		})
-		_, _ = io.WriteString(w, `{"ok":true}`)
+		ackGatewayPoolBatch[gwpool.CooldownReport](t, w, r, nil)
 	}))
 	defer server.Close()
 	account = gwpoolTestAccount(1)
