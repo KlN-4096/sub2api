@@ -171,7 +171,7 @@ func TestGatewayPoolBatchCatalogueChangeReleasesHoldWithoutClearingNetworkBackof
 	var store openAICodexCookieStore
 	changed := policy.Recommendation
 	changed.Seconds = 7200
-	store.noteGatewayPoolFeedbackPolicy(account, gwpoolTestIdentity, "g", &changed)
+	store.noteGatewayPoolFeedbackPolicy(account, gwpoolTestIdentity, "g", &changed, time.Now())
 	require.True(t, store.syncGatewayPoolFeedbackPolicies(&box, now))
 	require.False(t, store.syncGatewayPoolFeedbackPolicies(&box, now), "an applied revocation is not another database write")
 	require.True(t, box.Pending[0].HoldUntil.IsZero())
@@ -213,7 +213,7 @@ func TestGatewayPoolBatchLateAckCannotReviveRevokedPolicy(t *testing.T) {
 			if revoke {
 				update = nil
 			}
-			svc.codexCookies.noteGatewayPoolFeedbackPolicy(account, gwpoolTestIdentity, "g", update)
+			svc.codexCookies.noteGatewayPoolFeedbackPolicy(account, gwpoolTestIdentity, "g", update, time.Now())
 			close(release)
 			<-done
 			current, _ := repo.stored(1)
@@ -230,7 +230,7 @@ func TestGatewayPoolBatchLateAckCannotReviveRevokedPolicy(t *testing.T) {
 func TestGatewayPoolBatchPolicyCacheExpiresOldBindings(t *testing.T) {
 	var store openAICodexCookieStore
 	store.poolFeedbackPolicies.Store("old-binding\x00g", gatewayPoolFeedbackPolicyUpdate{at: time.Now().Add(-25 * time.Hour)})
-	store.noteGatewayPoolFeedbackPolicy(gwpoolTestAccount(1), gwpoolTestIdentity, "g", nil)
+	store.noteGatewayPoolFeedbackPolicy(gwpoolTestAccount(1), gwpoolTestIdentity, "g", nil, time.Now())
 	_, exists := store.poolFeedbackPolicies.Load("old-binding\x00g")
 	require.False(t, exists)
 }

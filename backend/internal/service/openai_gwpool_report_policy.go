@@ -30,9 +30,11 @@ func (p gatewayPoolFeedbackPolicy) stable(binding string, now time.Time) bool {
 	return p.Binding == binding && !p.Immediate && p.Recommendation.StableReporting(now)
 }
 
-func (s *openAICodexCookieStore) noteGatewayPoolFeedbackPolicy(account *Account, identity, gateway string, recommendation *gwpool.CooldownRecommendation) {
+// noteGatewayPoolFeedbackPolicy records the catalogue recommendation the pool
+// reported at observedAt, so an older catalogue cannot outrank a newer ACK.
+func (s *openAICodexCookieStore) noteGatewayPoolFeedbackPolicy(account *Account, identity, gateway string, recommendation *gwpool.CooldownRecommendation, observedAt time.Time) {
 	binding := gatewayPoolAccountReportBinding(account, identity)
-	update := gatewayPoolFeedbackPolicyUpdate{at: time.Now().UTC()}
+	update := gatewayPoolFeedbackPolicyUpdate{at: observedAt.UTC()}
 	if recommendation != nil {
 		update.CooldownRecommendation = *recommendation
 	}
@@ -58,7 +60,8 @@ func clearGatewayPoolReportHold(box *gatewayPoolOutbox, binding, gateway string)
 	}
 }
 
-// A fresh catalogue recommendation can revoke a policy immediately. It cannot
+// A catalogue recommendation observed after the policy revokes it; the member's
+// own part is cached for up to two hours, so that can take as long. It cannot
 // create or prolong a lease without an actual report acknowledgement.
 func (s *openAICodexCookieStore) syncGatewayPoolFeedbackPolicies(box *gatewayPoolOutbox, now time.Time) bool {
 	changed := false
