@@ -250,12 +250,12 @@ func TestGatewayPoolContactOutboxKeepsFinalUpdateDuringInitialSend(t *testing.T)
 	started, proceed := make(chan struct{}), make(chan struct{})
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/contact/report", r.URL.Path)
+		require.Equal(t, "/contact/reports", r.URL.Path)
 		if calls.Add(1) == 1 {
 			close(started)
 			<-proceed
 		}
-		_, _ = io.WriteString(w, `{"ok":true}`)
+		ackGatewayPoolBatch[gwpool.ContactReport](t, w, r, nil)
 	}))
 	defer server.Close()
 	account := gwpoolTestAccount(1)
@@ -264,10 +264,8 @@ func TestGatewayPoolContactOutboxKeepsFinalUpdateDuringInitialSend(t *testing.T)
 	svc, repo := gatewayRuntimeService(account)
 	event := contactEvent(time.Now().UTC(), "first")
 	svc.noteGatewayPoolContact(context.Background(), account, event)
-	current, _ := repo.stored(1)
-	pending := readGatewayPoolOutbox(current, time.Now()).Pending[0]
 	done := make(chan struct{})
-	go func() { defer close(done); svc.sendGatewayPoolPending(context.Background(), 1, pending) }()
+	go func() { defer close(done); svc.flushGatewayPoolReports(context.Background()) }()
 	select {
 	case <-started:
 	case <-time.After(time.Second):
@@ -276,7 +274,7 @@ func TestGatewayPoolContactOutboxKeepsFinalUpdateDuringInitialSend(t *testing.T)
 	svc.finishGatewayPoolContact(context.Background(), account, gwpoolTestIdentity, event.Applied, 80*time.Second, 20*time.Second)
 	close(proceed)
 	<-done
-	current, _ = repo.stored(1)
+	current, _ := repo.stored(1)
 	box := readGatewayPoolOutbox(current, time.Now())
 	require.Len(t, box.Pending, 1, "initial acknowledgement must not delete a newer window payload")
 	require.True(t, box.Pending[0].Contact.WindowFinal)
