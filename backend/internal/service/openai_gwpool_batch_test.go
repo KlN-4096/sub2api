@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,6 +13,27 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/gwpool"
 	"github.com/stretchr/testify/require"
 )
+
+// ackGatewayPoolBatch reads a /cooldown/reports or /contact/reports body and
+// acknowledges every report, each result carrying extra.
+func ackGatewayPoolBatch[T any](t *testing.T, w http.ResponseWriter, r *http.Request, extra map[string]any) []T {
+	var in struct {
+		Reports []json.RawMessage `json:"reports"`
+	}
+	require.NoError(t, json.NewDecoder(r.Body).Decode(&in))
+	reports, results := make([]T, len(in.Reports)), make([]map[string]any, len(in.Reports))
+	for i, raw := range in.Reports {
+		var id struct {
+			ID string `json:"id"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &reports[i]))
+		require.NoError(t, json.Unmarshal(raw, &id))
+		results[i] = map[string]any{"id": id.ID, "status": http.StatusOK}
+		maps.Copy(results[i], extra)
+	}
+	require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"ok": true, "results": results}))
+	return reports
+}
 
 func stableFeedbackPolicy(binding string, now time.Time) gatewayPoolFeedbackPolicy {
 	return gatewayPoolFeedbackPolicy{Binding: binding, UpdatedAt: now,
@@ -52,25 +74,10 @@ func TestGatewayPoolBatchHoldsStableSuccessButFlushesNewFailureWithoutDroppingEv
 	var received []gwpool.CooldownReport
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
+		require.Equal(t, "/cooldown/reports", r.URL.Path)
 		rec := map[string]any{"seconds": 3600, "samples": 6, "source": "account",
 			"report_interval_seconds": 21600, "report_policy_expires_at": time.Now().Add(24 * time.Hour)}
-		if r.URL.Path == "/cooldown/reports" {
-			var in struct {
-				Reports []gwpool.CooldownReport `json:"reports"`
-			}
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&in))
-			received = append(received, in.Reports...)
-			var results []map[string]any
-			for _, report := range in.Reports {
-				results = append(results, map[string]any{"id": report.ID, "status": 200})
-			}
-			require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"ok": true, "results": results}))
-			return
-		}
-		var report gwpool.CooldownReport
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&report))
-		received = append(received, report)
-		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"ok": true, "recommendation": rec}))
+		received = append(received, ackGatewayPoolBatch[gwpool.CooldownReport](t, w, r, map[string]any{"recommendation": rec})...)
 	}))
 	defer server.Close()
 	account := gwpoolTestAccount(1)
@@ -189,7 +196,7 @@ func TestGatewayPoolBatchLateAckCannotReviveRevokedPolicy(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				close(started)
 				<-release
-				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "recommendation": rec})
+				ackGatewayPoolBatch[gwpool.CooldownReport](t, w, r, map[string]any{"recommendation": rec})
 			}))
 			defer server.Close()
 			account := gwpoolTestAccount(1)
@@ -233,4 +240,160 @@ func TestGatewayPoolBatchPolicyCacheExpiresOldBindings(t *testing.T) {
 	store.noteGatewayPoolFeedbackPolicy(gwpoolTestAccount(1), gwpoolTestIdentity, "g", nil, time.Now())
 	_, exists := store.poolFeedbackPolicies.Load("old-binding\x00g")
 	require.False(t, exists)
+}
+
+// Rows on one pool key share report requests; a clone row's copy of a report
+// ID goes in the next request, never twice in one.
+func TestGatewayPoolBatchSharesRequestsAcrossMembers(t *testing.T) {
+	var cooldownBatches [][]string
+	contactCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/cooldown/reports":
+			var gateways []string
+			for _, report := range ackGatewayPoolBatch[gwpool.CooldownReport](t, w, r, nil) {
+				gateways = append(gateways, report.Gateway)
+			}
+			cooldownBatches = append(cooldownBatches, gateways)
+		case "/contact/reports":
+			contactCalls++
+			require.Len(t, ackGatewayPoolBatch[gwpool.ContactReport](t, w, r, nil), 2)
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	svc, repo, accounts := gatewayPoolBatchMembers(server.URL)
+	now := time.Now().UTC()
+	for id, account := range accounts {
+		for _, gateway := range []string{fmt.Sprint("own-", id), "shared"} {
+			svc.reportGatewayPoolCooldown(account, gwpoolTestIdentity, &gatewayPoolCooldownSample{
+				Gateway: gateway, AttemptAt: now, WindowSeconds: 3600, ElapsedSeconds: 3600, Full: true,
+			})
+		}
+		event := contactEvent(now, fmt.Sprint("v", id))
+		event.Applied.AccountID = id
+		svc.noteGatewayPoolContact(context.Background(), account, event)
+	}
+	svc.flushGatewayPoolReports(context.Background())
+	require.Equal(t, 1, contactCalls, "both rows' contacts share one request")
+	require.Len(t, cooldownBatches, 2, "the clone's copy of the shared report waits for a second request")
+	require.ElementsMatch(t, []string{"own-1", "own-2", "shared"}, cooldownBatches[0])
+	require.Equal(t, []string{"shared"}, cooldownBatches[1])
+	for _, id := range []int64{1, 2} {
+		current, _ := repo.stored(id)
+		require.Empty(t, readGatewayPoolOutbox(current, time.Now()).Pending)
+	}
+}
+
+// gatewayPoolBatchMembers are two rows of one credential on one pool key.
+func gatewayPoolBatchMembers(url string) (*OpenAIGatewayService, *gatewayPoolAccountsRepo, map[int64]*Account) {
+	repo := &gatewayPoolAccountsRepo{rows: map[int64]*gatewayRuntimeRepo{}}
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	svc.codexCookies.accountByID = svc.gatewayPoolLedgerRow
+	accounts := map[int64]*Account{}
+	for _, id := range []int64{1, 2} {
+		account := gwpoolTestAccount(id)
+		account.Extra[openAIGatewayPoolBaseURLExtraKey] = url
+		account.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = "test-key"
+		repo.rows[id] = &gatewayRuntimeRepo{account: *account}
+		accounts[id] = account
+	}
+	return svc, repo, accounts
+}
+
+// A report the pool cannot accept fails alone; the rest of the pass is sent.
+func TestGatewayPoolBatchInvalidReportFailsAlone(t *testing.T) {
+	var received []gwpool.CooldownReport
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = append(received, ackGatewayPoolBatch[gwpool.CooldownReport](t, w, r, nil)...)
+	}))
+	defer server.Close()
+	account := gwpoolTestAccount(1)
+	account.Extra[openAIGatewayPoolBaseURLExtraKey] = server.URL
+	account.Extra[OpenAIGatewayPoolConsumerKeyExtraKey] = "test-key"
+	svc, repo := gatewayRuntimeService(account)
+	for _, gateway := range []string{"good", "bad"} {
+		svc.reportGatewayPoolCooldown(account, gwpoolTestIdentity, &gatewayPoolCooldownSample{
+			Gateway: gateway, AttemptAt: time.Now(), WindowSeconds: 3600, ElapsedSeconds: 3600, Full: true,
+		})
+	}
+	require.NoError(t, svc.changeGatewayPoolOutbox(context.Background(), 1, func(_ *Account, box *gatewayPoolOutbox) {
+		for i := range box.Pending {
+			if box.Pending[i].Report.Gateway == "bad" {
+				box.Pending[i].Report.Result = "network_error"
+			}
+		}
+	}))
+	svc.flushGatewayPoolReports(context.Background())
+	require.Len(t, received, 1)
+	require.Equal(t, "good", received[0].Gateway)
+	current, _ := repo.stored(1)
+	box := readGatewayPoolOutbox(current, time.Now())
+	require.Len(t, box.Pending, 1)
+	require.Equal(t, "bad", box.Pending[0].Report.Gateway)
+	require.True(t, box.Pending[0].Permanent)
+}
+
+// A batch-level answer applies to every member's report in that batch.
+func TestGatewayPoolBatchRefusalReachesEveryMember(t *testing.T) {
+	for _, status := range []int{http.StatusConflict, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+			svc, repo, accounts := gatewayPoolBatchMembers(server.URL)
+			for id, account := range accounts {
+				svc.reportGatewayPoolCooldown(account, gwpoolTestIdentity, &gatewayPoolCooldownSample{
+					Gateway: fmt.Sprint("g-", id), AttemptAt: time.Now(), WindowSeconds: 3600, ElapsedSeconds: 3600, Full: true,
+				})
+			}
+			svc.flushGatewayPoolReports(context.Background())
+			require.Equal(t, 1, calls)
+			for id := range accounts {
+				current, _ := repo.stored(id)
+				box := readGatewayPoolOutbox(current, time.Now())
+				require.Len(t, box.Pending, 1)
+				require.Equal(t, 1, box.Pending[0].Attempts)
+				require.Equal(t, status == http.StatusConflict, box.Pending[0].Permanent)
+			}
+		})
+	}
+}
+
+// Stopping the reporter mid-send leaves every report queued with its attempts
+// unspent, and nothing is sent after the stop.
+func TestGatewayPoolBatchStopLeavesReportsUnspent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls++
+		cancel()
+	}))
+	defer server.Close()
+	svc, repo, accounts := gatewayPoolBatchMembers(server.URL)
+	now := time.Now().UTC()
+	for id, account := range accounts {
+		svc.reportGatewayPoolCooldown(account, gwpoolTestIdentity, &gatewayPoolCooldownSample{
+			Gateway: fmt.Sprint("g-", id), AttemptAt: now, WindowSeconds: 3600, ElapsedSeconds: 3600, Full: true,
+		})
+		event := contactEvent(now, fmt.Sprint("v", id))
+		event.Applied.AccountID = id
+		svc.noteGatewayPoolContact(context.Background(), account, event)
+	}
+	svc.flushGatewayPoolReports(ctx)
+	require.Equal(t, 1, calls)
+	for id := range accounts {
+		current, _ := repo.stored(id)
+		box := readGatewayPoolOutbox(current, time.Now())
+		require.Len(t, box.Pending, 2)
+		for _, pending := range box.Pending {
+			require.Zero(t, pending.Attempts)
+			require.True(t, pending.NextAt.IsZero())
+		}
+	}
 }

@@ -1,16 +1,14 @@
 package gwpool
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
 	"time"
 )
 
-const ContactCriterion = "state-echo-v1"
+const (
+	ContactCriterion  = "state-echo-v1"
+	ContactBatchLimit = 32
+)
 
 type ContactReport struct {
 	ID             string    `json:"id"`
@@ -71,33 +69,23 @@ func (s ContactStats) Valid() bool {
 		s.WindowSamples >= 0 && s.WindowSamples <= s.Full && s.WindowMeanMS >= 0 && s.WindowMeanMS <= 10*60*60*1000
 }
 
-func (c *Client) ReportContact(ctx context.Context, report ContactReport) error {
-	if c == nil || !validCooldownTag(report.ID) || !validCooldownTag(report.AccountTag) ||
-		sanitizeOpaque(report.Gateway, maxGatewayLen) == "" || report.Model == "" || report.Criterion == "" {
-		return fmt.Errorf("%w: invalid contact report", ErrPool)
-	}
-	raw, err := json.Marshal(report)
-	if err != nil {
-		return fmt.Errorf("%w: encode contact report", ErrPool)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint("contact/report"), bytes.NewReader(raw))
-	if err != nil {
-		return fmt.Errorf("%w: build contact report", ErrPool)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.do(req)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return &PoolError{Status: resp.StatusCode}
-	}
-	var out struct {
-		OK bool `json:"ok"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil || !out.OK {
-		return fmt.Errorf("%w: invalid contact report acknowledgement", ErrPool)
-	}
-	return nil
+// Valid reports whether the pool can accept this report; the client never sends
+// one that fails it.
+func (report ContactReport) Valid() bool {
+	return validCooldownTag(report.ID) && validCooldownTag(report.AccountTag) &&
+		sanitizeOpaque(report.Gateway, maxGatewayLen) != "" && report.Model != "" && report.Criterion != ""
 }
+
+type ContactReportResult struct {
+	ID     string `json:"id"`
+	Status int    `json:"status"`
+}
+
+func (r ContactReportResult) acknowledged() (string, int) { return r.ID, r.Status }
+
+// ReportContactBatch sends contact reports of any members of this key at once.
+func (c *Client) ReportContactBatch(ctx context.Context, reports []ContactReport) ([]ContactReportResult, error) {
+	return postReportBatch[ContactReport, ContactReportResult](ctx, c, "contact", reports, ContactBatchLimit, nil)
+}
+
+func (report ContactReport) reportID() string { return report.ID }
