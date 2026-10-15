@@ -158,7 +158,7 @@ func TestGatewayPoolRotationFreshlyEnabledSourceStopsUnrelatedFailure(t *testing
 	stale := *fresh
 	stale.Extra = map[string]any{} // scheduler snapshot predates both switches
 	svc := rotationService(fresh)
-	failure := &UpstreamFailoverError{StatusCode: http.StatusTooManyRequests}
+	failure := &UpstreamFailoverError{StatusCode: http.StatusBadGateway}
 	svc.PrepareGatewayPoolAccountRotation(context.Background(), &group, &stale, failure, nil)
 	require.False(t, failure.ShouldRetryNextAccount(), "current opt-in must apply even when the old snapshot lacked both keys")
 }
@@ -178,7 +178,7 @@ func TestGatewayPoolRotationNeverSwitchesOnAnyOtherError(t *testing.T) {
 	account := rotationAccount(1, 7)
 	svc := rotationService(account)
 	group := int64(7)
-	for _, status := range []int{400, 401, 403, 429, 500, 502, 503, 504} {
+	for _, status := range []int{400, 401, 403, 500, 502, 503, 504} { // 429: see the 429 switch tests
 		for _, alreadyRotating := range []bool{false, true} {
 			ctx := context.Background()
 			if alreadyRotating {
@@ -192,44 +192,47 @@ func TestGatewayPoolRotationNeverSwitchesOnAnyOtherError(t *testing.T) {
 	}
 }
 
-func TestGatewayPoolRotationPreservesConfirmedTransient429SameAccountRetry(t *testing.T) {
+// A pool member gets one same-account retry per request for a transient 429;
+// the next 429 hands the request only to another pool member of its group.
+func TestGatewayPoolRotationTransient429RetriesOnceThenSwitches(t *testing.T) {
 	group := int64(7)
 	account, other := rotationAccount(1, group), rotationAccount(2, group)
-	repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*account, *other}}}
+	ordinary, elsewhere := rotationAccount(3, group), rotationAccount(4, group+1)
+	ordinary.Extra[openAIGatewayPoolExtraKey] = false
+	repo := gatewayRotationRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{*account, *other, *ordinary, *elsewhere}}}
 	svc := withGatewayPoolRowRead(&OpenAIGatewayService{accountRepo: repo})
 	body := []byte(`{"detail":"Rate limit exceeded"}`)
 	failure := svc.newOpenAIAccountFailoverError(account, http.StatusTooManyRequests, nil, body, "Rate limit exceeded", false, false)
 	require.True(t, failure.RetryableOnSameAccount)
 	ctx := svc.PrepareGatewayPoolAccountRotation(context.Background(), &group, account, failure, nil)
-	require.True(t, failure.RetryableOnSameAccount, "pool rotation may forbid switching, not erase a confirmed transient retry")
-	require.False(t, failure.ShouldRetryNextAccount(), "429 never authorizes a gateway-pool account switch")
+	require.True(t, failure.SameAccountRetryOnly, "the first transient 429 retries its credential")
+	require.False(t, failure.ShouldRetryNextAccount())
 	omit, allowed, err := gatewayPoolRotationExclusions(ctx, repo, &group, nil)
 	require.NoError(t, err)
 	require.Contains(t, omit, other.ID)
 	require.Equal(t, map[int64]struct{}{account.ID: {}}, allowed)
-	require.False(t, gatewayPoolRotationRecheck(ctx, repo, allowed, &AccountSelectionResult{Account: other}))
-	require.True(t, failure.SameAccountRetryOnly)
-	require.False(t, gatewayPoolRotationFrom(ctx) != nil, "waiting must not start a shortage rotation")
-	ctx = svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, failure, nil)
-	require.True(t, failure.SameAccountRetryOnly, "preparing an already-classified retry is idempotent")
-	firstDeadline := failure.SameAccountRetryDeadline
-	// A different request can succeed and reset the account-wide retry clock;
-	// this request still retains its original bounded deadline.
-	svc.openaiOAuth429RetryStartedAt.Delete(account.ID)
+	require.Nil(t, gatewayPoolRotationFrom(ctx), "waiting must not start a shortage rotation")
+
 	next := svc.newOpenAIAccountFailoverError(account, http.StatusTooManyRequests, nil, body, "Rate limit exceeded", false, false)
 	ctx = svc.PrepareGatewayPoolAccountRotation(ctx, &group, account, next, nil)
-	require.Equal(t, firstDeadline, next.SameAccountRetryDeadline)
-	require.True(t, next.SameAccountRetryOnly)
-	expired := context.WithValue(ctx, gatewayPoolRetryOnlyKey{}, gatewayPoolRetryOnly{
-		accountID: account.ID, groupID: group, deadline: time.Now().Add(-time.Second),
-	})
-	next = svc.newOpenAIAccountFailoverError(account, http.StatusTooManyRequests, nil, body, "Rate limit exceeded", false, false)
-	svc.PrepareGatewayPoolAccountRotation(expired, &group, account, next, nil)
 	require.False(t, next.RetryableOnSameAccount)
-	require.False(t, next.ShouldRetryNextAccount())
+	require.False(t, next.SameAccountRetryOnly)
+	require.True(t, next.ShouldRetryNextAccount(), "a second 429 moves on")
+	omit, allowed, err = gatewayPoolRotationExclusions(ctx, repo, &group, nil)
+	require.NoError(t, err)
+	require.Equal(t, map[int64]struct{}{other.ID: {}}, allowed, "only another pool member of the group")
+	for _, id := range []int64{account.ID, ordinary.ID, elsewhere.ID} {
+		require.Contains(t, omit, id)
+	}
+	identity := gwpoolRotationTestIdentity(t, svc, account)
+	require.True(t, svc.codexCookies.poolRounds.blocked(group, identity), "the member yields its round")
+	remaining, _ := svc.codexCookies.gatewayPoolBackoffFor(identity)
+	require.Zero(t, remaining, "a 429 is not a pool shortage: ticket acquisition is not backed off")
 }
 
-func TestGatewayPoolRotationDoesNotRetryQuotaOrUnclassified429(t *testing.T) {
+// Quota, spent-window and unreserved 429s move a pool request on at once,
+// still only to another pool member.
+func TestGatewayPoolRotationQuotaOrSpent429Switches(t *testing.T) {
 	group := int64(7)
 	account := rotationAccount(1, group)
 	svc := rotationService(account)
@@ -241,11 +244,19 @@ func TestGatewayPoolRotationDoesNotRetryQuotaOrUnclassified429(t *testing.T) {
 		{StatusCode: http.StatusTooManyRequests, RetryableOnSameAccount: true, SameAccountRetryDeadline: time.Now().Add(time.Minute),
 			NextAccountAction: NextAccountStop},
 	} {
-		svc.PrepareGatewayPoolAccountRotation(context.Background(), &group, account, failure, nil)
+		ctx := svc.PrepareGatewayPoolAccountRotation(context.Background(), &group, account, failure, nil)
 		require.False(t, failure.RetryableOnSameAccount)
 		require.False(t, failure.SameAccountRetryOnly)
-		require.False(t, failure.ShouldRetryNextAccount())
+		require.True(t, failure.ShouldRetryNextAccount())
+		require.NotNil(t, gatewayPoolRotationFrom(ctx), "the switch keeps to pool members")
 	}
+}
+
+func gwpoolRotationTestIdentity(t *testing.T, svc *OpenAIGatewayService, account *Account) string {
+	t.Helper()
+	identity, err := svc.codexCookies.gatewayPoolIdentity(context.Background(), account)
+	require.NoError(t, err)
+	return identity
 }
 
 func TestGatewayPoolRetryDeadlinePreventsLateBusinessDispatch(t *testing.T) {

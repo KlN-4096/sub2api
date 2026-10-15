@@ -2,6 +2,9 @@ package service
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 
 	coderws "github.com/coder/websocket"
@@ -94,4 +97,31 @@ func (client *GatewayPoolWSWaitClient) Close() {
 	_ = client.conn.CloseNow()
 	<-client.readDone
 	<-client.pingDone
+}
+
+// A pool rest found while a later bridge turn waits in BeforeTurn replays only
+// that turn on the next credential, like a bridge failure. BeforeTurn keeps its
+// upstream position before the turn's replay input is built, so build the same
+// current-turn payload here from the turn's own inputs.
+func gatewayPoolWSTurnRestFailure(err error, turn int, payload []byte, previousResponseID string,
+	identitySource []byte, originalModel string, history []json.RawMessage, historyExists bool) error {
+	var failure *UpstreamFailoverError
+	if turn <= 1 || !errors.As(err, &failure) || failure.Reason != OpenAIGatewayPoolReason {
+		return err
+	}
+	coverage := AnalyzeToolCallOutputContextCoverageBytes(payload)
+	needsReplay := previousResponseID != "" || (coverage.HasFunctionCallOutput && !coverage.ContextCoversAllCallIDs)
+	items, itemsExist, extractErr := openAIWSExtractNormalizedInputSequence(payload)
+	if extractErr != nil {
+		return fmt.Errorf("build websocket http bridge replay input: %w", extractErr)
+	}
+	input, inputExists := buildOpenAIWSReplayInputSequenceFromItems(history, historyExists, items, itemsExist, needsReplay)
+	retryPayload, retrySafe, retryErr := buildOpenAIWSCurrentTurnRetryPayload(identitySource, input, inputExists, originalModel)
+	if retryErr != nil {
+		return fmt.Errorf("build websocket current-turn failover payload: %w", retryErr)
+	}
+	if !retrySafe {
+		retryPayload = nil
+	}
+	return newOpenAIWSCurrentTurnFailoverError(err, retryPayload)
 }

@@ -93,7 +93,7 @@ func (r *grokCredentialHandlerRepo) SetError(_ context.Context, id int64, messag
 	return nil
 }
 
-func (r *grokCredentialHandlerRepo) SetTempUnschedulable(_ context.Context, id int64, until time.Time, _ string) error {
+func (r *grokCredentialHandlerRepo) SetTempUnschedulable(_ context.Context, id int64, until time.Time, reason string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.setTempIDs = append(r.setTempIDs, id)
@@ -104,6 +104,7 @@ func (r *grokCredentialHandlerRepo) SetTempUnschedulable(_ context.Context, id i
 		if r.accounts[i].ID == id {
 			value := until
 			r.accounts[i].TempUnschedulableUntil = &value
+			r.accounts[i].TempUnschedulableReason = reason
 		}
 	}
 	return nil
