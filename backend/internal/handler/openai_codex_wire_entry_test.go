@@ -63,6 +63,8 @@ type codexWireUpstream struct {
 	postResponses []*http.Response // optional per-POST wire responses, including A/B probes
 	probeState    string           // optional Luna A/B fixture, separate from business failures
 	afterRequest  func(*gin.Context)
+	cache         *concurrencyCacheMock
+	handler       *OpenAIGatewayHandler
 }
 
 type codexWireRenewableCache struct{ *concurrencyCacheMock }
@@ -202,6 +204,10 @@ func newCodexWireEntry(t *testing.T, accounts []service.Account, repos ...servic
 }
 
 func newCodexWireEntryWithUsage(t *testing.T, accounts []service.Account, usage service.UsageLogRepository, repos ...service.AccountRepository) (*codexWireUpstream, *gin.Engine, func()) {
+	return newCodexWireEntryWithConfig(t, accounts, usage, nil, false, repos...)
+}
+
+func newCodexWireEntryWithConfig(t *testing.T, accounts []service.Account, usage service.UsageLogRepository, configure func(*config.Config), schedulerSlots bool, repos ...service.AccountRepository) (*codexWireUpstream, *gin.Engine, func()) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	groupID := int64(9001)
@@ -213,20 +219,29 @@ func newCodexWireEntryWithUsage(t *testing.T, accounts []service.Account, usage 
 
 	cfg := &config.Config{RunMode: config.RunModeSimple}
 	cfg.Gateway.MaxAccountSwitches = 3
+	if configure != nil {
+		configure(cfg)
+	}
 	billingCache := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
-	// openAITokenProvider 传 nil：GetAccessToken 会降级直接读 credentials.access_token，
-	// 省掉一整套 OAuth 刷新 mock。
-	gateway := service.NewOpenAIGatewayService(
-		repo, usage, nil, nil, nil, nil, nil, cfg, nil, nil,
-		service.NewBillingService(cfg, nil), nil, billingCache, upstream,
-		&service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil,
-	)
 	cache := &concurrencyCacheMock{
 		acquireUserSlotFn:    func(context.Context, int64, int, string) (bool, error) { return true, nil },
 		acquireAccountSlotFn: func(context.Context, int64, int, string) (bool, error) { return true, nil },
 	}
-	h := NewOpenAIGatewayHandler(gateway, service.NewConcurrencyService(codexWireRenewableCache{cache}), billingCache,
+	concurrency := service.NewConcurrencyService(codexWireRenewableCache{cache})
+	var schedulerConcurrency *service.ConcurrencyService
+	if schedulerSlots {
+		schedulerConcurrency = concurrency
+	}
+	// openAITokenProvider 传 nil：GetAccessToken 会降级直接读 credentials.access_token，
+	// 省掉一整套 OAuth 刷新 mock。
+	gateway := service.NewOpenAIGatewayService(
+		repo, usage, nil, nil, nil, nil, nil, cfg, nil, schedulerConcurrency,
+		service.NewBillingService(cfg, nil), nil, billingCache, upstream,
+		&service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil,
+	)
+	h := NewOpenAIGatewayHandler(gateway, concurrency, billingCache,
 		&service.APIKeyService{}, nil, nil, nil, nil, cfg)
+	upstream.cache, upstream.handler = cache, h
 
 	apiKey := &service.APIKey{
 		ID: 9002, GroupID: &groupID,
@@ -243,6 +258,7 @@ func newCodexWireEntryWithUsage(t *testing.T, accounts []service.Account, usage 
 		}
 	})
 	router.POST("/v1/responses", h.Responses)
+	router.GET("/v1/responses", h.ResponsesWebSocket)
 	router.POST("/responses", h.Responses)
 	router.POST("/v1/chat/completions", h.ChatCompletions)
 	router.POST("/v1/messages", h.Messages)
