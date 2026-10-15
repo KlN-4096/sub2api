@@ -2685,6 +2685,12 @@
             </p>
             <fieldset :disabled="openAIGwpoolContinuousWait" class="grid grid-cols-1 gap-3 sm:grid-cols-2" data-testid="edit-openai-gwpool-thresholds">
             <div>
+              <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolStopGateways') }}</label>
+              <input v-model.number="openAIGwpoolStopGateways" type="number" min="1" max="512" step="1"
+                placeholder="5" class="input text-xs" data-testid="edit-openai-gwpool-stop-gateways" />
+              <p class="input-hint">{{ t('admin.accounts.openai.gwpoolStopGatewaysDesc') }}</p>
+            </div>
+            <div>
               <label class="input-label text-xs">{{ t('admin.accounts.openai.gwpoolResumeGateways') }}</label>
               <input v-model.number="openAIGwpoolResumeGateways" type="number" min="1" max="512" step="1"
                 placeholder="50" class="input text-xs" data-testid="edit-openai-gwpool-resume-gateways" />
@@ -4116,6 +4122,7 @@ const openAIGwpoolBaseURL = ref('')
 // 输入框恒为空：后端把已存的 key 脱敏成 true，页面从不回显原值。留空 = 不修改。
 const openAIGwpoolConsumerKey = ref('')
 const openAIGwpoolConsumerKeySaved = ref(false)
+const openAIGwpoolStopGateways = ref<number | ''>('')
 const openAIGwpoolResumeGateways = ref<number | ''>('')
 const openAIGwpoolContinuousWait = ref(false)
 const openAIGwpoolProbeTimeout = ref<number | ''>('')
@@ -4701,6 +4708,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	openAIGwpoolConsumerKeySaved.value = extra?.openai_gwpool_consumer_key === true
 	openAIGwpoolConsumerKey.value = ''
 	// 网关池强制组内轮转，阈值留空沿用后端默认。
+	openAIGwpoolStopGateways.value = typeof extra?.openai_gwpool_stop_gateways === 'number' ? extra.openai_gwpool_stop_gateways : ''
 	openAIGwpoolResumeGateways.value = typeof extra?.openai_gwpool_resume_gateways === 'number' ? extra.openai_gwpool_resume_gateways : ''
 	openAIGwpoolContinuousWait.value = extra?.openai_gwpool_continuous_wait === true
 	openAIGwpoolProbeTimeout.value = typeof extra?.openai_gwpool_probe_timeout_s === 'number' ? extra.openai_gwpool_probe_timeout_s : ''
@@ -6381,6 +6389,11 @@ const handleSubmit = async () => {
           newExtra.openai_gwpool_probe_timeout_s = openAIGwpoolProbeTimeout.value
         } else {
           delete newExtra.openai_gwpool_probe_timeout_s
+        }
+        if (openAIGwpoolEnabled.value && openAIGwpoolStopGateways.value !== '') {
+          newExtra.openai_gwpool_stop_gateways = openAIGwpoolStopGateways.value
+        } else {
+          delete newExtra.openai_gwpool_stop_gateways
         }
         if (openAIGwpoolEnabled.value && openAIGwpoolResumeGateways.value !== '') {
           newExtra.openai_gwpool_resume_gateways = openAIGwpoolResumeGateways.value

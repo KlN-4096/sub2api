@@ -60,8 +60,11 @@ func (s *OpenAIGatewayService) applyGatewayPoolPreparationPolicies(ctx context.C
 			}
 			if !gatewayPoolWaitAccountMatches(fresh, policy.account) {
 				outcome = errOpenAIGatewayPoolWarmUnverified
-			} else if s.gatewayPoolNoRemainingRoutes(ctx, fresh) {
-				outcome = errGatewayPoolWarmAttemptsFinished
+			} else if exhausted := s.gatewayPoolStopCatalog(ctx, fresh); exhausted != nil {
+				outcome = errGatewayPoolStopThreshold
+				if !s.codexCookies.gatewayPoolCatalogHasRoute(fresh, exhausted.identity, exhausted.gateways) {
+					outcome = errGatewayPoolWarmAttemptsFinished // nothing left, not merely few
+				}
 			}
 			results[policy.account.ID] = outcome
 		}

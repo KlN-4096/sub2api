@@ -75,6 +75,16 @@ func (r gatewayPool429EntryRepo) ListByPlatform(_ context.Context, platform stri
 	return out, nil
 }
 
+// A failed selection classifies "no available account" from these candidates.
+func (r gatewayPool429EntryRepo) ListModelAvailabilityCandidates(ctx context.Context, _ *int64, platforms []string, _ bool) ([]service.Account, error) {
+	var out []service.Account
+	for _, platform := range platforms {
+		accounts, _ := r.ListByPlatform(ctx, platform)
+		out = append(out, accounts...)
+	}
+	return out, nil
+}
+
 func (r gatewayPool429EntryRepo) FindByExtraField(_ context.Context, key string, value any) ([]service.Account, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -129,7 +139,8 @@ func TestGatewayPool429EntryRetriesSameAccountWithoutInterruptingResponse(t *tes
 			defer pool.Close()
 			account := codexWireAccount(801, "pool", map[string]any{
 				"openai_gwpool": true, "openai_gwpool_base_url": pool.URL,
-				"openai_gwpool_consumer_key": "offline", "openai_gwpool_guard_enabled": false,
+				"openai_gwpool_stop_gateways": 1,
+				"openai_gwpool_consumer_key":  "offline", "openai_gwpool_guard_enabled": false,
 				"openai_passthrough": tc.passthrough,
 			})
 			account.GroupIDs = []int64{9001}

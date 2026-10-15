@@ -618,7 +618,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 			if hooks != nil && hooks.BeforeTurn != nil {
 				if err := hooks.BeforeTurn(turn); err != nil {
-					return err
+					return gatewayPoolWSTurnRestFailure(err, turn, currentBridgePayload.payloadRaw, currentBridgePayload.previousResponseID,
+						currentBridgePayload.accountIdentitySourceRaw, currentBridgePayload.originalModel, bridgeAccountFailoverInput, bridgeAccountFailoverInputExists)
 				}
 			}
 			if turnState != "" && c != nil && c.Request != nil {

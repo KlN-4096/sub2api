@@ -235,6 +235,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
 		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)
+		if slotResult == openAISlotAcquirePoolRested {
+			lastFailoverErr = h.gatewayPoolRestFailover(c, apiKey.GroupID, account, failedAccountIDs)
+			continue
+		}
 		if slotResult == openAISlotAcquireProfitVetoed {
 			// 利润终检否决：排除该账号重新选号；否决次数达上限则按无可用账号终止。
 			if !recordOpenAIProfitVeto(failedAccountIDs, account.ID, &profitVetoCount) {
@@ -378,6 +382,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 							if !sameAccountRetryDeadlineAllows(failoverErr) {
 								h.handleFailoverExhausted(c, failoverErr, streamStarted)
 								return
+							}
+							if h.gatewayService.GatewayPoolRestHandoff(c.Request.Context(), account) != nil {
+								lastFailoverErr = h.gatewayPoolRestFailover(c, apiKey.GroupID, account, failedAccountIDs)
 							}
 							continue
 						}

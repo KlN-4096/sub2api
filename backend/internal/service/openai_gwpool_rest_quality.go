@@ -20,7 +20,10 @@ type gatewayPoolRestPlan struct {
 // Display queues are empty at this boundary and stale catalog snapshots must
 // never decide a durable recovery policy.
 func (s *OpenAIGatewayService) gatewayPoolExhaustedRestQuality(ctx context.Context, account *Account) *gatewayPoolRestPlan {
-	exhausted := s.gatewayPoolExhaustedCatalog(ctx, account)
+	return s.gatewayPoolRestQualityFromExhaustion(ctx, account, s.gatewayPoolStopCatalog(ctx, account))
+}
+
+func (s *OpenAIGatewayService) gatewayPoolRestQualityFromExhaustion(ctx context.Context, account *Account, exhausted *gatewayPoolExhaustion) *gatewayPoolRestPlan {
 	if exhausted == nil {
 		return nil
 	}
