@@ -1380,6 +1380,36 @@ describe('EditAccountModal', () => {
     expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_gwpool_rotation_min_gateways')
   })
 
+  it('saves the default5 stop threshold independently from recovery and retired settings', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.extra = { openai_gwpool: true, openai_gwpool_base_url: 'https://pool.example.test',
+      openai_gwpool_rotation_min_gateways: 99, openai_gwpool_resume_gateways: 50 }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    const stop = wrapper.get<HTMLInputElement>('[data-testid="edit-openai-gwpool-stop-gateways"]')
+    expect(stop.element.value).toBe('')
+    expect(stop.attributes('placeholder')).toBe('5')
+    await stop.setValue('8')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    let extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra?.openai_gwpool_stop_gateways).toBe(8)
+    expect(extra?.openai_gwpool_resume_gateways).toBe(50)
+    expect(extra).not.toHaveProperty('openai_gwpool_rotation_min_gateways')
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    await stop.setValue('')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra).not.toHaveProperty('openai_gwpool_stop_gateways')
+    expect(extra?.openai_gwpool_resume_gateways).toBe(50)
+    const loaded = mountModal({ ...account, extra: { ...account.extra, openai_gwpool_stop_gateways: 7, openai_gwpool_continuous_wait: true } })
+    expect(loaded.get<HTMLInputElement>('[data-testid="edit-openai-gwpool-stop-gateways"]').element.value).toBe('7')
+    expect(loaded.get('[data-testid="edit-openai-gwpool-thresholds"]').attributes('disabled')).toBeDefined()
+    loaded.unmount()
+    wrapper.unmount()
+  })
+
   it('keeps default50 recovery independent from retired stop settings and saves overrides', async () => {
     const account = buildAccount()
     account.type = 'oauth'

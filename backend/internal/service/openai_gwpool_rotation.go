@@ -37,6 +37,9 @@ type gatewayPoolRetryOnly struct {
 	deadline  time.Time
 	failure   *UpstreamFailoverError
 	holder    *gatewayPoolWaitHolder // distinguishes a new WS turn from a retry
+	// A stop invalidated by new supply already earned this request's one
+	// same-account rejoin.
+	superseded bool
 }
 
 func gatewayPoolRetryOnlyFrom(ctx context.Context) gatewayPoolRetryOnly {
@@ -80,7 +83,7 @@ func gatewayPoolRotationAccount(account *Account, groupID int64) bool {
 // Only potentially exhausted candidate sets may be examined further. Even
 // all_cooling may describe a partial batch, so a fresh listing must confirm it.
 func gatewayPoolRotationFailure(err error) bool {
-	if errors.Is(err, errGatewayPoolWarmAttemptsFinished) {
+	if errors.Is(err, errGatewayPoolWarmAttemptsFinished) || errors.Is(err, errGatewayPoolStopThreshold) {
 		return true
 	}
 	var poolErr *gwpool.PoolError
@@ -151,9 +154,14 @@ func (s *OpenAIGatewayService) PrepareGatewayPoolAccountRotation(ctx context.Con
 	var retryDeadline time.Time
 	if previousRetry.accountID == fresh.ID {
 		retryDeadline = previousRetry.deadline
-		if !retryDeadline.IsZero() && !time.Now().Before(retryDeadline) {
-			return ctx // a later HTTP fault cannot restart a spent real 429 window
+	}
+	if failure.Reason == OpenAIGatewayPoolReason && s.gatewayPoolRestMaybeActive(ctx, fresh) {
+		if identity := s.gatewayPoolRestHandoffIdentity(ctx, fresh, source); identity != "" {
+			return s.allowGatewayPoolAccountRotation(ctx, *groupID, source.ID, identity, failure)
 		}
+	}
+	if !retryDeadline.IsZero() && !time.Now().Before(retryDeadline) {
+		return ctx // a later HTTP fault cannot restart a spent real 429 window
 	}
 	if retry429 && fresh.IsSchedulable() {
 		failure.RetryableOnSameAccount = true
@@ -162,7 +170,8 @@ func (s *OpenAIGatewayService) PrepareGatewayPoolAccountRotation(ctx context.Con
 			accountID: fresh.ID, groupID: *groupID, deadline: failure.SameAccountRetryDeadline, failure: failure, holder: holder,
 		})
 	}
-	if recoverBeforeOutput && gatewayPoolWaitHealth(fresh) {
+	superseded := false
+	retrySameAccount := func() context.Context {
 		// Reuse the captured credential policy within the logical request.
 		// New WS turns have a new holder; real 429 deadlines remain separate.
 		if client != nil {
@@ -195,8 +204,13 @@ func (s *OpenAIGatewayService) PrepareGatewayPoolAccountRotation(ctx context.Con
 			failure.Reason = OpenAIGatewayPoolReason
 			return context.WithValue(ctx, gatewayPoolRetryOnlyKey{}, gatewayPoolRetryOnly{
 				accountID: fresh.ID, groupID: *groupID, deadline: retryDeadline, failure: failure, holder: holder,
+				superseded: superseded,
 			})
 		}
+		return ctx
+	}
+	if recoverBeforeOutput && gatewayPoolWaitHealth(fresh) {
+		return retrySameAccount()
 	}
 	if fresh.GatewayPoolContinuousWaitEnabled() {
 		return ctx // shortages wait before dispatch; they never authorize credential rotation
@@ -205,22 +219,53 @@ func (s *OpenAIGatewayService) PrepareGatewayPoolAccountRotation(ctx context.Con
 	if !failure.GatewayPoolRotation {
 		return ctx
 	}
-	plan := s.gatewayPoolExhaustedRestQuality(ctx, fresh)
-	if plan == nil {
-		return ctx
-	}
 	identity, err := s.codexCookies.gatewayPoolIdentity(ctx, fresh)
 	if err != nil {
 		return ctx
 	}
+	inventoryGeneration, _, _ := s.codexCookies.gatewayPoolInventoryCandidates(identity)
+	exhausted, supplyRestored := s.gatewayPoolCatalogBelow(ctx, fresh, fresh.gatewayPoolStopGateways())
+	resumeSupersededPreparation := func() context.Context {
+		after, active, available := s.codexCookies.gatewayPoolInventoryCandidates(identity)
+		if !active && len(available) == 0 && after == inventoryGeneration && !supplyRestored {
+			return ctx
+		}
+		if previousRetry.superseded && previousRetry.accountID == source.ID {
+			// Supply flapping around the threshold: rejoin once, then finish
+			// this member's round and switch.
+			s.codexCookies.poolRounds.exhaust(*groupID, identity, generation)
+			return s.allowGatewayPoolAccountRotation(ctx, *groupID, source.ID, identity, failure)
+		}
+		// Another waiter may have started/finished a ticket, or the confirmed
+		// catalog may have replenished. Rejoin rather than fail or force rest
+		// using an invalidated proof. Recheck health/identity before retrying.
+		current, readErr := s.freshGatewayPoolPreparationAccount(ctx, source)
+		if readErr != nil || !gatewayPoolWaitAccountMatches(current, source) {
+			return ctx
+		}
+		fresh = current
+		failure.GatewayPoolRotation = false
+		superseded = true
+		next := retrySameAccount()
+		failure.SameAccountRetryNotBefore = time.Now() // a rejoin, not a verification retry: no gap
+		return next
+	}
+	plan := s.gatewayPoolRestQualityFromExhaustion(ctx, fresh, exhausted)
+	if plan == nil {
+		return resumeSupersededPreparation()
+	}
 	// Mark before finding a replacement, including the last account in a round.
 	plan.roundGeneration = generation
 	if err := s.restGatewayPoolAccount(ctx, fresh, identity, *groupID, *plan); err != nil {
-		return ctx
+		return resumeSupersededPreparation()
 	}
-	next := &gatewayPoolRotation{groupID: *groupID, attempted: map[int64]struct{}{source.ID: {}},
+	return s.allowGatewayPoolAccountRotation(ctx, *groupID, source.ID, identity, failure)
+}
+
+func (s *OpenAIGatewayService) allowGatewayPoolAccountRotation(ctx context.Context, groupID, sourceID int64, identity string, failure *UpstreamFailoverError) context.Context {
+	next := &gatewayPoolRotation{groupID: groupID, attempted: map[int64]struct{}{sourceID: {}},
 		domains: map[string]struct{}{identity: {}}}
-	if state != nil {
+	if state := gatewayPoolRotationFrom(ctx); state != nil {
 		for id := range state.attempted {
 			next.attempted[id] = struct{}{}
 		}
@@ -250,57 +295,80 @@ type gatewayPoolExhaustion struct {
 }
 
 func (s *OpenAIGatewayService) gatewayPoolExhaustedCatalog(ctx context.Context, account *Account) *gatewayPoolExhaustion {
+	exhausted, _ := s.gatewayPoolCatalogBelow(ctx, account, 1)
+	return exhausted
+}
+
+// A live ticket or actual in-flight work protects the current window. Only a
+// next-ticket boundary may confirm a shortage, always against a fresh list.
+// The second result distinguishes sufficient supply from an unknown/invalidated
+// check, including fresh responses which have no cacheable lifetime.
+func (s *OpenAIGatewayService) gatewayPoolCatalogBelow(ctx context.Context, account *Account, minimum int) (*gatewayPoolExhaustion, bool) {
 	if ctx.Err() != nil {
-		return nil
+		return nil, false
 	}
 	identity, err := s.codexCookies.gatewayPoolIdentity(ctx, account)
 	if err != nil || s.codexCookies.gatewayPoolVerifiedFull(identity) {
-		return nil
+		return nil, false
 	}
 	if err := s.codexCookies.hydrateGatewayPoolSharedHistory(ctx, account, identity); err != nil {
-		return nil
+		return nil, false
 	}
 	generation, active, available := s.codexCookies.gatewayPoolInventoryCandidates(identity)
 	if active || len(available) != 0 {
-		return nil
+		return nil, false
 	}
 	pool, err := s.codexCookies.poolClient(account)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	member, tag := gatewayPoolUpstreamAccountID(identity), gatewayPoolAccountTag(account, identity)
-	// A fresh cached list with a usable route already answers "not exhausted";
-	// only a zero needs a fresh directory to confirm it.
-	if cached, ok := pool.CachedCatalog(member, tag, gatewayPoolProbeModelLuna); ok &&
-		s.codexCookies.gatewayPoolCatalogHasRoute(account, identity, cached.Gateways) {
-		return nil
+	// Cached sufficient supply is a fast path. A below-threshold count must
+	// be confirmed fresh; a stale or unreadable list is not a shortage. Only a
+	// member backed off for all_cooling, which cannot take a ticket before the
+	// backoff ends anyway, answers from its unexpired list without a request.
+	if cached, ok := pool.CachedCatalog(member, tag, gatewayPoolProbeModelLuna); ok {
+		if s.codexCookies.gatewayPoolCatalogReadyCount(account, identity, cached.Gateways) >= minimum {
+			return nil, true
+		}
+		if remaining, code := s.codexCookies.gatewayPoolBackoffFor(identity); remaining > 0 && code == gwpool.CodeAllCooling {
+			return &gatewayPoolExhaustion{identity: identity, generation: generation, gateways: cached.Gateways}, false
+		}
 	}
 	listCtx, cancel := context.WithTimeout(ctx, account.gatewayPoolListTimeout())
 	defer cancel()
 	catalog, err := pool.FreshCatalog(listCtx, member, tag, gatewayPoolProbeModelLuna)
-	if err != nil || s.codexCookies.gatewayPoolCatalogHasRoute(account, identity, catalog.Gateways) {
-		return nil // unreadable state is not a zero inventory
+	if err != nil {
+		return nil, false // unreadable state is not a zero inventory
+	}
+	if s.codexCookies.gatewayPoolCatalogReadyCount(account, identity, catalog.Gateways) >= minimum {
+		return nil, true
 	}
 	after, pending, _ := s.codexCookies.gatewayPoolInventoryCandidates(identity)
 	if pending || after != generation || ctx.Err() != nil {
-		return nil
+		return nil, false
 	}
-	return &gatewayPoolExhaustion{identity: identity, generation: generation, gateways: catalog.Gateways}
+	return &gatewayPoolExhaustion{identity: identity, generation: generation, gateways: catalog.Gateways}, false
 }
 
 // gatewayPoolCatalogHasRoute reports whether the list still has a ready gateway
 // this credential is not locally cooling on.
 func (s *openAICodexCookieStore) gatewayPoolCatalogHasRoute(account *Account, identity string, gateways []gwpool.Gateway) bool {
+	return s.gatewayPoolCatalogReadyCount(account, identity, gateways) > 0
+}
+
+func (s *openAICodexCookieStore) gatewayPoolCatalogReadyCount(account *Account, identity string, gateways []gwpool.Gateway) int {
 	now, window := time.Now(), account.gatewayPoolGatewayWindow()
+	ready := make(map[string]struct{})
 	for _, gateway := range gateways {
-		if !gateway.ReadyAt(now) {
+		if gateway.Name == "" || !gateway.ReadyAt(now) {
 			continue
 		}
 		if _, cooling := s.gatewayPoolUsedAt(identity, gateway.Name, window); !cooling {
-			return true
+			ready[gateway.Name] = struct{}{}
 		}
 	}
-	return false
+	return len(ready)
 }
 
 // Read gateway-pool eligibility from the repository, not scheduler snapshots. An explicit
