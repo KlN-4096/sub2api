@@ -167,12 +167,12 @@ func (s *OpenAIGatewayService) writeGatewayPoolRest(ctx context.Context, account
 
 func gatewayPoolRestReason(account *Account, qualityGateways ...string) string {
 	if len(qualityGateways) > 0 {
-		return fmt.Sprintf("网关候选低于1，等%d个优质网关冷却或%d个本地冷却截止恢复，都不等剩余冷却离群的网关 / Gateway candidates below 1; resume after the %d quality gateways or %d local cooldowns, waiting for no remaining-cooldown outlier",
-			len(qualityGateways), account.gatewayPoolResumeGateways(), len(qualityGateways), account.gatewayPoolResumeGateways())
+		return fmt.Sprintf("网关候选低于%d，等%d个优质网关冷却或%d个本地冷却截止恢复，都不等剩余冷却离群的网关 / Gateway candidates below %d; resume after the %d quality gateways or %d local cooldowns, waiting for no remaining-cooldown outlier",
+			account.gatewayPoolStopGateways(), len(qualityGateways), account.gatewayPoolResumeGateways(), account.gatewayPoolStopGateways(), len(qualityGateways), account.gatewayPoolResumeGateways())
 	}
 	return fmt.Sprintf("网关候选低于%d，按%d个本地冷却截止恢复，不等剩余冷却离群的网关 / Gateway candidates below %d; resume after %d local cooldowns, waiting for no remaining-cooldown outlier",
-		1, account.gatewayPoolResumeGateways(),
-		1, account.gatewayPoolResumeGateways())
+		account.gatewayPoolStopGateways(), account.gatewayPoolResumeGateways(),
+		account.gatewayPoolStopGateways(), account.gatewayPoolResumeGateways())
 }
 
 func gatewayPoolOwnsTempBlock(account *Account) bool {

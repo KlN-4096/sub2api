@@ -35,6 +35,7 @@ func TestGatewayPoolWSRetryKeepsConnectionAndSecondTurnBody(t *testing.T) {
 	account := wireProfileTestAccount(false)
 	account.Credentials["chatgpt_user_id"] = "offline-member"
 	account.Extra[openAIGatewayPoolExtraKey] = true
+	account.Extra[openAIGatewayPoolStopGatewaysExtraKey] = 1 // this fixture exercises same-account ticket replacement
 	account.Credentials["access_token"] = "offline-token"
 	svc := codexWSWireProfileService(codexWSWireProfileConfig())
 	fake := newGwpoolFakePool(t, gwpoolTestPairCookie(t, "unified-142"), 150)

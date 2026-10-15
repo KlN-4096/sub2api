@@ -206,6 +206,7 @@ var gatewayPoolRuntimeExtraKeys = []string{
 // HTTP/SSE），留着只会让每次改 WS 开关都白读一次账号。
 var openAIGatewayPoolConfigExtraKeys = []string{
 	openAIGatewayPoolExtraKey,
+	openAIGatewayPoolStopGatewaysExtraKey,
 	openAIGatewayPoolResumeGatewaysExtraKey,
 	openAIGatewayPoolGatewayWindowExtraKey,
 	openAIGatewayPoolCooldownResetHoursKey,
@@ -248,6 +249,7 @@ func validateOpenAIGatewayPoolAccountExtra(account *Account, extra map[string]an
 		}
 	}
 	for key, limit := range map[string]int{
+		openAIGatewayPoolStopGatewaysExtraKey:   gatewayPoolStopGatewaysMax,
 		openAIGatewayPoolResumeGatewaysExtraKey: gatewayPoolResumeGatewaysMax,
 		openAIGatewayPoolFetchTimeoutExtraKey:   openAIGatewayPoolMaxSeconds,
 		openAIGatewayPoolListTimeoutExtraKey:    openAIGatewayPoolMaxSeconds,
@@ -335,6 +337,8 @@ func gatewayPoolClientMessage(err error) string {
 		return ""
 	case errors.Is(err, errOpenAIGatewayPoolRouteDegraded):
 		return gatewayPoolDegradedClientMsg
+	case errors.Is(err, errGatewayPoolStopThreshold):
+		return gatewayPoolStopThresholdClientMsg
 	case errors.Is(err, errOpenAIGatewayPoolWarmExhausted):
 		return gatewayPoolWarmExhaustedClientMsg
 	case errors.Is(err, errOpenAIGatewayPoolWarmUnverified):

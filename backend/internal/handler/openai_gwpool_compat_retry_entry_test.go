@@ -69,6 +69,7 @@ func TestGatewayPoolCompatRetryEntryPreservesIdentityAndFinalResponse(t *testing
 			account := codexWireAccount(801, "pool", codexWireConverged)
 			account.GroupIDs = []int64{9001}
 			account.Extra["openai_gwpool"] = true
+			account.Extra["openai_gwpool_stop_gateways"] = 1 // this fixture exercises same-account ticket retries
 			account.Extra["openai_gwpool_base_url"] = pool.URL
 			account.Extra["openai_gwpool_consumer_key"] = "offline"
 			account.Extra["openai_passthrough"] = tc.passthrough
