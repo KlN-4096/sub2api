@@ -142,6 +142,9 @@ func (s *OpenAIGatewayService) gatewayPoolPrepareUntilReady(
 ) error {
 	ctx, stopPolicy := s.codexCookies.watchGatewayPoolPreparationPolicy(ctx, identity, account)
 	defer stopPolicy()
+	// Check this waiter's policy before it joins a shared worker. A clone
+	// using continuous wait or a lower threshold may keep that worker alive.
+	s.applyGatewayPoolPreparationPolicies(ctx, identity)
 	wait := gatewayPoolWaitFrom(ctx)
 	for {
 		_, _, err := s.codexCookies.poolPrepare.do(ctx, identity, 0, func(work context.Context) (struct{}, error) {
