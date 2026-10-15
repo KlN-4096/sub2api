@@ -37,7 +37,8 @@ func gwpoolTestAccount(id int64) *Account {
 		ID: id, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
 		Status: StatusActive, Schedulable: true,
 		Credentials: map[string]any{"chatgpt_account_id": "acc-a", "chatgpt_user_id": "user-a", "access_token": "offline-test-token"},
-		Extra:       map[string]any{openAIGatewayPoolExtraKey: true},
+		// Existing fixtures exercise exhaustion, not the default early-stop policy.
+		Extra: map[string]any{openAIGatewayPoolExtraKey: true, openAIGatewayPoolStopGatewaysExtraKey: 1},
 	}
 }
 

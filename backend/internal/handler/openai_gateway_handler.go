@@ -769,6 +769,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
 		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)
+		if slotResult == openAISlotAcquirePoolRested {
+			lastFailoverErr = h.gatewayPoolRestFailover(c, apiKey.GroupID, account, failedAccountIDs)
+			continue
+		}
 		if slotResult == openAISlotAcquireProfitVetoed {
 			// 利润终检否决：排除该账号重新选号，全池耗尽由下一轮选号报错；
 			// 否决次数达上限则直接终止，避免排队抢槽后才终检的延迟放大。
@@ -942,6 +946,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 							if !sameAccountRetryDeadlineAllows(failoverErr) {
 								h.handleFailoverExhausted(c, failoverErr, streamStarted)
 								return
+							}
+							if h.gatewayService.GatewayPoolRestHandoff(c.Request.Context(), account) != nil {
+								lastFailoverErr = h.gatewayPoolRestFailover(c, apiKey.GroupID, account, failedAccountIDs)
 							}
 							continue
 						}
@@ -1385,6 +1392,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
 		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)
+		if slotResult == openAISlotAcquirePoolRested {
+			lastFailoverErr = h.gatewayPoolRestFailover(c, apiKey.GroupID, account, failedAccountIDs)
+			continue
+		}
 		if slotResult == openAISlotAcquireProfitVetoed {
 			// 利润终检否决：排除该账号重新选号，全池耗尽由下一轮选号报错；
 			// 否决次数达上限则直接终止，避免排队抢槽后才终检的延迟放大。
@@ -1530,6 +1541,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 							if !sameAccountRetryDeadlineAllows(failoverErr) {
 								h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
 								return
+							}
+							if h.gatewayService.GatewayPoolRestHandoff(c.Request.Context(), account) != nil {
+								lastFailoverErr = h.gatewayPoolRestFailover(c, apiKey.GroupID, account, failedAccountIDs)
 							}
 							continue
 						}
@@ -2154,6 +2168,9 @@ const (
 	// 未写任何响应；调用方应经 recordOpenAIProfitVeto 把该账号加入本请求排除集
 	// 后重新选号，全池耗尽由下一轮选号返回标准 no available accounts。
 	openAISlotAcquireProfitVetoed
+	// The selected pool credential entered rest while this request waited.
+	// No semantic output was written; the caller excludes it and reselects.
+	openAISlotAcquirePoolRested
 )
 
 // openAIWSTurnPricing 持有 WebSocket 连接内「当前 turn」的计费定价时刻。
@@ -2321,6 +2338,16 @@ func (h *OpenAIGatewayHandler) acquireResponsesAccountSlot(
 
 type openAISlotErrorWriter func(status int, errType, code, message string)
 
+// gatewayPoolRestFailover moves a request whose pool credential entered rest
+// before any output on to another member, also out of a same-account retry.
+// The rest failure is the client error when no member is left.
+func (h *OpenAIGatewayHandler) gatewayPoolRestFailover(c *gin.Context, groupID *int64, account *service.Account, failed map[int64]struct{}) *service.UpstreamFailoverError {
+	failure := service.GatewayPoolRestFailure()
+	c.Request = c.Request.WithContext(h.gatewayService.PrepareGatewayPoolAccountRotation(c.Request.Context(), groupID, account, failure, c))
+	failed[account.ID] = struct{}{}
+	return failure
+}
+
 // acquireOpenAIAccountSlot centralizes scheduler selection admission. The
 // optional error writer lets non-Responses endpoints retain their wire format
 // while sharing the same WaitPlan, cancellation, and release semantics.
@@ -2396,6 +2423,9 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	)
 	if err != nil {
 		reqLog.Warn("openai.account_slot_quick_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		if h.gatewayService.GatewayPoolRestHandoff(ctx, account) != nil {
+			return nil, openAISlotAcquirePoolRested
+		}
 		status, errType, code, message := concurrencyErrorResponse(err, "account")
 		writeError(status, errType, code, message)
 		return nil, openAISlotAcquireFailed
@@ -2423,6 +2453,9 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	if waitErr != nil {
 		reqLog.Warn("openai.account_wait_counter_increment_failed", zap.Int64("account_id", account.ID), zap.Error(waitErr))
 	} else if !canWait {
+		if h.gatewayService.GatewayPoolRestHandoff(ctx, account) != nil {
+			return nil, openAISlotAcquirePoolRested
+		}
 		reqLog.Info("openai.account_wait_queue_full",
 			zap.Int64("account_id", account.ID),
 			zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
@@ -2440,6 +2473,9 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	}
 	defer releaseWait()
 
+	waitCtx, stopRestWatch := h.gatewayService.WatchGatewayPoolSlotRest(c.Request.Context(), account)
+	originalRequest := c.Request
+	c.Request = originalRequest.WithContext(waitCtx)
 	accountReleaseFunc, err := h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
 		c,
 		account.ID,
@@ -2448,6 +2484,17 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 		reqStream,
 		streamStarted,
 	)
+	c.Request = originalRequest
+	var restFailure *service.UpstreamFailoverError
+	restedWhileWaiting := errors.As(context.Cause(waitCtx), &restFailure) && restFailure.Reason == service.OpenAIGatewayPoolReason
+	stopRestWatch()
+	// Selection already refused a resting credential; only a wait can outlive that check.
+	if restedWhileWaiting || h.gatewayService.GatewayPoolRestHandoff(ctx, account) != nil {
+		if accountReleaseFunc != nil {
+			accountReleaseFunc()
+		}
+		return nil, openAISlotAcquirePoolRested
+	}
 	if err != nil {
 		reqLog.Warn("openai.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 		status, errType, code, message := concurrencyErrorResponse(err, "account")
@@ -2726,24 +2773,36 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		return
 	}
 	currentUserRelease = wrapReleaseOnDone(ctx, userReleaseFunc)
-	ensureUserSlotHeld := func(account *service.Account) bool {
+	ensureUserSlotHeld := func(account *service.Account, afterFailover bool) error {
 		if currentUserRelease != nil {
-			return true
+			return nil
 		}
-		userReleaseFunc, userAcquired, err := h.acquireGatewayPoolWSTurnSlot(ctx, c, account, func() (func(), bool, error) {
+		acquire := func() (func(), bool, error) {
 			return h.concurrencyHelper.TryAcquireUserSlotForAPIKey(ctx, subject.UserID, subject.Concurrency, apiKey.ID)
-		})
+		}
+		var userReleaseFunc func()
+		var userAcquired bool
+		var err error
+		if afterFailover && account.UsesGatewayPool() {
+			userReleaseFunc, userAcquired, err = acquireGatewayPoolWSFailoverUserSlot(ctx, acquire)
+		} else {
+			userReleaseFunc, userAcquired, err = h.acquireGatewayPoolWSTurnSlot(ctx, c, account, acquire)
+		}
 		if err != nil {
+			var restFailure *service.UpstreamFailoverError
+			if errors.As(err, &restFailure) {
+				return restFailure
+			}
 			reqLog.Warn("openai.websocket_user_slot_reacquire_failed", zap.Error(err))
 			closeOpenAIClientWS(wsConn, coderws.StatusInternalError, "failed to acquire user concurrency slot")
-			return false
+			return err
 		}
 		if !userAcquired {
 			closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "too many concurrent requests, please retry later")
-			return false
+			return errors.New("user concurrency slot unavailable")
 		}
 		currentUserRelease = wrapReleaseOnDone(ctx, userReleaseFunc)
-		return true
+		return nil
 	}
 
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
@@ -2861,7 +2920,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		if ctx.Err() != nil {
 			return false
 		}
-		return ensureUserSlotHeld(account)
+		return ensureUserSlotHeld(account, true) == nil
 	}
 
 	// 与 HTTP Responses 路径保持一致：生图意图请求要求账号支持 Responses API（#4417）。
@@ -3139,6 +3198,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				return mapping.MappedModel, nil
 			},
 			BeforeTurn: func(turn int) error {
+				if failure := h.gatewayService.GatewayPoolRestHandoff(ctx, account); failure != nil {
+					releaseTurnSlots()
+					return failure
+				}
 				// turn==1 的会话屏蔽已由握手层检查覆盖；连接内 flag 只拦截后续 turn。
 				if cyberBlockedThisConn && !h.cyberPolicyLogOnly(c, apiKey) {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, cyberSessionBlockedClientMsg, nil)
@@ -3166,6 +3229,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					return h.concurrencyHelper.TryAcquireUserSlotForAPIKey(ctx, subject.UserID, subject.Concurrency, apiKey.ID)
 				})
 				if err != nil {
+					var restFailure *service.UpstreamFailoverError
+					if errors.As(err, &restFailure) {
+						return restFailure
+					}
 					return service.NewOpenAIWSClientCloseError(coderws.StatusInternalError, "failed to acquire user concurrency slot", err)
 				}
 				if !userAcquired {
@@ -3177,6 +3244,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				if err != nil {
 					if userReleaseFunc != nil {
 						userReleaseFunc()
+					}
+					var restFailure *service.UpstreamFailoverError
+					if errors.As(err, &restFailure) {
+						return restFailure
 					}
 					return service.NewOpenAIWSClientCloseError(coderws.StatusInternalError, "failed to acquire account concurrency slot", err)
 				}
@@ -3356,7 +3427,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, wsForwardModel, false, nil), false, nil, err)
 					}
-					if !ensureUserSlotHeld(account) {
+					if err := ensureUserSlotHeld(account, false); err != nil {
+						var restFailure *service.UpstreamFailoverError
+						if errors.As(err, &restFailure) && handleWSFailover(account, restFailure) {
+							break
+						}
 						return
 					}
 					if currentAccountRelease == nil {
@@ -3364,6 +3439,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 							return h.concurrencyHelper.TryAcquireAccountSlot(ctx, account.ID, accountMaxConcurrency)
 						})
 						if acquireErr != nil || !acquired {
+							var restFailure *service.UpstreamFailoverError
+							if errors.As(acquireErr, &restFailure) && handleWSFailover(account, restFailure) {
+								break
+							}
 							reqLog.Warn("openai.websocket_same_account_retry_slot_unavailable",
 								zap.Int64("account_id", account.ID),
 								zap.Error(acquireErr),

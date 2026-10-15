@@ -15,9 +15,11 @@ type concurrencyCacheMock struct {
 	acquireAccountSlotFn  func(ctx context.Context, accountID int64, maxConcurrency int, requestID string) (bool, error)
 	acquireIngressLeaseFn func(ctx context.Context, apiKeyID int64, maxConnections int, leaseID string) (bool, error)
 	releaseIngressLeaseFn func(ctx context.Context, apiKeyID int64, leaseID string) error
+	releaseAccountSlotFn  func(context.Context, int64, string) error
 	releaseUserCalled     int32
 	releaseAccountCalled  int32
 	releaseIngressCalled  int32
+	accountWaiting        int32
 }
 
 func (m *concurrencyCacheMock) AcquireAccountSlot(ctx context.Context, accountID int64, maxConcurrency int, requestID string) (bool, error) {
@@ -29,6 +31,9 @@ func (m *concurrencyCacheMock) AcquireAccountSlot(ctx context.Context, accountID
 
 func (m *concurrencyCacheMock) ReleaseAccountSlot(ctx context.Context, accountID int64, requestID string) error {
 	atomic.AddInt32(&m.releaseAccountCalled, 1)
+	if m.releaseAccountSlotFn != nil {
+		return m.releaseAccountSlotFn(ctx, accountID, requestID)
+	}
 	return nil
 }
 
@@ -45,10 +50,12 @@ func (m *concurrencyCacheMock) GetAccountConcurrencyBatch(ctx context.Context, a
 }
 
 func (m *concurrencyCacheMock) IncrementAccountWaitCount(ctx context.Context, accountID int64, maxWait int) (bool, error) {
+	atomic.AddInt32(&m.accountWaiting, 1)
 	return true, nil
 }
 
 func (m *concurrencyCacheMock) DecrementAccountWaitCount(ctx context.Context, accountID int64) error {
+	atomic.AddInt32(&m.accountWaiting, -1)
 	return nil
 }
 
