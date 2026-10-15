@@ -99,7 +99,11 @@ func (r gatewayPool429EntryRepo) FindByExtraField(_ context.Context, key string,
 	return out, nil
 }
 
-func TestGatewayPool429EntryRetriesSameAccountWithoutInterruptingResponse(t *testing.T) {
+// A pool member retries a transient 429 once; quota 429s and blocks get no
+// retry. Only another pool member may take the request, never an ordinary
+// account of the group, so here the client gets the 429. Cancellation and
+// emitted output still prevent any replay.
+func TestGatewayPool429EntryNeverLeavesThePool(t *testing.T) {
 	for _, tc := range []struct {
 		path, mode  string
 		passthrough bool
@@ -161,10 +165,12 @@ func TestGatewayPool429EntryRetriesSameAccountWithoutInterruptingResponse(t *tes
 			defer cancel()
 			switch tc.mode {
 			case "quota":
+				upstream.sequence = []int{429, 0}
 				upstream.errorBody = `{"error":{"type":"usage_limit_reached","resets_in_seconds":3600}}`
 			case "cancel":
 				upstream.afterPost = cancel
 			case "blocked":
+				upstream.sequence = []int{429, 0}
 				upstream.afterPost = func() {
 					require.NoError(t, repo.SetTempUnschedulable(context.Background(), account.ID, time.Now().Add(time.Minute), "auth"))
 				}
@@ -188,25 +194,49 @@ func TestGatewayPool429EntryRetriesSameAccountWithoutInterruptingResponse(t *tes
 				require.Equal(t, "gpt-6-luna", gjson.GetBytes(probe.body, "model").String())
 			}
 			calls = calls[2:]
-			if tc.mode == "success" {
-				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-				require.Len(t, calls, 3)
-				if tc.path == "/responses" || tc.path == "/v1/responses" {
-					require.Contains(t, rec.Body.String(), "response.completed")
+			var business []int64
+			for _, call := range calls {
+				business = append(business, call.accountID)
+				require.Equal(t, "gpt-5.4", gjson.GetBytes(call.body, "model").String(), "business model is unchanged")
+			}
+			switch tc.mode {
+			case "success", "quota", "blocked":
+				want := []int64{account.ID}
+				if tc.mode == "success" {
+					want = []int64{account.ID, account.ID}
 				}
-			} else {
-				require.Len(t, calls, 1, "quota, cancellation, blocks and emitted output must prevent replay")
-				if tc.mode == "quota" {
-					require.Equal(t, http.StatusTooManyRequests, rec.Code)
-				}
+				require.Equal(t, want, business, "a pool member's 429 never moves to an ordinary account")
+				require.NotContains(t, rec.Body.String(), "response.completed")
+				require.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+			default:
+				require.Equal(t, []int64{account.ID}, business, "cancellation and emitted output must prevent replay")
 				if tc.mode == "semantic-output" {
 					require.Contains(t, rec.Body.String(), "hello")
 				}
 			}
-			for _, call := range calls {
-				require.Equal(t, account.ID, call.accountID, "transient 429 cannot rotate credentials")
-				require.Equal(t, "gpt-5.4", gjson.GetBytes(call.body, "model").String(), "business model is unchanged")
-			}
+		})
+	}
+}
+
+// Between pool members the 429 switch also releases the round: the next
+// member can take the request although the active-member limit is one.
+func TestGatewayPool429EntrySwitchesToAnotherPoolMember(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		sequence   []int
+		want       []int64
+	}{
+		{"transient", `{"detail":"Rate limit exceeded"}`, []int{429, 429, 0}, []int64{801, 801, 802}},
+		{"quota", `{"error":{"type":"usage_limit_reached","resets_in_seconds":3600}}`, []int{429, 0}, []int64{801, 802}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream, router, _, _, _ := newGatewayStopEntryWith(t, []int64{801, 802}, nil,
+				map[string]any{"openai_gwpool_stop_gateways": 1}, nil)
+			upstream.sequence = tc.sequence
+			upstream.errorBody = tc.body
+			rec := gatewayStopSend(router, "/v1/responses", codexWireResponsesBody(true), 20*time.Second)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Equal(t, tc.want, gatewayStopBusiness(upstream))
 		})
 	}
 }
