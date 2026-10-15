@@ -122,6 +122,10 @@ func (s *OpenAIGatewayService) gatewayPoolPrepare(
 		if allowed, err := s.gatewayPoolResumeAllowed(ctx, fresh, false); err != nil || !allowed {
 			return gatewayPoolRestError()
 		}
+		s.applyGatewayPoolPreparationPolicies(ctx, identity)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		s.codexCookies.poolProgress.update(progress, "fetching", "", false, false)
 		// 借 AttachRoute 取票：取票、本地账本筛选、exclude、force 换网关那一整套都在它里面，
 		// 这里不另写一份选票逻辑。头是个丢弃用的容器，只为把 Cookie 取出来。
