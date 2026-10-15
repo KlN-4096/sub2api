@@ -132,9 +132,9 @@ func (s *OpenAIGatewayService) PrepareGatewayPoolAccountRotation(ctx context.Con
 	if state == nil && err == nil && fresh != nil && !fresh.UsesGatewayPool() {
 		return ctx
 	}
-	// A confirmed transient 429 may wait on the same credential, but never
-	// grants permission to switch credentials. The deadline/reservation was
-	// already established by the upstream error classifier.
+	// A confirmed transient 429 may wait on the same credential; the 429
+	// branch below allows that once. The deadline/reservation was already
+	// established by the upstream error classifier.
 	retry429 := failure.StatusCode == http.StatusTooManyRequests &&
 		failure.RetryableOnSameAccount && !failure.SameAccountRetryDeadline.IsZero() &&
 		time.Now().Before(failure.SameAccountRetryDeadline) &&
@@ -155,6 +155,25 @@ func (s *OpenAIGatewayService) PrepareGatewayPoolAccountRotation(ctx context.Con
 	if previousRetry.accountID == fresh.ID {
 		retryDeadline = previousRetry.deadline
 	}
+	if failure.StatusCode == http.StatusTooManyRequests && failure.Reason != OpenAIGatewayPoolReason {
+		// A transient 429 earns one same-account retry per request. The next
+		// 429, or a quota/spent one, yields this member's round slot and may
+		// move only to another pool member of the group; with none left the
+		// client gets the 429. Not a pool shortage, so no ticket backoff.
+		if retry429 && retryDeadline.IsZero() && fresh.IsSchedulable() {
+			failure.RetryableOnSameAccount = true
+			failure.SameAccountRetryOnly = true
+			return context.WithValue(ctx, gatewayPoolRetryOnlyKey{}, gatewayPoolRetryOnly{
+				accountID: fresh.ID, groupID: *groupID, deadline: failure.SameAccountRetryDeadline, failure: failure, holder: holder,
+			})
+		}
+		identity, err := s.codexCookies.gatewayPoolIdentity(ctx, fresh)
+		if err != nil {
+			return ctx
+		}
+		s.codexCookies.poolRounds.exhaust(*groupID, identity, s.codexCookies.poolRounds.generation(*groupID))
+		return gatewayPoolRotationScope(ctx, *groupID, source.ID, identity, failure)
+	}
 	if failure.Reason == OpenAIGatewayPoolReason && s.gatewayPoolRestMaybeActive(ctx, fresh) {
 		if identity := s.gatewayPoolRestHandoffIdentity(ctx, fresh, source); identity != "" {
 			return s.allowGatewayPoolAccountRotation(ctx, *groupID, source.ID, identity, failure)
@@ -162,13 +181,6 @@ func (s *OpenAIGatewayService) PrepareGatewayPoolAccountRotation(ctx context.Con
 	}
 	if !retryDeadline.IsZero() && !time.Now().Before(retryDeadline) {
 		return ctx // a later HTTP fault cannot restart a spent real 429 window
-	}
-	if retry429 && fresh.IsSchedulable() {
-		failure.RetryableOnSameAccount = true
-		failure.SameAccountRetryOnly = true
-		return context.WithValue(ctx, gatewayPoolRetryOnlyKey{}, gatewayPoolRetryOnly{
-			accountID: fresh.ID, groupID: *groupID, deadline: failure.SameAccountRetryDeadline, failure: failure, holder: holder,
-		})
 	}
 	superseded := false
 	retrySameAccount := func() context.Context {
@@ -263,6 +275,19 @@ func (s *OpenAIGatewayService) PrepareGatewayPoolAccountRotation(ctx context.Con
 }
 
 func (s *OpenAIGatewayService) allowGatewayPoolAccountRotation(ctx context.Context, groupID, sourceID int64, identity string, failure *UpstreamFailoverError) context.Context {
+	// Rest only the credential's ticket acquisition, not account health or
+	// global schedulability. Never shorten an existing longer pool backoff.
+	if remaining, _ := s.codexCookies.gatewayPoolBackoffFor(identity); remaining < openAIGatewayPoolDefaultBackoff {
+		s.codexCookies.poolBackoff.Store(identity, gatewayPoolBackoffEntry{
+			Until: time.Now().Add(openAIGatewayPoolDefaultBackoff), Code: gwpool.CodeAllCooling,
+		})
+	}
+	return gatewayPoolRotationScope(ctx, groupID, sourceID, identity, failure)
+}
+
+// gatewayPoolRotationScope lets the failover loop switch only to a pool member
+// of the group that this request has not tried, outside the tried credentials.
+func gatewayPoolRotationScope(ctx context.Context, groupID, sourceID int64, identity string, failure *UpstreamFailoverError) context.Context {
 	next := &gatewayPoolRotation{groupID: groupID, attempted: map[int64]struct{}{sourceID: {}},
 		domains: map[string]struct{}{identity: {}}}
 	if state := gatewayPoolRotationFrom(ctx); state != nil {
@@ -274,13 +299,6 @@ func (s *OpenAIGatewayService) allowGatewayPoolAccountRotation(ctx context.Conte
 		}
 	}
 	failure.NextAccountAction = NextAccountRetry // the existing bounded failover loop owns switching
-	// Rest only the credential's ticket acquisition, not account health or
-	// global schedulability. Never shorten an existing longer pool backoff.
-	if remaining, _ := s.codexCookies.gatewayPoolBackoffFor(identity); remaining < openAIGatewayPoolDefaultBackoff {
-		s.codexCookies.poolBackoff.Store(identity, gatewayPoolBackoffEntry{
-			Until: time.Now().Add(openAIGatewayPoolDefaultBackoff), Code: gwpool.CodeAllCooling,
-		})
-	}
 	return context.WithValue(ctx, gatewayPoolRotationKey{}, next)
 }
 
