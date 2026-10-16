@@ -393,6 +393,7 @@ describe('EditAccountModal', () => {
     checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
     const wrapper = mountModal(account)
     expect(wrapper.get<HTMLInputElement>('[data-testid="edit-quality-guard-enabled"]').element.checked).toBe(false)
+    expect(wrapper.get('[data-testid="edit-gwpool-shutdown-note"]').text()).toBe('admin.accounts.openai.gwpoolShutdownNote')
     await wrapper.get('[data-testid="edit-quality-guard-enabled"]').setValue(true)
     expect(wrapper.get<HTMLSelectElement>('[data-testid="edit-quality-guard-mode"]').element.value).toBe('')
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')

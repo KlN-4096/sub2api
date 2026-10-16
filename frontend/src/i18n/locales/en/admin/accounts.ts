@@ -847,6 +847,7 @@ export default {
         qualityGuardAttempts: 'Maximum Luna confirmations per request (1–100, default 20)',
         qualityGuardInterval: 'Confirmation interval (seconds, 1–300, default 5)',
         gwpool: 'Use the gateway pool for Codex routing',
+        gwpoolShutdownNote: '(Service shut down)',
         gwpoolManualRetry: 'Clear CD',
         gwpoolManualRetryPending: 'Processing…',
         gwpoolManualRetryHint: 'Clear only local cooldowns, backoff and pool rest. Keep live tickets and history. No ticket fetch or probe is sent; prepare when business traffic arrives. Authentication and upstream rate limits remain.',
