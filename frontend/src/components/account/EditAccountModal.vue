@@ -2653,7 +2653,10 @@
         >
           <div class="flex items-center justify-between gap-4">
             <div class="min-w-0">
-              <label class="input-label mb-0">{{ t('admin.accounts.openai.gwpool') }}</label>
+              <label class="input-label mb-0">
+                {{ t('admin.accounts.openai.gwpool') }}
+                <span class="ml-2 text-xs font-normal text-amber-600 dark:text-amber-400" data-testid="edit-gwpool-shutdown-note">{{ t('admin.accounts.openai.gwpoolShutdownNote') }}</span>
+              </label>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                 {{ t('admin.accounts.openai.gwpoolDesc') }}
               </p>

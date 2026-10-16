@@ -954,6 +954,7 @@ export default {
         qualityGuardAttempts: '单次请求最多 Luna 确认次数（1–100，默认20）',
         qualityGuardInterval: '确认间隔（秒，1–300，默认5）',
         gwpool: '使用网关池选择 Codex 路由',
+        gwpoolShutdownNote: '（已拉闸）',
         gwpoolManualRetry: '清空冷却',
         gwpoolManualRetryPending: '处理中…',
         gwpoolManualRetryHint: '仅清除本地冷却、退避及网关池休息，保留活票和历史。不取票、不发验证请求，不清鉴权或上游限流；下次业务到来时再准备。',
