@@ -452,6 +452,9 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 	}
 	// 预计算固定时间重置的下次重置时间
 	if account.Extra != nil {
+		if err := validateOpenAIQualityGuardExtra(account, account.Extra); err != nil {
+			return nil, err
+		}
 		if err := validateOpenAIGatewayPoolAccountExtra(account, account.Extra); err != nil {
 			return nil, err
 		}
@@ -760,7 +763,10 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			delete(account.Extra, modelRateLimitsKey)
 			delete(account.Extra, "antigravity_credits_overages") // 清理旧版 overages 运行态
 		}
-		// 网关池与 WS 上游互斥（openai_gwpool.go）：按合并后的最终 extra 判，否则改一半就绕过去了。
+		if err := validateOpenAIQualityGuardExtra(account, account.Extra); err != nil {
+			return nil, err
+		}
+		// Validate the final merged pool configuration.
 		if err := validateOpenAIGatewayPoolAccountExtra(account, account.Extra); err != nil {
 			return nil, err
 		}
@@ -1007,9 +1013,12 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 	}
 	// 网关池与 WS 上游互斥（openai_gwpool.go）。这是部分更新，要按「现有 extra + 本次更新」的
 	// 合并结果判：只写一边也能把两个开关凑齐。
-	if touchesOpenAIGatewayPoolConfig(updates) {
+	if touchesOpenAIGatewayPoolConfig(updates) || touchesOpenAIQualityGuardConfig(updates) {
 		account, err := s.accountRepo.GetByID(ctx, id)
 		if err != nil {
+			return err
+		}
+		if err := validateOpenAIQualityGuardExtra(account, mergeMap(account.Extra, updates)); err != nil {
 			return err
 		}
 		if err := validateOpenAIGatewayPoolAccountExtra(account, mergeMap(account.Extra, updates)); err != nil {
@@ -1096,7 +1105,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	// 预取所有目标账号，供凭据守卫/代理守卫/混合渠道检查共用，避免多次 DB 查询。
 	var cachedTargets []*Account
 	_, touchesRecording := input.Extra[openAIUpstreamRecordingExtraKey]
-	if len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil || touchesOpenAIGatewayPoolConfig(input.Extra) || touchesRecording {
+	if len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil || touchesOpenAIGatewayPoolConfig(input.Extra) || touchesOpenAIQualityGuardConfig(input.Extra) || touchesRecording {
 		loaded, err := s.accountRepo.GetByIDs(ctx, input.AccountIDs)
 		if err != nil {
 			return nil, err
@@ -1140,6 +1149,13 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	}
 	// 网关池与 WS 上游互斥（openai_gwpool.go）：批量把 gwpool 打开时，目标里任何一个已经开着
 	// WS 上游的账号都要整体拒绝——漏过去的那个账号每条 WS 请求都会被运行期闸门拒掉。
+	if touchesOpenAIQualityGuardConfig(input.Extra) {
+		for _, acc := range cachedTargets {
+			if err := validateOpenAIQualityGuardExtra(acc, mergeMap(acc.Extra, input.Extra)); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if touchesOpenAIGatewayPoolConfig(input.Extra) {
 		for _, acc := range cachedTargets {
 			if !acc.IsOpenAIOAuthLike() {

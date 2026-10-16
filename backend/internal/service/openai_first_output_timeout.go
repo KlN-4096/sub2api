@@ -260,6 +260,11 @@ func (s *OpenAIGatewayService) newOpenAIFirstOutputTimeoutError(
 	phase string,
 	responseHeaders http.Header,
 ) *UpstreamFailoverError {
+	// A quality-guard recovery still respects the original request deadline,
+	// but time spent waiting for quality must not penalize or switch accounts.
+	if c != nil && account.qualityGuardEnabled() && c.GetInt64(qualityGuardInterceptedAccountKey) == account.ID {
+		return qualityGuardFailure(qualityGuardTimeoutMessage)
+	}
 	elapsed := time.Since(startTime)
 	logger.LegacyPrintf(
 		"service.openai_gateway",
