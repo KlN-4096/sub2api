@@ -2611,6 +2611,47 @@
         v-if="accountHasOpenAIExtraSettings"
         class="border-t border-gray-200 pt-4 dark:border-dark-600 space-y-4"
       >
+        <div
+          v-if="accountSupportsGatewayPool"
+          class="space-y-3 rounded-lg border border-gray-200 p-4 dark:border-dark-600"
+          data-testid="edit-quality-guard-section"
+        >
+          <label class="flex items-center justify-between gap-4">
+            <span class="input-label mb-0">{{ t('admin.accounts.openai.qualityGuard') }}</span>
+            <input v-model="qualityGuardEnabled" data-testid="edit-quality-guard-enabled" type="checkbox" class="h-4 w-4 rounded" />
+          </label>
+          <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.qualityGuardScope') }}</p>
+          <p v-if="openAIGwpoolEnabled" class="text-xs text-amber-600">{{ t('admin.accounts.openai.qualityGuardPool') }}</p>
+          <div v-if="qualityGuardEnabled" class="space-y-3">
+            <label class="block text-xs">
+              {{ t('admin.accounts.openai.qualityGuardMode') }}
+              <select v-model="qualityGuardMode" required class="input mt-1" data-testid="edit-quality-guard-mode">
+                <option value="" disabled>{{ t('admin.accounts.openai.qualityGuardChoose') }}</option>
+                <option value="block">{{ t('admin.accounts.openai.qualityGuardBlock') }}</option>
+                <option value="wait">{{ t('admin.accounts.openai.qualityGuardWait') }}</option>
+              </select>
+            </label>
+            <template v-if="qualityGuardMode === 'wait'">
+              <p class="input-hint">{{ t('admin.accounts.openai.qualityGuardWaitHint') }}</p>
+              <label class="block text-xs">
+                {{ t('admin.accounts.openai.qualityGuardAttempts') }}
+                <input v-model.number="qualityGuardAttempts" type="number" min="1" max="100" step="1" required class="input mt-1" data-testid="edit-quality-guard-attempts" />
+              </label>
+              <label class="block text-xs">
+                {{ t('admin.accounts.openai.qualityGuardInterval') }}
+                <input v-model.number="qualityGuardInterval" type="number" min="1" max="300" step="1" required class="input mt-1" data-testid="edit-quality-guard-interval" />
+              </label>
+            </template>
+          </div>
+          <div class="space-y-1 border-t border-gray-200 pt-3 dark:border-dark-600">
+            <label class="flex items-center justify-between gap-4">
+              <span class="input-label mb-0">{{ t('admin.accounts.openai.turnStateRelay') }}</span>
+              <input v-model="turnStateRelayEnabled" data-testid="edit-turn-state-relay-enabled" type="checkbox" class="h-4 w-4 rounded" />
+            </label>
+            <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.turnStateRelayHint') }}</p>
+            <p v-if="openAIGwpoolEnabled" class="text-xs text-amber-600">{{ t('admin.accounts.openai.turnStateRelayPool') }}</p>
+          </div>
+        </div>
         <!-- 网关池：Codex 推理面的路由 cookie（__cflb / __oailb）改由池子下发，顶掉按账号罐回放。
              配置全在账号级：池子的 consumer key 是按账号发的。 -->
         <div
@@ -2620,7 +2661,10 @@
         >
           <div class="flex items-center justify-between gap-4">
             <div class="min-w-0">
-              <label class="input-label mb-0">{{ t('admin.accounts.openai.gwpool') }}</label>
+              <label class="input-label mb-0">
+                {{ t('admin.accounts.openai.gwpool') }}
+                <span class="ml-2 text-xs font-normal text-amber-600 dark:text-amber-400" data-testid="edit-gwpool-shutdown-note">{{ t('admin.accounts.openai.gwpoolShutdownNote') }}</span>
+              </label>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                 {{ t('admin.accounts.openai.gwpoolDesc') }}
               </p>
@@ -4119,6 +4163,11 @@ const accountSupportsGatewayPool = computed(
   () => props.account?.platform === 'openai' && ['oauth', 'setup-token'].includes(props.account?.type || '')
 )
 const openAIGwpoolEnabled = ref(false)
+const qualityGuardEnabled = ref(false)
+const qualityGuardMode = ref<'' | 'block' | 'wait'>('')
+const qualityGuardAttempts = ref<number>(20)
+const qualityGuardInterval = ref<number>(5)
+const turnStateRelayEnabled = ref(false)
 const openAIGwpoolBaseURL = ref('')
 // 输入框恒为空：后端把已存的 key 脱敏成 true，页面从不回显原值。留空 = 不修改。
 const openAIGwpoolConsumerKey = ref('')
@@ -4703,6 +4752,11 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	allowOverages.value = extra?.allow_overages === true
 	upstreamRequestIdHeader.value = readUpstreamRequestIdHeader(extra)
 	openAIGwpoolEnabled.value = extra?.openai_gwpool === true
+	qualityGuardEnabled.value = extra?.openai_quality_guard_enabled === true
+	qualityGuardMode.value = extra?.openai_quality_guard_mode === 'block' || extra?.openai_quality_guard_mode === 'wait' ? extra.openai_quality_guard_mode : ''
+	qualityGuardAttempts.value = typeof extra?.openai_quality_guard_max_attempts === 'number' ? extra.openai_quality_guard_max_attempts : 20
+	qualityGuardInterval.value = typeof extra?.openai_quality_guard_interval_s === 'number' ? extra.openai_quality_guard_interval_s : 5
+	turnStateRelayEnabled.value = extra?.openai_turn_state_relay_enabled === true
 	openAIUpstreamRecordingEnabled.value = newAccount.platform === 'openai' && extra?.openai_upstream_recording_enabled === true
 	openAIGwpoolBaseURL.value = typeof extra?.openai_gwpool_base_url === 'string' ? extra.openai_gwpool_base_url : ''
 	// 后端脱敏成 true = 配过；原值不会下发，所以输入框一律从空开始。
@@ -6363,6 +6417,26 @@ const handleSubmit = async () => {
         delete newExtra.openai_responses_flatten_namespaces
       }
       if (accountSupportsGatewayPool.value) {
+        if (qualityGuardEnabled.value) {
+          if (!qualityGuardMode.value) {
+            appStore.showError(t('admin.accounts.openai.qualityGuardChoose'))
+            return
+          }
+          newExtra.openai_quality_guard_enabled = true
+          newExtra.openai_quality_guard_mode = qualityGuardMode.value
+          newExtra.openai_quality_guard_max_attempts = qualityGuardAttempts.value
+          newExtra.openai_quality_guard_interval_s = qualityGuardInterval.value
+        } else {
+          delete newExtra.openai_quality_guard_enabled
+          delete newExtra.openai_quality_guard_mode
+          delete newExtra.openai_quality_guard_max_attempts
+          delete newExtra.openai_quality_guard_interval_s
+        }
+        if (turnStateRelayEnabled.value) {
+          newExtra.openai_turn_state_relay_enabled = true
+        } else {
+          delete newExtra.openai_turn_state_relay_enabled
+        }
         if (openAIGwpoolEnabled.value) {
           newExtra.openai_gwpool = true
         } else {
