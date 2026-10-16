@@ -1877,7 +1877,13 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		len(parsed.Uploads),
 		uploadParts,
 	)
-	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx, s.openAIImageDrainTimeout())
+	var upstreamCtx context.Context
+	var releaseUpstreamCtx context.CancelFunc
+	if !direct && account.qualityGuardEnabled() {
+		upstreamCtx, releaseUpstreamCtx = gatewayPoolUpstreamContext(ctx, account)
+	} else {
+		upstreamCtx, releaseUpstreamCtx = detachUpstreamContext(ctx, s.openAIImageDrainTimeout())
+	}
 	defer releaseUpstreamCtx()
 
 	token, _, err := s.GetAccessToken(upstreamCtx, account)
@@ -1937,6 +1943,13 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
 	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 	if err != nil {
+		var guarded *UpstreamFailoverError
+		if errors.As(err, &guarded) && guarded.Reason == OpenAIQualityGuardReason {
+			return nil, guarded
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		safeErr := sanitizeUpstreamErrorMessage(err.Error())
 		setOpsUpstreamError(c, 0, safeErr, "")
 		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{

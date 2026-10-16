@@ -1,6 +1,9 @@
 <template>
   <section class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600" data-testid="bulk-gwpool">
-    <h3 class="font-medium">{{ t('admin.accounts.openai.gwpool') }}</h3>
+    <h3 class="font-medium">
+      {{ t('admin.accounts.openai.gwpool') }}
+      <span class="ml-2 text-xs font-normal text-amber-600 dark:text-amber-400" data-testid="bulk-gwpool-shutdown-note">{{ t('admin.accounts.openai.gwpoolShutdownNote') }}</span>
+    </h3>
     <p class="input-hint">{{ t('admin.accounts.openai.gwpoolBulkHint') }}</p>
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
     <div v-for="field in fields" :key="field.key" class="grid grid-cols-[auto_1fr] items-start gap-3" :class="{ 'sm:col-span-2': field.wide }">

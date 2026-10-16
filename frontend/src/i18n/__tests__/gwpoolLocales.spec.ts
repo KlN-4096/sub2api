@@ -24,6 +24,11 @@ function translatorFor(messages: Messages) {
 }
 
 describe('gateway pool locale keys', () => {
+  it('labels the gateway-pool service as shut down in both languages', () => {
+    expect(zh.admin.accounts.openai.gwpoolShutdownNote).toBe('（已拉闸）')
+    expect(en.admin.accounts.openai.gwpoolShutdownNote).toBe('(Service shut down)')
+  })
+
   it.each([
     ['zh', zh],
     ['en', en]
@@ -31,6 +36,7 @@ describe('gateway pool locale keys', () => {
     const openai = (messages as any).admin.accounts.openai
     for (const key of [
       'gwpool',
+      'gwpoolShutdownNote',
       'gwpoolDesc',
       'gwpoolBaseUrl',
       'gwpoolBaseUrlDesc',
