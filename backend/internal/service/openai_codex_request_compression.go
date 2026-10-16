@@ -85,8 +85,11 @@ func (s *OpenAIGatewayService) finalizeCodexWireBody(ctx context.Context, c *gin
 	// 到那时双开账号的体已经是 zstd 了，解不出来（openai_gwpool_warm.go 的 gatewayPoolWarmModel）。
 	// 没挂 sink 的路径这一行是空操作。
 	openAIGatewayPoolSinkFrom(ctx).noteModel(gjson.GetBytes(body, "model").String())
-	if account.UsesGatewayPool() {
+	if account.UsesGatewayPool() || account.qualityGuardEnabled() {
 		ctx = context.WithValue(ctx, gatewayPoolConfirmBodyKey{}, gatewayPoolConfirmBody(body))
+	}
+	if account.qualityGuardEnabled() {
+		ctx = withQualityGuardRequest(ctx, c, account, body)
 	}
 
 	// 上线字节：双开 /responses 的请求体按真客户端默认做 zstd 压缩。

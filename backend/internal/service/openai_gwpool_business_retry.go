@@ -46,7 +46,7 @@ func gatewayPoolDegradedAttemptError(ctx context.Context, marked bool) error {
 // Keep the downstream cancellation for pool preparation and internal replay.
 // Other providers retain their existing detached billing/draining behavior.
 func gatewayPoolUpstreamContext(ctx context.Context, account *Account) (context.Context, context.CancelFunc) {
-	if account.UsesGatewayPool() {
+	if account.UsesGatewayPool() || account.qualityGuardEnabled() {
 		return ctx, func() {}
 	}
 	return detachUpstreamContext(ctx)
@@ -98,6 +98,9 @@ func gatewayPoolInferenceURL(u *url.URL) bool {
 func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL string, account *Account) (response *http.Response, responseErr error) {
 	pool := request != nil && account.UsesGatewayPool() && gatewayPoolInferenceURL(request.URL)
 	if !pool {
+		if request != nil && account.qualityGuardEnabled() && gatewayPoolInferenceURL(request.URL) {
+			return s.doQualityGuardUpstream(request, proxyURL, account)
+		}
 		return s.doOpenAIUpstreamAttempt(request, proxyURL, account)
 	}
 	ctx, finish := s.beginGatewayPoolUsageRequest(request.Context(), account)
