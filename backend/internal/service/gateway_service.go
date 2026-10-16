@@ -743,7 +743,7 @@ func (e *UpstreamFailoverError) ShouldReportAccountScheduleFailure() bool {
 	// 网关池失败不进调度器的错误率：没票 / 池子挂了 / 判降智说的都是**路由**，这个账号的
 	// 凭据好好的，记进错误率会让池子一抖就把一批健康账号的健康度打下去
 	// （classifyUpstreamTransportError 对 gwpool.ErrPool 的豁免是同一个道理）。
-	if e.Reason == OpenAIGatewayPoolReason {
+	if e.Reason == OpenAIGatewayPoolReason || e.Reason == OpenAIQualityGuardReason {
 		return false
 	}
 	return !e.IsCredentialFailure() || e.Scope == GatewayFailureScopeAccount

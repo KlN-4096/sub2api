@@ -1688,7 +1688,7 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 	}
 	// 与 Responses 入口同口径：只有带说明的池失败才原样转给客户端。同账号重试截止耗尽后
 	// 冒出来的池失败可能不带说明（重试失败被改标成池原因），那时按上游状态码归一。
-	if failoverErr != nil && failoverErr.Reason == service.OpenAIGatewayPoolReason && strings.TrimSpace(failoverErr.ClientMessage) != "" {
+	if failoverErr != nil && (failoverErr.Reason == service.OpenAIGatewayPoolReason || failoverErr.Reason == service.OpenAIQualityGuardReason) && strings.TrimSpace(failoverErr.ClientMessage) != "" {
 		status := failoverErr.ClientStatusCode
 		if status <= 0 {
 			status = http.StatusServiceUnavailable
@@ -3764,7 +3764,7 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		h.handleStreamingAwareErrorWithCode(c, status, "upstream_error", service.OpenAIImagesInsufficientBalanceCode, message, streamStarted, false)
 		return
 	}
-	if failoverErr.Reason == service.OpenAIGatewayPoolReason && strings.TrimSpace(failoverErr.ClientMessage) != "" {
+	if (failoverErr.Reason == service.OpenAIGatewayPoolReason || failoverErr.Reason == service.OpenAIQualityGuardReason) && strings.TrimSpace(failoverErr.ClientMessage) != "" {
 		// 网关池：说清是「没满血槽位，等会儿再试」还是「池子不可用/配错了」还是「判了降智」。
 		// 不说的话这三种在客户端那头长得一模一样（一句 Upstream request failed），
 		// 而它们要做的事完全相反。文案本身不带地址、不带 key（见 service 侧那三条常量）。
