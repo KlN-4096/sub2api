@@ -104,6 +104,7 @@ describe('BulkEditAccountModal', () => {
   it('网关池只发送勾选字段，不回写旧策略，空Key保留且无后台预热', async () => {
     const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth', 'setup-token'] })
     expect(wrapper.find('[data-testid="bulk-gwpool"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="bulk-gwpool-shutdown-note"]').text()).toBe('admin.accounts.openai.gwpoolShutdownNote')
     expect(wrapper.find('[data-testid*="prewarm"]').exists()).toBe(false)
     for (const key of ['guard_enabled', 'probe_model', 'rotation', 'rotation_min_gateways', 'max_wait_s', 'warm_tickets']) {
       expect(wrapper.find(`[data-testid="bulk-gwpool-apply-openai_gwpool_${key}"]`).exists()).toBe(false)
