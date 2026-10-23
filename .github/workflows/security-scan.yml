@@ -28,8 +28,8 @@ jobs:
       - uses: actions/checkout@v6
         with:
           # schedule 只能从默认分支触发，而默认分支 main 是 sync-upstream 的 cron
-          # 宿主，内容是 upstream/main —— 扫它等于扫上游的依赖。klno 的 go.mod 已
-          # 经分叉（klno.4 把 grpc 提到 v1.83.2），周扫必须显式指向 klno。
+          # 宿主，内容是 upstream/main —— 扫它等于扫上游的依赖。实际部署的是 klno，
+          # 它的 go.mod 带二开自己的依赖（如 ulikunitz/xz），周扫必须显式指向 klno。
           # 留空 = actions/checkout 的默认行为，push / pull_request 不受影响。
           ref: ${{ github.event_name == 'schedule' && 'klno' || '' }}
       - name: Set up Go

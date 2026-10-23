@@ -192,7 +192,7 @@ func applyCodexDeviceWireProfile(c *gin.Context, account *Account, headers http.
 	// （16ff14c: model-provider-info/src/lib.rs:397-398 create_openai_provider），
 	// build_request 带上每条 HTTP 请求（codex-api/src/provider.rs:77-86），WS 握手的
 	// merge_request_headers 也以 provider 头为底（endpoint/responses_websocket.rs:490-503）。
-	// 值由 enforceCodexIdentityHeadersWithUA 钉到规范身份，与 UA 版本段同源。
+	// 值由身份收口（enforceCodexClientIdentity）钉到账号出站身份，与 UA 版本段同源。
 	if websocket {
 		// 真客户端的 WS 握手显式传 turn_state=None（core/src/client.rs:1241），turn-state
 		// 只走每一帧的 client_metadata["x-codex-turn-state"]（client.rs:1793）。握手上删掉；
@@ -205,7 +205,7 @@ func applyCodexDeviceWireProfile(c *gin.Context, account *Account, headers http.
 // (16ff14c: core/src/turn_metadata.rs::current_meta_value_for_mcp_request).
 // Preserve session/thread/turn and unknown product metadata; do not invent context.
 func applyCodexAlphaSearchWireProfile(c *gin.Context, account *Account, headers http.Header, body []byte) {
-	// 基础投影不碰 version（已由 enforceCodexIdentityHeadersWithUA 钉到规范身份）。本函数必须在
+	// 基础投影不碰 version（已由 enforceCodexClientIdentity 钉到账号出站身份）。本函数必须在
 	// 身份收口与账号级覆写之后调用（openai_alpha_search.go），最后读到的 version 才是最终出站值。
 	applyCodexDeviceWireProfile(c, account, headers, false)
 	if headers == nil || !codexDeviceWireProfileEnabled(c, account) {
