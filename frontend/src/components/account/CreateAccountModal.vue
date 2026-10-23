@@ -482,33 +482,15 @@
       </div>
 
       <!-- CPR 中继：一个账号对应 CPR 里的一个 OpenAI 账号（单账号分组 + 专属 client key）。 -->
-      <div v-if="form.platform === 'openai' && accountCategory === 'cpr'" class="space-y-4">
-        <div>
-          <label class="input-label">{{ t('admin.accounts.cpr.baseUrl') }} <span class="text-red-500">*</span></label>
-          <input v-model="cprBaseUrl" type="text" class="input mt-1" placeholder="http://127.0.0.1:18081" />
-          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.cpr.baseUrlHint') }}</p>
-        </div>
-        <div>
-          <label class="input-label">{{ t('admin.accounts.cpr.clientKey') }} <span class="text-red-500">*</span></label>
-          <input v-model="cprClientKey" type="password" autocomplete="off" class="input mt-1" placeholder="sk_..." />
-          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.cpr.clientKeyHint') }}</p>
-        </div>
-        <div>
-          <label class="input-label">{{ t('admin.accounts.cpr.accountId') }} <span class="text-red-500">*</span></label>
-          <input v-model="cprAccountId" type="text" class="input mt-1" placeholder="acct_..." />
-          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.cpr.accountIdHint') }}</p>
-        </div>
-        <div>
-          <label class="input-label">{{ t('admin.accounts.cpr.adminApiKey') }} <span class="text-red-500">*</span></label>
-          <input v-model="cprAdminApiKey" type="password" autocomplete="off" class="input mt-1" placeholder="admin-..." />
-          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.cpr.adminApiKeyHint') }}</p>
-        </div>
-        <div>
-          <label class="input-label">{{ t('admin.accounts.cpr.adminBaseUrl') }}</label>
-          <input v-model="cprAdminBaseUrl" type="text" class="input mt-1" :placeholder="cprBaseUrl || 'http://127.0.0.1:18081'" />
-          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.cpr.adminBaseUrlHint') }}</p>
-        </div>
-      </div>
+      <CPRConnectionForm
+        v-if="form.platform === 'openai' && accountCategory === 'cpr'"
+        v-model:base-url="cprBaseUrl"
+        v-model:admin-key="cprAdminApiKey"
+        v-model:admin-base-url="cprAdminBaseUrl"
+        v-model:account-id="cprAccountId"
+        @selected="onCPRSelected"
+        @invalidated="cprConnected = false"
+      />
 
       <!-- Account Type Selection (Grok) -->
       <div v-if="form.platform === 'grok'">
@@ -4262,6 +4244,8 @@ import {
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
 import { supportsAccountQuota } from '@/utils/accountQuota'
 import { getAccountExpiryTimestamp } from '@/components/account/accountExpiry'
+import CPRConnectionForm from './CPRConnectionForm.vue'
+import type { CPRConnectAccount } from '@/types'
 import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
 import {
   OPENAI_WS_MODE_CTX_POOL,
@@ -4660,13 +4644,7 @@ const syncPreviewCredentials = computed(() => {
   // cpr 的凭据在独立的一组 ref 里；后端 buildOpenAIAPIKeyModelsRequest 对 cpr
   // 走同一条 {base_url}/v1/models，所以这里只需把字段换过来。
   if (accountCategory.value === 'cpr') {
-    if (!cprClientKey.value || !cprBaseUrl.value.trim()) return undefined
-    return {
-      platform: form.platform,
-      type: form.type,
-      base_url: cprBaseUrl.value.trim(),
-      api_key: cprClientKey.value
-    }
+    return undefined // Client Key is resolved server-side only when saving.
   }
   if (!apiKeyValue.value) return undefined
   const baseUrl = isMultiProtocolPlatform.value && apiProtocol.value === 'adaptive'
@@ -4821,10 +4799,17 @@ const upstreamBaseUrl = ref('') // For upstream type: base URL
 const upstreamApiKey = ref('') // For upstream type: API key
 // CPR 中继：base_url/api_key 是 CPR 网关的，admin_* 用于拉额度，cpr_account_id 指定绑定哪个 CPR 账号。
 const cprBaseUrl = ref('')
-const cprClientKey = ref('')
+const cprConnected = ref(false)
 const cprAccountId = ref('')
 const cprAdminApiKey = ref('')
 const cprAdminBaseUrl = ref('')
+const onCPRSelected = (account: CPRConnectAccount) => {
+  cprConnected.value = true
+  form.name = account.name || account.email || account.id
+  if (account.concurrency_limit != null && account.concurrency_limit > 0) {
+    form.concurrency = account.concurrency_limit
+  }
+}
 const antigravityModelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist')
 const antigravityWhitelistModels = ref<string[]>([])
 const antigravityModelMappings = ref<ModelMapping[]>([])
@@ -5790,7 +5775,7 @@ const resetForm = () => {
   antigravityProjectId.value = ''
   upstreamBaseUrl.value = ''
   cprBaseUrl.value = ''
-  cprClientKey.value = ''
+  cprConnected.value = false
   cprAccountId.value = ''
   cprAdminApiKey.value = ''
   cprAdminBaseUrl.value = ''
@@ -6055,8 +6040,8 @@ const handleSubmit = async () => {
       appStore.showError(t('admin.accounts.cpr.baseUrlRequired'))
       return
     }
-    if (!cprClientKey.value.trim()) {
-      appStore.showError(t('admin.accounts.cpr.clientKeyRequired'))
+    if (!cprConnected.value) {
+      appStore.showError(t('admin.accounts.cpr.selectAccount'))
       return
     }
     if (!cprAccountId.value.trim()) {
@@ -6070,7 +6055,6 @@ const handleSubmit = async () => {
 
     const credentials: Record<string, unknown> = {
       base_url: cprBaseUrl.value.trim().replace(/\/+$/, ''),
-      api_key: cprClientKey.value.trim(),
       cpr_account_id: cprAccountId.value.trim(),
       admin_api_key: cprAdminApiKey.value.trim()
     }
@@ -6465,6 +6449,7 @@ const createAccountAndFinish = async (
     }
   }
   await doCreateAccount({
+    cpr_auto_configure: type === 'cpr' ? true : undefined,
     name: form.name,
     notes: form.notes,
     platform,

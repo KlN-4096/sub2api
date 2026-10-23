@@ -928,6 +928,55 @@ describe('AccountUsageCell', () => {
     expect(getUsage).toHaveBeenCalledTimes(2)
   })
 
+  it('CPR uses the OAuth quota bars, accounting estimate and live action updates without internal details', async () => {
+    const cpr = {
+      account_id: 'acct', enabled: true, status: 'normal',
+      checked_at: '2026-10-21T08:00:00Z', quota_updated_display: '1 小时前',
+      email: 'internal@example.invalid', access_token_expires_at: '2026-10-31T08:00:00Z',
+      outbound_proxy: 'socks5h://198.51.100.1:1080'
+    }
+    getUsage.mockResolvedValue({
+      cpr,
+      five_hour: { utilization: 0, resets_at: null },
+      seven_day: { utilization: 2, window_stats: { requests: 216, tokens: 18100000, cost: 12.5672, user_cost: 12.5672 } }
+    })
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 56, platform: 'openai', type: 'cpr',
+          credentials: { cpr_account_id: 'acct', base_url: 'http://127.0.0.1:18081' }
+        })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: {
+            name: 'UsageProgressBar',
+            props: ['label', 'utilization', 'resetsAt', 'windowStats', 'estimatedTotalCost', 'showNowWhenIdle', 'color'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}</div>'
+          },
+          OpenAIQuotaResetCell: {
+            props: ['account', 'cprSnapshot'],
+            emits: ['usage-updated'],
+            template: '<button data-test="cpr-query-result" @click="$emit(\'usage-updated\', { cpr: cprSnapshot, seven_day: { utilization: 4 } })" />'
+          }
+        }
+      }
+    })
+    await flushPromises()
+    const bars = wrapper.findAllComponents({ name: 'UsageProgressBar' })
+    expect(bars).toHaveLength(2)
+    expect(bars[0]!.props()).toMatchObject({ label: '5h', utilization: 0, showNowWhenIdle: true, color: 'indigo' })
+    expect(bars[1]!.props()).toMatchObject({ label: '7d', utilization: 2, color: 'emerald' })
+    expect(bars[1]!.props('estimatedTotalCost')).toBeCloseTo(628.36)
+    for (const internal of ['1 小时前', 'internal@example.invalid', 'socks5h://', 'CPR: ', 'accessExpires', 'cpr.details']) {
+      expect(wrapper.text()).not.toContain(internal)
+    }
+    await wrapper.get('[data-test="cpr-query-result"]').trigger('click')
+    expect(wrapper.text()).toContain('7d|4')
+    expect(wrapper.findAllComponents({ name: 'UsageProgressBar' })).toHaveLength(1)
+    wrapper.unmount()
+  })
+
   it('OpenAI OAuth 已限额时显示 /usage API 返回的限额数据', async () => {
 	getUsage.mockResolvedValue({
 	  five_hour: {

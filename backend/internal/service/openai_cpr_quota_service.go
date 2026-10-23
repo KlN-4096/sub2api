@@ -14,7 +14,6 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
-	"sync"
 )
 
 // CPR admin API 额度适配器。
@@ -70,15 +69,21 @@ const CPROutboundProxyExtraKey = "cpr_outbound_proxy"
 
 // CPRAccountState 是一次 admin 查询的归一化结果。
 type CPRAccountState struct {
-	AccountID        string
-	Status           string
-	PlanType         string
-	Email            string
-	Enabled          bool
-	ErrorReason      string
-	LimitReached     bool
-	RateLimitedUntil *time.Time
-	RateLimit        *OpenAIRateLimit
+	AccountID             string
+	Name                  string
+	Status                string
+	PlanType              string
+	Email                 string
+	Enabled               bool
+	ErrorReason           string
+	AccessTokenExpiresAt  *time.Time
+	RefreshTokenExpiresAt *time.Time
+	QuotaUpdatedDisplay   string
+	LimitReached          bool
+	RateLimitedUntil      *time.Time
+	RateLimit             *OpenAIRateLimit
+	Credits               *OpenAICredits
+	Capabilities          CPRAccountCapabilities
 	// LimitIDs 是 CPR 返回的全部额度窗口的 limitId（含空串），只用于诊断日志。
 	LimitIDs []string
 	// OutboundProxyEndpoint 是 CPR 侧的出站代理（已由 CPR 脱敏，不含凭据）。
@@ -120,13 +125,17 @@ type cprAccountDetailData struct {
 }
 
 type cprAccountView struct {
-	ID          string          `json:"id"`
-	Email       string          `json:"email"`
-	PlanType    string          `json:"planType"`
-	Status      string          `json:"status"`
-	ErrorReason string          `json:"errorReason"`
-	Enabled     bool            `json:"enabled"`
-	Quota       cprAccountQuota `json:"quota"`
+	ID                    string                 `json:"id"`
+	Name                  string                 `json:"name"`
+	Email                 string                 `json:"email"`
+	PlanType              string                 `json:"planType"`
+	Status                string                 `json:"status"`
+	ErrorReason           string                 `json:"errorReason"`
+	Enabled               bool                   `json:"enabled"`
+	Quota                 cprAccountQuota        `json:"quota"`
+	AccessTokenExpiresAt  string                 `json:"accessTokenExpiresAt"`
+	RefreshTokenExpiresAt string                 `json:"refreshTokenExpiresAt"`
+	Capabilities          cprAccountCapabilities `json:"capabilities"`
 	// OutboundProxyEndpoint 是这个 CPR 账号真正的出站代理，形如 socks5h://host:port。
 	// sub2api 账号上绑的 proxy 只作用于 sub2api→CPR 那一跳，对 cpr 账号而言那是
 	// 127.0.0.1，真正决定出口 IP 的是这里。
@@ -137,9 +146,29 @@ type cprAccountView struct {
 }
 
 type cprAccountQuota struct {
-	LimitReached     bool             `json:"limitReached"`
-	RateLimitedUntil string           `json:"rateLimitedUntil"`
-	Windows          []cprQuotaWindow `json:"windows"`
+	RefreshedAtDisplay string             `json:"refreshedAtDisplay"`
+	LimitReached       bool               `json:"limitReached"`
+	RateLimitedUntil   string             `json:"rateLimitedUntil"`
+	Windows            []cprQuotaWindow   `json:"windows"`
+	Credits            *cprAccountCredits `json:"credits"`
+}
+
+type cprAccountCapabilities struct {
+	QuotaRefresh       bool `json:"quotaRefresh"`
+	ResetCredits       bool `json:"resetCredits"`
+	ConsumeResetCredit bool `json:"consumeResetCredit"`
+}
+
+type cprAccountCredits struct {
+	HasCredits bool    `json:"hasCredits"`
+	Unlimited  bool    `json:"unlimited"`
+	Balance    *string `json:"balance"`
+}
+
+type CPRAccountCapabilities struct {
+	QuotaRefresh       bool `json:"quota_refresh"`
+	ResetCredits       bool `json:"reset_credits"`
+	ConsumeResetCredit bool `json:"consume_reset_credit"`
 }
 
 type cprQuotaWindow struct {
@@ -215,6 +244,9 @@ func (s *CPRQuotaService) FetchAccountState(ctx context.Context, account *Accoun
 	if err := json.Unmarshal(envelope.Data, &detail); err != nil {
 		return nil, fmt.Errorf("decode cpr account detail: %w", err)
 	}
+	if detail.Account.ID != cprAccountID {
+		return nil, errors.New("cpr account response does not match the requested account")
+	}
 
 	now := time.Now()
 	return buildCPRAccountState(&detail.Account, now), nil
@@ -257,14 +289,30 @@ func buildCPRAccountState(view *cprAccountView, now time.Time) *CPRAccountState 
 	}
 	state := &CPRAccountState{
 		AccountID:             strings.TrimSpace(view.ID),
+		Name:                  strings.TrimSpace(view.Name),
 		Status:                strings.TrimSpace(view.Status),
 		PlanType:              strings.TrimSpace(view.PlanType),
 		Email:                 strings.TrimSpace(view.Email),
 		ErrorReason:           strings.TrimSpace(view.ErrorReason),
+		AccessTokenExpiresAt:  parseCPRDisplayTime(view.AccessTokenExpiresAt),
+		RefreshTokenExpiresAt: parseCPRDisplayTime(view.RefreshTokenExpiresAt),
+		QuotaUpdatedDisplay:   strings.TrimSpace(view.Quota.RefreshedAtDisplay),
 		Enabled:               view.Enabled,
 		LimitReached:          view.Quota.LimitReached,
 		OutboundProxyEndpoint: sanitizeCPROutboundProxy(view.ID, view.OutboundProxyEndpoint),
 		FetchedAt:             now,
+		Capabilities: CPRAccountCapabilities{
+			QuotaRefresh:       view.Capabilities.QuotaRefresh,
+			ResetCredits:       view.Capabilities.ResetCredits,
+			ConsumeResetCredit: view.Capabilities.ConsumeResetCredit,
+		},
+	}
+	if view.Quota.Credits != nil {
+		state.Credits = &OpenAICredits{
+			HasCredits: view.Quota.Credits.HasCredits,
+			Unlimited:  view.Quota.Credits.Unlimited,
+			Balance:    view.Quota.Credits.Balance,
+		}
 	}
 	if until := parseCPRDisplayTime(view.Quota.RateLimitedUntil); until != nil {
 		state.RateLimitedUntil = until
@@ -274,26 +322,6 @@ func buildCPRAccountState(view *cprAccountView, now time.Time) *CPRAccountState 
 	}
 	state.RateLimit = buildCPRRateLimit(view.Quota, now)
 	return state
-}
-
-// cprQuotaNoUsableWindowWarnedAt 按账号节流下面的 warn：这种状态下 extra 一个字节
-// 都不写、时效判定恒认为快照缺失，每次 /usage 刷新都会再查再打，不节流就是
-// 每账号每次刷新一条且永不收敛。
-var cprQuotaNoUsableWindowWarnedAt sync.Map // accountID(int64) -> time.Time
-
-// warnCPRQuotaNoUsableWindow：CPR 返回了额度窗口，却没有一条能落成主线 5h/7d
-// ——要么 limitId 不是 codex/空（CPR 换了主线标识），要么主线窗口缺
-// used_percent/window_seconds 被 convertCPRWindow 丢弃。两种情况下 codex_5h/7d
-// 都会停在旧值，进度条与 auto-pause 一直看旧数，不打日志就是静默卡死。
-func warnCPRQuotaNoUsableWindow(accountID int64, limitIDs []string) {
-	now := time.Now()
-	if last, ok := cprQuotaNoUsableWindowWarnedAt.Load(accountID); ok {
-		if t, ok := last.(time.Time); ok && now.Sub(t) < time.Hour {
-			return
-		}
-	}
-	cprQuotaNoUsableWindowWarnedAt.Store(accountID, now)
-	slog.Warn("cpr_quota_no_usable_main_window", "account_id", accountID, "limit_ids", limitIDs)
 }
 
 // buildCPRRateLimit 把 windows[] 折成 primary/secondary 两个窗口。
@@ -364,36 +392,6 @@ func convertCPRWindow(window cprQuotaWindow, now time.Time) *OpenAIRateLimitWind
 	return converted
 }
 
-// refreshCPRCodexSnapshot 拉一次 CPR admin 额度并写进账号的 codex_* extra。
-//
-// 失败时保留上一次快照：admin 接口不可用是运维问题，不该让展示归零，更不该
-// 被误读成"这个账号没额度了"。
-func (s *AccountUsageService) refreshCPRCodexSnapshot(ctx context.Context, account *Account, usage *UsageInfo, now time.Time) {
-	if s == nil || s.cprQuotaService == nil || account == nil {
-		return
-	}
-	state, err := s.cprQuotaService.FetchAccountState(ctx, account)
-	if err != nil {
-		slog.Warn("cpr_account_state_query_failed", "account_id", account.ID, "error", err)
-		return
-	}
-	if state != nil && state.RateLimit == nil && len(state.LimitIDs) > 0 {
-		warnCPRQuotaNoUsableWindow(account.ID, state.LimitIDs)
-	}
-	updates := buildCPRCodexExtraUpdates(account, state)
-	if len(updates) == 0 {
-		return
-	}
-	mergeAccountExtra(account, updates)
-	s.persistOpenAICodexProbeSnapshot(account.ID, updates)
-	if usage != nil {
-		if usage.UpdatedAt == nil {
-			usage.UpdatedAt = &now
-		}
-		applyExtraToUsage(usage, account.Extra, now)
-	}
-}
-
 // buildCPRCodexExtraUpdates 复用 OAuth 那条链的归一化函数，产出同一组 codex_* 键，
 // 因此前端展示与 OAuth 账号完全一致，不需要任何新的展示字段。
 //
@@ -459,6 +457,9 @@ func parseCPRDisplayTime(value string) *time.Time {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" || trimmed == "—" {
 		return nil
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, trimmed); err == nil {
+		return &parsed
 	}
 	loc := time.FixedZone("UTC+8", cprDisplayTimeOffset)
 	parsed, err := time.ParseInLocation(cprDisplayTimeLayout, trimmed, loc)

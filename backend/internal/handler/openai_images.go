@@ -252,7 +252,12 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		}
 
 		service.SetOpsLatencyMs(c, service.OpsRoutingLatencyMsKey, time.Since(routingStart).Milliseconds())
-		if !parsed.Stream && !jsonKeepaliveStarted {
+		if account.IsCPR() {
+			// A prior API-key attempt may have started this timer before failover.
+			stopJSONKeepalive()
+			jsonKeepaliveStarted = false
+		}
+		if !account.IsCPR() && !parsed.Stream && !jsonKeepaliveStarted {
 			stopJSONKeepalive = service.StartOpenAIImagesJSONKeepalive(c, h.openAIImagesJSONKeepaliveInterval())
 			jsonKeepaliveStarted = true
 		}
