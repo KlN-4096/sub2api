@@ -2181,6 +2181,9 @@ var apiKeyCodexModelsWithoutResponsesLite = map[string]struct{}{
 // Lite mode, so the affected model manifests must advertise the full Responses
 // path. Return the original body when no targeted true value is present.
 func adjustAPIKeyCodexModelsManifest(body []byte, account *Account) ([]byte, error) {
+	if account != nil && account.IsCPR() {
+		return body, nil
+	}
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return nil, fmt.Errorf("decode JSON object: %w", err)

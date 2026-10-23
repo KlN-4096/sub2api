@@ -79,6 +79,10 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	// 新增一条能打到 chatgpt.com 的转发入口时要照抄这两行。
 	ctx, gwpoolSink := withOpenAIGatewayPoolSink(ctx, c)
 	defer func() { gwpoolSink.publish(result) }()
+	if account.IsCPR() {
+		beginUpstreamResponseModelObservation(c)
+		return s.forwardOpenAIRawRelay(ctx, c, account, body)
+	}
 	return s.forwardAsChatCompletions(ctx, c, account, body, promptCacheKey, defaultMappedModel, false)
 }
 

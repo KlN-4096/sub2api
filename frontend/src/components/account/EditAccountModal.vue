@@ -1111,33 +1111,17 @@
       </div>
 
       <!-- CPR 中继（密钥留空表示不修改） -->
-      <div v-if="account.type === 'cpr'" class="space-y-4">
-        <div>
-          <label class="input-label">{{ t('admin.accounts.cpr.baseUrl') }}</label>
-          <input v-model="editCprBaseUrl" type="text" class="input" placeholder="http://127.0.0.1:18081" />
-          <p class="input-hint">{{ t('admin.accounts.cpr.baseUrlHint') }}</p>
-        </div>
-        <div>
-          <label class="input-label">{{ t('admin.accounts.cpr.accountId') }}</label>
-          <input v-model="editCprAccountId" type="text" class="input font-mono" placeholder="acct_..." />
-          <p class="input-hint">{{ t('admin.accounts.cpr.accountIdHint') }}</p>
-        </div>
-        <div>
-          <label class="input-label">{{ t('admin.accounts.cpr.clientKey') }}</label>
-          <input v-model="editCprClientKey" type="password" autocomplete="off" class="input font-mono" placeholder="sk_..." />
-          <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }}</p>
-        </div>
-        <div>
-          <label class="input-label">{{ t('admin.accounts.cpr.adminApiKey') }}</label>
-          <input v-model="editCprAdminApiKey" type="password" autocomplete="off" class="input font-mono" placeholder="admin-..." />
-          <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }}</p>
-        </div>
-        <div>
-          <label class="input-label">{{ t('admin.accounts.cpr.adminBaseUrl') }}</label>
-          <input v-model="editCprAdminBaseUrl" type="text" class="input" :placeholder="editCprBaseUrl || 'http://127.0.0.1:18081'" />
-          <p class="input-hint">{{ t('admin.accounts.cpr.adminBaseUrlHint') }}</p>
-        </div>
-      </div>
+      <CPRConnectionForm
+        v-if="account.type === 'cpr'"
+        :key="account.id"
+        v-model:base-url="editCprBaseUrl"
+        v-model:admin-key="editCprAdminApiKey"
+        v-model:admin-base-url="editCprAdminBaseUrl"
+        v-model:account-id="editCprAccountId"
+        :existing-account-id="account.id"
+        @selected="onCPRSelected"
+        @invalidated="editCprConnected = false"
+      />
 
       <!-- Vertex Service Account -->
       <div v-if="(account.platform === 'gemini' || account.platform === 'anthropic') && account.type === 'service_account'" class="space-y-4">
@@ -2764,44 +2748,47 @@
         class="border-t border-gray-200 pt-4 dark:border-dark-600 space-y-4"
       >
         <div
-          v-if="accountSupportsGatewayPool"
+          v-if="accountSupportsTurnStateRelay"
           class="space-y-3 rounded-lg border border-gray-200 p-4 dark:border-dark-600"
           data-testid="edit-quality-guard-section"
         >
-          <label class="flex items-center justify-between gap-4">
-            <span class="input-label mb-0">{{ t('admin.accounts.openai.qualityGuard') }}</span>
-            <input v-model="qualityGuardEnabled" data-testid="edit-quality-guard-enabled" type="checkbox" class="h-4 w-4 rounded" />
-          </label>
-          <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.qualityGuardScope') }}</p>
-          <p v-if="openAIGwpoolEnabled" class="text-xs text-amber-600">{{ t('admin.accounts.openai.qualityGuardPool') }}</p>
-          <div v-if="qualityGuardEnabled" class="space-y-3">
-            <label class="block text-xs">
-              {{ t('admin.accounts.openai.qualityGuardMode') }}
-              <select v-model="qualityGuardMode" required class="input mt-1" data-testid="edit-quality-guard-mode">
-                <option value="" disabled>{{ t('admin.accounts.openai.qualityGuardChoose') }}</option>
-                <option value="block">{{ t('admin.accounts.openai.qualityGuardBlock') }}</option>
-                <option value="wait">{{ t('admin.accounts.openai.qualityGuardWait') }}</option>
-              </select>
+          <!-- 降智防护只给本地 OAuth / setup-token；CPR 只有下面的 turn-state 接力。 -->
+          <template v-if="accountSupportsGatewayPool">
+            <label class="flex items-center justify-between gap-4">
+              <span class="input-label mb-0">{{ t('admin.accounts.openai.qualityGuard') }}</span>
+              <input v-model="qualityGuardEnabled" data-testid="edit-quality-guard-enabled" type="checkbox" class="h-4 w-4 rounded" />
             </label>
-            <template v-if="qualityGuardMode === 'wait'">
-              <p class="input-hint">{{ t('admin.accounts.openai.qualityGuardWaitHint') }}</p>
+            <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.qualityGuardScope') }}</p>
+            <p v-if="openAIGwpoolEnabled" class="text-xs text-amber-600">{{ t('admin.accounts.openai.qualityGuardPool') }}</p>
+            <div v-if="qualityGuardEnabled" class="space-y-3">
               <label class="block text-xs">
-                {{ t('admin.accounts.openai.qualityGuardAttempts') }}
-                <input v-model.number="qualityGuardAttempts" type="number" min="1" max="100" step="1" required class="input mt-1" data-testid="edit-quality-guard-attempts" />
+                {{ t('admin.accounts.openai.qualityGuardMode') }}
+                <select v-model="qualityGuardMode" required class="input mt-1" data-testid="edit-quality-guard-mode">
+                  <option value="" disabled>{{ t('admin.accounts.openai.qualityGuardChoose') }}</option>
+                  <option value="block">{{ t('admin.accounts.openai.qualityGuardBlock') }}</option>
+                  <option value="wait">{{ t('admin.accounts.openai.qualityGuardWait') }}</option>
+                </select>
               </label>
-              <label class="block text-xs">
-                {{ t('admin.accounts.openai.qualityGuardInterval') }}
-                <input v-model.number="qualityGuardInterval" type="number" min="1" max="300" step="1" required class="input mt-1" data-testid="edit-quality-guard-interval" />
-              </label>
-            </template>
-          </div>
-          <div class="space-y-1 border-t border-gray-200 pt-3 dark:border-dark-600">
+              <template v-if="qualityGuardMode === 'wait'">
+                <p class="input-hint">{{ t('admin.accounts.openai.qualityGuardWaitHint') }}</p>
+                <label class="block text-xs">
+                  {{ t('admin.accounts.openai.qualityGuardAttempts') }}
+                  <input v-model.number="qualityGuardAttempts" type="number" min="1" max="100" step="1" required class="input mt-1" data-testid="edit-quality-guard-attempts" />
+                </label>
+                <label class="block text-xs">
+                  {{ t('admin.accounts.openai.qualityGuardInterval') }}
+                  <input v-model.number="qualityGuardInterval" type="number" min="1" max="300" step="1" required class="input mt-1" data-testid="edit-quality-guard-interval" />
+                </label>
+              </template>
+            </div>
+          </template>
+          <div class="space-y-1" :class="{ 'border-t border-gray-200 pt-3 dark:border-dark-600': accountSupportsGatewayPool }">
             <label class="flex items-center justify-between gap-4">
               <span class="input-label mb-0">{{ t('admin.accounts.openai.turnStateRelay') }}</span>
               <input v-model="turnStateRelayEnabled" data-testid="edit-turn-state-relay-enabled" type="checkbox" class="h-4 w-4 rounded" />
             </label>
             <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.turnStateRelayHint') }}</p>
-            <p v-if="openAIGwpoolEnabled" class="text-xs text-amber-600">{{ t('admin.accounts.openai.turnStateRelayPool') }}</p>
+            <p v-if="accountSupportsGatewayPool && openAIGwpoolEnabled" class="text-xs text-amber-600">{{ t('admin.accounts.openai.turnStateRelayPool') }}</p>
           </div>
         </div>
         <!-- 网关池：Codex 推理面的路由 cookie（__cflb / __oailb）改由池子下发，顶掉按账号罐回放。
@@ -3815,6 +3802,8 @@ import { extractApiErrorMessage, extractI18nErrorMessage } from '@/utils/apiErro
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
 import { supportsAccountQuota } from '@/utils/accountQuota'
 import { getAccountExpiryTimestamp } from '@/components/account/accountExpiry'
+import CPRConnectionForm from './CPRConnectionForm.vue'
+import type { CPRConnectAccount } from '@/types'
 import { allSelectedGroupsEnableLongContextPricing } from '@/components/account/longContextBilling'
 import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
 import {
@@ -4005,9 +3994,16 @@ const editApiKey = ref('')
 // CPR 中继：两把密钥留空表示保持不变，不回显明文。
 const editCprBaseUrl = ref('')
 const editCprAccountId = ref('')
-const editCprClientKey = ref('')
+const editCprConnected = ref(false)
 const editCprAdminApiKey = ref('')
 const editCprAdminBaseUrl = ref('')
+const onCPRSelected = (account: CPRConnectAccount) => {
+  editCprConnected.value = true
+  form.name = account.name || account.email || account.id
+  if (account.concurrency_limit != null && account.concurrency_limit > 0) {
+    form.concurrency = account.concurrency_limit
+  }
+}
 
 // ── 国产供应商（Kimi / Zhipu / DeepSeek）account_mode / api_protocol 编辑 ──
 // account_mode 决定额度/余额监控路径，api_protocol 决定转发端点与格式；
@@ -4461,6 +4457,9 @@ const cprOutboundProxy = computed(() => readCPROutboundProxy(props.account))
 // 只有本地持 ChatGPT 凭据的账号才往 chatgpt.com 发推理请求。
 const accountSupportsGatewayPool = computed(
   () => props.account?.platform === 'openai' && ['oauth', 'setup-token'].includes(props.account?.type || '')
+)
+const accountSupportsTurnStateRelay = computed(
+  () => accountSupportsGatewayPool.value || (props.account?.platform === 'openai' && props.account?.type === 'cpr')
 )
 const openAIGwpoolEnabled = ref(false)
 const qualityGuardEnabled = ref(false)
@@ -5440,7 +5439,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     editCprAccountId.value = (credentials.cpr_account_id as string) || ''
     editCprAdminBaseUrl.value = (credentials.admin_base_url as string) || ''
     // 两把密钥不回显。
-    editCprClientKey.value = ''
+    editCprConnected.value = false
     editCprAdminApiKey.value = ''
     // 模型白名单/映射与 oauth 同源：后端 GetModelMapping() / IsModelSupported()
     // 只读 credentials.model_mapping，与账号类型无关。
@@ -6258,6 +6257,16 @@ const handleSubmit = async () => {
     } else if (props.account.type === 'cpr') {
       const currentCredentials = (props.account.credentials as Record<string, unknown>) || {}
       const newCredentials: Record<string, unknown> = { ...currentCredentials }
+      const normalize = (value: unknown) => String(value || '').trim().replace(/\/+$/, '')
+      const changed = normalize(currentCredentials.base_url) !== normalize(editCprBaseUrl.value)
+        || normalize(currentCredentials.admin_base_url) !== normalize(editCprAdminBaseUrl.value)
+        || currentCredentials.cpr_account_id !== editCprAccountId.value.trim()
+        || !!editCprAdminApiKey.value.trim()
+      if (changed && (!editCprConnected.value || !editCprAccountId.value)) {
+        appStore.showError(t('admin.accounts.cpr.selectAccount'))
+        return
+      }
+      updatePayload.cpr_auto_configure = changed
 
       newCredentials.base_url = editCprBaseUrl.value.trim().replace(/\/+$/, '')
       newCredentials.cpr_account_id = editCprAccountId.value.trim()
@@ -6267,9 +6276,6 @@ const handleSubmit = async () => {
         delete newCredentials.admin_base_url
       }
       // 留空 = 保持原值，避免清空后无法恢复。
-      if (editCprClientKey.value.trim()) {
-        newCredentials.api_key = editCprClientKey.value.trim()
-      }
       if (editCprAdminApiKey.value.trim()) {
         newCredentials.admin_api_key = editCprAdminApiKey.value.trim()
       }
@@ -6716,6 +6722,13 @@ const handleSubmit = async () => {
       } else if (props.account.type !== 'cpr') {
         delete newExtra.openai_responses_flatten_namespaces
       }
+      if (accountSupportsTurnStateRelay.value) {
+        if (turnStateRelayEnabled.value) {
+          newExtra.openai_turn_state_relay_enabled = true
+        } else {
+          delete newExtra.openai_turn_state_relay_enabled
+        }
+      }
       if (accountSupportsGatewayPool.value) {
         if (qualityGuardEnabled.value) {
           if (!qualityGuardMode.value) {
@@ -6731,11 +6744,6 @@ const handleSubmit = async () => {
           delete newExtra.openai_quality_guard_mode
           delete newExtra.openai_quality_guard_max_attempts
           delete newExtra.openai_quality_guard_interval_s
-        }
-        if (turnStateRelayEnabled.value) {
-          newExtra.openai_turn_state_relay_enabled = true
-        } else {
-          delete newExtra.openai_turn_state_relay_enabled
         }
         if (openAIGwpoolEnabled.value) {
           newExtra.openai_gwpool = true

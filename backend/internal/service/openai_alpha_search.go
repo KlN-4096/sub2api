@@ -40,6 +40,14 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(
 	if s == nil || c == nil || account == nil {
 		return nil, fmt.Errorf("service, context, and account are required")
 	}
+	if account.IsCPR() {
+		beginUpstreamResponseModelObservation(c)
+		result, err := s.forwardOpenAIRawRelay(ctx, c, account, body)
+		if result != nil && err == nil {
+			result.WebSearchCalls = 1
+		}
+		return result, err
+	}
 	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
 		return nil, err
 	}

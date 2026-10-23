@@ -15,6 +15,7 @@
       <slot name="pre-actions" />
 
       <button
+        v-if="showResetCredits"
         type="button"
         class="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium text-blue-600 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-blue-400 dark:hover:bg-blue-900/30"
         :disabled="loading || resetting"
@@ -39,6 +40,7 @@
       </button>
 
       <button
+        v-if="showResetCredits && canConsumeResetCredit"
         type="button"
         class="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium text-orange-600 transition-colors hover:bg-orange-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-orange-400 dark:hover:bg-orange-900/30"
         :disabled="resetting || loading || !canReset"
@@ -59,7 +61,7 @@
             d="M20 12a8 8 0 11-2.343-5.657L20 8m0 0V4m0 4h-4"
           />
         </svg>
-        {{ t('admin.accounts.openaiQuotaReset.reset') }}
+        {{ t(retryingCPRReset ? 'admin.accounts.cpr.retryReset' : 'admin.accounts.openaiQuotaReset.reset') }}
       </button>
 
       <button
@@ -73,7 +75,7 @@
         {{ t('admin.accounts.openaiQuotaReset.points') }}
         <span class="truncate tabular-nums">{{ creditsDisplay }}</span>
       </button>
-      <OpenAIReferralCell :account="account" />
+      <OpenAIReferralCell v-if="!isCPR" :account="account" />
     </div>
 
     <div v-if="creditsCacheWarning" class="text-[10px] text-amber-600 dark:text-amber-400">
@@ -170,8 +172,8 @@
     <ConfirmDialog
       :show="showResetConfirm"
       :title="t('admin.accounts.openaiQuotaReset.confirmTitle')"
-      :message="t('admin.accounts.openaiQuotaReset.confirmMessage', { count: availableResetCount })"
-      :confirm-text="t('admin.accounts.openaiQuotaReset.reset')"
+      :message="retryingCPRReset ? t('admin.accounts.cpr.retryResetConfirm') : t('admin.accounts.openaiQuotaReset.confirmMessage', { count: availableResetCount })"
+      :confirm-text="t(retryingCPRReset ? 'admin.accounts.cpr.retryReset' : 'admin.accounts.openaiQuotaReset.reset')"
       :cancel-text="t('common.cancel')"
       danger
       @confirm="confirmReset"
@@ -183,28 +185,57 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import type { Account } from '@/types'
+import type { Account, AccountUsageInfo, CPRAccountSnapshot } from '@/types'
 import {
   refreshOpenAIQuota,
   resetOpenAIQuota,
+  refreshCPRQuota,
+  resetCPRQuota,
   type OpenAIQuotaUsage,
   type OpenAIQuotaResetResult
 } from '@/api/admin/accounts'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import OpenAIReferralCell from '@/components/account/OpenAIReferralCell.vue'
+import { readPendingCPRResetRequest, pendingCPRResetRequest, completeCPRResetRequest } from '@/utils/cprResetRequest'
 
 const props = defineProps<{
   account: Account
+  cprSnapshot?: CPRAccountSnapshot
 }>()
 
 const emit = defineEmits<{
   'account-updated': [account: Account]
+  'usage-updated': [usage: AccountUsageInfo]
 }>()
 
 const { t } = useI18n()
 
-// Visible only for OpenAI OAuth accounts.
-const visible = computed(() => props.account.platform === 'openai' && props.account.type === 'oauth')
+const isCPR = computed(() => props.account.type === 'cpr')
+const visible = computed(() => props.account.platform === 'openai' && (props.account.type === 'oauth' || isCPR.value))
+const cardIdentity = computed(() => isCPR.value
+  ? [props.account.id, 'cpr', props.account.credentials?.base_url, props.account.credentials?.admin_base_url, props.account.credentials?.cpr_account_id].join('\n')
+  : `${props.account.id}:oauth`)
+const cprResetIdentity = computed(() => {
+  const credentials = props.account.credentials
+  const adminURL = String(credentials?.admin_base_url ?? '').trim() || String(credentials?.base_url ?? '').trim()
+  return [adminURL.replace(/\/+$/, ''), String(credentials?.cpr_account_id ?? '').trim()].join('\n')
+})
+const readPendingReset = () => {
+  try {
+    return isCPR.value ? readPendingCPRResetRequest(cprResetIdentity.value) : null
+  } catch {
+    // If storage is unavailable, a new operation also fails before sending.
+    return null
+  }
+}
+const pendingResetID = ref(readPendingReset())
+const retryingCPRReset = computed(() => isCPR.value && pendingResetID.value !== null)
+const cprSnapshot = computed(() => {
+  const snapshot = props.cprSnapshot ?? props.account.extra?.cpr_account_snapshot
+  return isCPR.value && snapshot?.account_id === props.account.credentials?.cpr_account_id ? snapshot : undefined
+})
+const showResetCredits = computed(() => !isCPR.value || cprSnapshot.value?.capabilities?.reset_credits === true)
+const canConsumeResetCredit = computed(() => !isCPR.value || cprSnapshot.value?.capabilities?.consume_reset_credit === true)
 
 const loading = ref(false)
 const resetting = ref(false)
@@ -218,7 +249,12 @@ const showResetCreditDetails = ref(false)
 const creditsCacheWarning = ref(false)
 
 const readCachedCredits = (account: Account) => {
-  const snapshot = account.extra?.codex_credits_snapshot
+  const snapshot = isCPR.value
+    ? {
+        credits: cprSnapshot.value?.credits,
+        fetched_at: cprSnapshot.value?.checked_at ? Math.floor(Date.parse(cprSnapshot.value.checked_at) / 1000) : 0
+      }
+    : account.extra?.codex_credits_snapshot
   const credits = snapshot?.credits
   if (!credits || typeof credits.has_credits !== 'boolean' || typeof credits.unlimited !== 'boolean') return null
   if (credits.balance != null && typeof credits.balance !== 'string') return null
@@ -238,7 +274,7 @@ const creditsDisplay = computed(() => {
 const creditsButtonTitle = computed(() => {
   const fetchedAt = creditsData.value?.fetched_at
   const refresh = t('admin.accounts.openaiQuotaReset.pointsTooltip')
-  if (!fetchedAt || !Number.isFinite(fetchedAt)) return refresh
+  if (isCPR.value || !fetchedAt || !Number.isFinite(fetchedAt)) return refresh
   return `${refresh}\n${t('admin.accounts.openaiQuotaReset.pointsUpdatedAt', {
     time: new Date(fetchedAt * 1000).toLocaleString()
   })}`
@@ -251,6 +287,7 @@ const updateCredits = (usage: OpenAIQuotaUsage | null) => {
 type AutoResetCreditState = NonNullable<NonNullable<Account['extra']>['codex_auto_reset_credit_state']>
 const validAutoResetStatuses = new Set(['checking', 'available', 'resetting', 'success', 'no_credit', 'failed'])
 const autoResetState = computed<AutoResetCreditState | null>(() => {
+  if (isCPR.value) return null
   if (props.account.extra?.auto_reset_credit_enabled !== true) return null
   const state = props.account.extra?.codex_auto_reset_credit_state
   if (!state || typeof state !== 'object' || !validAutoResetStatuses.has(String(state.status))) return null
@@ -290,7 +327,7 @@ const autoResetStateClass = computed(() => {
 // longer exist. A snapshot claiming credits with no usable expiration left is
 // treated as absent, which keeps the reset button gated on a live query.
 const readCachedResetCredits = (account: Account): OpenAIQuotaUsage | null => {
-  const cached = account.extra?.codex_reset_credit_snapshot
+  const cached = isCPR.value ? cprSnapshot.value?.reset_credits : account.extra?.codex_reset_credit_snapshot
   if (!cached || typeof cached !== 'object' || Array.isArray(cached)) return null
 
   const { available_count: count, credits: rawCredits } = cached as {
@@ -345,7 +382,7 @@ const resetCreditExpirations = computed(() =>
 )
 const primaryResetCreditExpiry = computed(() => resetCreditExpirations.value[0] ?? '')
 const hiddenResetCreditCount = computed(() => Math.max(resetCreditExpirations.value.length - 1, 0))
-const canReset = computed(() => availableResetCount.value > 0 && !isShadow.value)
+const canReset = computed(() => (availableResetCount.value > 0 || retryingCPRReset.value) && !isShadow.value && canConsumeResetCredit.value)
 
 const resetCreditDetailsTitle = computed(() =>
   resetCreditExpirations.value
@@ -362,6 +399,7 @@ const resetCreditDetailsToggleLabel = computed(() => {
 
 const resetButtonTitle = computed(() => {
   if (isShadow.value) return t('admin.accounts.openaiQuotaReset.resetTooltipShadow')
+  if (retryingCPRReset.value) return t('admin.accounts.cpr.retryResetConfirm')
   if (!data.value) return t('admin.accounts.openaiQuotaReset.resetTooltipNeedQuery')
   if (!canReset.value) return t('admin.accounts.openaiQuotaReset.resetTooltipNoCredits')
   return t('admin.accounts.openaiQuotaReset.resetTooltipReady')
@@ -435,6 +473,8 @@ const toggleResetCreditDetails = () => {
 const handleQuery = async () => {
   if (loading.value || resetting.value) return
   const accountID = props.account.id
+  const identity = cardIdentity.value
+  const query = isCPR.value ? refreshCPRQuota : refreshOpenAIQuota
   loading.value = true
   creditsCacheWarning.value = false
   error.value = null
@@ -442,8 +482,9 @@ const handleQuery = async () => {
   resetWarning.value = null
   showResetCreditDetails.value = false
   try {
-    const result = await refreshOpenAIQuota(accountID)
-    if (props.account.id !== accountID) return
+    const result = await query(accountID)
+    if (cardIdentity.value !== identity) return
+    if (result.usage) emit('usage-updated', result.usage)
     updateCredits(result)
     creditsCacheWarning.value = result.credits_cache_persisted === false
     // The upstream read succeeded even when the snapshot write was rejected, so
@@ -456,10 +497,10 @@ const handleQuery = async () => {
       resetWarning.value = t('admin.accounts.openaiQuotaReset.refreshCachePersistFailed')
     }
   } catch (e) {
-    if (props.account.id !== accountID) return
+    if (cardIdentity.value !== identity) return
     error.value = extractErrorMessage(e)
   } finally {
-    if (props.account.id === accountID) loading.value = false
+    if (cardIdentity.value === identity) loading.value = false
   }
 }
 
@@ -481,13 +522,39 @@ const confirmReset = async () => {
   }
   resetting.value = true
   const accountID = props.account.id
+  const identity = cardIdentity.value
+  const resetIdentity = cprResetIdentity.value
+  const retryRequestID = pendingResetID.value
+  const cprReset = isCPR.value
+  let resetSent = false
   creditsCacheWarning.value = false
   error.value = null
   resetMessage.value = null
   resetWarning.value = null
   try {
-    const result: OpenAIQuotaResetResult = await resetOpenAIQuota(accountID)
-    if (props.account.id !== accountID) return
+    let requestID: string | undefined
+    if (cprReset) {
+      try {
+        if (retryRequestID) {
+          // A retry must never turn into a new consumption if storage changed.
+          requestID = readPendingCPRResetRequest(resetIdentity) ?? undefined
+          if (requestID !== retryRequestID) throw new Error('Pending reset changed')
+        } else {
+          requestID = pendingCPRResetRequest(resetIdentity)
+        }
+        pendingResetID.value = requestID
+      } catch {
+        throw new Error(t('admin.accounts.cpr.resetRetryUnavailable'))
+      }
+    }
+    resetSent = true
+    const result: OpenAIQuotaResetResult = cprReset
+      ? await resetCPRQuota(accountID, requestID!)
+      : await resetOpenAIQuota(accountID)
+    if (cprReset) completeCPRResetRequest(resetIdentity)
+    if (cardIdentity.value !== identity) return
+    if (cprReset) pendingResetID.value = null
+    if (result.quota?.usage) emit('usage-updated', result.quota.usage)
     updateCredits(result.quota ?? null)
     showResetCreditDetails.value = false
     if (result.cache_refreshed && result.quota) {
@@ -498,6 +565,7 @@ const confirmReset = async () => {
       // Whatever we still hold is one generation stale, so report the count as
       // unknown instead of letting a second consumption start from stale data.
       data.value = null
+      if (cprReset) cachedData.value = null
     }
     if (result.account) emit('account-updated', result.account)
 
@@ -507,25 +575,29 @@ const confirmReset = async () => {
       resetWarning.value = t('admin.accounts.openaiQuotaReset.resetAccountRecoveryFailed')
     } else if (result.warning_code === 'account_state_refresh_failed') {
       resetWarning.value = t('admin.accounts.openaiQuotaReset.resetAccountRefreshFailed')
+    } else if (result.warning_code?.startsWith('cpr_')) {
+      resetWarning.value = t(`admin.accounts.cpr.${result.warning_code}`)
+    } else if (cprReset) {
+      resetMessage.value = t(result.code === 'already_redeemed'
+        ? 'admin.accounts.cpr.resetAlreadyApplied' : 'admin.accounts.cpr.resetSuccess')
     } else {
-      resetMessage.value = t('admin.accounts.openaiQuotaReset.resetSuccess', {
-        windows: result.windows_reset
-      })
+      resetMessage.value = t('admin.accounts.openaiQuotaReset.resetSuccess', { windows: result.windows_reset })
     }
   } catch (e) {
-    if (props.account.id !== accountID) return
-    error.value = extractErrorMessage(e)
+    if (cardIdentity.value !== identity) return
+    error.value = cprReset && resetSent ? t('admin.accounts.cpr.resetUnconfirmed') : extractErrorMessage(e)
   } finally {
-    if (props.account.id === accountID) resetting.value = false
+    if (cardIdentity.value === identity) resetting.value = false
   }
 }
 
 watch(
-  () => props.account.id,
+  cardIdentity,
   () => {
     // Account row may be reused across paginated lists; reset local state.
     cachedData.value = readCachedResetCredits(props.account)
     data.value = cachedData.value
+    pendingResetID.value = readPendingReset()
     creditsData.value = readCachedCredits(props.account)
     creditsCacheWarning.value = false
     error.value = null
@@ -537,6 +609,13 @@ watch(
     showResetCreditDetails.value = false
   }
 )
+
+watch(cprSnapshot, () => {
+  if (!isCPR.value || loading.value || resetting.value) return
+  creditsData.value = readCachedCredits(props.account)
+  cachedData.value = readCachedResetCredits(props.account)
+  data.value = cachedData.value
+})
 
 watch(
   resetCreditExpirations,

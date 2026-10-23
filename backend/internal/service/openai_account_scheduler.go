@@ -2613,6 +2613,11 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 	if account == nil {
 		return false
 	}
+	if account.IsCPR() && !success {
+		// CPR owns its account health and retry policy. Observability is recorded
+		// by the relay, not turned into another local health/cooldown decision.
+		return false
+	}
 	accountID := account.ID
 	healthTripped := false
 	if s != nil && s.rateLimitService != nil {
@@ -3141,7 +3146,7 @@ func openAIFreshUpstreamBillingRate(account *Account, now time.Time) (float64, b
 }
 
 func openAIQuotaHeadroomFactor(account *Account, now time.Time) float64 {
-	if account == nil || len(account.Extra) == 0 || openAIQuotaHeadroomSnapshotStale(account.Extra, now) {
+	if account == nil || account.IsCPR() || len(account.Extra) == 0 || openAIQuotaHeadroomSnapshotStale(account.Extra, now) {
 		return openAIQuotaHeadroomNeutralFactor
 	}
 	window5h, window7d := openAICanonicalQuotaWindows(account.Extra, now)

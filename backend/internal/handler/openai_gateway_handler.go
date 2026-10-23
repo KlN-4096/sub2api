@@ -476,9 +476,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
 		return
 	}
+	var reasoningPolicyErr error
 	if cappedBody, changed, err := applyOpenAIReasoningEffortPolicyForRequest(c, apiKey, body); err != nil {
-		respondOpenAIReasoningEffortPolicyError(c, err, h.errorResponse)
-		return
+		// The selected account is not known yet. CPR owns effort policy; keep
+		// the rejection for local upstreams without denying CPR requests here.
+		reasoningPolicyErr = err
 	} else if changed {
 		body = cappedBody
 	}
@@ -740,6 +742,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			zap.Float64("load_skew", scheduleDecision.LoadSkew),
 		)
 		account := selection.Account
+		if reasoningPolicyErr != nil && !account.IsCPR() {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			respondOpenAIReasoningEffortPolicyError(c, reasoningPolicyErr, h.errorResponse)
+			return
+		}
 		if previousResponseID != "" && requestPlatform == service.PlatformOpenAI && !account.IsOpenAIApiKey() && !account.UsesOpenAIRawRelay() {
 			// The public Responses HTTP API supports previous_response_id on API-key
 			// accounts. OAuth/SetupToken upstreams do not, so keep searching instead

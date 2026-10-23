@@ -180,18 +180,19 @@ type AICredit struct {
 
 // UsageInfo 账号使用量信息
 type UsageInfo struct {
-	Source             string         `json:"source,omitempty"`               // "passive" or "active"
-	UpdatedAt          *time.Time     `json:"updated_at,omitempty"`           // 更新时间
-	FiveHour           *UsageProgress `json:"five_hour"`                      // 5小时窗口
-	SevenDay           *UsageProgress `json:"seven_day,omitempty"`            // 7天窗口
-	SevenDaySonnet     *UsageProgress `json:"seven_day_sonnet,omitempty"`     // 7天Sonnet窗口
-	SevenDayFable      *UsageProgress `json:"seven_day_fable,omitempty"`      // 7天Fable窗口（响应头 7d_oi）
-	GeminiSharedDaily  *UsageProgress `json:"gemini_shared_daily,omitempty"`  // Gemini shared pool RPD (Google One / Code Assist)
-	GeminiProDaily     *UsageProgress `json:"gemini_pro_daily,omitempty"`     // Gemini Pro 日配额
-	GeminiFlashDaily   *UsageProgress `json:"gemini_flash_daily,omitempty"`   // Gemini Flash 日配额
-	GeminiSharedMinute *UsageProgress `json:"gemini_shared_minute,omitempty"` // Gemini shared pool RPM (Google One / Code Assist)
-	GeminiProMinute    *UsageProgress `json:"gemini_pro_minute,omitempty"`    // Gemini Pro RPM
-	GeminiFlashMinute  *UsageProgress `json:"gemini_flash_minute,omitempty"`  // Gemini Flash RPM
+	CPR                *CPRAccountSnapshot `json:"cpr,omitempty"`
+	Source             string              `json:"source,omitempty"`               // "passive" or "active"
+	UpdatedAt          *time.Time          `json:"updated_at,omitempty"`           // 更新时间
+	FiveHour           *UsageProgress      `json:"five_hour"`                      // 5小时窗口
+	SevenDay           *UsageProgress      `json:"seven_day,omitempty"`            // 7天窗口
+	SevenDaySonnet     *UsageProgress      `json:"seven_day_sonnet,omitempty"`     // 7天Sonnet窗口
+	SevenDayFable      *UsageProgress      `json:"seven_day_fable,omitempty"`      // 7天Fable窗口（响应头 7d_oi）
+	GeminiSharedDaily  *UsageProgress      `json:"gemini_shared_daily,omitempty"`  // Gemini shared pool RPD (Google One / Code Assist)
+	GeminiProDaily     *UsageProgress      `json:"gemini_pro_daily,omitempty"`     // Gemini Pro 日配额
+	GeminiFlashDaily   *UsageProgress      `json:"gemini_flash_daily,omitempty"`   // Gemini Flash 日配额
+	GeminiSharedMinute *UsageProgress      `json:"gemini_shared_minute,omitempty"` // Gemini shared pool RPM (Google One / Code Assist)
+	GeminiProMinute    *UsageProgress      `json:"gemini_pro_minute,omitempty"`    // Gemini Pro RPM
+	GeminiFlashMinute  *UsageProgress      `json:"gemini_flash_minute,omitempty"`  // Gemini Flash RPM
 
 	// Antigravity 多模型配额
 	AntigravityQuota map[string]*AntigravityModelQuota `json:"antigravity_quota,omitempty"`
@@ -298,6 +299,7 @@ type AccountUsageService struct {
 	grokQuotaService        *GrokQuotaService
 	openAIQuotaService      *OpenAIQuotaService
 	cprQuotaService         *CPRQuotaService
+	cprSnapshotLocks        sync.Map // account ID -> *sync.Mutex
 	cache                   *UsageCache
 	identityCache           IdentityCache
 	tlsFPProfileService     *TLSFingerprintProfileService
@@ -367,11 +369,7 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 	// CPR 中继与 OAuth 共用 getOpenAIUsage：展示口径（codex_5h_* / codex_7d_*）相同，
 	// 数据源是 CPR 的 admin API。CPR 没有 refresh token，查到用量即可清可恢复错误。
 	if account.Platform == PlatformOpenAI && account.IsCPR() {
-		usage, err := s.getOpenAIUsage(ctx, account, forceProbe)
-		if err == nil {
-			s.tryClearRecoverableAccountError(ctx, account)
-		}
-		return usage, err
+		return s.getCPRUsage(ctx, account, forceProbe)
 	}
 
 	if account.Platform == PlatformGemini {
@@ -748,10 +746,6 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 					}
 				}
 			}
-		} else if account.IsCPR() {
-			// CPR 中继账号的额度只能从 CPR 的 admin API 拿：它会故意剥掉响应里的
-			// x-codex-primary-* 配额头，转发链上一个字节都读不到。
-			s.refreshCPRCodexSnapshot(ctx, account, usage, now)
 		} else if s.openAIQuotaService != nil {
 			// 普通 OAuth 账号同样从 /wham/usage 取额度——真实 Codex 客户端就是从这个
 			// 接口读的。此前这里向 /responses 发一条合成的 "hi" 推理请求、只为蹭响应头

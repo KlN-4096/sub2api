@@ -615,13 +615,22 @@ func (s *OpenAIGatewayService) ForwardImages(
 	// 新增一条能打到 chatgpt.com 的转发入口时要照抄这两行。
 	ctx, gwpoolSink := withOpenAIGatewayPoolSink(ctx, c)
 	defer func() { gwpoolSink.publish(result) }()
+	if account.IsCPR() {
+		beginUpstreamResponseModelObservation(c)
+		result, err := s.forwardOpenAIRawRelay(ctx, c, account, body)
+		if result != nil && parsed != nil {
+			result.Model = parsed.Model
+			result.Stream = parsed.Stream
+			result.ImageSize = parsed.SizeTier
+			result.ImageInputSize = parsed.Size
+		}
+		return result, err
+	}
 	if parsed == nil {
 		return nil, fmt.Errorf("parsed images request is required")
 	}
 	switch account.Type {
-	// cpr 与 apikey 同一条：Bearer + {base_url}/v1/images/*。差别只在 buildOpenAIImagesRequest
-	// 里——cpr 的 base_url 为空时直接报错，绝不回落 api.openai.com。
-	case AccountTypeAPIKey, AccountTypeCPR:
+	case AccountTypeAPIKey:
 		return s.forwardOpenAIImagesAPIKey(ctx, c, account, body, parsed, channelMappedModel)
 	case AccountTypeOAuth, AccountTypeSetupToken:
 		return s.forwardOpenAIImagesOAuth(ctx, c, account, parsed, channelMappedModel)
