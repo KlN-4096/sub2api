@@ -1,6 +1,8 @@
 /**
  * Core Type Definitions for Sub2API Frontend
  */
+import type { CPRAccountSnapshot } from './cpr'
+export type { CPRAccountSnapshot, CPRConnectAccount } from './cpr'
 
 // ==================== Common Types ====================
 
@@ -1291,6 +1293,7 @@ export interface Account {
     upstream_billing_group_sync_enabled?: boolean
     upstream_billing_rate_sync_enabled?: boolean
     upstream_billing_probe?: UpstreamBillingProbeSnapshot
+    cpr_account_snapshot?: import('./cpr').CPRAccountSnapshot
     codex_reset_credit_snapshot?: {
       available_count?: number
       credits?: { expires_at?: string }[]
@@ -1513,6 +1516,7 @@ export interface GrokBillingSummary {
 }
 
 export interface AccountUsageInfo {
+  cpr?: CPRAccountSnapshot
   source?: 'passive' | 'active'
   updated_at: string | null
   five_hour: UsageProgress | null
@@ -1610,6 +1614,7 @@ export interface OpenAIResponsesState {
 }
 
 export interface CreateAccountRequest {
+  cpr_auto_configure?: boolean
   name: string
   notes?: string | null
   platform: AccountPlatform
@@ -1630,6 +1635,7 @@ export interface CreateAccountRequest {
 }
 
 export interface UpdateAccountRequest {
+  cpr_auto_configure?: boolean
   name?: string
   notes?: string | null
   type?: AccountType

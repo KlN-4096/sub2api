@@ -4,9 +4,11 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -250,6 +252,72 @@ func TestTurnStateRelayStopsBeforeUpstreamExpiry(t *testing.T) {
 	fresh := turnStateFernetBlob(time.Now().Add(-50*time.Minute), 10)
 	svc.storeOpenAITurnStateRelay("fresh", fresh)
 	require.Equal(t, fresh, svc.loadOpenAITurnStateRelay("fresh"))
+}
+
+// CPR 原样中继同样接力：CPR 回的票正常收尾后，下一发盖到 /v1/responses 上；其它端点与关着时不动。
+func TestTurnStateRelayCoversCPRRawRelay(t *testing.T) {
+	run := func(t *testing.T, enabled bool, endpoint string, rewrite ...func(*gin.Context)) []string {
+		var mu sync.Mutex
+		var sent []string
+		svc, account := rawRelayTestSetup(t, func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			sent = append(sent, r.Header.Get(openAICodexTurnStateHeader))
+			n := len(sent)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set(openAICodexTurnStateHeader, fmt.Sprintf("cpr-%d", n))
+			_, _ = io.WriteString(w, rawRelaySSE)
+		})
+		if enabled {
+			account.Extra[openAITurnStateRelayEnabledKey] = true
+		}
+		body := []byte(`{"model":"gpt-5.5","stream":true,"input":"hi","prompt_cache_key":"pck-cpr"}`)
+		for i := 0; i < 2; i++ {
+			c, _, decoded := rawRelayTestContext(t, context.Background(), endpoint, body, "", nil)
+			for _, apply := range rewrite {
+				apply(c)
+			}
+			_, err := svc.Forward(context.Background(), c, account, decoded)
+			require.NoError(t, err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return sent
+	}
+	require.Equal(t, []string{"ts-inbound", "cpr-1"}, run(t, true, "/v1/responses"), "客户端自带的也盖成 CPR 最近给的票")
+	require.Equal(t, []string{"ts-inbound", "ts-inbound"}, run(t, false, "/v1/responses"), "关着时原样中继不动")
+	require.Equal(t, []string{"ts-inbound", "ts-inbound"}, run(t, true, "/v1/responses/compact"), "只接力 Responses 推理")
+	bodySignalCompact := func(c *gin.Context) { c.Request.URL.Path = "/v1/responses/compact" } // handler 按体信号改写，CPR 仍发原端点
+	require.Equal(t, []string{"ts-inbound", "ts-inbound"}, run(t, true, "/v1/responses", bodySignalCompact), "体信号 compact 也不接力")
+
+	// 混合分组里先试过 OAuth 号再换到 CPR：gin 上下文还暂存着 OAuth 的凭证身份，CPR 不能借它的票，
+	// 也不能把 CPR 给的票记到 OAuth 名下。
+	t.Run("after_oauth_failover", func(t *testing.T) {
+		var sent string
+		svc, account := rawRelayTestSetup(t, func(w http.ResponseWriter, r *http.Request) {
+			sent = r.Header.Get(openAICodexTurnStateHeader)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set(openAICodexTurnStateHeader, "cpr-minted")
+			_, _ = io.WriteString(w, rawRelaySSE)
+		})
+		account.Extra[openAITurnStateRelayEnabledKey] = true
+		oauth := turnStateRelayAccount()
+		body := []byte(`{"model":"gpt-5.5","stream":true,"input":"hi","prompt_cache_key":"pck-cpr"}`)
+		c, _, decoded := rawRelayTestContext(t, context.Background(), "/v1/responses", body, "", nil)
+		_, err := svc.prepareCodexAccountIdentitySource(context.Background(), c, oauth)
+		require.NoError(t, err)
+		oauthKey := openAITurnStateRelayKey(c, oauth, "gpt-5.5", "pck-cpr")
+		svc.storeOpenAITurnStateRelay(oauthKey, "oauth-state")
+
+		_, err = svc.Forward(context.Background(), c, account, decoded)
+		require.NoError(t, err)
+		require.Equal(t, "ts-inbound", sent, "CPR 不带 OAuth 凭证域的票")
+		require.Equal(t, "oauth-state", svc.loadOpenAITurnStateRelay(oauthKey), "CPR 的票不记到 OAuth 名下")
+	})
+
+	require.NoError(t, validateOpenAIQualityGuardExtra(newCPRTestAccount(), map[string]any{openAITurnStateRelayEnabledKey: true}))
+	require.Error(t, validateOpenAIQualityGuardExtra(newCPRTestAccount(), map[string]any{openAIQualityGuardEnabledKey: true, openAIQualityGuardModeKey: qualityGuardModeBlock}),
+		"降智防护仍只给本地 OAuth")
 }
 
 func TestTurnStateRelayCarriesLatestStateAcrossRequests(t *testing.T) {
