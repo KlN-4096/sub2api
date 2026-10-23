@@ -25,11 +25,8 @@ func (s *OpenAIGatewayService) FetchOpenAIModelsList(ctx context.Context, accoun
 		return nil, fmt.Errorf("resolve model list credentials: %w", err)
 	}
 	if credentialAccount.IsOpenAIOAuth() {
-		clientVersion := CodexCanonicalClientVersion()
-		if s.settingService != nil {
-			clientVersion = s.settingService.GetOpenAICodexClientVersion(ctx)
-		}
-		response, err := s.FetchCodexModelsManifest(ctx, account, clientVersion, "")
+		// 版本留空：按该账号的出站身份取（账号预设可能是 Desktop，版本不同于 CLI 设置）。
+		response, err := s.FetchCodexModelsManifest(ctx, account, "", "")
 		if err != nil {
 			return nil, err
 		}
