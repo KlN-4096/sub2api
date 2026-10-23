@@ -54,7 +54,7 @@ func (a *Account) qualityGuardConfig() openAIQualityGuardConfig {
 }
 
 func touchesOpenAIQualityGuardConfig(extra map[string]any) bool {
-	for _, key := range []string{openAIQualityGuardEnabledKey, openAIQualityGuardModeKey, openAIQualityGuardAttemptsKey, openAIQualityGuardIntervalKey, openAITurnStateRelayEnabledKey} {
+	for _, key := range []string{openAIQualityGuardEnabledKey, openAIQualityGuardModeKey, openAIQualityGuardAttemptsKey, openAIQualityGuardIntervalKey, openAITurnStateRelayEnabledKey, codexClientProfileExtraKey} {
 		if _, ok := extra[key]; ok {
 			return true
 		}
@@ -99,7 +99,7 @@ func validateOpenAIQualityGuardExtra(account *Account, extra map[string]any) err
 			return invalid("Choose block or wait before enabling quality guard")
 		}
 	}
-	return nil
+	return validateCodexClientProfileExtra(account, extra)
 }
 
 func qualityGuardFailure(message string) *UpstreamFailoverError {

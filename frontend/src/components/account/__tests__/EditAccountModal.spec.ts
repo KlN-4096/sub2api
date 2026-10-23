@@ -47,6 +47,12 @@ vi.mock('@/api/admin', () => ({
   }
 }))
 
+// Codex 客户端身份卡片自带请求：本 spec 不涉及，挂起以免 jsdom 真的发 XHR。
+vi.mock('@/api/admin/codexClientProfile', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api/admin/codexClientProfile')>()),
+  getCodexClientProfile: vi.fn(() => new Promise(() => {})),
+  previewCodexClientProfile: vi.fn(() => new Promise(() => {})),
+}))
 vi.mock('@/api/admin/accounts', () => ({
   getAntigravityDefaultModelMapping: vi.fn()
 }))
@@ -62,6 +68,7 @@ vi.mock('vue-i18n', async () => {
 })
 
 import EditAccountModal from '../EditAccountModal.vue'
+import { getCodexClientProfile } from '@/api/admin/codexClientProfile'
 
 const BaseDialogStub = defineComponent({
   name: 'BaseDialog',
@@ -457,6 +464,46 @@ describe('EditAccountModal', () => {
     expect(saved).toMatchObject({ openai_turn_state_relay_enabled: true })
     expect(saved).not.toHaveProperty('openai_quality_guard_enabled')
     expect(saved).not.toHaveProperty('openai_quality_guard_mode')
+  })
+
+  it('saves the account Codex client profile and clears it back to inherit', async () => {
+    const profile = { client: 'cli', platform: 'linux', versionMode: 'latest' }
+    vi.mocked(getCodexClientProfile).mockResolvedValueOnce({
+      global: null,
+      effective: { user_agent: 'Codex Desktop/0.163.0', originator: 'Codex Desktop', version: '0.163.0' },
+      fallback: { user_agent: 'Codex Desktop/0.163.0', originator: 'Codex Desktop', version: '0.163.0' },
+      presets: [
+        { profile: { client: 'desktop', platform: 'macos', versionMode: 'latest' }, originator: 'Codex Desktop', os_type: 'Mac OS', os_version: '15.7.1', arch: 'arm64', terminal: 'unknown' },
+        { profile, originator: 'codex_cli_rs', os_type: 'Linux', os_version: '6.8.0', arch: 'x86_64', terminal: 'unknown' },
+      ],
+      max_version_lag: 10,
+      refreshing: false,
+      desktop: {} as never,
+      cli: [],
+    } as never)
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.extra = { codex_client_profile: profile }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    await flushPromises()
+    expect(wrapper.find('[data-testid="edit-codex-client-profile"]').exists()).toBe(true)
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.codex_client_profile).toEqual(profile)
+
+    await wrapper.get('[data-testid="codex-profile-preset"]').setValue('')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[1]?.[1]?.extra).not.toHaveProperty('codex_client_profile')
+  })
+
+  it('hides the Codex client profile on spark shadows', async () => {
+    vi.mocked(getCodexClientProfile).mockResolvedValueOnce({ presets: [], max_version_lag: 10, effective: { user_agent: '' } } as never)
+    const shadow = { ...buildOpenAIOAuthParentAccount(), id: 8, parent_account_id: 7 }
+    const wrapper = mountModal(shadow)
+    await flushPromises()
+    expect(wrapper.find('[data-testid="edit-codex-client-profile"]').exists()).toBe(false)
   })
 
   it('loads and clears turn-state relay', async () => {

@@ -302,7 +302,7 @@ func (s *OpenAIGatewayService) createUpstreamLiveCall(
 	upstreamReq.Header.Set("Content-Type", "application/json")
 	upstreamReq.Header.Set("Accept", "application/sdp")
 	upstreamReq.Header.Set(liveAttestationHeader, attestation)
-	applyLiveUpstreamIdentityHeaders(upstreamReq.Header)
+	s.applyLiveUpstreamIdentityHeaders(upstreamReq.Header, account)
 
 	resp, err := s.doOpenAIUpstream(upstreamReq, resolveAccountProxyURL(account), account)
 	if err != nil {
@@ -399,10 +399,10 @@ func liveCallIDFromLocation(location string) (string, error) {
 	return callID, nil
 }
 
-func applyLiveUpstreamIdentityHeaders(headers http.Header) {
+func (s *OpenAIGatewayService) applyLiveUpstreamIdentityHeaders(headers http.Header, account *Account) {
 	headers.Set("OpenAI-Alpha", "quicksilver=v2")
 	ensureCodexIdentityHeaders(headers)
-	enforceCodexIdentityHeaders(headers)
+	s.enforceCodexClientIdentity(nil, headers, account)
 	if strings.TrimSpace(headers.Get("session-id")) == "" {
 		headers.Set("session-id", uuid.NewString())
 	}
@@ -434,7 +434,7 @@ func (s *OpenAIGatewayService) liveSidebandHeaders(
 		return nil, err
 	}
 	headers.Set(liveAttestationHeader, attestation)
-	applyLiveUpstreamIdentityHeaders(headers)
+	s.applyLiveUpstreamIdentityHeaders(headers, account)
 	return headers, nil
 }
 

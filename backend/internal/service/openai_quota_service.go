@@ -563,7 +563,9 @@ func (s *OpenAIQuotaService) buildCodexQuotaHeaders(call *openAIQuotaCall) (map[
 	// 不该有的字节变化。关闭强制统一身份时也整体不接管：那条路径上推理面保留账号原值的
 	// 版本段，这里再去重建就是反方向的不一致。
 	if codexIdentityEnforcement.Load() {
-		if ua := forwardedRow.getCodexUserAgentOverride(); ua != "" {
+		if profile := account.codexClientProfile(); profile != nil {
+			headers["user-agent"] = profile.identity(codexPublishedReleases()).userAgent
+		} else if ua := forwardedRow.getCodexUserAgentOverride(); ua != "" {
 			headers["user-agent"] = resolveCodexOutboundIdentity(ua).userAgent
 		}
 	}
