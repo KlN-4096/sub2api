@@ -143,7 +143,7 @@ func CreatePrivacyReqClient(proxyURL string) (*req.Client, error) {
 // ImpersonateChrome 改的不只是 TLS：它同时设置 HelloChrome_120 指纹、Chrome 的
 // HTTP/2 SETTINGS 帧与头顺序，以及 sec-ch-ua / sec-ch-ua-platform="macOS" /
 // user-agent=Chrome 120 on macOS 一整套公共头。用在这里会让同一个账号在额度面
-// 自报「macOS 上的 Chrome」、在推理面自报 codex-tui，两者互相矛盾。
+// 自报「macOS 上的 Chrome」、在推理面自报 Codex 客户端，两者互相矛盾。
 //
 // 真实 Codex 走 reqwest 直连该端点，只发 User-Agent + Authorization +
 // ChatGPT-Account-Id（codex-rs backend-client/src/client.rs 的 headers()）。

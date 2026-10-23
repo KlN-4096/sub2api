@@ -25,7 +25,7 @@ import (
 // extra.openai_raw_relay 打开（下一跳是另一个 sub2api 时用）。
 //
 // 与透传路径的区别：不做头白名单、兼容改写、错误脱敏、重试、熔断和账号状态变更。
-// 只有上游「整体不可用」才换号（isOpenAIRawRelayUnavailable），换不了由 handler
+// CPR 不在本层换号；apikey 中继只有上游「整体不可用」才换号，换不了由 handler
 // 原样写回最后一次的上游响应（UpstreamFailoverError.RawRelayResponse）。
 
 const openAIRawRelayExtraKey = "openai_raw_relay"
@@ -54,6 +54,11 @@ var openAIRawRelayHopByHopResponseHeaders = map[string]bool{
 
 func (s *OpenAIGatewayService) forwardOpenAIRawRelay(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
 	startTime := time.Now()
+	// handler 换号复用同一个 gin 上下文：先把暂存的凭证身份换成本账号，turn-state 的铸造记录与接力
+	// 才不会算到上一次尝试的 OAuth 号名下。
+	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
+		return nil, err
+	}
 	// 本站自己的拒绝都不算账号失败，免得一个用户的坏请求抬高共享账号的错误率。
 	if restriction := s.detectCodexClientRestriction(c, account, body); restriction.Enabled && !restriction.Matched {
 		writeOpenAIRawRelayLocalRejection(c, http.StatusForbidden, "forbidden_error", CodexClientRestrictionMessage(restriction))
@@ -81,6 +86,9 @@ func (s *OpenAIGatewayService) forwardOpenAIRawRelay(ctx context.Context, c *gin
 		return nil, err
 	}
 	reqModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if account.IsCPR() {
+		reqModel = strings.TrimSpace(gjson.GetBytes(plainBody, "model").String())
+	}
 	sentModel := strings.TrimSpace(gjson.GetBytes(plainBody, "model").String())
 	SetOpsUpstreamModel(c, sentModel)
 
@@ -88,6 +96,8 @@ func (s *OpenAIGatewayService) forwardOpenAIRawRelay(ctx context.Context, c *gin
 	if err != nil {
 		return nil, err
 	}
+	// CPR 开了 turn-state 接力时只改这一个头（openai_turn_state_relay.go），请求体照旧原文。
+	req = s.applyOpenAITurnStateRelay(c, account, req, plainBody, gjson.GetBytes(plainBody, "prompt_cache_key").String())
 	markOpenAITurnStateSent(c, account, req.Header.Get(openAICodexTurnStateHeader))
 
 	proxyURL := ""
@@ -132,11 +142,19 @@ func (s *OpenAIGatewayService) forwardOpenAIRawRelay(ctx context.Context, c *gin
 	return result, nil
 }
 
-// openAIRawRelayOutboundBody 决定出站请求体：分组策略没改动任何字段就发线上原文（含压缩），
+// openAIRawRelayOutboundBody 对 CPR 总是保原文；以下分组策略仅适用于 apikey 中继。
+// apikey 分组策略没改动任何字段就发线上原文（含压缩），
 // 改了才发改过的明文。策略只动它们管的字段：推理强度（分组）、model（渠道映射）、
 // service_tier（Fast 策略，按账号作用域）。plain 始终是明文，供记账解析用。
 func (s *OpenAIGatewayService) openAIRawRelayOutboundBody(ctx context.Context, c *gin.Context, account *Account, forwardBody []byte) (out, plain []byte, encoding string, err error) {
 	preread, _ := c.Request.Body.(*httputil.PrereadBody)
+	if account.IsCPR() {
+		if original, exists := c.Get(cprOriginalBodyKey); exists {
+			if saved, ok := original.(*httputil.PrereadBody); ok {
+				preread = saved
+			}
+		}
+	}
 	decoded := preread.Bytes()
 	if decoded == nil {
 		decoded = forwardBody
@@ -144,6 +162,18 @@ func (s *OpenAIGatewayService) openAIRawRelayOutboundBody(ctx context.Context, c
 	var limit int64
 	if s.cfg != nil {
 		limit = s.cfg.Gateway.MaxBodySize
+	}
+	if account.IsCPR() {
+		if limit > 0 && int64(len(decoded)) > limit {
+			return nil, nil, "", &http.MaxBytesError{Limit: limit}
+		}
+		if jsonHasDuplicateObjectKeys(decoded) {
+			return nil, nil, "", errOpenAIRawRelayDuplicateKeys
+		}
+		if wire, wireEncoding, ok := preread.Wire(); ok {
+			return wire, decoded, wireEncoding, nil
+		}
+		return decoded, decoded, "", nil
 	}
 	base, err := httputil.NormalizeLenientJSONRequestBody(decoded, limit)
 	if err != nil {
@@ -219,6 +249,9 @@ func (s *OpenAIGatewayService) openAIRawRelayTargetURL(c *gin.Context, account *
 		validatedURL, err := s.validateUpstreamBaseURL(baseURL)
 		if err != nil {
 			return "", err
+		}
+		if account.IsCPR() {
+			return cprRelayTargetURL(validatedURL, c)
 		}
 		targetURL = buildOpenAIResponsesURL(validatedURL)
 	}
@@ -362,6 +395,9 @@ func (s *OpenAIGatewayService) handleOpenAIRawRelayErrorResponse(c *gin.Context,
 		return failoverErr
 	}
 	WriteOpenAIRawRelayUpstreamResponse(c, resp.StatusCode, resp.Header, body)
+	if account.IsCPR() {
+		return openAIRawRelayNotAccountFault(fmt.Errorf("cpr upstream status %d", resp.StatusCode))
+	}
 	return fmt.Errorf("openai raw relay upstream status %d", resp.StatusCode)
 }
 
@@ -380,7 +416,7 @@ func (s *OpenAIGatewayService) recordOpenAIRawRelayUpstreamError(c *gin.Context,
 	if hit, code, msg := detectOpenAICyberPolicy(body); hit {
 		MarkOpsCyberPolicy(c, CyberPolicyMark{Code: code, Message: msg, Body: truncateString(string(body), 4096), UpstreamStatus: status})
 	}
-	unavailable := isOpenAIRawRelayUnavailable(status, header, body)
+	unavailable := !account.IsCPR() && isOpenAIRawRelayUnavailable(status, header, body)
 	kind := "http_error"
 	if unavailable {
 		kind = "failover"
@@ -428,6 +464,13 @@ func (s *OpenAIGatewayService) openAIRawRelayTransportError(ctx context.Context,
 	if ctx.Err() != nil {
 		return err
 	}
+	if account.IsCPR() {
+		// WebSocket 连接已升级，错误由 WS 调用方转成错误帧；HTTP 则在这里提交 502。
+		if !strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
+			WriteOpenAIRawRelayUpstreamResponse(c, http.StatusBadGateway, nil, openAITransportFailoverBody)
+		}
+		return openAIRawRelayNotAccountFault(fmt.Errorf("cpr upstream request failed: %s", safeErr))
+	}
 	return &UpstreamFailoverError{
 		StatusCode:   http.StatusBadGateway,
 		ResponseBody: openAITransportFailoverBody,
@@ -439,6 +482,16 @@ func (s *OpenAIGatewayService) openAIRawRelayTransportError(ctx context.Context,
 // 时状态码和头都改不了，退化成一条 SSE error 事件，正文照旧。
 func WriteOpenAIRawRelayUpstreamResponse(c *gin.Context, status int, header http.Header, body []byte) {
 	MarkResponseCommitted(c)
+	if StopOpenAIImagesJSONKeepaliveCommitted(c) {
+		// A previous non-CPR attempt may already have sent JSON whitespace.
+		// Its status cannot be undone, but never append SSE to a JSON response.
+		if !json.Valid(body) {
+			body, _ = json.Marshal(map[string]any{"error": map[string]string{"message": string(body)}})
+		}
+		_, _ = c.Writer.Write(body)
+		c.Writer.Flush()
+		return
+	}
 	if c.Writer.Written() {
 		_, _ = c.Writer.Write(openAIRawRelaySSEErrorFrame(body))
 		c.Writer.Flush()
@@ -552,7 +605,7 @@ func (s *OpenAIGatewayService) observeOpenAIRawSSELine(
 		out.responseID = extractOpenAIResponseIDFromJSONBytes(payload)
 	}
 	images.AddSSEData(payload)
-	if out.firstTokenMs == nil && openAIStreamDataStartsTTFT(strings.TrimSpace(data), effective, false, ttftMode) {
+	if out.firstTokenMs == nil && !openAIRawRelayTransportEvent(effective) && openAIStreamDataStartsTTFT(strings.TrimSpace(data), effective, false, ttftMode) {
 		ms := int(time.Since(startTime).Milliseconds())
 		out.firstTokenMs = &ms
 	}
@@ -566,6 +619,17 @@ func (s *OpenAIGatewayService) observeOpenAIRawSSELine(
 		}
 	}
 	return eventType
+}
+
+// openAIRawRelayTransportEvent：ChatGPT WS 上游的非输出帧（codex-api 的 sse/responses.rs 与
+// endpoint/responses_websocket.rs 都不当输出），不算首字。CPR 会把 codex.response.metadata 先于
+// response.created 转来；其余几种按协议一并排除，下一跳或 CPR 改了转发范围也不误记。
+func openAIRawRelayTransportEvent(eventType string) bool {
+	switch eventType {
+	case "codex.response.metadata", "response.metadata", "codex.rate_limits", "responsesapi.websocket_timing":
+		return true
+	}
+	return false
 }
 
 // relayOpenAIRawBody 非流式：整体读完再原样写回（与透传路径一样按上限读取）。

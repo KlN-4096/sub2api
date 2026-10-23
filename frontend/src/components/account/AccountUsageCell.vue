@@ -122,7 +122,7 @@
       </ClaudeResetCreditsCell>
     </template>
 
-    <!-- OpenAI OAuth accounts: single source from /usage API -->
+    <!-- OpenAI OAuth and CPR share the same quota layout; their APIs stay separate. -->
     <template v-else-if="isOpenAICodexUsageAccount">
       <div
         v-if="error || usageInfo?.error || usageInfo?.error_code"
@@ -133,6 +133,7 @@
           ? 'admin.accounts.usageWindow.quotaRefreshFailedCached'
           : 'admin.accounts.usageWindow.quotaRefreshFailedUnknown') }}
       </div>
+      <CPRAccountInfo v-if="account.type === 'cpr'" :snapshot="usageInfo?.cpr" />
       <div v-if="hasOpenAIUsageFallback" class="space-y-1">
         <UsageProgressBar
           v-if="usageInfo?.five_hour"
@@ -163,11 +164,8 @@
           <span v-else>{{ t('admin.accounts.usageWindow.quotaObservationUnknown') }}</span>
         </div>
         <!--
-          Upstream codex /wham/usage quota query + reset. The local active-sampling
-          refresh button is a sibling (not a #pre-actions slot child) because
-          OpenAIQuotaResetCell's root carries v-if="oauth only" — putting the
-          button inside would make it vanish for cpr accounts along with the
-          reset UI. The shared flex row keeps them on a single line for OAuth.
+          The shared action row keeps OAuth and CPR equally compact. The reset
+          component dispatches to the account type's own management API.
         -->
         <div class="flex flex-wrap items-start gap-1.5">
           <button
@@ -192,7 +190,7 @@
             </svg>
             {{ t('admin.accounts.usageWindow.activeQuery') }}
           </button>
-          <OpenAIQuotaResetCell :account="account" @account-updated="handleQuotaResetAccountUpdated" />
+          <OpenAIQuotaResetCell :account="account" :cpr-snapshot="usageInfo?.cpr" @account-updated="handleQuotaResetAccountUpdated" @usage-updated="handleQuotaUsageUpdated" />
         </div>
       </div>
       <div v-else-if="loading" class="space-y-1.5">
@@ -234,7 +232,7 @@
             </svg>
             {{ t('admin.accounts.usageWindow.activeQuery') }}
           </button>
-          <OpenAIQuotaResetCell :account="account" @account-updated="handleQuotaResetAccountUpdated" />
+          <OpenAIQuotaResetCell :account="account" :cpr-snapshot="usageInfo?.cpr" @account-updated="handleQuotaResetAccountUpdated" @usage-updated="handleQuotaUsageUpdated" />
         </div>
       </div>
     </template>
@@ -798,6 +796,7 @@ import { isOfficialGeminiBaseUrl } from '@/utils/geminiExplicitCache'
 import { supportsAccountQuota } from '@/utils/accountQuota'
 import UsageProgressBar from './UsageProgressBar.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
+import CPRAccountInfo from './CPRAccountInfo.vue'
 import ClaudeResetCreditsCell from './ClaudeResetCreditsCell.vue'
 import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
 import GrokQuotaProbeCell from './GrokQuotaProbeCell.vue'
@@ -1769,6 +1768,10 @@ const quotaTotalBar = computed((): QuotaBarInfo | null => {
 
 const handleQuotaResetAccountUpdated = (account: Account) => {
   emit('account-updated', account)
+}
+
+const handleQuotaUsageUpdated = (usage: AccountUsageInfo) => {
+  usageInfo.value = usage
 }
 
 const handleOllamaCloudUsageUpdated = (state: NonNullable<Account['ollama_cloud_usage']>) => {

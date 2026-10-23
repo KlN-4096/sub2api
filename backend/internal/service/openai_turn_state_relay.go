@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -21,9 +22,10 @@ import (
 // 一轮内只带第一张、新一轮从空开始。是否接力由管理员按账号决定，与降智防护同一配置区；两者同开时
 // 出站几乎总带票，降智防护的「票被换掉」判据因此覆盖到每一轮。
 //
-// 范围与降智防护一致：本地 OpenAI OAuth / setup-token 账号（非网关池）发往 ChatGPT 推理端点的 HTTP
-// 请求。不参与：WS 上游与 WS 入站（含 WS 转 HTTP 桥，票走帧内 client_metadata）、请求体自带票的请求
-// （两个载体不能不一致）、图片与 compact、没有模型或会话标识（prompt_cache_key）的请求。
+// 范围：本地 OpenAI OAuth / setup-token 账号（非网关池，同降智防护）发往 ChatGPT 推理端点的 HTTP
+// 请求，以及 CPR 原样中继的 /v1/responses（只改这一个头，请求体照旧原文）。不参与：WS 上游与 WS
+// 入站（含 WS 转 HTTP 桥，票走帧内 client_metadata）、请求体自带票的请求（两个载体不能不一致）、
+// 图片与 compact（含 handler 按体信号改判的 compact）、没有模型或会话标识（prompt_cache_key）的请求。
 //
 // 收票落在单次 HTTP 往返上（doOpenAIUpstreamRoundTrip），降智防护的业务重发也一样推进接力；防护的
 // Luna 确认不记票（模型不同，openai_quality_guard_probe.go）：
@@ -61,6 +63,15 @@ func openAITurnStateRelayKey(c *gin.Context, account *Account, model, sessionID 
 	return owner + "\x00" + strconv.FormatInt(getAPIKeyIDFromContext(c), 10) + "\x00" + model + "\x00" + sessionID
 }
 
+// openAITurnStateRelayURL：CPR 原样中继打 CPR 自己的 /v1/responses（cprRelayTargetURL），其余只认
+// ChatGPT 推理端点。
+func openAITurnStateRelayURL(account *Account, u *url.URL) bool {
+	if account.IsCPR() {
+		return strings.HasSuffix(u.Path, "/v1/responses")
+	}
+	return gatewayPoolInferenceURL(u)
+}
+
 // withoutOpenAITurnStateRelay 让这条出站不收票：从业务请求 Clone 出来、换了模型的请求（降智防护的 Luna 确认）用。
 func withoutOpenAITurnStateRelay(ctx context.Context) context.Context {
 	return context.WithValue(ctx, openAITurnStateRelayRequestKey{}, "")
@@ -70,7 +81,7 @@ func withoutOpenAITurnStateRelay(ctx context.Context) context.Context {
 // 自带的也盖），并把会话键挂到请求 ctx 上供传输边界收票。不参与接力时原样返回。
 func (s *OpenAIGatewayService) applyOpenAITurnStateRelay(c *gin.Context, account *Account, req *http.Request, body []byte, sessionID string) *http.Request {
 	if s == nil || req == nil || account == nil || !account.turnStateRelayEnabled() ||
-		!gatewayPoolInferenceURL(req.URL) || openAIImagesWireTarget(req.Context()) != "" ||
+		!openAITurnStateRelayURL(account, req.URL) || isOpenAIResponsesCompactPath(c) || openAIImagesWireTarget(req.Context()) != "" ||
 		(c != nil && c.GetBool("openai_ws_http_bridge")) ||
 		gjson.GetBytes(body, "client_metadata."+openAICodexTurnStateHeader).Exists() {
 		return req

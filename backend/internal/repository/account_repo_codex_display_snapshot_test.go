@@ -15,7 +15,7 @@ import (
 )
 
 func TestUpdateExtraCodexDisplaySnapshotsAvoidSchedulerOutbox(t *testing.T) {
-	for _, key := range []string{"codex_credits_snapshot", "codex_referral_snapshot"} {
+	for _, key := range []string{"codex_credits_snapshot", "codex_referral_snapshot", "cpr_account_snapshot"} {
 		for _, tc := range []struct {
 			name             string
 			value            any
