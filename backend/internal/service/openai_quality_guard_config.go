@@ -35,9 +35,9 @@ func (a *Account) qualityGuardEnabled() bool {
 	return a.IsOpenAIOAuthLike() && !a.UsesGatewayPool() && a.getExtraBool(openAIQualityGuardEnabledKey)
 }
 
-// turnStateRelayEnabled 与降智防护同一账号范围，但开关独立。
+// turnStateRelayEnabled：降智防护的账号范围再加 CPR 原样中继，开关独立。
 func (a *Account) turnStateRelayEnabled() bool {
-	return a.IsOpenAIOAuthLike() && !a.UsesGatewayPool() && a.getExtraBool(openAITurnStateRelayEnabledKey)
+	return (a.IsCPR() || a.IsOpenAIOAuthLike() && !a.UsesGatewayPool()) && a.getExtraBool(openAITurnStateRelayEnabledKey)
 }
 
 func (a *Account) qualityGuardConfig() openAIQualityGuardConfig {
@@ -76,8 +76,8 @@ func validateOpenAIQualityGuardExtra(account *Account, extra map[string]any) err
 		if !ok {
 			return invalid("Turn-state relay enabled must be boolean")
 		}
-		if relay && !account.IsOpenAIOAuthLike() {
-			return invalid("Turn-state relay requires a local OpenAI OAuth or setup-token account")
+		if relay && !account.IsOpenAIOAuthLike() && !account.IsCPR() {
+			return invalid("Turn-state relay requires a local OpenAI OAuth, setup-token or CPR account")
 		}
 	}
 	mode, _ := extra[openAIQualityGuardModeKey].(string)

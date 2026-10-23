@@ -121,6 +121,7 @@ func NewAccountHandler(
 
 // CreateAccountRequest represents create account request
 type CreateAccountRequest struct {
+	CPRAutoConfigure        bool           `json:"cpr_auto_configure"`
 	Name                    string         `json:"name" binding:"required"`
 	Notes                   *string        `json:"notes"`
 	Platform                string         `json:"platform" binding:"required"`
@@ -142,6 +143,7 @@ type CreateAccountRequest struct {
 // UpdateAccountRequest represents update account request
 // 使用指针类型来区分"未提供"和"设置为0"
 type UpdateAccountRequest struct {
+	CPRAutoConfigure        bool           `json:"cpr_auto_configure"`
 	Name                    string         `json:"name"`
 	Notes                   *string        `json:"notes"`
 	Type                    string         `json:"type" binding:"omitempty,oneof=oauth setup-token apikey upstream bedrock service_account cpr"`
@@ -1046,6 +1048,13 @@ func (h *AccountHandler) Create(c *gin.Context) {
 	var createdAccount *service.Account
 
 	result, err := executeAdminIdempotent(c, "admin.accounts.create", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		if req.CPRAutoConfigure {
+			credentials, err := h.configureCPR(ctx, req.Platform, req.Type, req.Credentials, nil)
+			if err != nil {
+				return nil, err
+			}
+			req.Credentials = credentials
+		}
 		account, execErr := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
 			Name:                  req.Name,
 			Notes:                 req.Notes,
@@ -1177,6 +1186,24 @@ func (h *AccountHandler) Update(c *gin.Context) {
 
 	// 确定是否跳过混合渠道检查
 	skipCheck := req.ConfirmMixedChannelRisk != nil && *req.ConfirmMixedChannelRisk
+
+	if req.CPRAutoConfigure {
+		existing, err := h.adminService.GetAccount(c.Request.Context(), accountID)
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+		accountType := req.Type
+		if accountType == "" {
+			accountType = existing.Type
+		}
+		credentials, err := h.configureCPR(c.Request.Context(), existing.Platform, accountType, req.Credentials, existing)
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+		req.Credentials = credentials
+	}
 
 	account, err := h.adminService.UpdateAccount(c.Request.Context(), accountID, &service.UpdateAccountInput{
 		Name:                  req.Name,

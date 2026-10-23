@@ -4,6 +4,17 @@
  */
 
 import { apiClient } from '../client'
+import type { CPRConnectAccount } from '@/types'
+
+export async function discoverCPR(payload: {
+  base_url: string
+  admin_base_url?: string
+  admin_api_key: string
+  existing_account_id?: number
+}): Promise<CPRConnectAccount[]> {
+  const { data } = await apiClient.post<CPRConnectAccount[]>('/admin/accounts/cpr/discover', payload)
+  return data
+}
 import type { OpenAIReferralRefreshResult, OpenAIReferralSendResult } from '@/types/openaiReferrals'
 import type {
   Account,
@@ -991,6 +1002,8 @@ export interface OpenAIQuotaUsage {
   rate_limit_reset_credits?: OpenAIRateLimitResetCredits | null
   credits?: OpenAICredits | null
   fetched_at: number
+  /** CPR action responses include the freshly queried, locally enriched usage. */
+  usage?: AccountUsageInfo
 }
 
 export interface OpenAICredits {
@@ -1021,6 +1034,9 @@ export interface OpenAIQuotaResetResult {
     | 'reset_credit_cache_refresh_failed'
     | 'account_state_recovery_failed'
     | 'account_state_refresh_failed'
+    | 'cpr_reset_refresh_failed'
+    | 'cpr_snapshot_save_failed'
+    | 'cpr_reset_not_applied'
 }
 
 /** Usage payload plus whether the reset-credit snapshot was persisted. */
@@ -1041,6 +1057,20 @@ export interface OpenAIQuotaRefreshResult extends OpenAIQuotaUsage {
 export async function refreshOpenAIQuota(id: number): Promise<OpenAIQuotaRefreshResult> {
   const { data } = await apiClient.post<OpenAIQuotaRefreshResult>(
     `/admin/openai/accounts/${id}/quota/refresh`
+  )
+  return data
+}
+
+export async function refreshCPRQuota(id: number): Promise<OpenAIQuotaRefreshResult> {
+  const { data } = await apiClient.post<OpenAIQuotaRefreshResult>(
+    `/admin/accounts/${id}/cpr/quota/refresh`, undefined, { timeout: 90_000 }
+  )
+  return data
+}
+
+export async function resetCPRQuota(id: number, redeemRequestID: string): Promise<OpenAIQuotaResetResult> {
+  const { data } = await apiClient.post<OpenAIQuotaResetResult>(
+    `/admin/accounts/${id}/cpr/reset-quota`, { redeem_request_id: redeemRequestID }, { timeout: 90_000 }
   )
   return data
 }
@@ -1205,6 +1235,7 @@ export async function retryGatewayPool(id: number): Promise<{ state: 'cleared' }
 }
 
 export const accountsAPI = {
+  discoverCPR,
   retryGatewayPool,
   list,
   listWithEtag,
@@ -1256,6 +1287,8 @@ export const accountsAPI = {
   revertProxyFallback,
   refreshOpenAIQuota,
   resetOpenAIQuota,
+  refreshCPRQuota,
+  resetCPRQuota,
   createSparkShadow,
   getUpstreamBillingProbeSettings,
   updateUpstreamBillingProbeSettings,

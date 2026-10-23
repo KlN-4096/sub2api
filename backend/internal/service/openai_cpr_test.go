@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -358,7 +359,12 @@ func TestParseCPRDisplayTime(t *testing.T) {
 	// CPR 用 "—" 表示没有重置时间；格式变了也必须退化成 nil 而不是猜一个。
 	require.Nil(t, parseCPRDisplayTime("—"))
 	require.Nil(t, parseCPRDisplayTime(""))
-	require.Nil(t, parseCPRDisplayTime("2026-09-15T20:30:00+08:00"))
+	rfc3339 := parseCPRDisplayTime("2026-09-15T20:30:00+08:00")
+	require.NotNil(t, rfc3339)
+	require.Equal(t, got.UTC(), rfc3339.UTC())
+	nanoseconds := parseCPRDisplayTime("2026-09-15T12:30:00.123456789Z")
+	require.NotNil(t, nanoseconds)
+	require.Equal(t, 123456789, nanoseconds.Nanosecond())
 	require.Nil(t, parseCPRDisplayTime("not a time"))
 }
 
@@ -622,7 +628,7 @@ func TestCPRAdminURLHonoursAllowlist(t *testing.T) {
 func TestCPRAdminAccountIDIsQueryEscaped(t *testing.T) {
 	const weirdID = "acct x&role=admin#frag"
 	server, seen := startCPRAdminStub(t, http.StatusOK,
-		cprTestDetailJSON("normal", "pro", cprTestWindow("primary", 18000, 12.5, "—")))
+		strings.Replace(cprTestDetailJSON("normal", "pro", cprTestWindow("primary", 18000, 12.5, "—")), cprTestCPRAccount, weirdID, 1))
 
 	account := newCPRTestAccount()
 	account.Credentials["admin_base_url"] = server.URL
@@ -1087,10 +1093,9 @@ func TestCPRSharesOAuthUpstreamSemantics(t *testing.T) {
 	require.Equal(t, string(oauthLite), string(cprLite))
 	require.NotEqual(t, string(apikeyLite), string(cprLite), "夹具必须能区分两条分支，否则相等断言是空转")
 
-	// 计费 tier：ChatGPT Codex 后端对 Fast 轮常报 default，oauth 按请求 tier 结算；
-	// cpr 收到的是同一份响应，不能被降档计费。
-	require.Equal(t, ResolveOpenAIServiceTierBilling(oauth, "priority", "default"), ResolveOpenAIServiceTierBilling(cpr, "priority", "default"))
-	require.Equal(t, "priority", ResolveOpenAIServiceTierBilling(cpr, "priority", "default").Billing)
+	// CPR owns Fast policy; unlike direct OAuth, only its observed tier is billed.
+	require.Equal(t, "priority", ResolveOpenAIServiceTierBilling(oauth, "priority", "default").Billing)
+	require.Equal(t, "default", ResolveOpenAIServiceTierBilling(cpr, "priority", "default").Billing)
 	require.Equal(t, "default", ResolveOpenAIServiceTierBilling(apikey, "priority", "default").Billing, "apikey 上游自报 tier 权威，照常降档")
 
 	// 流终态语义：error / response.failed 按 Codex 后端处理。
@@ -1325,7 +1330,7 @@ func TestCPRJoinsOpenAIUpstreamCostPool(t *testing.T) {
 // 主线同源。cpr 进了 429 延迟（handle429 / markOpenAIOAuth429RateLimited 在窗口内
 // 不落库不熔断），这里若仍按旧谓词判成不可同账号重试，cpr 在 2 分钟窗口内既不
 // 冷却也不重试，调度器会反复选中它反复 429。
-func TestCPRImages429CarriesSameAccountRetryWindow(t *testing.T) {
+func TestCPRImages429IsDelegatedWithoutRetry(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	body := []byte(`{"model":"gpt-image-1","prompt":"draw a cat","response_format":"b64_json"}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
@@ -1346,9 +1351,10 @@ func TestCPRImages429CarriesSameAccountRetryWindow(t *testing.T) {
 
 	require.Nil(t, result)
 	var failoverErr *UpstreamFailoverError
-	require.ErrorAs(t, err, &failoverErr)
-	require.True(t, failoverErr.RetryableOnSameAccount, "与 oauth 同：瞬时 429 在窗口内同账号重试")
-	require.Equal(t, time.Second, failoverErr.SameAccountRetryDelay)
+	require.Error(t, err)
+	require.False(t, errors.As(err, &failoverErr))
+	require.Equal(t, http.StatusTooManyRequests, rec.Code)
+	require.Equal(t, "1", rec.Header().Get("Retry-After"))
 }
 
 // TestCPR429FastPathSemanticsMatchOAuth：/responses 主线的 429 快路径三件套
@@ -1384,7 +1390,7 @@ func TestCPR429FastPathSemanticsMatchOAuth(t *testing.T) {
 
 // TestCPRAlphaSearch429CarriesSameAccountRetryWindow：/alpha/search 两条分支的 429
 // 闸门与 /responses 主线同源（同 images）。
-func TestCPRAlphaSearch429CarriesSameAccountRetryWindow(t *testing.T) {
+func TestCPRAlphaSearch429IsDelegatedWithoutRetry(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	body := []byte(`{"id":"search-session","model":"gpt-5.6-sol","commands":{}}`)
 	recorder := httptest.NewRecorder()
@@ -1406,8 +1412,9 @@ func TestCPRAlphaSearch429CarriesSameAccountRetryWindow(t *testing.T) {
 
 	require.Nil(t, result)
 	var failoverErr *UpstreamFailoverError
-	require.ErrorAs(t, err, &failoverErr)
-	require.True(t, failoverErr.RetryableOnSameAccount, "与 oauth/setup-token 同：瞬时 429 在窗口内同账号重试")
+	require.Error(t, err)
+	require.False(t, errors.As(err, &failoverErr))
+	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
 	require.Equal(t, "127.0.0.1:18081", upstream.lastReq.URL.Host)
 }
 

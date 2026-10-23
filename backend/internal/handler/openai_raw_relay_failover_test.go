@@ -1,15 +1,21 @@
+//go:build unit
+
 package handler
 
 import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	middleware "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
@@ -34,6 +40,145 @@ func TestOpenAIRawRelayFailoverExhausted_WritesUpstreamVerbatim(t *testing.T) {
 	require.Equal(t, http.StatusTooManyRequests, rec.Code)
 	require.Equal(t, string(body), rec.Body.String())
 	require.Equal(t, "gw-9", rec.Header().Get("X-Gateway-Request-Id"))
+}
+
+type cprDelegationHTTPUpstream struct {
+	service.HTTPUpstream
+	body           []byte
+	calls          int
+	delay          time.Duration
+	firstAccountID int64
+	firstDelay     time.Duration
+}
+
+func (u *cprDelegationHTTPUpstream) Do(r *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
+	u.body, _ = io.ReadAll(r.Body)
+	u.calls++
+	delay := u.delay
+	if accountID == u.firstAccountID {
+		delay = u.firstDelay
+	}
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+	return &http.Response{StatusCode: 503, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"message":"CPR unavailable"}}`))}, nil
+}
+
+func TestCPRDelegationImagesSlowErrorDoesNotBecomeJSONKeepaliveSSE(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		mixed      bool
+		firstDelay time.Duration
+		wantStatus int
+	}{
+		{"cpr_only", false, 0, 503},
+		{"apikey_to_cpr_before_heartbeat", true, 0, 503},
+		{"apikey_to_cpr_after_heartbeat", true, 1100 * time.Millisecond, 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := service.Account{ID: 9968, Name: "cpr-images", Platform: service.PlatformOpenAI, Type: service.AccountTypeCPR,
+				Status: service.StatusActive, Schedulable: true, Concurrency: 1, Priority: 1,
+				Credentials: map[string]any{"base_url": "https://fake.invalid", "api_key": "fake-client"}}
+			cfg := &config.Config{RunMode: config.RunModeSimple}
+			cfg.Default.RateMultiplier = 1
+			cfg.Gateway.ImageNonstreamKeepaliveInterval = 1
+			cfg.Gateway.MaxAccountSwitches = 2
+			repo := openAIImagesFailoverAccountRepo{accounts: []service.Account{account}}
+			upstream := &cprDelegationHTTPUpstream{delay: 1100 * time.Millisecond}
+			if tc.mixed {
+				first := account
+				first.ID, first.Type, first.Priority = 9967, service.AccountTypeAPIKey, 0
+				repo.accounts = append([]service.Account{first}, repo.accounts...)
+				upstream.firstAccountID, upstream.firstDelay = first.ID, tc.firstDelay
+			}
+			billing := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
+			t.Cleanup(billing.Stop)
+			gateway := service.NewOpenAIGatewayService(repo, nil, nil, nil, nil, nil, nil, cfg, nil, nil,
+				service.NewBillingService(cfg, nil), nil, billing, upstream, &service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil)
+			h := NewOpenAIGatewayHandler(gateway, service.NewConcurrencyService(nil), billing, service.NewAPIKeyService(nil, nil, nil, nil, nil, nil, cfg), nil, nil, nil, nil, cfg)
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"model":"gpt-image-1","prompt":"cat"}`))
+			c.Request.Header.Set("Content-Type", "application/json")
+			groupID := int64(4289)
+			c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{ID: 1899, GroupID: &groupID, User: &service.User{ID: 1799, Status: service.StatusActive},
+				Group: &service.Group{ID: groupID, Platform: service.PlatformOpenAI, Status: service.StatusActive, AllowImageGeneration: true}})
+			c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 1799, Concurrency: 0})
+			h.Images(c)
+			wantCalls := 1
+			if tc.mixed {
+				wantCalls = 2
+			}
+			require.Equal(t, wantCalls, upstream.calls)
+			require.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())
+			require.JSONEq(t, `{"error":{"message":"CPR unavailable"}}`, rec.Body.String())
+			require.NotContains(t, rec.Body.String(), "event:")
+		})
+	}
+}
+
+func TestCPRDelegationHTTPHandlerDefersEffortDenyUntilAccountSelected(t *testing.T) {
+	for _, accountType := range []string{service.AccountTypeCPR, service.AccountTypeAPIKey, service.AccountTypeOAuth} {
+		for _, path := range []string{"/v1/responses", "/v1/chat/completions"} {
+			t.Run(accountType+path, func(t *testing.T) {
+				gin.SetMode(gin.TestMode)
+				groupID := int64(4289)
+				account := service.Account{
+					ID: 9957, Name: "delegation", Platform: service.PlatformOpenAI, Type: accountType,
+					Status: service.StatusActive, Schedulable: true, Concurrency: 1,
+					Credentials: map[string]any{"base_url": "https://fake.invalid", "api_key": "fake-client", "access_token": "fake-access"},
+				}
+				cfg := &config.Config{RunMode: config.RunModeSimple}
+				cfg.Default.RateMultiplier = 1
+				repo := &openAIWSFailoverHandlerAccountRepoStub{accounts: []service.Account{account}}
+				upstream := &cprDelegationHTTPUpstream{}
+				billing := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
+				t.Cleanup(billing.Stop)
+				gateway := service.NewOpenAIGatewayService(repo, nil, nil, nil, nil, nil, nil, cfg, nil, nil,
+					service.NewBillingService(cfg, nil), nil, billing, upstream, &service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil)
+				h := NewOpenAIGatewayHandler(gateway, service.NewConcurrencyService(nil), billing,
+					service.NewAPIKeyService(nil, nil, nil, nil, nil, nil, cfg), nil, nil, nil, nil, cfg)
+				require.True(t, account.IsModelSupported("gpt-5.4"), "fixture must reach account selection")
+				body := `{"model":"gpt-5.4","input":"hi","messages":[{"role":"user","content":"hi"}],"reasoning":{"effort":"xhigh"}}`
+				rec := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(rec)
+				observedLogger, observed := newObservedLogger(t)
+				c.Request = httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)).WithContext(logger.IntoContext(context.Background(), observedLogger))
+				c.Request.Header.Set("Content-Type", "application/json")
+				c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{
+					ID: 1899, GroupID: &groupID, User: &service.User{ID: 1799, Status: service.StatusActive},
+					Group: &service.Group{ID: groupID, Platform: service.PlatformOpenAI, Status: service.StatusActive, MaxReasoningEffort: "low", MaxReasoningEffortOverLimit: "deny"},
+				})
+				c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 1799, Concurrency: 0})
+				if path == "/v1/responses" {
+					h.Responses(c)
+				} else {
+					h.ChatCompletions(c)
+				}
+				for _, entry := range observed.FilterMessage("openai.responses_panic_recovered").All() {
+					t.Fatalf("handler panic: %v", entry.ContextMap())
+				}
+				if accountType == service.AccountTypeCPR {
+					require.Equal(t, 1, upstream.calls)
+					require.Equal(t, body, string(upstream.body))
+					require.Equal(t, 503, rec.Code)
+				} else {
+					require.Zero(t, upstream.calls)
+					require.Equal(t, 403, rec.Code, "body=%s errors=%v", rec.Body.String(), c.Errors)
+				}
+			})
+		}
+	}
+}
+
+func TestCPRDelegationWSHandlerDoesNotDenyEffortBeforeRawRelay(t *testing.T) {
+	first := `{"type":"response.create","model":"gpt-5.4","reasoning":{"effort":"xhigh"},"input":"hi"}`
+	got := runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
+		firstPayload: first, cpr: true, userAgent: testStringPtr("codex_cli_rs/0.160.0"),
+		group: &service.Group{ID: 42, Platform: service.PlatformOpenAI, Status: service.StatusActive, MaxReasoningEffort: "low", MaxReasoningEffortOverLimit: "deny"},
+	})
+	require.Equal(t, first, string(got.upstreamFirstPayload))
+	require.Len(t, got.logs, 1)
 }
 
 // WS 下换号耗尽：先把上游那条错误帧原样发给客户端，再按状态码关连接。
