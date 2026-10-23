@@ -1,9 +1,11 @@
 export default {
   codexClientProfile: {
     accountTitle: 'Codex client identity',
-    accountDescription: 'Which official Codex client this account presents upstream (User-Agent, originator, version), on HTTP, WebSocket, quota and model-list calls alike. A preset wins over the custom User-Agent below.',
+    accountDescription: 'Which official Codex client this account presents upstream (User-Agent, originator, version), on HTTP, WebSocket, quota and model-list calls alike. OAuth accounts can instead pick "Custom UA" and type a full User-Agent; it is one or the other.',
     accountInherit: 'Inherit global',
-    accountInheritCustomUA: 'Uses the custom User-Agent below (version segment rewritten by the gateway)',
+    accountInheritCustomUA: 'Uses the legacy User-Agent stored in the account credentials (version segment rewritten by the gateway)',
+    accountCustomUA: 'Custom UA',
+    accountCustomPreview: 'Uses the User-Agent typed below (version segment rewritten by the gateway)',
     globalTitle: 'Global Codex client identity',
     globalDescription: 'Fallback for accounts without their own preset. Without a global preset the custom User-Agent above applies; with neither, the built-in Desktop · macOS (latest) is used.',
     globalInherit: 'Not set',

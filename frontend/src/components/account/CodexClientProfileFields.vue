@@ -71,8 +71,14 @@ const props = defineProps<{
   /** 未选预设时生效的身份（账号：全局身份；全局：自定义 UA 或内置默认）。 */
   inheritLabel: string
   inheritPreview: string
+  /** 传了才在下拉末尾加「自定义 UA」项；选中时 modelValue 为 null、custom 为 true，输入框由调用方渲染。 */
+  customLabel?: string
+  custom?: boolean
 }>()
-const emit = defineEmits<{ (e: 'update:modelValue', value: CodexClientProfile | null): void }>()
+const emit = defineEmits<{
+  (e: 'update:modelValue', value: CodexClientProfile | null): void
+  (e: 'update:custom', value: boolean): void
+}>()
 const { t } = useI18n()
 
 type OverrideKey = 'osType' | 'osVersion' | 'arch' | 'terminal'
@@ -121,10 +127,13 @@ watch(
 )
 watch(form, () => emit('update:modelValue', toProfile()), { deep: true })
 
+const CUSTOM_KEY = 'custom'
 const presetKey = computed<string>({
-  get: () => (form.client && form.platform ? `${form.client}:${form.platform}` : ''),
+  get: () => (form.client && form.platform ? `${form.client}:${form.platform}` : props.custom ? CUSTOM_KEY : ''),
   set: (key) => {
-    const [client, platform] = (key || '').split(':') as [Form['client'], Form['platform']]
+    const custom = key === CUSTOM_KEY
+    if (custom !== Boolean(props.custom)) emit('update:custom', custom)
+    const [client, platform] = (custom ? '' : key || '').split(':') as [Form['client'], Form['platform']]
     if (client === form.client && platform === form.platform) return
     Object.assign(form, emptyForm(), { client: client || '', platform: platform || '' })
   },
@@ -136,6 +145,7 @@ const presetOptions = computed(() => [
     value: `${profile.client}:${profile.platform}`,
     label: `${profile.client === 'desktop' ? 'Desktop' : 'CLI'} · ${t(`admin.codexClientProfile.platform.${profile.platform}`)}`,
   })),
+  ...(props.customLabel ? [{ value: CUSTOM_KEY, label: props.customLabel }] : []),
 ])
 const cliEntryOptions = computed(() => [
   { value: '', label: 'codex_cli_rs' },

@@ -1,9 +1,11 @@
 export default {
   codexClientProfile: {
     accountTitle: 'Codex 客户端身份',
-    accountDescription: '该账号对上游自报的官方 Codex 客户端（User-Agent / originator / version），HTTP、WebSocket、额度与模型列表一致。选了预设时下面的自定义 User-Agent 不生效。',
+    accountDescription: '该账号对上游自报的官方 Codex 客户端（User-Agent / originator / version），HTTP、WebSocket、额度与模型列表一致。OAuth 账号也可选「自定义 UA」手填完整 User-Agent，与预设二选一。',
     accountInherit: '继承全局',
-    accountInheritCustomUA: '使用下方自定义 User-Agent（版本段由网关改写）',
+    accountInheritCustomUA: '使用账号凭据里遗留的 User-Agent（版本段由网关改写）',
+    accountCustomUA: '自定义 UA',
+    accountCustomPreview: '使用下方填写的 User-Agent（版本段由网关改写）',
     globalTitle: '全局 Codex 客户端身份',
     globalDescription: '账号未选预设时使用。未设全局预设时用上面的自定义 User-Agent；两者都没有时用内置默认 Desktop · macOS（跟随最新）。',
     globalInherit: '不设置',

@@ -820,7 +820,7 @@ export default {
           + 'Leave empty to use the global setting. Keep it consistent with the real OS of this account\u0027s users: a Windows UA '
           + 'paired with Linux paths and shell in the request body contradicts itself. The gateway rewrites the version segment '
           + 'to the effective client version, so the value you type there does not matter; a codex-tui UA is converted to the CLI '
-          + '(codex_cli_rs) form, as upstream does. Ignored when a client identity preset is selected above.',
+          + '(codex_cli_rs) form, as upstream does. Ignored when the account (for a Spark shadow, its parent) has a client identity preset.',
         codexUserAgentPlaceholder: 'Leave empty to use the global setting',
         codexImageTool: 'Codex image bridge policy',
         codexImageToolDesc:

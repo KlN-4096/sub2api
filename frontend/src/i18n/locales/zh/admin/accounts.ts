@@ -926,7 +926,7 @@ export default {
         codexUserAgent: 'Codex 出站 User-Agent',
         codexUserAgentDesc: '该账号出站时自报的客户端标识，HTTP、WS 握手与额度查询共用。留空使用全局设置。'
           + '要与该账号使用者的真实系统一致：UA 报 Windows、请求体里却是 Linux 路径和 shell，两者互相矛盾。'
-          + '版本号会被网关统一改写为生效版本，填什么都一样；codex-tui 形会按上游规则改成 CLI（codex_cli_rs）形。上面选了身份预设时本项不生效。',
+          + '版本号会被网关统一改写为生效版本，填什么都一样；codex-tui 形会按上游规则改成 CLI（codex_cli_rs）形。账号设了身份预设（Spark 影子行看母账号）时本项不生效。',
         codexUserAgentPlaceholder: '留空使用全局设置',
         codexImageTool: 'Codex 图片桥接策略',
         codexImageToolDesc:

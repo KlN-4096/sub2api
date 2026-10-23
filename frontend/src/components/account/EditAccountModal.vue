@@ -2542,18 +2542,20 @@
       >
         <CodexClientProfileFields
           v-model="codexClientProfile"
+          v-model:custom="codexCustomUA"
           :presets="codexProfileView.presets"
           :max-version-lag="codexProfileView.max_version_lag"
           :title="t('admin.codexClientProfile.accountTitle')"
           :description="t('admin.codexClientProfile.accountDescription')"
           :inherit-label="t('admin.codexClientProfile.accountInherit')"
-          :inherit-preview="accountHasCustomCodexUA ? t('admin.codexClientProfile.accountInheritCustomUA') : codexProfileView.effective.user_agent"
+          :custom-label="account?.type === 'oauth' ? t('admin.codexClientProfile.accountCustomUA') : undefined"
+          :inherit-preview="codexCustomUA ? t('admin.codexClientProfile.accountCustomPreview') : legacyCredentialCodexUA ? t('admin.codexClientProfile.accountInheritCustomUA') : codexProfileView.effective.user_agent"
         />
       </div>
 
-      <!-- 账号级出站 User-Agent（仅 OpenAI OAuth）：留空回落到全局设置 -->
+      <!-- 账号级出站 User-Agent（仅 OpenAI OAuth）：有预设面板时只在选「自定义 UA」后出现；影子行/面板未加载时照旧直接显示 -->
       <div
-        v-if="account?.platform === 'openai' && account?.type === 'oauth'"
+        v-if="account?.platform === 'openai' && account?.type === 'oauth' && (!codexProfileUIShown || codexCustomUA)"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <label class="input-label">{{ t('admin.accounts.openai.codexUserAgent') }}</label>
@@ -4189,10 +4191,13 @@ const accountSupportsTurnStateRelay = computed(
 const codexClientProfile = ref<CodexClientProfile | null>(null)
 const codexProfileView = ref<CodexClientProfileView | null>(null)
 const accountSupportsCodexClientProfile = computed(() => accountSupportsGatewayPool.value && !isSparkShadow.value)
-// 推理面的自定义 UA 还会回落遗留的 credentials.user_agent（后端 GetOpenAIUserAgent）。
-const accountHasCustomCodexUA = computed(() => {
+const codexProfileUIShown = computed(() => accountSupportsCodexClientProfile.value && codexProfileView.value !== null)
+// 预设下拉里的「自定义 UA」项：与预设二选一，保存时只留选中的那个。
+const codexCustomUA = ref(false)
+// 继承时推理面还会回落遗留的 credentials.user_agent（后端 GetOpenAIUserAgent）。
+const legacyCredentialCodexUA = computed(() => {
   const legacy = (props.account?.credentials as Record<string, unknown> | undefined)?.user_agent
-  return codexUserAgent.value.trim() !== '' || (typeof legacy === 'string' && legacy.trim() !== '')
+  return typeof legacy === 'string' && legacy.trim() !== ''
 })
 const openAIGwpoolEnabled = ref(false)
 const qualityGuardEnabled = ref(false)
@@ -4837,6 +4842,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   codexFingerprintConvergence.value = false
   codexUserAgent.value = ''
   codexClientProfile.value = null
+  codexCustomUA.value = false
   codexImageToolMode.value = 'inherit'
   anthropicPassthroughEnabled.value = false
   anthropicAPIKeyAuthScheme.value = 'x_api_key'
@@ -4900,6 +4906,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
         : 'off')
       codexFingerprintConvergence.value = extra?.codex_experimental_fingerprint_convergence === true
       codexUserAgent.value = typeof extra?.codex_user_agent === 'string' ? extra.codex_user_agent : ''
+      codexCustomUA.value = !codexClientProfile.value && codexUserAgent.value.trim() !== ''
     }
     const credentials = newAccount.credentials as Record<string, unknown> | undefined
     const compactMappings = credentials?.compact_model_mapping as Record<string, string> | undefined
@@ -6649,8 +6656,8 @@ const handleSubmit = async () => {
         } else {
           delete newExtra.codex_experimental_fingerprint_convergence
         }
-        // 账号级出站 UA：留空删键，回落到全局设置
-        const codexUA = codexUserAgent.value.trim()
+        // 账号级出站 UA：留空删键，回落到全局设置；有预设面板时只有选「自定义 UA」才保存（选预设或继承都清掉）
+        const codexUA = !codexProfileUIShown.value || codexCustomUA.value ? codexUserAgent.value.trim() : ''
         if (codexUA) {
           newExtra.codex_user_agent = codexUA
         } else {

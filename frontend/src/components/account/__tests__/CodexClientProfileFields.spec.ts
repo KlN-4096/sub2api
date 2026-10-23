@@ -24,11 +24,11 @@ const presets = [
   { profile: { client: 'cli', platform: 'linux', versionMode: 'latest' }, originator: 'codex_cli_rs', os_type: 'Linux', os_version: '6.8.0', arch: 'x86_64', terminal: 'unknown' },
 ]
 
-function mountFields(modelValue: unknown = null) {
+function mountFields(modelValue: unknown = null, extra: Record<string, unknown> = {}) {
   return mount(CodexClientProfileFields, {
     props: {
       modelValue: modelValue as never, presets: presets as never, maxVersionLag: 10,
-      title: 'T', description: 'D', inheritLabel: 'Inherit', inheritPreview: 'global-ua',
+      title: 'T', description: 'D', inheritLabel: 'Inherit', inheritPreview: 'global-ua', ...extra,
     },
     global: { stubs: { Select: SelectStub } },
   })
@@ -52,6 +52,29 @@ describe('CodexClientProfileFields', () => {
     expect(wrapper.find('[data-testid="codex-profile-preview"]').text()).toBe('global-ua')
     expect(wrapper.find('[data-testid="codex-profile-version-mode"]').exists()).toBe(false)
     expect(previewCodexClientProfile).not.toHaveBeenCalled()
+  })
+
+  it('offers a custom UA entry only when asked, exclusive with the presets', async () => {
+    const optionValues = (w: ReturnType<typeof mountFields>) => w.findAll('option').map((o) => (o.element as HTMLOptionElement).value)
+    expect(optionValues(mountFields())).not.toContain('custom')
+
+    const wrapper = mountFields({ client: 'cli', platform: 'linux', versionMode: 'latest' }, { customLabel: 'Custom' })
+    expect(optionValues(wrapper)).toContain('custom')
+    const select = () => wrapper.find('[data-testid="codex-profile-preset"]')
+
+    await select().setValue('custom')
+    expect(wrapper.emitted('update:custom')?.at(-1)).toEqual([true])
+    expect(lastEmitted(wrapper)).toBeNull()
+    await wrapper.setProps({ custom: true })
+    expect((select().element as HTMLSelectElement).value).toBe('custom')
+
+    await select().setValue('desktop:macos')
+    expect(wrapper.emitted('update:custom')?.at(-1)).toEqual([false])
+    expect(lastEmitted(wrapper)).toEqual({ client: 'desktop', platform: 'macos', versionMode: 'latest' })
+
+    await wrapper.setProps({ custom: true, modelValue: null })
+    await select().setValue('')
+    expect(wrapper.emitted('update:custom')?.at(-1)).toEqual([false])
   })
 
   it('builds the selection document and previews it', async () => {
