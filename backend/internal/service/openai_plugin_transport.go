@@ -274,9 +274,12 @@ func gatewayPoolCleanupUnsent(cleanup func()) {
 }
 
 func (s *OpenAIGatewayService) doOpenAIUpstreamRoundTrip(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
-	return s.recordOpenAIHTTP(account, request, "inference", func(request *http.Request) (*http.Response, error) {
+	resp, err := s.recordOpenAIHTTP(account, request, "inference", func(request *http.Request) (*http.Response, error) {
 		return s.doOpenAIUpstreamRoundTripUnrecorded(request, proxyURL, account)
 	})
+	// turn-state 接力在每一发往返上收票（openai_turn_state_relay.go），降智防护的确认与重发也在内。
+	s.settleOpenAITurnStateRelay(request, resp)
+	return resp, err
 }
 
 func (s *OpenAIGatewayService) doOpenAIUpstreamRoundTripUnrecorded(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {

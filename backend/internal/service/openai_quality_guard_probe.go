@@ -21,7 +21,7 @@ type qualityGuardProbeResult struct {
 }
 
 func (s *OpenAIGatewayService) qualityGuardProbe(original *http.Request, account *Account, proxyURL string, template []byte, state string, jar *chatgptcookies.Jar) qualityGuardProbeResult {
-	ctx, cancel := context.WithTimeout(original.Context(), qualityGuardProbeTimeout)
+	ctx, cancel := context.WithTimeout(withoutOpenAITurnStateRelay(original.Context()), qualityGuardProbeTimeout)
 	defer cancel()
 	probe, err := gatewayPoolConfirmationRequest(ctx, original, template, state)
 	if err != nil {

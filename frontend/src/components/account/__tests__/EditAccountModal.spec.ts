@@ -429,6 +429,45 @@ describe('EditAccountModal', () => {
     expect(wrapper.find('[data-testid="edit-quality-guard-section"]').exists()).toBe(false)
   })
 
+  it('saves turn-state relay independently of the quality guard', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.extra = {}
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="edit-turn-state-relay-enabled"]').element.checked).toBe(false)
+    await wrapper.get('[data-testid="edit-turn-state-relay-enabled"]').setValue(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    const saved = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(saved).toMatchObject({ openai_turn_state_relay_enabled: true })
+    expect(saved).not.toHaveProperty('openai_quality_guard_enabled')
+    expect(saved).not.toHaveProperty('openai_quality_guard_mode')
+  })
+
+  it('loads and clears turn-state relay', async () => {
+    const account = buildAccount()
+    account.type = 'setup-token'
+    account.extra = { openai_turn_state_relay_enabled: true }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="edit-turn-state-relay-enabled"]').element.checked).toBe(true)
+    await wrapper.get('[data-testid="edit-turn-state-relay-enabled"]').setValue(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_turn_state_relay_enabled')
+  })
+
+  it('notes that gateway-pool accounts do not relay turn-state', () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.extra = { openai_gwpool: true }
+    const wrapper = mountModal(account)
+    expect(wrapper.text()).toContain('admin.accounts.openai.turnStateRelayPool')
+    const plain = mountModal({ ...account, id: account.id + 1, extra: {} })
+    expect(plain.text()).not.toContain('admin.accounts.openai.turnStateRelayPool')
+  })
+
   beforeEach(() => {
     authIsSimpleMode.value = true
   })

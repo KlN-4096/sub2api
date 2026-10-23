@@ -2643,6 +2643,14 @@
               </label>
             </template>
           </div>
+          <div class="space-y-1 border-t border-gray-200 pt-3 dark:border-dark-600">
+            <label class="flex items-center justify-between gap-4">
+              <span class="input-label mb-0">{{ t('admin.accounts.openai.turnStateRelay') }}</span>
+              <input v-model="turnStateRelayEnabled" data-testid="edit-turn-state-relay-enabled" type="checkbox" class="h-4 w-4 rounded" />
+            </label>
+            <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.turnStateRelayHint') }}</p>
+            <p v-if="openAIGwpoolEnabled" class="text-xs text-amber-600">{{ t('admin.accounts.openai.turnStateRelayPool') }}</p>
+          </div>
         </div>
         <!-- 网关池：Codex 推理面的路由 cookie（__cflb / __oailb）改由池子下发，顶掉按账号罐回放。
              配置全在账号级：池子的 consumer key 是按账号发的。 -->
@@ -4159,6 +4167,7 @@ const qualityGuardEnabled = ref(false)
 const qualityGuardMode = ref<'' | 'block' | 'wait'>('')
 const qualityGuardAttempts = ref<number>(20)
 const qualityGuardInterval = ref<number>(5)
+const turnStateRelayEnabled = ref(false)
 const openAIGwpoolBaseURL = ref('')
 // 输入框恒为空：后端把已存的 key 脱敏成 true，页面从不回显原值。留空 = 不修改。
 const openAIGwpoolConsumerKey = ref('')
@@ -4747,6 +4756,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	qualityGuardMode.value = extra?.openai_quality_guard_mode === 'block' || extra?.openai_quality_guard_mode === 'wait' ? extra.openai_quality_guard_mode : ''
 	qualityGuardAttempts.value = typeof extra?.openai_quality_guard_max_attempts === 'number' ? extra.openai_quality_guard_max_attempts : 20
 	qualityGuardInterval.value = typeof extra?.openai_quality_guard_interval_s === 'number' ? extra.openai_quality_guard_interval_s : 5
+	turnStateRelayEnabled.value = extra?.openai_turn_state_relay_enabled === true
 	openAIUpstreamRecordingEnabled.value = newAccount.platform === 'openai' && extra?.openai_upstream_recording_enabled === true
 	openAIGwpoolBaseURL.value = typeof extra?.openai_gwpool_base_url === 'string' ? extra.openai_gwpool_base_url : ''
 	// 后端脱敏成 true = 配过；原值不会下发，所以输入框一律从空开始。
@@ -6421,6 +6431,11 @@ const handleSubmit = async () => {
           delete newExtra.openai_quality_guard_mode
           delete newExtra.openai_quality_guard_max_attempts
           delete newExtra.openai_quality_guard_interval_s
+        }
+        if (turnStateRelayEnabled.value) {
+          newExtra.openai_turn_state_relay_enabled = true
+        } else {
+          delete newExtra.openai_turn_state_relay_enabled
         }
         if (openAIGwpoolEnabled.value) {
           newExtra.openai_gwpool = true

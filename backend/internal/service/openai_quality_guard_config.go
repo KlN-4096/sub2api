@@ -22,6 +22,9 @@ const (
 	OpenAIQualityGuardReason      GatewayFailureReason = "openai_quality_guard"
 )
 
+// openAITurnStateRelayEnabledKey 是 turn-state 接力的开关（openai_turn_state_relay.go），与降智防护同一配置区。
+const openAITurnStateRelayEnabledKey = "openai_turn_state_relay_enabled"
+
 type openAIQualityGuardConfig struct {
 	mode     string
 	attempts int
@@ -30,6 +33,11 @@ type openAIQualityGuardConfig struct {
 
 func (a *Account) qualityGuardEnabled() bool {
 	return a.IsOpenAIOAuthLike() && !a.UsesGatewayPool() && a.getExtraBool(openAIQualityGuardEnabledKey)
+}
+
+// turnStateRelayEnabled 与降智防护同一账号范围，但开关独立。
+func (a *Account) turnStateRelayEnabled() bool {
+	return a.IsOpenAIOAuthLike() && !a.UsesGatewayPool() && a.getExtraBool(openAITurnStateRelayEnabledKey)
 }
 
 func (a *Account) qualityGuardConfig() openAIQualityGuardConfig {
@@ -46,7 +54,7 @@ func (a *Account) qualityGuardConfig() openAIQualityGuardConfig {
 }
 
 func touchesOpenAIQualityGuardConfig(extra map[string]any) bool {
-	for _, key := range []string{openAIQualityGuardEnabledKey, openAIQualityGuardModeKey, openAIQualityGuardAttemptsKey, openAIQualityGuardIntervalKey} {
+	for _, key := range []string{openAIQualityGuardEnabledKey, openAIQualityGuardModeKey, openAIQualityGuardAttemptsKey, openAIQualityGuardIntervalKey, openAITurnStateRelayEnabledKey} {
 		if _, ok := extra[key]; ok {
 			return true
 		}
@@ -61,6 +69,15 @@ func validateOpenAIQualityGuardExtra(account *Account, extra map[string]any) err
 	if raw := extra[openAIQualityGuardEnabledKey]; raw != nil {
 		if _, ok := raw.(bool); !ok {
 			return invalid("Quality guard enabled must be boolean")
+		}
+	}
+	if raw := extra[openAITurnStateRelayEnabledKey]; raw != nil {
+		relay, ok := raw.(bool)
+		if !ok {
+			return invalid("Turn-state relay enabled must be boolean")
+		}
+		if relay && !account.IsOpenAIOAuthLike() {
+			return invalid("Turn-state relay requires a local OpenAI OAuth or setup-token account")
 		}
 	}
 	mode, _ := extra[openAIQualityGuardModeKey].(string)
