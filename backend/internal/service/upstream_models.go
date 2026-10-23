@@ -1165,7 +1165,7 @@ func buildOpenAIAPIKeyModelsRequest(ctx context.Context, account *Account, valid
 	// 不设 User-Agent 的话 net/http 会填 Go-http-client/1.1 出站。这条对 cpr 打的是本机
 	// 网关、对 api_key 打的是 Platform 面，危害都有限，但「让 Go 的默认值代表本服务」
 	// 不该是任何一条出站路径的形态（2026-09-20 审计）。账号级覆写仍可改写它。
-	req.Header.Set("User-Agent", resolveCodexOutboundIdentity(account.GetOpenAIUserAgent()).userAgent)
+	req.Header.Set("User-Agent", resolveCodexUserAgentIdentity(account.GetOpenAIUserAgent()).userAgent)
 	// 账号级请求头覆写：模型列表探测与真实转发保持一致的最终头
 	account.ApplyHeaderOverrides(req.Header)
 	return req, nil
@@ -1188,7 +1188,7 @@ func (s *AccountTestService) buildOpenAIOAuthUpstreamModelsRequest(ctx context.C
 	modelsURL, err := buildCodexModelsManifestURL(
 		chatgptCodexModelsURL,
 		false,
-		CodexCanonicalClientVersion(),
+		codexWholeVersion(codexClientIdentityFor(credentialAccount, credentialAccount).version),
 	)
 	if err != nil {
 		return nil, newUpstreamModelSyncConfigError("Invalid OpenAI Codex model list URL", err)
@@ -1222,7 +1222,7 @@ func (s *AccountTestService) buildOpenAIOAuthUpstreamModelsRequest(ctx context.C
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 	}
 
-	identity := resolveCodexOutboundIdentity(credentialAccount.GetOpenAIUserAgent())
+	identity := codexClientIdentityFor(credentialAccount, credentialAccount)
 	// 双开与 /models 转发同形（*/*，见 buildCodexModelsManifestRequest），其余维持既有。
 	if codexDeviceWireProfileEnabledFor(account, credentialAccount) {
 		req.Header.Set("Accept", "*/*")
@@ -1234,7 +1234,7 @@ func (s *AccountTestService) buildOpenAIOAuthUpstreamModelsRequest(ctx context.C
 	req.Header.Set("Version", identity.version)
 	setOpenAIChatGPTAccountHeaders(req.Header, credentialAccount)
 	credentialAccount.ApplyHeaderOverrides(req.Header)
-	enforceCodexIdentityHeadersWithUA(req.Header, credentialAccount.GetOpenAIUserAgent())
+	enforceCodexClientIdentityHeaders(req.Header, credentialAccount, credentialAccount)
 	return req, nil
 }
 

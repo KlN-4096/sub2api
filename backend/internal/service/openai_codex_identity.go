@@ -138,6 +138,17 @@ type codexOutboundIdentity struct {
 // 永久钉死在陈旧版本上，绕过版本自动同步，落回上游身份风控更严格的一侧。
 // 需要固定版本请填「Codex 客户端版本号」并关闭自动同步。
 func resolveCodexOutboundIdentity(candidateUA string) codexOutboundIdentity {
+	if strings.TrimSpace(candidateUA) == "" {
+		if profile, releases := codexGlobalClientProfile(); profile != nil {
+			return profile.identity(releases)
+		}
+	}
+	return resolveCodexUserAgentIdentity(candidateUA)
+}
+
+// resolveCodexUserAgentIdentity 是预设之前的解析链（候选 UA → 全局自定义 UA → 规范 CLI）。
+// 非 ChatGPT 上游（API key、CPR、Command Code）固定走它：预设只描述 ChatGPT 账号的客户端。
+func resolveCodexUserAgentIdentity(candidateUA string) codexOutboundIdentity {
 	canonical := codexCanonicalUserAgent()
 	if _, _, ok := openai.PairCodexClientIdentity(canonical); !ok {
 		canonical = codexCLIUserAgent
@@ -162,6 +173,15 @@ func resolveCodexOutboundIdentity(candidateUA string) codexOutboundIdentity {
 		pairedUA = rebuilt
 	}
 	return codexOutboundIdentity{userAgent: pairedUA, originator: originator, version: version}
+}
+
+// codexWholeVersion 去掉预发布/构建后缀（1.2.3-alpha.4 → 1.2.3），同 codex-rs
+// client_version_to_whole：/models 的 client_version 查询参数只带整版本。
+func codexWholeVersion(version string) string {
+	if i := strings.IndexAny(version, "-+"); i >= 0 {
+		return version[:i]
+	}
+	return version
 }
 
 // codexClientVersionFromUA 取 UA 的版本段作为生效版本；
@@ -226,6 +246,10 @@ func enforceCodexIdentityHeaders(h http.Header) {
 // （2026-09-20 排查）。需要连 originator 一起恢复的调用方先调 ensureCodexIdentityHeaders。
 // 必须在所有 User-Agent 改写之后调用。
 func enforceCodexIdentityHeadersWithUA(h http.Header, overrideUA string) {
+	enforceResolvedCodexIdentity(h, resolveCodexOutboundIdentity(overrideUA))
+}
+
+func enforceResolvedCodexIdentity(h http.Header, identity codexOutboundIdentity) {
 	if h == nil {
 		return
 	}
@@ -234,7 +258,6 @@ func enforceCodexIdentityHeadersWithUA(h http.Header, overrideUA string) {
 		pairCodexIdentityHeaders(h, keepOriginatorAbsent)
 		return
 	}
-	identity := resolveCodexOutboundIdentity(overrideUA)
 	h.Set("user-agent", identity.userAgent)
 	h.Set("version", identity.version)
 	if !keepOriginatorAbsent {

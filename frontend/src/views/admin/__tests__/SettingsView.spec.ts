@@ -81,6 +81,12 @@ const {
 
 const localeRef = vi.hoisted(() => ({ value: "zh-CN" }));
 
+// Codex 客户端身份卡片自带请求：本 spec 不涉及，挂起以免 jsdom 真的发 XHR。
+vi.mock('@/api/admin/codexClientProfile', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api/admin/codexClientProfile')>()),
+  getCodexClientProfile: vi.fn(() => new Promise(() => {})),
+  previewCodexClientProfile: vi.fn(() => new Promise(() => {})),
+}))
 vi.mock("@/api", () => ({
   adminAPI: {
     settings: {
