@@ -416,6 +416,24 @@ func (s *OpenAIGatewayService) patchOpenAIRawRelayWSFrame(
 	frame []byte,
 ) ([]byte, error) {
 	requestModel := meta.requestModelForFrame(frame)
+	if account.IsCPR() {
+		// The hook also freezes per-turn channel pricing and local admission.
+		// Its mapped model is deliberately not written into the CPR frame.
+		if hooks.MapRequestModel != nil {
+			if _, err := hooks.MapRequestModel(turn, requestModel); err != nil {
+				return nil, err
+			}
+		}
+		meta.captureRequestedReasoningEffort(frame, requestModel)
+		meta.updateFromResponseCreate(frame, requestModel, requestModel)
+		SetOpsUpstreamModel(c, requestModel)
+		sent := gjson.GetBytes(frame, "client_metadata."+openAICodexTurnStateHeader).String()
+		if sent == "" && turn == 1 {
+			sent = c.GetHeader(openAICodexTurnStateHeader)
+		}
+		markOpenAITurnStateSent(c, account, sent)
+		return frame, nil
+	}
 	patched, err := applyOpenAIWSReasoningEffortPolicy(frame, hooks)
 	if err != nil {
 		return nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, err.Error(), err)
@@ -496,7 +514,11 @@ func (s *OpenAIGatewayService) openAIRawRelayWSDialError(
 ) error {
 	logOpenAIRawRelayWS("dial_failed account_id=%d status=%d err=%s", account.ID, status, err.Error())
 	if status == 0 {
-		return s.openAIRawRelayTransportError(ctx, c, account, err)
+		transportErr := s.openAIRawRelayTransportError(ctx, c, account, err)
+		if account.IsCPR() && ctx.Err() == nil {
+			WriteOpenAIRawRelayWSError(c, clientConn, openAIRawRelayWSErrorEvent(http.StatusBadGateway, nil, openAITransportFailoverBody))
+		}
+		return transportErr
 	}
 	var handshakeErr *openAIWSHandshakeError
 	var body []byte

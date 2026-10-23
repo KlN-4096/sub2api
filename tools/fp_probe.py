@@ -38,6 +38,8 @@ KEY = os.environ.get("SUB2API_REHEARSAL_API_KEY", "")
 EXPECT_TZ = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--expect-timezone=")), "")
 CAP = "/opt/s2a-rehearsal/echo/capture.jsonl"
 UA = "codex-tui/0.153.4 (Mac OS 26.2.0; arm64) Apple_Terminal/466 (codex-tui; 0.153.4)"
+CODEX_UA = re.compile(r"^[^/()]+/\S+ \([^;()]+; [^;()]+\) \S")
+CODEX_UA_TRAILER = re.compile(r"\) \S+ \(([^;()]+); [^;()]+\)$")
 INSTALL = "7f582abd-05d2-4a59-b4e5-ec1b733b4edc"
 # 真实客户端把工具清单留在 body 的 client_metadata、从兼容头里剥掉
 # （codex-rs core/src/responses_metadata.rs 的 compatibility_headers）。
@@ -605,9 +607,17 @@ def check_rows(rows, cases, cross_check=True):
             elif lv != rv:
                 problems.append("%s 关系不成立 %s(%r) != %s(%r)" % (label, left, lv, right, rv))
 
+        # 身份只看配套（PairCodexClientIdentity 同一规则）：首段 = originator，有尾组时尾组客户端名也是它。
+        # CLI 核心（codex_cli_rs）没有尾组，Desktop / exec / tui 有，不能再按"必须带尾组"验收。
         ua = hdr(row, "user-agent") or ""
-        if not ua.rstrip().endswith(")"):
-            problems.append("%s UA 缺尾部客户端标识组" % label)
+        originator = hdr(row, "originator")
+        trailer = CODEX_UA_TRAILER.search(ua)
+        if not CODEX_UA.match(ua):
+            problems.append("%s UA 不是 Codex 形态 %r" % (label, ua))
+        elif originator and ua.split("/", 1)[0] != originator:
+            problems.append("%s UA 首段与 originator %r 不配套" % (label, originator))
+        elif originator and trailer and trailer.group(1) != originator:
+            problems.append("%s UA 尾组客户端名与 originator %r 不配套" % (label, originator))
 
     if cross_check:
         problems += cross_device_problems(devices)
@@ -669,6 +679,17 @@ def selftest():
     if ok:
         print("[SELFTEST FAIL] 正样本被误报：%s" % ok)
         return 1
+    # CLI 核心无尾组、Desktop 尾组是应用版本：两种合法形态都不能误报。
+    for originator, ua, version in (
+            ("codex_cli_rs", "codex_cli_rs/0.164.0 (Ubuntu 22.4.0; x86_64) xterm-256color", "0.164.0"),
+            ("Codex Desktop", "Codex Desktop/0.163.0-alpha.11.2 (Mac OS 15.7.1; arm64) unknown "
+                              "(Codex Desktop; 26.1016.62342)", "0.163.0-alpha.11.2")):
+        headers = [[k, {"originator": originator, "user-agent": ua, "version": version}.get(k, v)]
+                   for k, v in base_headers]
+        ok, _ = check_rows([row(headers)], [case])
+        if ok:
+            print("[SELFTEST FAIL] %s 正样本被误报：%s" % (originator, ok))
+            return 1
 
     def mutate(fn):
         h = [list(x) for x in base_headers]
@@ -761,10 +782,20 @@ def selftest():
              next(i for i, x in enumerate(h) if x[0] == "x-codex-window-id"),
              ["x-codex-window-id", "S"]))], [case], "关系不成立"),
         ("body 整段丢失", [row(body={})], [case], "没抓到请求体"),
-        ("UA 缺尾部组",
+        ("UA 不是 Codex 形态",
          [mutate(lambda h, b: h.__setitem__(
              next(i for i, x in enumerate(h) if x[0] == "user-agent"),
-             ["user-agent", "codex-tui/0.153.4"]))], [case], "UA 缺尾部"),
+             ["user-agent", "codex-tui/0.153.4"]))], [case], "不是 Codex 形态"),
+        ("UA 首段与 originator 不配套",
+         [mutate(lambda h, b: h.__setitem__(
+             next(i for i, x in enumerate(h) if x[0] == "user-agent"),
+             ["user-agent", "codex_cli_rs/0.153.4 (Ubuntu 22.4.0; x86_64) xterm-256color"]))],
+         [case], "首段与 originator"),
+        ("UA 尾组与 originator 不配套",
+         [mutate(lambda h, b: h.__setitem__(
+             next(i for i, x in enumerate(h) if x[0] == "user-agent"),
+             ["user-agent", "codex-tui/0.153.4 (Mac OS 26.2.0; arm64) unknown (Codex Desktop; 26.1016.62342)"]))],
+         [case], "尾组客户端名"),
     ]
 
     for field in ("installation_id", "session_id", "thread_id", "window_id",

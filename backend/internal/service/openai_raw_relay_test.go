@@ -136,6 +136,26 @@ func TestOpenAIRawRelayForwardsWireBytesAndHeadersVerbatim(t *testing.T) {
 	require.Equal(t, "ts-minted", *usageCodexTurnStatePtr(result.UpstreamHeaders))
 }
 
+// CPR 走 ChatGPT WS 上游时先转来不含输出的传输帧（2026-10-23 pro1-cpr 诊断轨迹：codex.response.metadata
+// 574ms 就提交了响应，response.output_item.added 4992ms 才到），首字落在第一个模型输出事件。
+func TestOpenAIRawRelayTTFTSkipsWebSocketTransportFrames(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	var out openAIRawRelayOutcome
+	observer, images, eventType := &upstreamResponseModelObserver{}, newOpenAIImageOutputCounter(), ""
+	feed := func(event, data string) {
+		for _, line := range []string{"event: " + event, "data: " + data, ""} {
+			eventType = svc.observeOpenAIRawSSELine(c, &out, observer, images, []byte(line+"\n"), eventType, OpenAITTFTModeSemantic, time.Now())
+		}
+	}
+	for _, event := range []string{"codex.response.metadata", "response.metadata", "codex.rate_limits", "responsesapi.websocket_timing", "response.created", "response.in_progress"} {
+		feed(event, `{"type":"`+event+`"}`)
+		require.Nil(t, out.firstTokenMs, event)
+	}
+	feed("response.output_item.added", `{"type":"response.output_item.added","item":{"type":"reasoning","summary":[]}}`)
+	require.NotNil(t, out.firstTokenMs)
+}
+
 func TestOpenAIRawRelayPatchesOnlyPolicyFields(t *testing.T) {
 	seen := &rawRelaySeen{}
 	svc, account := rawRelayTestSetup(t, func(w http.ResponseWriter, r *http.Request) {
@@ -143,6 +163,7 @@ func TestOpenAIRawRelayPatchesOnlyPolicyFields(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"id":"resp_json","model":"gpt-5.5-mapped","usage":{"input_tokens":2,"output_tokens":1}}`)
 	})
+	rawRelayUseAPIKey(account)
 	plain := []byte(`{"model":"gpt-5.5","reasoning":{"effort":"xhigh","summary":"auto"},"input":"hi","z":[1,2]}`)
 	enc, _ := zstd.NewWriter(nil)
 	wire := enc.EncodeAll(plain, nil)
@@ -190,6 +211,7 @@ func TestOpenAIRawRelayUnavailableFailsOverThenWritesVerbatim(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = io.WriteString(w, errBody)
 	})
+	rawRelayUseAPIKey(account)
 	c, rec, body := rawRelayTestContext(t, context.Background(), "/v1/responses", []byte(`{"model":"gpt-5.5"}`), "", nil)
 
 	_, err := svc.Forward(context.Background(), c, account, body)
@@ -210,6 +232,7 @@ func TestOpenAIRawRelayConnectionRefusedFailsOver(t *testing.T) {
 	server.Close()
 	account := newCPRTestAccount()
 	account.Credentials["base_url"] = base
+	rawRelayUseAPIKey(account)
 	svc := &OpenAIGatewayService{cfg: cprTestConfig(), httpUpstream: rawRelayTransport{}}
 	c, _, body := rawRelayTestContext(t, context.Background(), "/v1/responses", []byte(`{"model":"gpt-5.5"}`), "", nil)
 
@@ -218,6 +241,11 @@ func TestOpenAIRawRelayConnectionRefusedFailsOver(t *testing.T) {
 	require.True(t, errors.As(err, &failoverErr))
 	require.False(t, failoverErr.RawRelayResponse, "没有上游响应可原样返回")
 	require.False(t, c.Writer.Written())
+}
+
+func rawRelayUseAPIKey(account *Account) {
+	account.Type = AccountTypeAPIKey
+	account.Extra = map[string]any{openAIRawRelayExtraKey: true}
 }
 
 func TestOpenAIRawRelayClientDisconnectStopsUpstream(t *testing.T) {

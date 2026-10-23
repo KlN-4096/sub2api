@@ -74,6 +74,7 @@ vi.mock('vue-i18n', async () => {
 })
 
 import CreateAccountModal from '../CreateAccountModal.vue'
+import CPRConnectionForm from '../CPRConnectionForm.vue'
 
 const BaseDialogStub = defineComponent({
   name: 'BaseDialog',
@@ -218,6 +219,25 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
   })
 
   afterEach(() => vi.useRealTimers())
+
+  it('creates CPR from selected metadata without a hand-entered Client Key', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'CPR')
+    const connection = wrapper.getComponent(CPRConnectionForm)
+    connection.vm.$emit('update:baseUrl', 'http://127.0.0.1:18081')
+    connection.vm.$emit('update:adminKey', 'fake-admin')
+    await flushPromises()
+    connection.vm.$emit('update:accountId', 'acct_1')
+    connection.vm.$emit('selected', { id: 'acct_1', name: 'CPR One', email: '', plan_type: 'pro', status: 'normal', enabled: true, concurrency_limit: 16 })
+    await flushPromises()
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(createAccountMock).toHaveBeenCalledOnce()
+    expect(createAccountMock.mock.calls[0]?.[0]).toMatchObject({ type: 'cpr', name: 'CPR One', concurrency: 16, cpr_auto_configure: true, credentials: { cpr_account_id: 'acct_1', admin_api_key: 'fake-admin' } })
+    expect(createAccountMock.mock.calls[0]?.[0]?.credentials).not.toHaveProperty('api_key')
+    wrapper.unmount()
+  })
 
   it('sets month and year expiry presets without submitting the account form', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })

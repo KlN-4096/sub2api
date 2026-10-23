@@ -117,7 +117,7 @@ type rawRelayWSHarness struct {
 	log       *rawRelayWSHookLog
 }
 
-func startRawRelayWS(t *testing.T, reject http.HandlerFunc, header http.Header, first string, hooks func(*rawRelayWSHookLog, *gin.Context) *OpenAIWSIngressHooks) *rawRelayWSHarness {
+func startRawRelayWS(t *testing.T, reject http.HandlerFunc, header http.Header, first string, hooks func(*rawRelayWSHookLog, *gin.Context) *OpenAIWSIngressHooks, apiKey ...bool) *rawRelayWSHarness {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	upstream := newRawRelayWSUpstream(t, reject)
@@ -127,6 +127,9 @@ func startRawRelayWS(t *testing.T, reject http.HandlerFunc, header http.Header, 
 	svc := &OpenAIGatewayService{cfg: cfg}
 	account := newCPRTestAccount()
 	account.Credentials["base_url"] = upstream.server.URL
+	if len(apiKey) > 0 && apiKey[0] {
+		rawRelayUseAPIKey(account)
+	}
 	log := &rawRelayWSHookLog{}
 	if hooks == nil {
 		hooks = (*rawRelayWSHookLog).hooks
@@ -138,7 +141,7 @@ func startRawRelayWS(t *testing.T, reject http.HandlerFunc, header http.Header, 
 
 	dialCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	client, _, err := coderws.Dial(dialCtx, "ws"+strings.TrimPrefix(ingress.URL, "http"), &coderws.DialOptions{HTTPHeader: header})
+	client, _, err := coderws.Dial(dialCtx, "ws"+strings.TrimPrefix(ingress.URL, "http")+"/v1/responses", &coderws.DialOptions{HTTPHeader: header})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.CloseNow() })
 	require.NoError(t, client.Write(dialCtx, coderws.MessageText, []byte(first)))
@@ -374,7 +377,7 @@ func TestOpenAIRawRelayWSBinaryFrameIsATurn(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	require.NoError(t, h.client.Write(ctx, coderws.MessageBinary, []byte(`{"type":"response.create","model":"gpt-5.5","reasoning":{"effort":"xhigh"},"input":[]}`)))
-	require.Equal(t, `{"type":"response.create","model":"gpt-5.5","reasoning":{"effort":"low"},"input":[]}`, string(rawRelayRecv(t, h.upstream.frames)))
+	require.Equal(t, `{"type":"response.create","model":"gpt-5.5","reasoning":{"effort":"xhigh"},"input":[]}`, string(rawRelayRecv(t, h.upstream.frames)))
 	h.send(t, up, `{"type":"response.completed","response":{"id":"resp_2","usage":{"input_tokens":7,"output_tokens":7}}}`)
 	h.clientReads(t)
 	require.NoError(t, h.client.Close(coderws.StatusNormalClosure, ""))
@@ -395,9 +398,39 @@ func TestOpenAIRawRelayWSPatchesOnlyPolicyFields(t *testing.T) {
 		hooks.MaxReasoningEffortOverLimit = "downgrade"
 		hooks.MapRequestModel = func(int, string) (string, error) { return "gpt-5.5-mapped", nil }
 		return hooks
-	})
+	}, true)
 	want := `{"type":"response.create","model":"gpt-5.5-mapped","reasoning":{"effort":"low","summary":"auto"},"input":"hi","z":[1,2]}`
 	require.Equal(t, want, string(rawRelayRecv(t, h.upstream.frames)))
+}
+
+func TestCPRDelegationWSKeepsFrameDespiteDenyAndMapping(t *testing.T) {
+	first := `{"type":"response.create","model":"gpt-5.5", "reasoning":{"effort":"xhigh"},"service_tier":"priority","input":"hi"}`
+	h := startRawRelayWS(t, nil, nil, first, func(l *rawRelayWSHookLog, c *gin.Context) *OpenAIWSIngressHooks {
+		hooks := l.hooks(c)
+		hooks.MaxReasoningEffort = "low"
+		hooks.MaxReasoningEffortOverLimit = "deny"
+		hooks.MapRequestModel = func(int, string) (string, error) { return "mapped-by-sub2", nil }
+		return hooks
+	})
+	require.Equal(t, first, string(rawRelayRecv(t, h.upstream.frames)))
+}
+
+func TestCPRDelegationWSHandshakeUnavailableReachesClientWithoutFailover(t *testing.T) {
+	h := startRawRelayWS(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "7")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":{"code":"no_available_provider","message":"no provider"}}`)
+	}, nil, rawRelayWSFirstFrame, nil)
+	event := h.clientReads(t)
+	require.EqualValues(t, 503, gjson.GetBytes(event, "status").Int())
+	require.Equal(t, "no_available_provider", gjson.GetBytes(event, "error.code").String())
+	_, err := readPassthroughLifecycleFrame(t, h.client, 3*time.Second)
+	require.Equal(t, coderws.StatusInternalError, coderws.CloseStatus(err))
+	serverErr := rawRelayRecv(t, h.serverErr)
+	require.ErrorIs(t, serverErr, ErrOpenAIRawRelayNotAccountFault)
+	var failoverErr *UpstreamFailoverError
+	require.False(t, errors.As(serverErr, &failoverErr))
 }
 
 func TestOpenAIRawRelayWSHandshakeUnavailableFailsOver(t *testing.T) {
@@ -406,7 +439,7 @@ func TestOpenAIRawRelayWSHandshakeUnavailableFailsOver(t *testing.T) {
 		w.Header().Set("Retry-After", "7")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = io.WriteString(w, `{"error":{"code":"no_available_provider","message":"no provider"}}`)
-	}, nil, rawRelayWSFirstFrame, nil)
+	}, nil, rawRelayWSFirstFrame, nil, true)
 
 	var failoverErr *UpstreamFailoverError
 	require.ErrorAs(t, rawRelayRecv(t, h.serverErr), &failoverErr)
