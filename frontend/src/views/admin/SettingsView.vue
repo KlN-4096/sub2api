@@ -5823,6 +5823,9 @@
                 <Toggle v-model="form.openai_codex_version_auto_sync_enabled" />
               </div>
 
+              <!-- Codex 客户端身份预设与官方发布状态（自带保存，不随整页提交） -->
+              <CodexClientProfileSettings />
+
               <!-- Claude Code 客户端版本号 -->
               <div>
                 <label
@@ -9006,6 +9009,7 @@ import {
 } from "@/utils/rechargeBonus";
 import RegistrationEmailBlacklistEditor from "@/components/admin/settings/RegistrationEmailBlacklistEditor.vue";
 import OpenAIFastPolicyUserSelector from "@/views/admin/settings/OpenAIFastPolicyUserSelector.vue";
+import CodexClientProfileSettings from "@/components/admin/settings/CodexClientProfileSettings.vue";
 import { useClipboard } from "@/composables/useClipboard";
 import {
   useStepUp,

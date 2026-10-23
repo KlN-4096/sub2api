@@ -314,7 +314,7 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchResponsesWebSearchRequest(c
 		req.Header.Set("Conversation_ID", isolated)
 	}
 	applyCodexAccountIdentityHeaders(req.Header, codexAccountIdentitySource(c, account), apiKeyID)
-	enforceCodexIdentityHeadersWithUA(req.Header, s.codexIdentityOverrideUA(account))
+	s.enforceCodexClientIdentity(c, req.Header, account)
 	account.ApplyHeaderOverrides(req.Header)
 	// 这条兜底打的是 /responses：双开账号的头也要按线协议投影收口，否则同一账号出现
 	// 「双开的体 + 非双开的头」两种形态（体已按双开压缩，见 compressCodexRequestBody）。
@@ -475,7 +475,7 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchRequest(ctx context.Context
 		if s.cfg != nil && s.cfg.Gateway.ForceCodexCLI {
 			req.Header.Set("User-Agent", canonical.userAgent)
 		}
-		enforceCodexIdentityHeadersWithUA(req.Header, s.codexIdentityOverrideUA(account))
+		s.enforceCodexClientIdentity(c, req.Header, account)
 	}
 
 	account.ApplyHeaderOverrides(req.Header)
