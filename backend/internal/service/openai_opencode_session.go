@@ -126,7 +126,7 @@ func applyOpenCodeUpstreamUserAgent(account *Account, targetURL string, headers 
 	userAgent := ""
 	switch {
 	case isOfficialCommandCodeHost(targetURL):
-		userAgent = CodexCanonicalUserAgent()
+		userAgent = resolveCodexUserAgentIdentity("").userAgent
 	case account != nil && account.IsOpenCodeGo(), isOfficialOpenCodeHost(targetURL):
 		userAgent = openCodeUpstreamUserAgent
 	default:
