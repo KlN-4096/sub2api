@@ -1776,9 +1776,6 @@ func (s *OpenAIGatewayService) buildCodexModelsManifestRequest(ctx context.Conte
 	}
 
 	clientVersion = strings.TrimSpace(clientVersion)
-	if clientVersion == "" {
-		clientVersion = CodexCanonicalClientVersion()
-	}
 
 	requestEndpoint := chatgptCodexModelsURL
 	authToken := ""
@@ -1825,6 +1822,18 @@ func (s *OpenAIGatewayService) buildCodexModelsManifestRequest(ctx context.Conte
 		return openAIModelsRequest{}, nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_ACCOUNT_TYPE_UNSUPPORTED", "account type %q cannot fetch the Codex models manifest", credAccount.Type)
 	}
 
+	// ChatGPT 上游按凭据账号的出站身份（预设或自定义 UA）；API key / CPR 上游走预设之前的解析链。
+	identity := resolveCodexUserAgentIdentity("")
+	if !useAPIKeyUpstream {
+		identity = codexClientIdentityFor(credAccount, credAccount)
+	}
+	// 网关自己取清单时版本跟出站身份：查询参数是去掉预发布的整版本（codex-rs
+	// client_version_to_whole），version 头是完整 core 版本。
+	defaultVersion := clientVersion == ""
+	if defaultVersion {
+		clientVersion = codexWholeVersion(identity.version)
+	}
+
 	requestURL, err := buildCodexModelsManifestURL(requestEndpoint, appendModelsPath, clientVersion)
 	if err != nil {
 		if useAPIKeyUpstream {
@@ -1858,11 +1867,6 @@ func (s *OpenAIGatewayService) buildCodexModelsManifestRequest(ctx context.Conte
 	} else {
 		headers.Set("Accept", "application/json")
 	}
-	overrideUA := ""
-	if !useAPIKeyUpstream {
-		overrideUA = credAccount.GetOpenAIUserAgent()
-	}
-	identity := resolveCodexOutboundIdentity(overrideUA)
 	headers.Set("Originator", identity.originator)
 	headers.Set("User-Agent", identity.userAgent)
 	// Version 头优先与 client_version 查询参数同源：客户端自报版本合法且不低于上游
@@ -1871,6 +1875,9 @@ func (s *OpenAIGatewayService) buildCodexModelsManifestRequest(ctx context.Conte
 	// TestFetchCodexModelsManifestPassthrough）。
 	headerVersion := NormalizeCodexClientVersion(clientVersion)
 	if headerVersion == "" || CompareVersions(headerVersion, codexUpstreamMinVersion) < 0 {
+		headerVersion = identity.version
+	}
+	if defaultVersion {
 		headerVersion = identity.version
 	}
 	headers.Set("Version", headerVersion)
