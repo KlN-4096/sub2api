@@ -130,8 +130,9 @@ func TestCPROutboundTargetsGatewayNotOpenAI(t *testing.T) {
 	require.False(t, account.UsesOpenAICodexProtocol(), "前置：cpr 不是 Codex 协议账号")
 	require.NotEqual(t, "chatgpt.com", req.Host, "不得强改 Host")
 	require.Empty(t, req.Header.Get("chatgpt-account-id"), "账号身份由 CPR 自己注入")
-	require.NotContains(t, req.Header.Get("user-agent"), "codex-tui",
-		"不得把出站 UA 强改成 Codex 身份——那是 CPR 的职责")
+	require.Equal(t, c.Request.Header.Get("User-Agent"), req.Header.Get("user-agent"),
+		"不得把出站 UA 收口成网关身份——那是 CPR 的职责")
+	require.Empty(t, req.Header.Get("version"), "version 头同样归 CPR 补")
 	require.Empty(t, req.Header.Get("Content-Encoding"),
 		"zstd 压缩属于真上游形态，中继这一跳不做")
 }
