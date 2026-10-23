@@ -65,9 +65,21 @@ func serviceTierCostRank(tier string) (rank int, known bool) {
 // may lower billing. The private ChatGPT Codex endpoint does not: it commonly
 // reports default for effective Fast turns, so OAuth-like credentials retain
 // the final outbound tier while still exposing the observed value.
-// cpr 中继的是同一个 ChatGPT Codex 后端（CPR 对 service_tier 只读不写），
-// 按「上游是谁」分流，否则同一份响应 cpr 会被按 default 降档计费。
+// CPR is an opaque policy boundary: its group may downgrade Fast, so only the
+// observed tier is authoritative there, with a base-rate fallback when unknown.
 func ResolveOpenAIServiceTierBilling(account *Account, requested, observed string) ServiceTierBillingResolution {
+	if account != nil && account.IsCPR() {
+		requested = normalizeBillingServiceTier(requested)
+		observed = normalizeBillingServiceTier(observed)
+		billing := observed
+		if _, known := serviceTierCostRank(billing); !known {
+			billing = ""
+		}
+		return ServiceTierBillingResolution{
+			Requested: requested, Observed: observed, Billing: billing,
+			Downgraded: serviceTierBillingCheaper(billing, requested),
+		}
+	}
 	if account != nil && account.TargetsChatGPTCodexUpstream() && codexOAuthResponseTierIsNonAuthoritative(observed) {
 		return ServiceTierBillingResolution{
 			Requested: normalizeBillingServiceTier(requested),
@@ -76,6 +88,12 @@ func ResolveOpenAIServiceTierBilling(account *Account, requested, observed strin
 		}
 	}
 	return ResolveBillingServiceTier(requested, observed)
+}
+
+func serviceTierBillingCheaper(actual, requested string) bool {
+	actualRank, _ := serviceTierCostRank(actual)
+	requestedRank, _ := serviceTierCostRank(requested)
+	return actualRank < requestedRank
 }
 
 func codexOAuthResponseTierIsNonAuthoritative(observed string) bool {
@@ -94,7 +112,7 @@ func ApplyOpenAIServiceTierBillingResolution(account *Account, result *OpenAIFor
 		return ServiceTierBillingResolution{}
 	}
 	resolution := ResolveOpenAIServiceTierBilling(account, optionalStringValue(result.ServiceTier), result.UpstreamResponseServiceTier)
-	if resolution.Downgraded {
+	if resolution.Downgraded || (account != nil && account.IsCPR()) {
 		billing := resolution.Billing
 		result.ServiceTier = &billing
 	}

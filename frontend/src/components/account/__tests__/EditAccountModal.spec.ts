@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
+import CPRConnectionForm from '../CPRConnectionForm.vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import {
   BUILTIN_PLATFORM_CATALOG,
@@ -331,6 +332,19 @@ function mountModal(account = buildAccount(), renderGroupSelector = false) {
 }
 
 describe('EditAccountModal', () => {
+  it('saves unchanged CPR credentials without requiring a new remote connection', async () => {
+    const account = { ...buildAccount(), type: 'cpr', credentials: { base_url: 'http://127.0.0.1:18081', cpr_account_id: 'acct_1' } }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    expect(wrapper.getComponent(CPRConnectionForm).props('existingAccountId')).toBe(account.id)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock).toHaveBeenCalledOnce()
+    expect(updateAccountMock.mock.calls[0]?.[1]?.cpr_auto_configure).toBe(false)
+    wrapper.unmount()
+  })
+
   it('keeps the redacted Vertex API key when saving without entering a new one', async () => {
     const account = buildVertexAccount()
     account.credentials = {
@@ -456,6 +470,18 @@ describe('EditAccountModal', () => {
     await wrapper.get('[data-testid="edit-turn-state-relay-enabled"]').setValue(false)
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
     expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_turn_state_relay_enabled')
+  })
+
+  it('offers turn-state relay on CPR accounts without the quality guard', async () => {
+    const account = { ...buildAccount(), type: 'cpr', extra: {}, credentials: { base_url: 'http://127.0.0.1:18081', cpr_account_id: 'acct_1' } }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    expect(wrapper.find('[data-testid="edit-quality-guard-enabled"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="edit-turn-state-relay-enabled"]').setValue(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).toMatchObject({ openai_turn_state_relay_enabled: true })
   })
 
   it('notes that gateway-pool accounts do not relay turn-state', () => {
