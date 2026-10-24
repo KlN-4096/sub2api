@@ -38,5 +38,9 @@ export default {
     save: '保存身份',
     saved: 'Codex 客户端身份已保存',
     cliHistory: 'CLI 版本',
+    osVersions: '系统版本',
+    osVersionsDescription: '与官方发布一起检查，数据取自 endoflife.date，各取发布满 60 天的最新版本：macOS 大版本（含最新补丁）、Windows 11 H2 功能更新、Ubuntu LTS。预设里填了 OS 版本的以预设为准；同步成功前用内置值。',
+    osBuiltin: '内置值，尚未同步',
+    syncedAt: '同步于 {time}',
   },
 }

@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -43,7 +44,7 @@ func profileWiringContext(path string) *gin.Context {
 func requireProfileWired(t *testing.T, label string, h http.Header) {
 	t.Helper()
 	want := profileWiringSelection.identity(codexPublishedReleases())
-	require.Equal(t, "Codex Desktop/0.163.0-alpha.11.2 (Mac OS 15.7.1; arm64) unknown (Codex Desktop; 26.1016.62342)", want.userAgent)
+	require.Equal(t, "Codex Desktop/0.163.0-alpha.11.2 (Mac OS 26.7.1; arm64) unknown (Codex Desktop; 26.1016.62342)", want.userAgent)
 	require.Equal(t, want.userAgent, h.Get("User-Agent"), label)
 	require.Equal(t, want.version, h.Get("Version"), label)
 	require.Equal(t, want.originator, h.Get("Originator"), label)
@@ -213,11 +214,13 @@ func TestCodexReleaseServiceMergesOtherInstances(t *testing.T) {
 	svc := NewCodexReleaseService(repo, nil, nil)
 	svc.state = *testCodexReleases()
 
-	newer := `{"desktop":{"macos":{"history":[{"core_version":"0.165.0","desktop_version":"26.1100.1","desktop_build":"21700"}]}},"cli":["0.165.0"]}`
+	newer := `{"desktop":{"macos":{"history":[{"core_version":"0.165.0","desktop_version":"26.1100.1","desktop_build":"21700"}]}},"cli":["0.165.0"],` +
+		`"os":{"macos":{"version":"27.0.1","verified_at":"2026-10-24T00:00:00Z"}}}`
 	repo.values[SettingKeyOpenAICodexReleases] = newer
 	svc.reload()
 	require.Equal(t, "21700", codexPublishedReleases().desktopHistory("macos")[0].DesktopBuild, "a newer build written by another instance is adopted")
 	require.Equal(t, "0.165.0", codexPublishedReleases().CLI[0])
+	require.Equal(t, "27.0.1", codexPublishedReleases().platformDefaults("macos").osVersion, "a synced OS version written by another instance is adopted")
 
 	older := `{"desktop":{"macos":{"history":[{"core_version":"0.160.0","desktop_version":"26.900.1","desktop_build":"20000"}]}}}`
 	repo.values[SettingKeyOpenAICodexReleases] = older
@@ -251,9 +254,122 @@ func TestCodexReleaseServiceRecordsFailedChecks(t *testing.T) {
 	view := svc.ClientProfileView()
 	require.Equal(t, "proxy unavailable", view.Desktop[codexrelease.Linux].Error)
 	require.False(t, view.Desktop[codexrelease.Linux].Verified)
-	require.Contains(t, repo.values[SettingKeyOpenAICodexReleases], "proxy unavailable")
+	require.Equal(t, CodexOSVersionStatus{OSType: "Ubuntu", Version: "26.4.0", CheckedAt: view.OS[codexrelease.Linux].CheckedAt, Error: "proxy unavailable"},
+		view.OS[codexrelease.Linux], "a failed OS check keeps the built-in version and shows why")
+	require.NotNil(t, view.OS[codexrelease.Linux].CheckedAt)
+	var stored codexReleaseState
+	require.NoError(t, json.Unmarshal([]byte(repo.values[SettingKeyOpenAICodexReleases]), &stored))
+	require.Equal(t, "proxy unavailable", stored.Desktop[codexrelease.Linux].Error)
+	require.Equal(t, "proxy unavailable", stored.OS[codexrelease.Linux].Error, "the failed OS check is persisted too")
+	require.NotNil(t, stored.OS[codexrelease.Linux].CheckedAt)
+	require.Empty(t, stored.OS[codexrelease.Linux].Version)
 
 	svc.TriggerRefresh()
 	require.True(t, svc.ClientProfileView().Refreshing)
 	require.Eventually(t, idle, 5*time.Second, 5*time.Millisecond)
+}
+
+// 系统版本：预设覆盖 > 同步值 > 写死值；面板的预设占位与系统版本行同源。
+func TestCodexProfileFollowsSyncedOSVersions(t *testing.T) {
+	releases := testCodexReleases()
+	releases.OS = map[codexrelease.Platform]codexOSRelease{codexrelease.MacOS: {Version: "27.0.1"}}
+	withCodexProfileRuntime(t, &codexProfileRuntime{releases: releases})
+
+	desktop := CodexClientProfile{Client: "desktop", Platform: "macos", VersionMode: "latest"}
+	require.Equal(t, "Codex Desktop/0.164.0-alpha.2 (Mac OS 27.0.1; arm64) unknown (Codex Desktop; 26.1020.10000)", desktop.identity(releases).userAgent)
+	desktop.OSVersion = "26.5.2"
+	require.Contains(t, desktop.identity(releases).userAgent, "(Mac OS 26.5.2; arm64)", "an explicit override beats the synced version")
+	cli := CodexClientProfile{Client: "cli", Platform: "windows", VersionMode: "latest"}
+	require.Contains(t, cli.identity(releases).userAgent, "(Windows 10.0.26200; x86_64)", "an unsynced platform keeps the built-in version")
+
+	view := NewCodexReleaseService(&codexProfileSettingRepo{values: map[string]string{}}, nil, nil).ClientProfileView()
+	require.Equal(t, CodexOSVersionStatus{OSType: "Mac OS", Version: "27.0.1", Synced: true}, view.OS[codexrelease.MacOS])
+	require.Equal(t, CodexOSVersionStatus{OSType: "Ubuntu", Version: "26.4.0"}, view.OS[codexrelease.Linux])
+	require.Equal(t, "27.0.1", view.Presets[0].OSVersion, "preset placeholders show the synced version")
+}
+
+func TestCodexOSVersionsMergeByVerification(t *testing.T) {
+	t1 := time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC)
+	t2, t3 := t1.Add(24*time.Hour), t1.Add(25*time.Hour)
+	ours := codexReleaseState{OS: map[codexrelease.Platform]codexOSRelease{
+		codexrelease.MacOS: {Version: "26.7.1", VerifiedAt: &t2, CheckedAt: &t3, Error: "feed down"},
+	}}
+	older := codexReleaseState{OS: map[codexrelease.Platform]codexOSRelease{codexrelease.MacOS: {Version: "26.6.0", VerifiedAt: &t1}}}
+	require.Equal(t, ours.OS, ours.merge(older).OS, "an older verification never rolls the version back, and our latest error stays")
+
+	newer := codexReleaseState{OS: map[codexrelease.Platform]codexOSRelease{
+		codexrelease.MacOS:   {Version: "27.0.1", VerifiedAt: &t3},
+		codexrelease.Linux:   {Version: "26.4.0", VerifiedAt: &t1},
+		codexrelease.Windows: {CheckedAt: &t3, Error: "feed down"},
+	}}
+	merged := ours.merge(newer).OS
+	require.Equal(t, "27.0.1", merged[codexrelease.MacOS].Version)
+	require.Equal(t, "26.4.0", merged[codexrelease.Linux].Version)
+	require.NotContains(t, merged, codexrelease.Windows, "another instance's failure without a result is not adopted")
+	require.Equal(t, "26.7.1", ours.OS[codexrelease.MacOS].Version, "merge never mutates the published state")
+}
+
+func TestCodexOSVersionRefresh(t *testing.T) {
+	settled := time.Now().AddDate(0, 0, -100).Format(time.DateOnly)
+	fresh := time.Now().AddDate(0, 0, -10).Format(time.DateOnly)
+	feed := `{"result":{"releases":[{"name":"28","releaseDate":"` + fresh + `","latest":{"name":"28.0"}},` +
+		`{"name":"27","releaseDate":"` + settled + `","latest":{"name":"27.2"}}]}}`
+	var requested []string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requested = append(requested, r.URL.String())
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(feed)), Header: http.Header{}, Request: r}, nil
+	})}
+	svc := NewCodexReleaseService(&codexProfileSettingRepo{values: map[string]string{}}, client, nil)
+	svc.refreshOSVersion(codexrelease.MacOS)
+	entry := svc.state.OS[codexrelease.MacOS]
+	require.Equal(t, []string{"https://endoflife.date/api/v1/products/macos/"}, requested)
+	require.Equal(t, "27.2.0", entry.Version, "the newest major waits out the settle window; os_info pads to three parts")
+	require.NotNil(t, entry.VerifiedAt)
+	require.Empty(t, entry.Error)
+
+	failing := NewCodexReleaseService(&codexProfileSettingRepo{values: map[string]string{}}, nil, errors.New("proxy unavailable"))
+	failing.state.OS = svc.state.OS
+	failing.refreshOSVersion(codexrelease.MacOS)
+	kept := failing.state.OS[codexrelease.MacOS]
+	require.Equal(t, "27.2.0", kept.Version, "a failed check keeps the last synced version")
+	require.Equal(t, entry.VerifiedAt, kept.VerifiedAt)
+	require.Equal(t, "proxy unavailable", kept.Error)
+	require.Equal(t, "", svc.state.OS[codexrelease.MacOS].Error, "the update replaced the map instead of writing into the shared one")
+}
+
+// 检查成功的系统版本要随发布记录落库并发布（重启与其它实例靠它）；官方安装包这里一律 404。
+func TestCodexReleaseServicePersistsSyncedOSVersions(t *testing.T) {
+	withCodexProfileRuntime(t, nil)
+	settled := time.Now().AddDate(0, 0, -100).Format(time.DateOnly)
+	feeds := map[string]string{
+		"/api/v1/products/macos/":   `{"result":{"releases":[{"name":"27","releaseDate":"` + settled + `","latest":{"name":"27.1"}}]}}`,
+		"/api/v1/products/windows/": `{"result":{"releases":[{"name":"11-26h2-w","releaseDate":"` + settled + `","latest":{"name":"10.0.26300"}}]}}`,
+		"/api/v1/products/ubuntu/":  `{"result":{"releases":[{"name":"26.04","releaseDate":"` + settled + `","isLts":true,"latest":{"name":"26.04.1"}}]}}`,
+	}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		feed, ok := feeds[r.URL.Path]
+		status := http.StatusOK
+		if r.URL.Host != "endoflife.date" || !ok {
+			status, feed = http.StatusNotFound, ""
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(feed)), Header: http.Header{}, Request: r}, nil
+	})}
+	repo := &codexProfileSettingRepo{values: map[string]string{}}
+	svc := NewCodexReleaseService(repo, client, nil)
+	svc.refresh()
+
+	var stored codexReleaseState
+	require.NoError(t, json.Unmarshal([]byte(repo.values[SettingKeyOpenAICodexReleases]), &stored))
+	want := map[codexrelease.Platform]string{codexrelease.MacOS: "27.1.0", codexrelease.Windows: "10.0.26300", codexrelease.Linux: "26.4.0"}
+	for platform, version := range want {
+		require.Equal(t, version, stored.OS[platform].Version, platform)
+		require.NotNil(t, stored.OS[platform].VerifiedAt, platform)
+		require.Empty(t, stored.OS[platform].Error, platform)
+		require.NotEmpty(t, stored.Desktop[platform].Error, "the installer checks failed against the stub: %s", platform)
+		require.Equal(t, version, codexPublishedReleases().platformDefaults(string(platform)).osVersion, "published: %s", platform)
+		status := svc.ClientProfileView().OS[platform]
+		require.True(t, status.Synced, platform)
+		require.Equal(t, version, status.Version, platform)
+		require.Equal(t, stored.OS[platform].VerifiedAt.Unix(), status.VerifiedAt.Unix(), "the panel shows when it was last synced: %s", platform)
+	}
 }

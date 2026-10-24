@@ -43,10 +43,30 @@ type codexPlatformReleases struct {
 	Error     string                 `json:"error,omitempty"`
 }
 
+// codexOSRelease 是同步到的系统版本；失败只记 CheckedAt/Error，保留上次成功的 Version/VerifiedAt。
+type codexOSRelease struct {
+	Version    string     `json:"version,omitempty"`
+	VerifiedAt *time.Time `json:"verified_at,omitempty"`
+	CheckedAt  *time.Time `json:"checked_at,omitempty"`
+	Error      string     `json:"error,omitempty"`
+}
+
 // codexReleaseState 持久化在 settings（各实例各自检查，读写时按 merge 合并）；发布后只读，更新一律换新值。
 type codexReleaseState struct {
 	Desktop map[codexrelease.Platform]codexPlatformReleases `json:"desktop"`
 	CLI     []string                                        `json:"cli,omitempty"`
+	OS      map[codexrelease.Platform]codexOSRelease        `json:"os,omitempty"`
+}
+
+// platformDefaults 是预设未覆盖时的系统字段：系统版本取同步值，没同步成功过用写死值。
+func (s *codexReleaseState) platformDefaults(platform string) codexPlatformDefault {
+	defaults := codexPlatformDefaults[platform]
+	if s != nil {
+		if version := s.OS[codexrelease.Platform(platform)].Version; version != "" {
+			defaults.osVersion = version
+		}
+	}
+	return defaults
 }
 
 // desktopHistory 新的在前；无核验记录时用内置种子。
@@ -71,9 +91,19 @@ func (s *codexReleaseState) cliVersions() []string {
 	return versions
 }
 
-// merge 每个平台取构建更新的那份记录、CLI 取版本更新的那份：多实例各自检查、各自写回，
-// 合并后谁的结果都不会让版本倒退。
+// merge 每个平台取构建更新的那份记录、CLI 取版本更新的那份、系统版本取成功得更晚的那份：
+// 多实例各自检查、各自写回，合并后谁的结果都不会让版本倒退。
 func (s codexReleaseState) merge(other codexReleaseState) codexReleaseState {
+	osVersions := maps.Clone(s.OS)
+	for platform, entry := range other.OS {
+		if current := osVersions[platform]; entry.VerifiedAt != nil && (current.VerifiedAt == nil || entry.VerifiedAt.After(*current.VerifiedAt)) {
+			if osVersions == nil {
+				osVersions = map[codexrelease.Platform]codexOSRelease{}
+			}
+			osVersions[platform] = entry
+		}
+	}
+	s.OS = osVersions
 	desktop := maps.Clone(s.Desktop)
 	if desktop == nil {
 		desktop = map[codexrelease.Platform]codexPlatformReleases{}
@@ -120,7 +150,7 @@ func (p codexPlatformReleases) accept(next codexrelease.Release) (codexPlatformR
 	return p, nil
 }
 
-// CodexReleaseService 跟踪官方 Codex Desktop 发布（启动一次＋每 24h＋手动），并与全局预设一起
+// CodexReleaseService 跟踪官方 Codex Desktop 发布与三平台系统版本（启动一次＋每 24h＋手动），并与全局预设一起
 // 发布出站身份解析用的运行时。
 type CodexReleaseService struct {
 	settingRepo SettingRepository
@@ -245,6 +275,7 @@ func (s *CodexReleaseService) refresh() {
 		if s.ctx.Err() != nil {
 			return
 		}
+		s.refreshOSVersion(platform)
 	}
 	stored := s.storedReleases()
 	s.mu.Lock()
@@ -280,6 +311,38 @@ func (s *CodexReleaseService) check(platform codexrelease.Platform, previous cod
 	ctx, cancel := context.WithTimeout(s.ctx, codexReleaseCheckTimeout)
 	defer cancel()
 	return codexrelease.Check(ctx, s.client, platform, previous)
+}
+
+// refreshOSVersion 与 Desktop 发布同周期读系统版本；失败保留上次成功的值。
+func (s *CodexReleaseService) refreshOSVersion(platform codexrelease.Platform) {
+	s.mu.Lock()
+	entry := s.state.OS[platform]
+	s.mu.Unlock()
+	version, err := s.checkOSVersion(platform)
+	now := time.Now().UTC()
+	entry.CheckedAt, entry.Error = &now, ""
+	if err != nil {
+		entry.Error = err.Error()
+		slog.Warn("codex os version check failed", "platform", platform, "error", err)
+	} else {
+		entry.Version, entry.VerifiedAt = version, &now
+	}
+	s.mu.Lock()
+	osVersions := maps.Clone(s.state.OS)
+	if osVersions == nil {
+		osVersions = map[codexrelease.Platform]codexOSRelease{}
+	}
+	osVersions[platform] = entry
+	s.state.OS = osVersions
+	s.mu.Unlock()
+}
+
+// checkOSVersion 只发一个请求，超时用客户端自带的一分钟。
+func (s *CodexReleaseService) checkOSVersion(platform codexrelease.Platform) (string, error) {
+	if s.clientErr != nil {
+		return "", s.clientErr
+	}
+	return codexrelease.CheckOSVersion(s.ctx, s.client, platform, time.Now())
 }
 
 // reload 读全局预设、全局自定义 UA 与发布记录（其它实例的保存和检查结果一分钟内生效）。
@@ -371,6 +434,16 @@ type CodexPlatformReleaseStatus struct {
 	Error     string                 `json:"error,omitempty"`
 }
 
+type CodexOSVersionStatus struct {
+	OSType  string `json:"os_type"`
+	Version string `json:"version"`
+	// Synced 为 false 表示还没同步成功过，Version 是写死值；VerifiedAt 是 Version 最近一次同步成功的时刻。
+	Synced     bool       `json:"synced"`
+	VerifiedAt *time.Time `json:"verified_at,omitempty"`
+	CheckedAt  *time.Time `json:"checked_at,omitempty"`
+	Error      string     `json:"error,omitempty"`
+}
+
 type CodexClientProfileView struct {
 	Global    *CodexClientProfile        `json:"global"`
 	Effective CodexClientIdentityPreview `json:"effective"`
@@ -381,6 +454,7 @@ type CodexClientProfileView struct {
 	Refreshing    bool                                                 `json:"refreshing"`
 	Desktop       map[codexrelease.Platform]CodexPlatformReleaseStatus `json:"desktop"`
 	CLI           []string                                             `json:"cli"`
+	OS            map[codexrelease.Platform]CodexOSVersionStatus       `json:"os"`
 }
 
 func (s *CodexReleaseService) ClientProfileView() CodexClientProfileView {
@@ -399,6 +473,7 @@ func (s *CodexReleaseService) ClientProfileView() CodexClientProfileView {
 		MaxVersionLag: codexMaxVersionLag,
 		Refreshing:    s.running.Load(),
 		Desktop:       map[codexrelease.Platform]CodexPlatformReleaseStatus{},
+		OS:            map[codexrelease.Platform]CodexOSVersionStatus{},
 	}
 	var releases *codexReleaseState
 	if rt != nil {
@@ -411,7 +486,7 @@ func (s *CodexReleaseService) ClientProfileView() CodexClientProfileView {
 		view.Fallback.Source = "legacy_user_agent"
 	}
 	for _, platform := range []string{"macos", "windows", "linux"} {
-		defaults := codexPlatformDefaults[platform]
+		defaults := releases.platformDefaults(platform)
 		for _, client := range []string{"desktop", "cli"} {
 			profile := CodexClientProfile{Client: client, Platform: platform, VersionMode: "latest"}
 			view.Presets = append(view.Presets, CodexClientProfilePreset{
@@ -428,6 +503,15 @@ func (s *CodexReleaseService) ClientProfileView() CodexClientProfileView {
 		view.Desktop[platform] = CodexPlatformReleaseStatus{
 			Latest: releases.desktopHistory(platform)[0], Verified: len(entry.History) > 0,
 			History: entry.History, CheckedAt: entry.CheckedAt, Error: entry.Error,
+		}
+		var osEntry codexOSRelease
+		if releases != nil {
+			osEntry = releases.OS[platform]
+		}
+		defaults := releases.platformDefaults(string(platform))
+		view.OS[platform] = CodexOSVersionStatus{
+			OSType: defaults.osType, Version: defaults.osVersion, Synced: osEntry.Version != "",
+			VerifiedAt: osEntry.VerifiedAt, CheckedAt: osEntry.CheckedAt, Error: osEntry.Error,
 		}
 	}
 	view.CLI = releases.cliVersions()

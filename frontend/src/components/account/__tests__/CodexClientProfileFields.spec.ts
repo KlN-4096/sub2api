@@ -20,8 +20,8 @@ const SelectStub = defineComponent({
 })
 
 const presets = [
-  { profile: { client: 'desktop', platform: 'macos', versionMode: 'latest' }, originator: 'Codex Desktop', os_type: 'Mac OS', os_version: '15.7.1', arch: 'arm64', terminal: 'unknown' },
-  { profile: { client: 'cli', platform: 'linux', versionMode: 'latest' }, originator: 'codex_cli_rs', os_type: 'Linux', os_version: '6.8.0', arch: 'x86_64', terminal: 'unknown' },
+  { profile: { client: 'desktop', platform: 'macos', versionMode: 'latest' }, originator: 'Codex Desktop', os_type: 'Mac OS', os_version: '26.7.1', arch: 'arm64', terminal: 'unknown' },
+  { profile: { client: 'cli', platform: 'linux', versionMode: 'latest' }, originator: 'codex_cli_rs', os_type: 'Ubuntu', os_version: '26.4.0', arch: 'x86_64', terminal: 'unknown' },
 ]
 
 function mountFields(modelValue: unknown = null, extra: Record<string, unknown> = {}) {
@@ -43,7 +43,7 @@ describe('CodexClientProfileFields', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     previewCodexClientProfile.mockReset()
-    previewCodexClientProfile.mockResolvedValue({ user_agent: 'codex_exec/0.160.0 (Linux 6.8.0; x86_64) unknown (codex_exec; 0.160.0)' })
+    previewCodexClientProfile.mockResolvedValue({ user_agent: 'codex_exec/0.160.0 (Ubuntu 26.4.0; x86_64) unknown (codex_exec; 0.160.0)' })
   })
   afterEach(() => vi.useRealTimers())
 

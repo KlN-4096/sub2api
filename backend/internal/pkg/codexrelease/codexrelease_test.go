@@ -546,3 +546,140 @@ func TestCheckRejectsAMacOSZipOfTheWrongSize(t *testing.T) {
 	_, err := Check(context.Background(), server.officialClient(), MacOS, Release{})
 	require.Error(t, err)
 }
+
+// 夹具按 2026-10-24 的 endoflife.date v1 响应裁剪（只留用到的字段与有代表性的条目），并打乱了顺序：
+// 选取按发布日期，不能依赖表里新的在前。
+const (
+	osFeedMacOS = `{"result":{"releases":[
+		{"name":"15","releaseDate":"2024-09-16","isLts":false,"latest":{"name":"15.8.1"}},
+		{"name":"27","releaseDate":"2026-09-14","isLts":false,"latest":{"name":"27.0.1"}},
+		{"name":"26","releaseDate":"2025-09-15","isLts":false,"latest":{"name":"26.7.1"}}]}}`
+	osFeedWindows = `{"result":{"releases":[
+		{"name":"11-24h2-w","releaseDate":"2024-10-01","latest":{"name":"10.0.26100"}},
+		{"name":"11-26h2-e","releaseDate":"2026-09-29","latest":{"name":"10.0.26300"}},
+		{"name":"11-26h2-w","releaseDate":"2026-09-29","latest":{"name":"10.0.26300"}},
+		{"name":"11-26h1-w","releaseDate":"2026-02-10","latest":{"name":"10.0.28000"}},
+		{"name":"11-25h2-e","releaseDate":"2025-09-30","latest":{"name":"10.0.26200"}},
+		{"name":"11-25h2-w","releaseDate":"2025-09-30","latest":{"name":"10.0.26200"}},
+		{"name":"11-24h2-iot-lts","releaseDate":"2024-10-01","latest":{"name":"10.0.26100"}},
+		{"name":"10-22h2","releaseDate":"2022-10-18","latest":{"name":"10.0.19045"}}]}}`
+	osFeedUbuntu = `{"result":{"releases":[
+		{"name":"24.04","releaseDate":"2024-04-25","isLts":true,"latest":{"name":"24.04.5"}},
+		{"name":"26.10","releaseDate":"2026-10-15","isLts":false,"latest":{"name":"26.10"}},
+		{"name":"26.04","releaseDate":"2026-04-23","isLts":true,"latest":{"name":"26.04.1"}},
+		{"name":"25.10","releaseDate":"2025-10-09","isLts":false,"latest":{"name":"25.10"}}]}}`
+)
+
+func TestPickOSVersionFollowsSettledReleases(t *testing.T) {
+	today := time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC)
+	settled27 := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC) // 27 发布（09-14）满 60 天的那一刻
+	later := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		platform Platform
+		feed     string
+		now      time.Time
+		want     string
+	}{
+		{MacOS, osFeedMacOS, today, "26.7.1"}, // 27 才出 40 天：取上一代的最新补丁
+		{MacOS, osFeedMacOS, settled27.Add(-time.Second), "26.7.1"},
+		{MacOS, osFeedMacOS, settled27, "27.0.1"},     // 满 60 天当刻就跟新大版本
+		{Windows, osFeedWindows, today, "10.0.26200"}, // 26H2 未满期；26H1 只给新机型，不跟
+		{Windows, osFeedWindows, later, "10.0.26300"},
+		{Linux, osFeedUbuntu, today, "26.4.0"}, // 最新 LTS 的 VERSION_ID：不跟过渡版 26.10，不带点版本 .1
+		{Linux, osFeedUbuntu, later, "26.4.0"},
+	}
+	for _, tc := range cases {
+		got, err := pickOSVersion(tc.platform, []byte(tc.feed), tc.now)
+		require.NoError(t, err)
+		require.Equal(t, tc.want, got, "%s at %s", tc.platform, tc.now.Format(time.DateOnly))
+	}
+}
+
+func TestPickOSVersionRejectsUnusableFeeds(t *testing.T) {
+	now := time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC)
+	cases := map[string]struct {
+		platform Platform
+		feed     string
+		want     string
+	}{
+		"not json":              {MacOS, `<html></html>`, "macos feed:"},
+		"no releases":           {MacOS, `{"result":{"releases":[]}}`, "lists no releases"},
+		"nothing settled":       {MacOS, `{"result":{"releases":[{"name":"27","releaseDate":"2026-10-01","latest":{"name":"27.0.1"}}]}}`, "has been out 60 days"},
+		"patch of another":      {MacOS, `{"result":{"releases":[{"name":"26","releaseDate":"2025-09-15","latest":{"name":"62.7.1"}}]}}`, "unexpected macos version"},
+		"patch prefix only":     {MacOS, `{"result":{"releases":[{"name":"26","releaseDate":"2025-09-15","latest":{"name":"2.7.1"}}]}}`, "unexpected macos version"},
+		"patch without dot":     {MacOS, `{"result":{"releases":[{"name":"26","releaseDate":"2025-09-15","latest":{"name":"260.1"}}]}}`, "unexpected macos version"},
+		"no latest":             {MacOS, `{"result":{"releases":[{"name":"26","releaseDate":"2025-09-15"}]}}`, "has no latest version"},
+		"not a version":         {MacOS, `{"result":{"releases":[{"name":"26","releaseDate":"2025-09-15","latest":{"name":"26.7 (a)"}}]}}`, "unexpected macos version"},
+		"windows not 10.0.x":    {Windows, `{"result":{"releases":[{"name":"11-25h2-w","releaseDate":"2025-09-30","latest":{"name":"11.0.1"}}]}}`, "unexpected windows version"},
+		"windows no build":      {Windows, `{"result":{"releases":[{"name":"11-25h2-w","releaseDate":"2025-09-30","latest":{"name":"10.0"}}]}}`, "unexpected windows version"},
+		"windows major only":    {Windows, `{"result":{"releases":[{"name":"11-25h2-w","releaseDate":"2025-09-30","latest":{"name":"10"}}]}}`, "unexpected windows version"},
+		"no lts":                {Linux, `{"result":{"releases":[{"name":"25.10","releaseDate":"2025-10-09","isLts":false}]}}`, "has been out 60 days"},
+		"padded patch accepted": {MacOS, `{"result":{"releases":[{"name":"26","releaseDate":"2025-09-15","latest":{"name":" 26.7.1 "}}]}}`, ""},
+	}
+	for name, tc := range cases {
+		got, err := pickOSVersion(tc.platform, []byte(tc.feed), now)
+		if tc.want == "" {
+			require.NoError(t, err, name)
+			require.Equal(t, "26.7.1", got, name)
+			continue
+		}
+		require.ErrorContains(t, err, tc.want, name)
+	}
+}
+
+func TestOSInfoVersionMatchesOSInfoFormatting(t *testing.T) {
+	for raw, want := range map[string]string{"27": "27.0.0", "26.2": "26.2.0", "24.04": "24.4.0", "26.7.1": "26.7.1", "10.0.26200.6899": "10.0.26200"} {
+		got, ok := osInfoVersion(raw)
+		require.True(t, ok, raw)
+		require.Equal(t, want, got, raw)
+	}
+	for _, raw := range []string{"", "26.x", "26..1", "-1.0", "26.2 beta", "26.7 (a)"} {
+		_, ok := osInfoVersion(raw)
+		require.False(t, ok, raw)
+	}
+}
+
+func TestCheckOSVersionReadsTheProductFeed(t *testing.T) {
+	var requested []string
+	status, location, body := http.StatusOK, "", osFeedUbuntu
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Scheme != "https" || r.URL.Host != "endoflife.date" {
+			return nil, errors.New("unexpected destination " + r.URL.String())
+		}
+		requested = append(requested, r.URL.Path)
+		header := http.Header{}
+		if location != "" {
+			header.Set("Location", location)
+		}
+		return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	})}
+	now := time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC)
+	got, err := CheckOSVersion(context.Background(), client, Linux, now)
+	require.NoError(t, err)
+	require.Equal(t, "26.4.0", got)
+	require.Equal(t, []string{"/api/v1/products/ubuntu/"}, requested)
+
+	status, location = http.StatusFound, "https://example.com/feed"
+	_, err = CheckOSVersion(context.Background(), client, Linux, now)
+	require.ErrorContains(t, err, "status 302", "redirects are never followed")
+
+	status, location, body = http.StatusOK, "", `{"result":{"releases":[]},"pad":"`+strings.Repeat("x", maxOSFeedBytes)+`"}`
+	_, err = CheckOSVersion(context.Background(), client, Linux, now)
+	require.ErrorContains(t, err, "ubuntu feed exceeds")
+}
+
+// 官方安装包与 appcast 同样不跟随重定向，也不改调用方传进来的客户端。
+func TestCheckDoesNotFollowRedirects(t *testing.T) {
+	for _, platform := range []Platform{MacOS, Windows, Linux} {
+		requests := 0
+		client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			requests++
+			header := http.Header{"Location": []string{"https://" + officialHost + "/elsewhere"}}
+			return &http.Response{StatusCode: http.StatusFound, Header: header, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+		})}
+		_, err := Check(context.Background(), client, platform, Release{})
+		require.ErrorContains(t, err, "302", platform)
+		require.Equal(t, 1, requests, platform)
+		require.Nil(t, client.CheckRedirect, "the caller's client is not modified")
+	}
+}

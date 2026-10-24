@@ -38,5 +38,9 @@ export default {
     save: 'Save identity',
     saved: 'Codex client identity saved',
     cliHistory: 'CLI versions',
+    osVersions: 'OS versions',
+    osVersionsDescription: 'Checked with the official releases, from endoflife.date, each taking the newest release that has been out for 60 days: the macOS major release (with its latest patch), the Windows 11 H2 feature update and the Ubuntu LTS. An OS version set in a preset wins; built-in values apply until a sync succeeds.',
+    osBuiltin: 'built-in value, not synced yet',
+    syncedAt: 'synced {time}',
   },
 }

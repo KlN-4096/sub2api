@@ -31,11 +31,16 @@ function view(overrides: Record<string, unknown> = {}) {
     global: null,
     effective: { user_agent: 'Codex Desktop/0.163.0-alpha.11.2', originator: 'Codex Desktop', version: '0.163.0-alpha.11.2', source: 'builtin' },
     fallback: { user_agent: 'Codex Desktop/0.163.0-alpha.11.2', originator: 'Codex Desktop', version: '0.163.0-alpha.11.2', source: 'builtin' },
-    presets: [{ profile: { client: 'cli', platform: 'linux', versionMode: 'latest' }, originator: 'codex_cli_rs', os_type: 'Linux', os_version: '6.8.0', arch: 'x86_64', terminal: 'unknown' }],
+    presets: [{ profile: { client: 'cli', platform: 'linux', versionMode: 'latest' }, originator: 'codex_cli_rs', os_type: 'Ubuntu', os_version: '26.4.0', arch: 'x86_64', terminal: 'unknown' }],
     max_version_lag: 10,
     refreshing: false,
     desktop: { macos: { latest: release, verified: true, history: [release] }, windows: { latest: release, verified: false, history: null }, linux: { latest: release, verified: false, history: null } },
     cli: ['0.163.0'],
+    os: {
+      macos: { os_type: 'Mac OS', version: '26.7.1', synced: false },
+      windows: { os_type: 'Windows', version: '10.0.26200', synced: false },
+      linux: { os_type: 'Ubuntu', version: '26.4.0', synced: false },
+    },
     ...overrides,
   }
 }
@@ -57,6 +62,30 @@ describe('CodexClientProfileSettings', () => {
     await wrapper.find('[data-testid="codex-profile-save"]').trigger('click')
     await flushPromises()
     expect(api.updateCodexClientProfile).toHaveBeenCalledWith({ client: 'cli', platform: 'linux', versionMode: 'latest' })
+  })
+
+  it('shows the synced OS versions, how old they are and why a sync failed', async () => {
+    api.getCodexClientProfile.mockResolvedValue(view({
+      os: {
+        macos: { os_type: 'Mac OS', version: '27.0.1', synced: true, verified_at: '2026-12-01T00:00:00Z', checked_at: '2026-12-01T00:00:00Z' },
+        windows: { os_type: 'Windows', version: '10.0.26200', synced: false, checked_at: '2026-12-01T00:00:00Z', error: 'feed down' },
+        linux: { os_type: 'Ubuntu', version: '26.4.0', synced: true, verified_at: '2026-11-01T00:00:00Z', checked_at: '2026-12-01T00:00:00Z', error: 'feed down' },
+      },
+    }))
+    const wrapper = mount(CodexClientProfileSettings, { global: { stubs: { Select: SelectStub } } })
+    await flushPromises()
+    const macos = wrapper.find('[data-testid="codex-os-macos"]').text()
+    expect(macos).toContain('Mac OS 27.0.1')
+    expect(macos).toContain('admin.codexClientProfile.syncedAt')
+    expect(macos).not.toContain('admin.codexClientProfile.checkedAt')
+    expect(macos).not.toContain('admin.codexClientProfile.osBuiltin')
+    const windows = wrapper.find('[data-testid="codex-os-windows"]').text()
+    expect(windows).toContain('admin.codexClientProfile.osBuiltin')
+    expect(windows).toContain('admin.codexClientProfile.checkedAt')
+    expect(windows).toContain('feed down')
+    const linux = wrapper.find('[data-testid="codex-os-linux"]').text()
+    expect(linux).toContain('admin.codexClientProfile.syncedAt')
+    expect(linux).toContain('admin.codexClientProfile.checkedAt')
   })
 
   it('keeps Enter in its inputs from submitting the settings form', async () => {

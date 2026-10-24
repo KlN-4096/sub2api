@@ -45,10 +45,12 @@ type CodexClientProfile struct {
 
 type codexPlatformDefault struct{ osType, osVersion, arch string }
 
+// codexPlatformDefaults 的系统版本只在还没同步成功过时用（同步见 codexrelease.CheckOSVersion），
+// 取值是 2026-10-24 按同步规则算出的结果；Linux 按真机 os_info 报发行版 Ubuntu。
 var codexPlatformDefaults = map[string]codexPlatformDefault{
-	"macos":   {"Mac OS", "15.7.1", "arm64"},
-	"windows": {"Windows", "10.0.26100", "x86_64"},
-	"linux":   {"Linux", "6.8.0", "x86_64"},
+	"macos":   {"Mac OS", "26.7.1", "arm64"},
+	"windows": {"Windows", "10.0.26200", "x86_64"},
+	"linux":   {"Ubuntu", "26.4.0", "x86_64"},
 }
 
 var codexBuiltinClientProfile = CodexClientProfile{Client: "desktop", Platform: "macos", VersionMode: "latest"}
@@ -155,7 +157,7 @@ func (p *CodexClientProfile) originator() string {
 // Desktop 追加 `(Codex Desktop; {应用版本})`，exec 追加 `(codex_exec; {core})`；version 头 = core。
 func (p *CodexClientProfile) identity(releases *codexReleaseState) codexOutboundIdentity {
 	core, app := p.versions(releases)
-	defaults := codexPlatformDefaults[p.Platform]
+	defaults := releases.platformDefaults(p.Platform)
 	originator := p.originator()
 	ua := fmt.Sprintf("%s/%s (%s %s; %s) %s", originator, core,
 		firstNonEmpty(p.OSType, defaults.osType), firstNonEmpty(p.OSVersion, defaults.osVersion),

@@ -50,6 +50,22 @@
           <span class="font-mono">{{ view.cli.join(' · ') }}</span>
         </li>
       </ul>
+      <p class="mt-3 text-sm font-medium text-gray-700 dark:text-gray-300">{{ t('admin.codexClientProfile.osVersions') }}</p>
+      <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.codexClientProfile.osVersionsDescription') }}</p>
+      <ul class="mt-2 space-y-1 text-xs">
+        <li v-for="platform in platforms" :key="platform" class="flex flex-wrap gap-x-2" :data-testid="`codex-os-${platform}`">
+          <span class="w-16 font-medium text-gray-700 dark:text-gray-300">{{ t(`admin.codexClientProfile.platform.${platform}`) }}</span>
+          <span class="font-mono">{{ view.os[platform].os_type }} {{ view.os[platform].version }}</span>
+          <span v-if="!view.os[platform].synced" class="text-amber-600 dark:text-amber-400">{{ t('admin.codexClientProfile.osBuiltin') }}</span>
+          <span v-if="view.os[platform].verified_at" class="text-gray-500 dark:text-gray-400">
+            {{ t('admin.codexClientProfile.syncedAt', { time: formatTime(view.os[platform].verified_at) }) }}
+          </span>
+          <span v-if="view.os[platform].error && view.os[platform].checked_at" class="text-gray-500 dark:text-gray-400">
+            {{ t('admin.codexClientProfile.checkedAt', { time: formatTime(view.os[platform].checked_at) }) }}
+          </span>
+          <span v-if="view.os[platform].error" class="break-all text-red-600 dark:text-red-400">{{ view.os[platform].error }}</span>
+        </li>
+      </ul>
     </div>
   </div>
 </template>

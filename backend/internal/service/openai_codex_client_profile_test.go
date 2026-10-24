@@ -51,7 +51,7 @@ func TestCodexClientProfileIdentityShapes(t *testing.T) {
 			name:    "desktop_latest",
 			profile: CodexClientProfile{Client: "desktop", Platform: "macos", VersionMode: "latest"},
 			want: codexOutboundIdentity{
-				userAgent:  "Codex Desktop/0.164.0-alpha.2 (Mac OS 15.7.1; arm64) unknown (Codex Desktop; 26.1020.10000)",
+				userAgent:  "Codex Desktop/0.164.0-alpha.2 (Mac OS 26.7.1; arm64) unknown (Codex Desktop; 26.1020.10000)",
 				originator: "Codex Desktop", version: "0.164.0-alpha.2",
 			},
 		},
@@ -59,7 +59,7 @@ func TestCodexClientProfileIdentityShapes(t *testing.T) {
 			name:    "desktop_lag_beyond_history_takes_oldest",
 			profile: CodexClientProfile{Client: "desktop", Platform: "macos", VersionMode: "latest", VersionLag: 5},
 			want: codexOutboundIdentity{
-				userAgent:  "Codex Desktop/0.163.0-alpha.11.2 (Mac OS 15.7.1; arm64) unknown (Codex Desktop; 26.1016.62342)",
+				userAgent:  "Codex Desktop/0.163.0-alpha.11.2 (Mac OS 26.7.1; arm64) unknown (Codex Desktop; 26.1016.62342)",
 				originator: "Codex Desktop", version: "0.163.0-alpha.11.2",
 			},
 		},
@@ -67,7 +67,7 @@ func TestCodexClientProfileIdentityShapes(t *testing.T) {
 			name:    "desktop_without_verified_history_uses_seed",
 			profile: CodexClientProfile{Client: "desktop", Platform: "linux", VersionMode: "latest"},
 			want: codexOutboundIdentity{
-				userAgent:  "Codex Desktop/0.163.0-alpha.11.1 (Linux 6.8.0; x86_64) unknown (Codex Desktop; 26.1016.61520)",
+				userAgent:  "Codex Desktop/0.163.0-alpha.11.1 (Ubuntu 26.4.0; x86_64) unknown (Codex Desktop; 26.1016.61520)",
 				originator: "Codex Desktop", version: "0.163.0-alpha.11.1",
 			},
 		},
@@ -75,14 +75,14 @@ func TestCodexClientProfileIdentityShapes(t *testing.T) {
 			name:    "cli_core_follows_live_cli_version",
 			profile: CodexClientProfile{Client: "cli", Platform: "windows", VersionMode: "latest"},
 			want: codexOutboundIdentity{
-				userAgent: "codex_cli_rs/0.164.0 (Windows 10.0.26100; x86_64) unknown", originator: "codex_cli_rs", version: "0.164.0",
+				userAgent: "codex_cli_rs/0.164.0 (Windows 10.0.26200; x86_64) unknown", originator: "codex_cli_rs", version: "0.164.0",
 			},
 		},
 		{
 			name:    "cli_lag_walks_observed_history",
 			profile: CodexClientProfile{Client: "cli", Platform: "windows", VersionMode: "latest", VersionLag: 2},
 			want: codexOutboundIdentity{
-				userAgent: "codex_cli_rs/0.162.0 (Windows 10.0.26100; x86_64) unknown", originator: "codex_cli_rs", version: "0.162.0",
+				userAgent: "codex_cli_rs/0.162.0 (Windows 10.0.26200; x86_64) unknown", originator: "codex_cli_rs", version: "0.162.0",
 			},
 		},
 		{
@@ -174,7 +174,7 @@ func TestCodexAccountProfileDrivesEnforcedHeaders(t *testing.T) {
 	h.Set("user-agent", "curl/8")
 	h.Set("originator", "whatever")
 	enforceCodexClientIdentityHeaders(h, account, account)
-	require.Equal(t, "Codex Desktop/0.163.0-alpha.11.2 (Mac OS 15.7.1; arm64) unknown (Codex Desktop; 26.1016.62342)", h.Get("user-agent"),
+	require.Equal(t, "Codex Desktop/0.163.0-alpha.11.2 (Mac OS 26.7.1; arm64) unknown (Codex Desktop; 26.1016.62342)", h.Get("user-agent"),
 		"the profile wins over the account's custom UA and the Desktop trailer keeps the app version")
 	require.Equal(t, "Codex Desktop", h.Get("originator"))
 	require.Equal(t, "0.163.0-alpha.11.2", h.Get("version"))

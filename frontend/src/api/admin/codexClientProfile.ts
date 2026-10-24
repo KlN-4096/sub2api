@@ -45,6 +45,16 @@ export interface CodexPlatformReleaseStatus {
   error?: string
 }
 
+export interface CodexOSVersionStatus {
+  os_type: string
+  version: string
+  /** false 表示还没同步成功过，version 是内置值；verified_at 是 version 最近一次同步成功的时刻。 */
+  synced: boolean
+  verified_at?: string
+  checked_at?: string
+  error?: string
+}
+
 export interface CodexClientProfileView {
   global: CodexClientProfile | null
   effective: CodexClientIdentityPreview
@@ -54,6 +64,7 @@ export interface CodexClientProfileView {
   refreshing: boolean
   desktop: Record<'macos' | 'windows' | 'linux', CodexPlatformReleaseStatus>
   cli: string[]
+  os: Record<'macos' | 'windows' | 'linux', CodexOSVersionStatus>
 }
 
 const base = '/admin/settings/codex-client-profile'
