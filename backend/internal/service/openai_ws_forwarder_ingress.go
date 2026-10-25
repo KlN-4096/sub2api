@@ -1059,7 +1059,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		responseID := ""
 		usage := OpenAIUsage{}
 		imageCounter := newOpenAIImageOutputCounter()
-		var firstTokenMs *int
+		var firstFrame openAIFirstFrame
 		reqStream := openAIWSPayloadBoolFromRaw(payload, "stream", true)
 		turnPreviousResponseID := openAIWSPayloadStringFromRaw(payload, "previous_response_id")
 		turnPreviousResponseIDKind := ClassifyOpenAIPreviousResponseIDKind(turnPreviousResponseID)
@@ -1102,6 +1102,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 
 			eventType, eventResponseID, _ := parseOpenAIWSEventEnvelope(upstreamMessage)
 			responseModelObserver.ObserveOpenAI(upstreamMessage, eventType)
+			firstFrame.observeEvent(eventType, turnStart)
 			if responseID == "" && eventResponseID != "" {
 				responseID = eventResponseID
 			}
@@ -1228,10 +1229,6 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if isTerminalEvent {
 				terminalEventCount++
 			}
-			if firstTokenMs == nil && isTokenEvent {
-				ms := int(time.Since(turnStart).Milliseconds())
-				firstTokenMs = &ms
-			}
 			imageCounter.AddSSEData(upstreamMessage)
 
 			if !clientDisconnected {
@@ -1292,8 +1289,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					lease.MarkBroken()
 				}
 				firstTokenMsValue := -1
-				if firstTokenMs != nil {
-					firstTokenMsValue = *firstTokenMs
+				if firstFrame.ms != nil {
+					firstTokenMsValue = *firstFrame.ms
 				}
 				if debugEnabled {
 					logOpenAIWSModeDebug(
@@ -1329,7 +1326,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					UpstreamTerminalEvent:         terminalEvent,
 					ResponseHeaders:               lease.HandshakeHeaders(),
 					Duration:                      time.Since(turnStart),
-					FirstTokenMs:                  firstTokenMs,
+					FirstTokenMs:                  firstFrame.ms,
 				}
 				replayInput := replayCollector.Items()
 				if account.IsOpenAIOAuthLike() && lease.initializedWithoutWebSearch() {
