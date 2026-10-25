@@ -397,7 +397,7 @@ export default {
     latencyDuration: 'Total',
     outputTps: 'Output TPS',
     outputTpsHint: 'Output tokens divided by total duration, including first-token wait, in tok/s. Output tokens may include reasoning tokens.',
-    tpsDescription: 'End-to-end output tokens/second: output tokens ÷ total time (including the first-token wait), for streaming and non-streaming alike; output tokens may include reasoning tokens. Unavailable when data is insufficient or not applicable.',
+    tpsDescription: 'Answer tokens/second: (output − reasoning) tokens ÷ time from the first answer token to the end; reasoning, including summaries, does not count as answer, and the wait before the first answer is not timed. Records without reasoning counts or first-answer timing (older, non-streaming, WebSocket, safety-buffered, etc.) use output tokens ÷ total time. Unavailable when data is insufficient or not applicable.',
     time: 'Time',
     ws: 'WS',
     stream: 'Stream',

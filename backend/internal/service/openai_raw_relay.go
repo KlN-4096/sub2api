@@ -531,6 +531,8 @@ type openAIRawRelayOutcome struct {
 	usage        OpenAIUsage
 	responseID   string
 	firstTokenMs *int
+	firstAnswer  openAIFirstAnswer
+	endedAt      time.Time // 最后一个终止事件的时刻；CPR 发完终止事件后关连接的时延不算用时
 	imageCount   int
 	imageSizes   []string
 	clientGone   bool
@@ -609,6 +611,10 @@ func (s *OpenAIGatewayService) observeOpenAIRawSSELine(
 		ms := int(time.Since(startTime).Milliseconds())
 		out.firstTokenMs = &ms
 	}
+	out.firstAnswer.observe(data, effective, startTime)
+	if openAIStreamEventTypeIsTerminal(effective) {
+		out.endedAt = time.Now()
+	}
 	s.parseSSEUsageBytesWithType(payload, effective, &out.usage)
 	if effective == "response.failed" || effective == "error" {
 		if hit, code, msg := detectOpenAICyberPolicy(payload); hit {
@@ -664,6 +670,10 @@ func (s *OpenAIGatewayService) openAIRawRelayResult(c *gin.Context, resp *http.R
 	if sentModel != reqModel {
 		upstreamModel = sentModel
 	}
+	duration := time.Since(startTime)
+	if !relay.endedAt.IsZero() {
+		duration = relay.endedAt.Sub(startTime)
+	}
 	result := &OpenAIForwardResult{
 		RequestID:                     resp.Header.Get("x-request-id"),
 		UpstreamHeaders:               resp.Header,
@@ -677,8 +687,9 @@ func (s *OpenAIGatewayService) openAIRawRelayResult(c *gin.Context, resp *http.R
 		ServiceTier:                   resolvedOpenAIUpstreamServiceTier(c, extractOpenAIServiceTierFromBody(plainBody)),
 		ReasoningEffort:               extractOpenAIReasoningEffortFromBody(plainBody, sentModel),
 		Stream:                        gjson.GetBytes(plainBody, "stream").Bool(),
-		Duration:                      time.Since(startTime),
+		Duration:                      duration,
 		FirstTokenMs:                  relay.firstTokenMs,
+		FirstAnswerMs:                 relay.firstAnswer.ms,
 	}
 	if relay.imageCount > 0 {
 		result.ImageCount = relay.imageCount

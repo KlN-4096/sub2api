@@ -29,6 +29,7 @@ import (
 type openaiStreamingResult struct {
 	usage            *OpenAIUsage
 	firstTokenMs     *int
+	firstAnswerMs    *int
 	responseID       string
 	imageCount       int
 	imageOutputSizes []string
@@ -123,6 +124,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		maxLineSize = s.cfg.Gateway.MaxLineSize
 	}
 	var firstTokenMs *int
+	var firstAnswer openAIFirstAnswer
 	ttftMode := s.openAITTFTMode(ctx)
 	firstOutputProgressObserved := false
 	bufferedWriter := bufio.NewWriterSize(w, 4*1024)
@@ -358,6 +360,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		return &openaiStreamingResult{
 			usage:            usage,
 			firstTokenMs:     firstTokenMs,
+			firstAnswerMs:    firstAnswer.ms,
 			responseID:       responseID,
 			imageCount:       imageCounter.Count(),
 			imageOutputSizes: imageCounter.Sizes(),
@@ -734,6 +737,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				firstTokenMs = &ms
 				stopFirstOutputTimer()
 			}
+			firstAnswer.observe(data, eventType, startTime)
 			s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
 			return
 		}
@@ -1282,6 +1286,9 @@ func mergeOpenAIUsageNonZero(dst *OpenAIUsage, src OpenAIUsage) {
 	if src.ImageOutputTokens > 0 {
 		dst.ImageOutputTokens = src.ImageOutputTokens
 	}
+	if src.ReasoningTokens != nil {
+		dst.ReasoningTokens = src.ReasoningTokens
+	}
 }
 
 func openAIUsageHasTokens(usage *OpenAIUsage) bool {
@@ -1566,6 +1573,7 @@ func openAIUsageFromGJSON(value gjson.Result) (OpenAIUsage, bool) {
 		CacheCreationInputTokens: cacheCreationTokens,
 		CacheReadInputTokens:     cacheReadTokens,
 		ImageOutputTokens:        int(imageOutputTokens),
+		ReasoningTokens:          openAIReasoningTokensFromGJSON(value),
 	}, true
 }
 

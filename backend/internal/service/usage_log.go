@@ -201,6 +201,9 @@ type UsageLog struct {
 	FirstTokenMs       *int
 	UserAgent          *string
 	IPAddress          *string
+	// FirstAnswerMs / ReasoningTokens 供使用记录按可见输出算 TPS（openai_usage_answer.go）。
+	FirstAnswerMs   *int
+	ReasoningTokens *int
 	// SessionID is the explicit client-provided request correlation identifier
 	// (e.g. the session_id / X-Session-Id headers). Nil when the client sent no
 	// valid session header. It is never derived from prompt_cache_key or content.
