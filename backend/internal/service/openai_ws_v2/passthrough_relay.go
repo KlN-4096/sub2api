@@ -111,6 +111,7 @@ type relayState struct {
 	requestModelMu          sync.RWMutex
 	requestModel            string
 	pendingTurnStart        atomic.Pointer[time.Time]
+	pendingTurnFrameAt      time.Time
 	lastResponseID          string
 	lastResponseModel       string
 	lastResponseServiceTier string
@@ -612,7 +613,7 @@ func runUpstreamToClient(
 			// disconnect guard would turn an already-delivered terminal into a false
 			// missing-terminal failure when the upstream closes normally.
 			if isTerminalEvent(strings.TrimSpace(gjson.GetBytes(payload, "type").String())) {
-				state.consumePendingTurnStartedAt()
+				state.dropPendingTurnStart()
 				openAIWSRelayDiscardActiveTurnTiming(state)
 			}
 		}
@@ -772,8 +773,9 @@ func observeUpstreamMessage(
 		responseID = strings.TrimSpace(values[3].String())
 	}
 	now := nowFn()
+	state.notePendingTurnFrame(eventType, responseID, now)
 
-	if state.firstTokenMs == nil && isTokenEvent(eventType) {
+	if state.firstTokenMs == nil && IsResponseFrameEvent(eventType) {
 		ms := int(now.Sub(startAt).Milliseconds())
 		if ms >= 0 {
 			state.firstTokenMs = &ms
@@ -794,7 +796,7 @@ func observeUpstreamMessage(
 	var turnTiming *relayTurnTiming
 	if responseID != "" {
 		turnTiming = openAIWSRelayGetOrInitTurnTiming(state, responseID, now)
-		if turnTiming != nil && turnTiming.firstTokenMs == nil && isTokenEvent(eventType) {
+		if turnTiming != nil && turnTiming.firstTokenMs == nil && IsResponseFrameEvent(eventType) {
 			ms := int(now.Sub(turnTiming.startAt).Milliseconds())
 			if ms >= 0 {
 				turnTiming.firstTokenMs = &ms
@@ -881,7 +883,7 @@ func finalizeObservedRelayTerminal(state *relayState, observed observedUpstreamE
 			observed.firstToken = openAIWSRelayCloneIntPtr(turnTiming.firstTokenMs)
 		}
 	} else {
-		state.consumePendingTurnStartedAt()
+		state.dropPendingTurnStart()
 		openAIWSRelayDiscardActiveTurnTiming(state)
 	}
 	return observed
@@ -1002,7 +1004,7 @@ func openAIWSRelayGetOrInitTurnTiming(state *relayState, responseID string, now 
 		if startAt.IsZero() {
 			startAt = now
 		}
-		timing = &relayTurnTiming{startAt: startAt}
+		timing = &relayTurnTiming{startAt: startAt, firstTokenMs: state.takePendingTurnFirstToken(startAt)}
 		state.turnTimingByID[responseID] = timing
 		state.activeTurn = timing
 		return timing
