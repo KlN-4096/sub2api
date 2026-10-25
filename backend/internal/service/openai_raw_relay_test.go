@@ -136,24 +136,28 @@ func TestOpenAIRawRelayForwardsWireBytesAndHeadersVerbatim(t *testing.T) {
 	require.Equal(t, "ts-minted", *usageCodexTurnStatePtr(result.UpstreamHeaders))
 }
 
-// CPR 走 ChatGPT WS 上游时先转来不含输出的传输帧（2026-10-23 pro1-cpr 诊断轨迹：codex.response.metadata
-// 574ms 就提交了响应，response.output_item.added 4992ms 才到），首字落在第一个模型输出事件。
-func TestOpenAIRawRelayTTFTSkipsWebSocketTransportFrames(t *testing.T) {
+// CPR 走 ChatGPT WS 上游时先转来 codex.response.metadata（早于 response.created），首字就记它：
+// sub2api 的首字统一记第一个响应帧，keepalive、error 不算。
+func TestOpenAIRawRelayTTFTCountsFirstResponseFrame(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	var out openAIRawRelayOutcome
 	observer, images, eventType := &upstreamResponseModelObserver{}, newOpenAIImageOutputCounter(), ""
+	start := time.Now().Add(-time.Second)
 	feed := func(event, data string) {
 		for _, line := range []string{"event: " + event, "data: " + data, ""} {
-			eventType = svc.observeOpenAIRawSSELine(c, &out, observer, images, []byte(line+"\n"), eventType, OpenAITTFTModeSemantic, time.Now())
+			eventType = svc.observeOpenAIRawSSELine(c, &out, observer, images, []byte(line+"\n"), eventType, start)
 		}
 	}
-	for _, event := range []string{"codex.response.metadata", "response.metadata", "codex.rate_limits", "responsesapi.websocket_timing", "response.created", "response.in_progress"} {
-		feed(event, `{"type":"`+event+`"}`)
-		require.Nil(t, out.firstTokenMs, event)
-	}
-	feed("response.output_item.added", `{"type":"response.output_item.added","item":{"type":"reasoning","summary":[]}}`)
-	require.NotNil(t, out.firstTokenMs)
+	feed("keepalive", `{"type":"keepalive"}`)
+	feed("error", `{"type":"error","error":{"message":"transient"}}`)
+	require.Nil(t, out.firstFrame.ms)
+	feed("codex.response.metadata", `{"type":"codex.response.metadata"}`)
+	require.NotNil(t, out.firstFrame.ms)
+	first := *out.firstFrame.ms
+	require.GreaterOrEqual(t, first, 1000)
+	feed("response.created", `{"type":"response.created","response":{"id":"resp_frame"}}`)
+	require.Equal(t, first, *out.firstFrame.ms, "只记第一帧")
 }
 
 func TestOpenAIRawRelayPatchesOnlyPolicyFields(t *testing.T) {

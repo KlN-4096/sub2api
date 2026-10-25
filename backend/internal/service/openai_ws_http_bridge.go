@@ -650,7 +650,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	responseID := ""
 	usage := OpenAIUsage{}
 	imageCounter := newOpenAIImageOutputCounter()
-	var firstTokenMs *int
+	var firstFrame openAIFirstFrame
 	reqStream := openAIWSPayloadBoolFromRaw(body, "stream", true)
 	eventCount := 0
 	tokenEventCount := 0
@@ -699,7 +699,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			UpstreamTerminalEvent:         upstreamTerminalEvent,
 			ResponseHeaders:               cloneHeader(resp.Header),
 			Duration:                      time.Since(turnStart),
-			FirstTokenMs:                  firstTokenMs,
+			FirstTokenMs:                  firstFrame.ms,
 		}
 		if replayInput := replayCollector.Items(); len(replayInput) > 0 {
 			result.wsReplayInput = replayInput
@@ -790,6 +790,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		}
 		eventType, eventResponseID, _ := parseOpenAIWSEventEnvelope(upstreamMessage)
 		responseModelObserver.ObserveOpenAI(upstreamMessage, eventType)
+		firstFrame.observeEvent(eventType, turnStart)
 		if responseID == "" && eventResponseID != "" {
 			responseID = eventResponseID
 		}
@@ -802,10 +803,6 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		}
 		if isOpenAIWSTokenEvent(eventType) {
 			tokenEventCount++
-			if firstTokenMs == nil {
-				ms := int(time.Since(turnStart).Milliseconds())
-				firstTokenMs = &ms
-			}
 		}
 		if openAIWSMessageShouldParseUsage(eventType, upstreamMessage) {
 			parseOpenAIWSResponseUsageFromCompletedEvent(upstreamMessage, &usage)
@@ -980,8 +977,8 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			}
 			terminalEventCount++
 			firstTokenMsValue := -1
-			if firstTokenMs != nil {
-				firstTokenMsValue = *firstTokenMs
+			if firstFrame.ms != nil {
+				firstTokenMsValue = *firstFrame.ms
 			}
 			logOpenAIWSModeInfo(
 				"ingress_ws_http_bridge_turn_completed account_id=%d turn=%d response_id=%s payload_bytes=%d duration_ms=%d events=%d token_events=%d terminal_events=%d first_event=%s last_event=%s first_token_ms=%d client_disconnected=%v",

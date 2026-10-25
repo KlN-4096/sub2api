@@ -279,8 +279,8 @@
               <span v-else class="text-right tabular-nums text-gray-400 dark:text-gray-500">-</span>
               <span class="text-gray-400 dark:text-gray-500">{{ t('usage.latencyDuration') }}</span>
               <span class="text-right font-medium tabular-nums" :class="LATENCY_TEXT_CLASSES[durationSeverity(row.duration_ms ?? 0)]">{{ formatDuration(row.duration_ms) }}</span>
-              <span class="cursor-help text-gray-400 dark:text-gray-500" :title="t('usage.tpsDescription')">TPS</span>
-              <span data-testid="usage-tps" class="text-right font-medium tabular-nums text-gray-600 dark:text-gray-300" :title="t('usage.tpsDescription')">{{ formatUsageTps(row) }}</span>
+              <span class="cursor-help text-gray-400 dark:text-gray-500" :title="t('usage.outputTpsHint')">{{ t('usage.outputTps') }}</span>
+              <span data-testid="usage-tps" class="text-right font-medium tabular-nums text-gray-600 dark:text-gray-300" :title="t('usage.outputTpsHint')">{{ formatUsageTps(row) }}</span>
             </div>
           </div>
         </template>
