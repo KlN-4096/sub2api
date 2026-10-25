@@ -38,10 +38,11 @@ func TestPrepareUsageLogInsert_SessionIDArgWiring(t *testing.T) {
 	require.Len(t, prepared.args, len(usageLogInsertArgTypes),
 		"prepared args must match the arg-type table length")
 
-	// 尾部顺序：session_id, native_compaction_v2, turn_state, turn_state_overridden,
+	// 尾部顺序：session_id, native_compaction_v2, cache buckets ×2, turn_state, turn_state_overridden,
 	// turn_state_source, turn_state_sent, safety_buffering ×2, route_gateway, route_pair,
-	// route_pair_overridden, route_pair_pool_gateway, route_pair_pool_version, created_at
-	sessionArg := prepared.args[len(prepared.args)-16]
+	// route_pair_overridden, route_pair_pool_gateway, route_pair_pool_version,
+	// first_answer_ms, reasoning_tokens, created_at
+	sessionArg := prepared.args[len(prepared.args)-18]
 	ns, ok := sessionArg.(sql.NullString)
 	require.True(t, ok, "session_id arg should be a sql.NullString, got %T", sessionArg)
 	require.True(t, ns.Valid)
