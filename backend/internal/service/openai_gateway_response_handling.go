@@ -29,6 +29,7 @@ import (
 type openaiStreamingResult struct {
 	usage            *OpenAIUsage
 	firstTokenMs     *int
+	firstAnswerMs    *int
 	responseID       string
 	imageCount       int
 	imageOutputSizes []string
@@ -123,6 +124,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		maxLineSize = s.cfg.Gateway.MaxLineSize
 	}
 	var firstTokenMs *int
+	var firstAnswer openAIFirstAnswer
+	var firstFrame openAIFirstFrame
 	ttftMode := s.openAITTFTMode(ctx)
 	firstOutputProgressObserved := false
 	bufferedWriter := bufio.NewWriterSize(w, 4*1024)
@@ -357,7 +360,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	resultWithUsage := func() *openaiStreamingResult {
 		return &openaiStreamingResult{
 			usage:            usage,
-			firstTokenMs:     firstTokenMs,
+			firstTokenMs:     firstFrame.ms,
+			firstAnswerMs:    firstAnswer.ms,
 			responseID:       responseID,
 			imageCount:       imageCounter.Count(),
 			imageOutputSizes: imageCounter.Sizes(),
@@ -507,6 +511,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				suppressCurrentEvent = true
 			}
 			observer.ObserveOpenAI(dataBytes, eventType)
+			firstFrame.observe(data, eventType, startTime)
 			// 初始上游 data 的 type 只解析一次：原始值保持终止事件的精确匹配，规范化值供后续分支复用。
 			if openAIStreamEventIsTerminalWithType(data, eventType) {
 				sawTerminalEvent = true
@@ -734,6 +739,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				firstTokenMs = &ms
 				stopFirstOutputTimer()
 			}
+			firstAnswer.observe(data, eventType, startTime)
 			s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
 			return
 		}
@@ -1282,6 +1288,9 @@ func mergeOpenAIUsageNonZero(dst *OpenAIUsage, src OpenAIUsage) {
 	if src.ImageOutputTokens > 0 {
 		dst.ImageOutputTokens = src.ImageOutputTokens
 	}
+	if src.ReasoningTokens != nil {
+		dst.ReasoningTokens = src.ReasoningTokens
+	}
 }
 
 func openAIUsageHasTokens(usage *OpenAIUsage) bool {
@@ -1566,6 +1575,7 @@ func openAIUsageFromGJSON(value gjson.Result) (OpenAIUsage, bool) {
 		CacheCreationInputTokens: cacheCreationTokens,
 		CacheReadInputTokens:     cacheReadTokens,
 		ImageOutputTokens:        int(imageOutputTokens),
+		ReasoningTokens:          openAIReasoningTokensFromGJSON(value),
 	}, true
 }
 

@@ -19,6 +19,8 @@ import { nextTick } from 'vue'
 
 import en from '@/i18n/locales/en/admin/resources'
 import zh from '@/i18n/locales/zh/admin/resources'
+import enDashboard from '@/i18n/locales/en/dashboard'
+import zhDashboard from '@/i18n/locales/zh/dashboard'
 import UsageTable from '../UsageTable.vue'
 
 let locale: 'en' | 'zh' = 'en'
@@ -26,15 +28,18 @@ const localizedMessages: Record<'en' | 'zh', Record<string, string>> = {
   en: {
     'admin.usage.longContext': en.usage.longContext,
     'admin.usage.longContextPricingTooltip': en.usage.longContextPricingTooltip,
+    'usage.outputTps': enDashboard.usage.outputTps,
+    'usage.outputTpsHint': enDashboard.usage.outputTpsHint,
   },
   zh: {
     'admin.usage.longContext': zh.usage.longContext,
     'admin.usage.longContextPricingTooltip': zh.usage.longContextPricingTooltip,
+    'usage.outputTps': zhDashboard.usage.outputTps,
+    'usage.outputTpsHint': zhDashboard.usage.outputTpsHint,
   },
 }
 
 const messages: Record<string, string> = {
-  'usage.outputTps': 'Output TPS',
   'admin.usage.turnStateBlocks': 'blocks:{n}',
   'admin.usage.turnStateSourceShort.manual': 'BADGE-MAN',
   'admin.usage.turnStateSourceShort.auto': 'BADGE-AUTO',
@@ -188,7 +193,9 @@ describe('admin UsageTable tooltip', () => {
     wrapper.unmount()
   })
 
-  it('shows aligned TPS as the third latency row in both usage views', () => {
+  it.each(['en', 'zh'] as const)('shows aligned average output TPS in both usage views (%s)', language => {
+    locale = language
+    const usageMessages = language === 'en' ? enDashboard.usage : zhDashboard.usage
     for (const showAccountBilling of [true, false]) {
       const wrapper = mount(UsageTable, {
         props: {
@@ -201,6 +208,8 @@ describe('admin UsageTable tooltip', () => {
             stream: true,
             duration_ms: 7000,
             first_token_ms: 2000,
+            reasoning_tokens: 40,
+            first_answer_ms: 3000,
           }],
           columns: [],
           showAccountBilling,
@@ -208,13 +217,13 @@ describe('admin UsageTable tooltip', () => {
         global: { stubs: { DataTable: DataTableStub, EmptyState: true, Icon: true, Teleport: true } },
       })
       const tps = wrapper.get('[data-testid="usage-tps"]')
-      expect(tps.text()).toBe('20.00')
-      expect(tps.attributes('title')).toBe('usage.tpsDescription')
+      expect(tps.text()).toBe('14.29')
+      expect(tps.attributes('title')).toBe(usageMessages.outputTpsHint)
       expect(tps.element.parentElement!.classList.contains('text-left')).toBe(true)
       const cells = Array.from(tps.element.parentElement!.children)
       expect(cells).toHaveLength(6)
-      expect(cells[4].textContent).toBe('TPS')
-      expect(cells[4].getAttribute('title')).toBe('usage.tpsDescription')
+      expect(cells[4].textContent).toBe(usageMessages.outputTps)
+      expect(cells[4].getAttribute('title')).toBe(usageMessages.outputTpsHint)
       for (const index of [1, 3, 5]) {
         expect(cells[index].classList.contains('text-right')).toBe(true)
         expect(cells[index].classList.contains('tabular-nums')).toBe(true)

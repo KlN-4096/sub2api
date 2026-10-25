@@ -82,7 +82,7 @@ func TestOpenAIWSv2StreamingRepairsConcatenatedJSONDocumentsInSingleMessage(t *t
 	require.NotNil(t, result)
 	require.Equal(t, 7, result.Usage.InputTokens)
 	require.Equal(t, 9, result.Usage.OutputTokens)
-	require.Nil(t, result.FirstTokenMs)
+	require.NotNil(t, result.FirstTokenMs)
 	assertOpenAISSEFrames(t, recorder.Body.String(), []string{
 		"response.in_progress",
 		"response.output_item.added",

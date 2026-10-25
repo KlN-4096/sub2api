@@ -41,7 +41,7 @@ func TestOpenAIVisibleOutputClassification(t *testing.T) {
 	}
 }
 
-func TestOpenAIResponsesTTFTStartsAtVisibleOutput(t *testing.T) {
+func TestOpenAIResponsesTTFTVisibleModeRecordsFirstResponseFrame(t *testing.T) {
 	for _, passthrough := range []bool{false, true} {
 		name := "native"
 		if passthrough {
@@ -51,22 +51,7 @@ func TestOpenAIResponsesTTFTStartsAtVisibleOutput(t *testing.T) {
 			result := runSyntheticVisibleTTFTStream(t, passthrough, 120*time.Millisecond, 0, OpenAITTFTModeVisible,
 				`{"type":"response.output_text.delta","delta":"test output"}`)
 			require.NotNil(t, result.firstTokenMs)
-			require.GreaterOrEqual(t, *result.firstTokenMs, 100)
-		})
-	}
-}
-
-func TestOpenAIResponsesTTFTStartsAtCompletedImage(t *testing.T) {
-	for _, passthrough := range []bool{false, true} {
-		name := "native"
-		if passthrough {
-			name = "passthrough"
-		}
-		t.Run(name, func(t *testing.T) {
-			result := runSyntheticVisibleTTFTStream(t, passthrough, 120*time.Millisecond, 0, OpenAITTFTModeVisible,
-				`{"type":"response.output_item.done","item":{"id":"item_test","type":"image_generation_call","result":"dGVzdA=="}}`)
-			require.NotNil(t, result.firstTokenMs)
-			require.GreaterOrEqual(t, *result.firstTokenMs, 100)
+			require.Less(t, *result.firstTokenMs, 100, "first_token_ms records response.created, not the visible delta")
 		})
 	}
 }

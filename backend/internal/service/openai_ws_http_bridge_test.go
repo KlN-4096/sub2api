@@ -1429,7 +1429,7 @@ func TestProxyOpenAIWSHTTPBridgeTurnDisconnectedBeforeOutputDoesNotFailOver(t *t
 			for _, message := range writes {
 				require.JSONEq(t, `{"type":"keepalive"}`, string(message))
 			}
-			require.Nil(t, result.FirstTokenMs)
+			require.NotNil(t, result.FirstTokenMs, "response.created is the first response frame")
 			if tc.wantTerminal {
 				require.NoError(t, err)
 				require.Equal(t, "response.failed", result.UpstreamTerminalEvent)

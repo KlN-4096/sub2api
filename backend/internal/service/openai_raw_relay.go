@@ -528,19 +528,20 @@ func openAIRawRelaySSEErrorFrame(body []byte) []byte {
 }
 
 type openAIRawRelayOutcome struct {
-	usage        OpenAIUsage
-	responseID   string
-	firstTokenMs *int
-	imageCount   int
-	imageSizes   []string
-	clientGone   bool
+	usage       OpenAIUsage
+	responseID  string
+	firstFrame  openAIFirstFrame
+	firstAnswer openAIFirstAnswer
+	endedAt     time.Time // 最后一个终止事件的时刻；CPR 发完终止事件后关连接的时延不算用时
+	imageCount  int
+	imageSizes  []string
+	clientGone  bool
 }
 
 // relayOpenAIRawStream 逐行原样转发 SSE，旁路解析记账字段。转发字节不经过解析结果。
 func (s *OpenAIGatewayService) relayOpenAIRawStream(ctx context.Context, c *gin.Context, resp *http.Response, startTime time.Time) (out openAIRawRelayOutcome, err error) {
 	observer := upstreamResponseModelObserverFromContext(c)
 	images := newOpenAIImageOutputCounter()
-	ttftMode := s.openAITTFTMode(ctx)
 	eventType := ""
 	defer func() {
 		out.imageCount, out.imageSizes = images.Count(), images.Sizes()
@@ -561,7 +562,7 @@ func (s *OpenAIGatewayService) relayOpenAIRawStream(ctx context.Context, c *gin.
 			if reader.Buffered() == 0 {
 				c.Writer.Flush()
 			}
-			eventType = s.observeOpenAIRawSSELine(c, &out, observer, images, line, eventType, ttftMode, startTime)
+			eventType = s.observeOpenAIRawSSELine(c, &out, observer, images, line, eventType, startTime)
 		}
 		if readErr == nil {
 			continue
@@ -584,7 +585,6 @@ func (s *OpenAIGatewayService) observeOpenAIRawSSELine(
 	images *openAIImageOutputCounter,
 	line []byte,
 	eventType string,
-	ttftMode string,
 	startTime time.Time,
 ) string {
 	text := strings.TrimRight(string(line), "\r\n")
@@ -605,9 +605,10 @@ func (s *OpenAIGatewayService) observeOpenAIRawSSELine(
 		out.responseID = extractOpenAIResponseIDFromJSONBytes(payload)
 	}
 	images.AddSSEData(payload)
-	if out.firstTokenMs == nil && !openAIRawRelayTransportEvent(effective) && openAIStreamDataStartsTTFT(strings.TrimSpace(data), effective, false, ttftMode) {
-		ms := int(time.Since(startTime).Milliseconds())
-		out.firstTokenMs = &ms
+	out.firstFrame.observe(data, effective, startTime)
+	out.firstAnswer.observe(data, effective, startTime)
+	if openAIStreamEventTypeIsTerminal(effective) {
+		out.endedAt = time.Now()
 	}
 	s.parseSSEUsageBytesWithType(payload, effective, &out.usage)
 	if effective == "response.failed" || effective == "error" {
@@ -619,17 +620,6 @@ func (s *OpenAIGatewayService) observeOpenAIRawSSELine(
 		}
 	}
 	return eventType
-}
-
-// openAIRawRelayTransportEvent：ChatGPT WS 上游的非输出帧（codex-api 的 sse/responses.rs 与
-// endpoint/responses_websocket.rs 都不当输出），不算首字。CPR 会把 codex.response.metadata 先于
-// response.created 转来；其余几种按协议一并排除，下一跳或 CPR 改了转发范围也不误记。
-func openAIRawRelayTransportEvent(eventType string) bool {
-	switch eventType {
-	case "codex.response.metadata", "response.metadata", "codex.rate_limits", "responsesapi.websocket_timing":
-		return true
-	}
-	return false
 }
 
 // relayOpenAIRawBody 非流式：整体读完再原样写回（与透传路径一样按上限读取）。
@@ -664,6 +654,10 @@ func (s *OpenAIGatewayService) openAIRawRelayResult(c *gin.Context, resp *http.R
 	if sentModel != reqModel {
 		upstreamModel = sentModel
 	}
+	duration := time.Since(startTime)
+	if !relay.endedAt.IsZero() {
+		duration = relay.endedAt.Sub(startTime)
+	}
 	result := &OpenAIForwardResult{
 		RequestID:                     resp.Header.Get("x-request-id"),
 		UpstreamHeaders:               resp.Header,
@@ -677,8 +671,9 @@ func (s *OpenAIGatewayService) openAIRawRelayResult(c *gin.Context, resp *http.R
 		ServiceTier:                   resolvedOpenAIUpstreamServiceTier(c, extractOpenAIServiceTierFromBody(plainBody)),
 		ReasoningEffort:               extractOpenAIReasoningEffortFromBody(plainBody, sentModel),
 		Stream:                        gjson.GetBytes(plainBody, "stream").Bool(),
-		Duration:                      time.Since(startTime),
-		FirstTokenMs:                  relay.firstTokenMs,
+		Duration:                      duration,
+		FirstTokenMs:                  relay.firstFrame.ms,
+		FirstAnswerMs:                 relay.firstAnswer.ms,
 	}
 	if relay.imageCount > 0 {
 		result.ImageCount = relay.imageCount

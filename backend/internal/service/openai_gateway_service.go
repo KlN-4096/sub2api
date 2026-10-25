@@ -238,6 +238,8 @@ type OpenAIUsage struct {
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 	ImageOutputTokens        int `json:"image_output_tokens,omitempty"`
+	// ReasoningTokens 是上游 usage 报的推理 token（OpenAI 口径已含在 OutputTokens 里）；没报时为 nil。
+	ReasoningTokens *int `json:"reasoning_tokens,omitempty"`
 }
 
 // OpenAIForwardResult represents the result of forwarding
@@ -307,6 +309,8 @@ type OpenAIForwardResult struct {
 	SearchCount int
 	// AudioUsage carries Voice billing units when present.
 	AudioUsage *AudioUsage
+	// FirstAnswerMs 是首个答案 delta（正文、拒答、工具参数）的到达时延，推理不算；只有 HTTP 流式路径记录。
+	FirstAnswerMs *int
 
 	wsReplayInput                []json.RawMessage
 	wsReplayInputExists          bool
