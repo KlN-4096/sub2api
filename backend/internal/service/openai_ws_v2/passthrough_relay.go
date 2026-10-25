@@ -79,7 +79,7 @@ type RelayOptions struct {
 	FirstMessageType                coderws.MessageType
 	FirstMessageSent                bool
 	StartClientAfterFirstDownstream bool
-	BareErrorEndsTurn bool
+	BareErrorEndsTurn               bool
 	OnUsageParseFailure             func(eventType string, usageRaw string)
 	OnTurnComplete                  func(turn RelayTurnResult)
 	BeforeWriteClient               func(msgType coderws.MessageType, payload []byte, wroteDownstream bool) error
@@ -111,6 +111,7 @@ type relayState struct {
 	requestModelMu          sync.RWMutex
 	requestModel            string
 	pendingTurnStart        atomic.Pointer[time.Time]
+	pendingTurnFrameAt      time.Time
 	lastResponseID          string
 	lastResponseModel       string
 	lastResponseServiceTier string
@@ -613,7 +614,7 @@ func runUpstreamToClient(
 			// disconnect guard would turn an already-delivered terminal into a false
 			// missing-terminal failure when the upstream closes normally.
 			if isTerminalEvent(strings.TrimSpace(gjson.GetBytes(payload, "type").String())) {
-				state.consumePendingTurnStartedAt()
+				state.dropPendingTurnStart()
 				openAIWSRelayDiscardActiveTurnTiming(state)
 			}
 		}
@@ -773,8 +774,9 @@ func observeUpstreamMessage(
 		responseID = strings.TrimSpace(values[3].String())
 	}
 	now := nowFn()
+	state.notePendingTurnFrame(eventType, responseID, now)
 
-	if state.firstTokenMs == nil && state.startsFirstToken(eventType, message) {
+	if state.firstTokenMs == nil && IsResponseFrameEvent(eventType) {
 		ms := int(now.Sub(startAt).Milliseconds())
 		if ms >= 0 {
 			state.firstTokenMs = &ms
@@ -793,8 +795,8 @@ func observeUpstreamMessage(
 		// delta 等 token 事件不携带 response.id，归属当前活跃 turn。
 		turnTiming = state.activeTurn
 	}
-	// 每个 turn 独立记录首 token；连接级 firstTokenMs 只反映整条连接的第一个 token。
-	if turnTiming != nil && turnTiming.firstTokenMs == nil && state.startsFirstToken(eventType, message) {
+	// 每轮独立记录首个响应帧；连接级 firstTokenMs 不复用给后续轮次。
+	if turnTiming != nil && turnTiming.firstTokenMs == nil && IsResponseFrameEvent(eventType) {
 		ms := int(now.Sub(turnTiming.startAt).Milliseconds())
 		if ms >= 0 {
 			turnTiming.firstTokenMs = &ms
@@ -878,7 +880,7 @@ func finalizeObservedRelayTerminal(state *relayState, observed observedUpstreamE
 			observed.firstToken = openAIWSRelayCloneIntPtr(turnTiming.firstTokenMs)
 		}
 	} else {
-		state.consumePendingTurnStartedAt()
+		state.dropPendingTurnStart()
 		openAIWSRelayDiscardActiveTurnTiming(state)
 	}
 	return observed
@@ -999,7 +1001,7 @@ func openAIWSRelayGetOrInitTurnTiming(state *relayState, responseID string, now 
 		if startAt.IsZero() {
 			startAt = now
 		}
-		timing = &relayTurnTiming{startAt: startAt}
+		timing = &relayTurnTiming{startAt: startAt, firstTokenMs: state.takePendingTurnFirstToken(startAt)}
 		state.turnTimingByID[responseID] = timing
 		state.activeTurn = timing
 		return timing

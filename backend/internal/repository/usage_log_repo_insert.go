@@ -98,6 +98,8 @@ var usageLogInsertArgTypes = [...]string{
 	"boolean",     // route_pair_overridden
 	"text",        // route_pair_pool_gateway
 	"text",        // route_pair_pool_version
+	"integer",     // first_answer_ms
+	"integer",     // reasoning_tokens
 	"timestamptz", // created_at
 }
 
@@ -312,6 +314,8 @@ func (r *usageLogRepository) createSingle(ctx context.Context, sqlq sqlExecutor,
 			route_pair_overridden,
 			route_pair_pool_gateway,
 			route_pair_pool_version,
+			first_answer_ms,
+			reasoning_tokens,
 			created_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9,
@@ -785,6 +789,8 @@ func buildUsageLogBatchInsertQuery(keys []string, preparedByKey map[string]usage
 			route_pair_overridden,
 			route_pair_pool_gateway,
 			route_pair_pool_version,
+			first_answer_ms,
+			reasoning_tokens,
 			created_at
 		) AS (VALUES `)
 
@@ -893,6 +899,8 @@ func buildUsageLogBatchInsertQuery(keys []string, preparedByKey map[string]usage
 				route_pair_overridden,
 				route_pair_pool_gateway,
 				route_pair_pool_version,
+				first_answer_ms,
+				reasoning_tokens,
 				created_at
 			)
 			SELECT
@@ -970,6 +978,8 @@ func buildUsageLogBatchInsertQuery(keys []string, preparedByKey map[string]usage
 				route_pair_overridden,
 				route_pair_pool_gateway,
 				route_pair_pool_version,
+				first_answer_ms,
+				reasoning_tokens,
 				created_at
 			FROM input
 			ON CONFLICT (request_id, api_key_id) DO NOTHING
@@ -1087,6 +1097,8 @@ func buildUsageLogBestEffortInsertQuery(preparedList []usageLogInsertPrepared) (
 			route_pair_overridden,
 			route_pair_pool_gateway,
 			route_pair_pool_version,
+			first_answer_ms,
+			reasoning_tokens,
 			created_at
 		) AS (VALUES `)
 
@@ -1190,6 +1202,8 @@ func buildUsageLogBestEffortInsertQuery(preparedList []usageLogInsertPrepared) (
 			route_pair_overridden,
 			route_pair_pool_gateway,
 			route_pair_pool_version,
+			first_answer_ms,
+			reasoning_tokens,
 			created_at
 		)
 		SELECT
@@ -1267,6 +1281,8 @@ func buildUsageLogBestEffortInsertQuery(preparedList []usageLogInsertPrepared) (
 			route_pair_overridden,
 			route_pair_pool_gateway,
 			route_pair_pool_version,
+			first_answer_ms,
+			reasoning_tokens,
 			created_at
 		FROM input
 		ON CONFLICT (request_id, api_key_id) DO NOTHING
@@ -1352,6 +1368,8 @@ func execUsageLogInsertNoResult(ctx context.Context, sqlq sqlExecutor, prepared 
 			route_pair_overridden,
 			route_pair_pool_gateway,
 			route_pair_pool_version,
+			first_answer_ms,
+			reasoning_tokens,
 			created_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9,
@@ -1414,6 +1432,8 @@ func prepareUsageLogInsert(log *service.UsageLog) usageLogInsertPrepared {
 	routePairOverridden := nullBool(log.RoutePairOverridden)
 	routePairPoolGateway := nullString(log.RoutePairPoolGateway)
 	routePairPoolVersion := nullString(log.RoutePairPoolVersion)
+	firstAnswer := nullInt(log.FirstAnswerMs)
+	reasoningTokens := nullInt(log.ReasoningTokens)
 	requestedModel := strings.TrimSpace(log.RequestedModel)
 	if requestedModel == "" {
 		requestedModel = strings.TrimSpace(log.Model)
@@ -1507,6 +1527,8 @@ func prepareUsageLogInsert(log *service.UsageLog) usageLogInsertPrepared {
 			routePairOverridden,        // route_pair_overridden
 			routePairPoolGateway,       // route_pair_pool_gateway
 			routePairPoolVersion,       // route_pair_pool_version
+			firstAnswer,                // first_answer_ms
+			reasoningTokens,            // reasoning_tokens
 			createdAt,
 		},
 	}
