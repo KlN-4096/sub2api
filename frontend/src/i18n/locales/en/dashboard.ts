@@ -397,7 +397,7 @@ export default {
     latencyDuration: 'Total',
     outputTps: 'Output TPS',
     outputTpsHint: 'Output tokens divided by total duration, including first-token wait, in tok/s. Output tokens may include reasoning tokens.',
-    tpsDescription: 'Average output tokens/second: streaming uses output tokens ÷ (total time − time to first token); non-streaming uses output tokens ÷ total time. Unavailable when data is insufficient.',
+    tpsDescription: 'End-to-end output tokens/second: output tokens ÷ total time (including the first-token wait), for streaming and non-streaming alike; output tokens may include reasoning tokens. Unavailable when data is insufficient or not applicable.',
     time: 'Time',
     ws: 'WS',
     stream: 'Stream',

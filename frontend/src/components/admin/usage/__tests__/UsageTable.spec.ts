@@ -208,7 +208,7 @@ describe('admin UsageTable tooltip', () => {
         global: { stubs: { DataTable: DataTableStub, EmptyState: true, Icon: true, Teleport: true } },
       })
       const tps = wrapper.get('[data-testid="usage-tps"]')
-      expect(tps.text()).toBe('20.00')
+      expect(tps.text()).toBe('14.29')
       expect(tps.attributes('title')).toBe('usage.tpsDescription')
       expect(tps.element.parentElement!.classList.contains('text-left')).toBe(true)
       const cells = Array.from(tps.element.parentElement!.children)
