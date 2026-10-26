@@ -168,12 +168,12 @@ func TestOpenAIRawRelayRecordsFirstAnswer(t *testing.T) {
 	start := time.Now().Add(-time.Second)
 	feed := func(event, data string) {
 		for _, line := range []string{"event: " + event, "data: " + data, ""} {
-			eventType = svc.observeOpenAIRawSSELine(c, &out, observer, images, []byte(line+"\n"), eventType, OpenAITTFTModeSemantic, start)
+			eventType = svc.observeOpenAIRawSSELine(c, &out, observer, images, []byte(line+"\n"), eventType, start)
 		}
 	}
 	feed("response.output_item.added", `{"type":"response.output_item.added","item":{"type":"reasoning","summary":[]}}`)
 	feed("response.reasoning_summary_text.delta", `{"type":"response.reasoning_summary_text.delta","delta":"thinking"}`)
-	require.NotNil(t, out.firstTokenMs)
+	require.NotNil(t, out.firstFrame.ms)
 	require.Nil(t, out.firstAnswer.ms)
 	feed("response.function_call_arguments.delta", `{"type":"response.function_call_arguments.delta","delta":"{\"cmd\""}`)
 	require.NotNil(t, out.firstAnswer.ms)

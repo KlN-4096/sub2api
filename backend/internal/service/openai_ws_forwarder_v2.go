@@ -391,6 +391,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	usage := &OpenAIUsage{}
 	imageCounter := newOpenAIImageOutputCounter()
 	var firstTokenMs *int
+	var firstFrame openAIFirstFrame
 	responseID := ""
 	var finalResponse []byte
 	wroteDownstream := false
@@ -457,7 +458,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			UpstreamTerminalEvent:         upstreamTerminalEvent,
 			ResponseHeaders:               lease.HandshakeHeaders(),
 			Duration:                      time.Since(startTime),
-			FirstTokenMs:                  firstTokenMs,
+			FirstTokenMs:                  firstFrame.ms,
 			ClientDisconnect:              clientDisconnected,
 		}
 	}
@@ -638,6 +639,7 @@ readLoop:
 			continue
 		}
 		responseModelObserver.ObserveOpenAI(message, eventType)
+		firstFrame.observeEvent(eventType, startTime)
 		eventCount++
 		if firstEventType == "" {
 			firstEventType = eventType
@@ -852,8 +854,8 @@ readLoop:
 		stateStore.BindSessionConn(groupID, sessionHash, lease.ConnID(), s.openAIWSSessionStickyTTL())
 	}
 	firstTokenMsValue := -1
-	if firstTokenMs != nil {
-		firstTokenMsValue = *firstTokenMs
+	if firstFrame.ms != nil {
+		firstTokenMsValue = *firstFrame.ms
 	}
 	logOpenAIWSModeDebug(
 		"completed account_id=%d conn_id=%s response_id=%s stream=%v duration_ms=%d events=%d token_events=%d terminal_events=%d buffered_events=%d buffered_flushed=%d first_event=%s last_event=%s first_token_ms=%d wrote_downstream=%v client_disconnected=%v",

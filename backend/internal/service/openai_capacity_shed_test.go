@@ -310,7 +310,7 @@ func TestOpenAIStreamReplayBoundaryPreservesContentAndToolCompletion(t *testing.
 	}
 }
 
-func TestOpenAIStreamKeepaliveOnlyFailureDoesNotRecordFirstToken(t *testing.T) {
+func TestOpenAIStreamKeepaliveOnlyFailureRecordsFirstFrame(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, passthrough := range []bool{false, true} {
 		name := "native"
@@ -343,12 +343,12 @@ func TestOpenAIStreamKeepaliveOnlyFailureDoesNotRecordFirstToken(t *testing.T) {
 				var result *openaiStreamingResultPassthrough
 				result, err = svc.handleStreamingResponsePassthrough(c.Request.Context(), resp, c, account, time.Now(), "model", "model")
 				require.NotNil(t, result)
-				require.Nil(t, result.firstTokenMs)
+				require.NotNil(t, result.firstTokenMs, "response.created is the first response frame")
 			} else {
 				var result *openaiStreamingResult
 				result, err = svc.handleStreamingResponse(c.Request.Context(), resp, c, account, time.Now(), "model", "model")
 				require.NotNil(t, result)
-				require.Nil(t, result.firstTokenMs)
+				require.NotNil(t, result.firstTokenMs, "response.created is the first response frame")
 			}
 			var failoverErr *UpstreamFailoverError
 			require.ErrorAs(t, err, &failoverErr)

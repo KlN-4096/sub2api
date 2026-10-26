@@ -258,7 +258,7 @@ func TestRelay_BasicRelayAndUsage(t *testing.T) {
 	require.Equal(t, 7, result.Usage.InputTokens)
 	require.Equal(t, 3, result.Usage.OutputTokens)
 	require.Equal(t, 2, result.Usage.CacheReadInputTokens)
-	require.Nil(t, result.FirstTokenMs)
+	require.NotNil(t, result.FirstTokenMs, "首字记第一个响应帧")
 	require.Equal(t, int64(1), result.ClientToUpstreamFrames)
 	require.Equal(t, int64(1), result.UpstreamToClientFrames)
 	require.Equal(t, int64(0), result.DroppedDownstreamFrames)
@@ -1307,7 +1307,7 @@ func (c *errorOnWriteFrameConn) Close() error {
 	return nil
 }
 
-func TestRelay_NoSemanticOutputTerminalSequence_FirstTokenMsNil(t *testing.T) {
+func TestRelay_NoOutputTerminalSequence_FirstTokenMsAtFirstFrame(t *testing.T) {
 	t.Parallel()
 
 	for _, terminalEvent := range []string{"response.completed", "response.done"} {
@@ -1353,9 +1353,9 @@ func TestRelay_NoSemanticOutputTerminalSequence_FirstTokenMsNil(t *testing.T) {
 
 			require.Nil(t, relayExit)
 			require.Equal(t, terminalEvent, turn.TerminalEventType)
-			require.Nil(t, turn.FirstTokenMs)
+			require.NotNil(t, turn.FirstTokenMs, "没有输出也记第一个响应帧")
 			require.Equal(t, terminalEvent, result.TerminalEventType)
-			require.Nil(t, result.FirstTokenMs)
+			require.NotNil(t, result.FirstTokenMs)
 			require.Equal(t, int64(5), result.UpstreamToClientFrames)
 		})
 	}
