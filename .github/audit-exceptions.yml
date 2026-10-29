@@ -14,3 +14,24 @@ exceptions:
     mitigation: "Never parse untrusted spreadsheets with xlsx; no patched version on npm, migrate to SheetJS CDN build or another writer before expiry"
     expires_on: "2027-01-06"
     owner: "security@your-domain"
+  - package: vue-i18n
+    advisory: "GHSA-83rm-6c8r-g728"
+    severity: high
+    reason: "escapeParameter / escapeParameterHtml is never enabled (createI18n in frontend/src/i18n/index.ts), so the bypassed sanitizeTranslatedHtml path never runs; messages are bundled locale files"
+    mitigation: "No patched 9.x release (fixed in 11.4.14); keep escapeParameter off and never v-html translations that carry user input; upgrade vue-i18n or follow upstream before expiry"
+    expires_on: "2027-01-29"
+    owner: "security@your-domain"
+  - package: "@intlify/core-base"
+    advisory: "GHSA-83rm-6c8r-g728"
+    severity: high
+    reason: "escapeParameter / escapeParameterHtml is never enabled (createI18n in frontend/src/i18n/index.ts), so the bypassed sanitizeTranslatedHtml path never runs; messages are bundled locale files"
+    mitigation: "No patched 9.x release (fixed in 11.4.14); keep escapeParameter off and never v-html translations that carry user input; upgrade vue-i18n or follow upstream before expiry"
+    expires_on: "2027-01-29"
+    owner: "security@your-domain"
+  - package: "@intlify/shared"
+    advisory: "GHSA-83rm-6c8r-g728"
+    severity: high
+    reason: "escapeParameter / escapeParameterHtml is never enabled (createI18n in frontend/src/i18n/index.ts), so the bypassed sanitizeTranslatedHtml path never runs; messages are bundled locale files"
+    mitigation: "No patched 9.x release (fixed in 11.4.14); keep escapeParameter off and never v-html translations that carry user input; upgrade vue-i18n or follow upstream before expiry"
+    expires_on: "2027-01-29"
+    owner: "security@your-domain"
