@@ -33,8 +33,9 @@ const (
 // reader 是否已被（部分）消费——包装的字节完整且不可变，即使 reader 已被
 // 流式消费过，Bytes() 也始终返回完整请求体。
 type PrereadBody struct {
-	body   []byte
-	reader *bytes.Reader
+	body           []byte
+	reader         *bytes.Reader
+	normalizedJSON []byte
 	// wire 是本包首读时记下的线上原文（解压前），wireEncoding 是它的 Content-Encoding。
 	// 原样中继靠它按原字节出站；请求体被改成别的内容后就不再可得（见 NewPrereadBodyFrom）。
 	wire         []byte
@@ -76,10 +77,34 @@ func (p *PrereadBody) Wire() (wire []byte, encoding string, ok bool) {
 // NewPrereadBodyFrom 回填请求体；内容与 prev 相同时沿用 prev 记下的线上原文。
 func NewPrereadBodyFrom(prev io.Reader, body []byte) *PrereadBody {
 	next := NewPrereadBody(body)
-	if p, ok := prev.(*PrereadBody); ok && p.wire != nil && bytes.Equal(p.body, body) {
+	if p, ok := prev.(*PrereadBody); ok && bytes.Equal(p.body, body) {
 		next.wire, next.wireEncoding = p.wire, p.wireEncoding
+		next.normalizedJSON = p.normalizedJSON
 	}
 	return next
+}
+
+// LenientJSONBytes reuses the already-budgeted ingress normalization. If no
+// normalized body was retained, it normalizes the preread bytes or fallback
+// using the caller's request memory budget.
+func (p *PrereadBody) LenientJSONBytes(ctx context.Context, fallback []byte, maxNormalizedBytes int64) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if p != nil && p.normalizedJSON != nil {
+		if maxNormalizedBytes <= 0 {
+			maxNormalizedBytes = maxDecompressedBodySize
+		}
+		if int64(len(p.normalizedJSON)) > maxNormalizedBytes {
+			return nil, &http.MaxBytesError{Limit: maxNormalizedBytes}
+		}
+		return p.normalizedJSON, nil
+	}
+	if body := p.Bytes(); body != nil {
+		fallback = body
+	}
+	normalized, err := normalizeLenientJSONRequestBody(ctx, fallback, maxNormalizedBytes)
+	return normalized.data, err
 }
 
 // ReadRequestBodyWithPrealloc reads request body with preallocated buffer based
@@ -265,6 +290,9 @@ func ReadLenientJSONRequestBodyWithPrealloc(req *http.Request, maxNormalizedByte
 		// The raw relay needs the original bytes even when the normalizer
 		// allocated a separate representation for validation.
 		body.refill(req)
+		if preread, ok := req.Body.(*PrereadBody); ok {
+			preread.normalizedJSON = normalized.data
+		}
 	}
 	return normalized.data, err
 }
