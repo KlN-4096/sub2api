@@ -195,7 +195,8 @@ func TestCodexDirectImagesEndpointNotTreatedAsResponses(t *testing.T) {
 func TestCodexDirectImagesDisabled(t *testing.T) {
 	require.False(t, codexDirectImagesEnabled)
 	for _, model := range []string{"gpt-image-1.5", "gpt-image-2",
-		"gpt-image-2.5-flare", "gpt-image-2.5-sunburst", openAIImagesDefaultModel} {
+		"gpt-image-2.5-flare", "gpt-image-2.5-sunburst",
+		"gpt-image-2.6-flare", "gpt-image-2.6-sunburst", openAIImagesDefaultModel} {
 		require.False(t, usesCodexDirectImages(model), "%s 必须回落 /responses", model)
 	}
 

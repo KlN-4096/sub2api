@@ -19,6 +19,7 @@ import (
 )
 
 func TestGPTImage26ComplexityAcrossImageEndpoints(t *testing.T) {
+	requireCodexDirectImages(t)
 	for _, model := range []string{"gpt-image-2.6-flare", "gpt-image-2.6-sunburst"} {
 		for _, accountType := range []string{AccountTypeOAuth, AccountTypeSetupToken} {
 			for _, format := range []string{"generation", "json-edit", "multipart-edit"} {
@@ -81,6 +82,7 @@ func TestGPTImage26ComplexityAcrossImageEndpoints(t *testing.T) {
 }
 
 func TestGPTImage26DoesNotFallbackToResponses(t *testing.T) {
+	requireCodexDirectImages(t)
 	for _, model := range []string{"gpt-image-2.6-flare", "gpt-image-2.6-sunburst"} {
 		for _, status := range []int{400, 404, 405, 429} {
 			t.Run(fmt.Sprintf("%s/%d", model, status), func(t *testing.T) {
@@ -138,6 +140,7 @@ func TestOpenAIImagesComplexityLegacyBridgeAndAPIKey(t *testing.T) {
 func TestGPTImage26OutputFormats(t *testing.T) {
 	for _, format := range []string{"gif", "svg"} {
 		t.Run(format, func(t *testing.T) {
+			requireCodexDirectImages(t)
 			body := []byte(fmt.Sprintf(`{"model":"gpt-image-2.6-flare","prompt":"draw","output_format":%q,"response_format":"url"}`, format))
 			c, rec := newOpenAIImagesTestContext(t, body)
 			response := fmt.Sprintf(`{"output_format":%q,"data":[{"b64_json":"AA=="}],"usage":{"input_tokens":10,"output_tokens":20}}`, format)
@@ -169,16 +172,19 @@ func TestGPTImage26NativeOptions(t *testing.T) {
 		c, _ := newOpenAIImagesTestContext(t, body)
 		parsed, err := newOpenAIImagesTestService(nil).ParseOpenAIImagesRequest(c, body)
 		require.NoError(t, err)
-		payload, _, err := buildOpenAIImagesOAuthPayload(parsed, parsed.Model)
-		require.NoError(t, err)
-		if parsed.OutputFormat == "gif" {
-			require.EqualValues(t, 2, gjson.GetBytes(payload, "frame_count").Int())
-			require.EqualValues(t, 100, gjson.GetBytes(payload, "frame_duration_ms").Int())
-		} else {
-			require.Equal(t, "gpt-6-astra", gjson.GetBytes(payload, "svg.model").String())
-			require.Equal(t, "high", gjson.GetBytes(payload, "svg.reasoning.effort").String())
-			require.False(t, gjson.GetBytes(payload, "svg.ignored").Exists())
-		}
+		t.Run(parsed.OutputFormat+"/native-oauth", func(t *testing.T) {
+			requireCodexDirectImages(t)
+			payload, _, err := buildOpenAIImagesOAuthPayload(parsed, parsed.Model)
+			require.NoError(t, err)
+			if parsed.OutputFormat == "gif" {
+				require.EqualValues(t, 2, gjson.GetBytes(payload, "frame_count").Int())
+				require.EqualValues(t, 100, gjson.GetBytes(payload, "frame_duration_ms").Int())
+			} else {
+				require.Equal(t, "gpt-6-astra", gjson.GetBytes(payload, "svg.model").String())
+				require.Equal(t, "high", gjson.GetBytes(payload, "svg.reasoning.effort").String())
+				require.False(t, gjson.GetBytes(payload, "svg.ignored").Exists())
+			}
+		})
 		_, err = buildOpenAIImagesResponsesRequest(parsed, parsed.Model)
 		require.ErrorContains(t, err, "native Images endpoint", "native options must not disappear during a legacy fallback")
 		upstream := &httpUpstreamRecorder{resp: openAIImagesJSONResponse()}
@@ -214,11 +220,14 @@ func TestGPTImage26NativeOptions(t *testing.T) {
 			parsed, err := newOpenAIImagesTestService(nil).ParseOpenAIImagesRequest(c, body)
 			require.NoError(t, err)
 			require.Equal(t, OpenAIImagesCapabilityNative, parsed.RequiredCapability)
-			payload, target, err := buildOpenAIImagesOAuthPayload(parsed, parsed.Model)
-			require.NoError(t, err)
-			require.Equal(t, "https://chatgpt.com/backend-api/codex/images/edits", target)
-			require.Equal(t, "data:image/png;base64,bWFya3Vw", gjson.GetBytes(payload, "markup.image_url").String())
-			require.Equal(t, "low", gjson.GetBytes(payload, "complexity").String())
+			t.Run("native-oauth", func(t *testing.T) {
+				requireCodexDirectImages(t)
+				payload, target, err := buildOpenAIImagesOAuthPayload(parsed, parsed.Model)
+				require.NoError(t, err)
+				require.Equal(t, "https://chatgpt.com/backend-api/codex/images/edits", target)
+				require.Equal(t, "data:image/png;base64,bWFya3Vw", gjson.GetBytes(payload, "markup.image_url").String())
+				require.Equal(t, "low", gjson.GetBytes(payload, "complexity").String())
+			})
 			require.Len(t, gjson.GetBytes(parsed.ModerationBody(), "images").Array(), 2)
 			_, err = buildOpenAIImagesResponsesRequest(parsed, parsed.Model)
 			require.ErrorContains(t, err, "native Images endpoint")
@@ -227,6 +236,7 @@ func TestGPTImage26NativeOptions(t *testing.T) {
 }
 
 func TestGPTImage26StreamedJSONEdits(t *testing.T) {
+	requireCodexDirectImages(t)
 	for _, model := range []string{"gpt-image-2.6-flare", "gpt-image-2.6-sunburst"} {
 		for _, disconnect := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/disconnect=%t", model, disconnect), func(t *testing.T) {
