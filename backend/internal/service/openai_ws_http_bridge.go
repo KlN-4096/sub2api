@@ -449,11 +449,10 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	if err != nil {
 		return nil, fmt.Errorf("prepare http bridge body: %w", err)
 	}
-	// Codex fingerprint convergence, same as Forward / forwardOpenAIPassthrough. Builders only read
-	// staged IDs; without staging, the bridge sends no account-level session_id, so clients without
-	// prompt_cache_key get random upstream prompt-cache routing and rarely hit the cache.
-	stageCodexFingerprintIDs(c, nil)
-	if account.UsesOpenAICodexProtocol() {
+	// Normal WS ingress already projected this turn from the original frame.
+	// Only resolve a fingerprint for calls without one; the rewritten metadata
+	// no longer contains the client's original session evidence.
+	if account.UsesOpenAICodexProtocol() && stagedCodexFingerprintIDs(c, account) == nil {
 		fpIDs := resolveCodexFingerprintIDsWithBody(c, account, nil, gjson.GetBytes(body, "client_metadata"))
 		if fpIDs != nil {
 			fpBody, fpChanged, fpErr := applyCodexFingerprintClientMetadataRaw(body, fpIDs)

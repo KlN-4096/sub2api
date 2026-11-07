@@ -196,7 +196,7 @@
 
       <!-- OpenAI images: size tier routing -->
       <div
-        v-if="allOpenAIPassthroughCapable"
+        v-if="allOpenAIExtraSettingsCapable"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="mb-3 flex items-center justify-between gap-4">
@@ -1613,7 +1613,7 @@ const allOpenAIPassthroughCapable = computed(() => {
   )
 })
 
-// 长上下文计费 / compact 模式 / compact 模型映射：后端只按 platform 判定，cpr 同样生效。
+// 长上下文计费 / 生图尺寸 / compact 设置对 CPR 同样生效。
 // 与上面拆开是因为原先四个区块共用一个 every()——选中集合里混进 1 个 cpr，
 // 那些 oauth 账号的区块会一起消失，看起来像 bug。
 const allOpenAIExtraSettingsCapable = computed(() => {
@@ -2068,7 +2068,7 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     extra.openai_long_context_billing_enabled = openAILongContextBillingEnabled.value
   }
 
-  if (enableOpenAIImageSizeTiers.value && allOpenAIPassthroughCapable.value) {
+  if (enableOpenAIImageSizeTiers.value && allOpenAIExtraSettingsCapable.value) {
     // extra 按 JSONB 合并写入，不限档位用空列表覆盖旧值。
     ensureExtra()[OPENAI_IMAGE_SIZE_TIERS_EXTRA_KEY] = openAIImageSizeTiersPayload(openAIImageSizeTiers.value) ?? []
   }
@@ -2284,7 +2284,7 @@ const handleSubmit = async () => {
     enableOpenAIPassthrough.value ||
     enableOpenAIFlattenNamespaces.value ||
     (enableOpenAILongContextBilling.value && allOpenAIExtraSettingsCapable.value) ||
-    (enableOpenAIImageSizeTiers.value && allOpenAIPassthroughCapable.value) ||
+    (enableOpenAIImageSizeTiers.value && allOpenAIExtraSettingsCapable.value) ||
     (enableOpenAIEndpointCapabilities.value && allOpenAIAPIKey.value) ||
     (enableOpenAIResponsesMode.value && allOpenAIAPIKey.value) ||
     enableModelRestriction.value ||

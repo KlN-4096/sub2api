@@ -175,7 +175,7 @@ func (s *OpenAIGatewayService) openAIRawRelayOutboundBody(ctx context.Context, c
 		}
 		return decoded, decoded, "", nil
 	}
-	base, err := httputil.NormalizeLenientJSONRequestBody(decoded, limit)
+	base, err := preread.LenientJSONBytes(ctx, forwardBody, limit)
 	if err != nil {
 		return nil, nil, "", err
 	}
