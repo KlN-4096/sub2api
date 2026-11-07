@@ -609,7 +609,7 @@ describe('BulkEditAccountModal', () => {
   it('生图尺寸档位独立启用，全选时提交空列表表示不限', async () => {
     const restricted = mountModal({
       selectedPlatforms: ['openai'],
-      selectedTypes: ['oauth', 'apikey']
+      selectedTypes: ['oauth', 'apikey', 'cpr']
     })
     await restricted.get('#bulk-edit-openai-image-size-tiers-enabled').setValue(true)
     await restricted.get('[data-testid="bulk-edit-openai-image-size-tier-4K"]').setValue(false)
