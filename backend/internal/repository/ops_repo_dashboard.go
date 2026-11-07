@@ -70,11 +70,11 @@ SELECT
  AVG(output_tps),
  COUNT(*)
 FROM (
- SELECT ul.output_tokens * 1000.0 / NULLIF(ul.duration_ms, 0) AS output_tps
+ SELECT ul.output_tokens * 1000.0 / NULLIF(ul.duration_ms - ul.first_token_ms, 0) AS output_tps
  FROM usage_logs ul
  ` + join + `
  ` + where + `
- AND ul.output_tokens > 0 AND ul.duration_ms > 0
+ AND ul.output_tokens > 0 AND ul.first_token_ms >= 0 AND ul.duration_ms > ul.first_token_ms
  AND ul.image_count = 0 AND ul.image_output_tokens = 0
  AND COALESCE(ul.billing_mode, '') <> 'image'
  ` + fmt.Sprintf("AND ul.request_type IN (%d, %d, %d, %d)",
