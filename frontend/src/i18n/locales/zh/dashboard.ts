@@ -401,7 +401,7 @@ export default {
     latencyFirstToken: '首字',
     latencyDuration: '总耗时',
     outputTps: '平均输出 TPS',
-    outputTpsHint: '输出 Token ÷ 请求总耗时，单位 tok/s。包含推理 Token 和等待时间，不减首字或首答耗时；这是端到端平均吞吐，非纯解码速度。数据不足或不适用时不显示。',
+    outputTpsHint: '输出 Token ÷（请求总耗时 − 首字耗时），单位 tok/s。首字按首个响应帧计时，不扣首答耗时或推理 Token；这不是纯解码速度。首字缺失、有效耗时不大于 0 或不适用时不显示。',
     time: '时间',
     ws: 'WS',
     stream: '流式',
