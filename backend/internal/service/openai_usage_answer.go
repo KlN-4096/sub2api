@@ -9,7 +9,7 @@ import (
 )
 
 // 首答耗时与推理 Token 数保留用于诊断。使用记录的平均输出 TPS 只取
-// output_tokens ÷ duration_ms（frontend/src/utils/usageTps.ts），不使用这两个字段。
+// output_tokens ÷（duration_ms − first_token_ms）（frontend/src/utils/usageTps.ts），不使用这两个字段。
 
 // openAIFirstAnswer 记首个答案 delta 的到达时延。见到安全缓冲标记即作废且不再记：上游扣住输出、
 // 审完才放（Codex 提示 "Giving this request a little extra thought"），到达节奏不反映生成速度。

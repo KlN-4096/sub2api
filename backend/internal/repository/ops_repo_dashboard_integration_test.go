@@ -30,45 +30,49 @@ func TestOpsOutputTPSDistribution(t *testing.T) {
 		_, _ = integrationDB.ExecContext(ctx, "DELETE FROM groups WHERE id IN ($1, $2)", group.ID, otherGroup.ID)
 		_, _ = integrationDB.ExecContext(ctx, "DELETE FROM users WHERE id = $1", user.ID)
 	})
-	insert := func(at time.Time, groupID *int64, output int, duration *int, requestType service.RequestType, imageCount, imageTokens int, billingMode string) {
+	insert := func(at time.Time, groupID *int64, output int, duration, firstToken *int, requestType service.RequestType, imageCount, imageTokens int, billingMode string) {
 		t.Helper()
 		_, err := integrationDB.ExecContext(ctx, `INSERT INTO usage_logs
-   (user_id, api_key_id, account_id, group_id, request_id, model, input_tokens, output_tokens, duration_ms, request_type, image_count, image_output_tokens, billing_mode, created_at, image_size)
-   VALUES ($1,$2,$3,$4,$5,'gpt-test',100000,$6,$7,$8,$9,$10,$11,$12,CASE WHEN $9 > 0 THEN '1K' ELSE NULL END)`,
-			user.ID, key.ID, account.ID, groupID, fmt.Sprintf("output-tps-%d-%d", user.ID, time.Now().UnixNano()), output, duration, requestType, imageCount, imageTokens, billingMode, at)
+   (user_id, api_key_id, account_id, group_id, request_id, model, input_tokens, output_tokens, duration_ms, first_token_ms, request_type, image_count, image_output_tokens, billing_mode, created_at, image_size)
+   VALUES ($1,$2,$3,$4,$5,'gpt-test',100000,$6,$7,$8,$9,$10,$11,$12,$13,CASE WHEN $10 > 0 THEN '1K' ELSE NULL END)`,
+			user.ID, key.ID, account.ID, groupID, fmt.Sprintf("output-tps-%d-%d", user.ID, time.Now().UnixNano()), output, duration, firstToken, requestType, imageCount, imageTokens, billingMode, at)
 		require.NoError(t, err)
 	}
-	// Rates 1, 10, 100, 1000: unequal durations catch ratio-of-sums mistakes.
+	// Rates 1, 10, 100, 1000: subtract each sample's first-frame time.
+	// Unequal remaining durations catch ratio-of-sums mistakes.
 	// Put samples in the raw head, stable hourly buckets, and raw tail.
 	for _, sample := range []struct {
-		output, duration int
-		kind             service.RequestType
-		at               time.Time
+		output, duration, firstToken int
+		kind                         service.RequestType
+		at                           time.Time
 	}{
-		{1, 1000, service.RequestTypeSync, start},
-		{20, 2000, service.RequestTypeStream, start.Add(time.Hour)},
-		{100, 1000, service.RequestTypeWSV2, start.Add(2 * time.Hour)},
-		{500, 500, service.RequestTypeCyberBlocked, end.Add(-time.Minute)},
+		{1, 1300, 300, service.RequestTypeSync, start},
+		{20, 2500, 500, service.RequestTypeStream, start.Add(time.Hour)},
+		{100, 1100, 100, service.RequestTypeWSV2, start.Add(2 * time.Hour)},
+		{500, 500, 0, service.RequestTypeCyberBlocked, end.Add(-time.Minute)},
 	} {
-		insert(sample.at, &group.ID, sample.output, &sample.duration, sample.kind, 0, 0, "token")
+		insert(sample.at, &group.ID, sample.output, &sample.duration, &sample.firstToken, sample.kind, 0, 0, "token")
 	}
-	positive, zero, negative := 1000, 0, -1
+	positive, zero, negative, pastEnd := 1000, 0, -1, 1100
 	for _, d := range []*int{nil, &zero, &negative} {
-		insert(start, &group.ID, 9999, d, service.RequestTypeSync, 0, 0, "token")
+		insert(start, &group.ID, 9999, d, &zero, service.RequestTypeSync, 0, 0, "token")
+	}
+	for _, firstToken := range []*int{nil, &negative, &positive, &pastEnd} {
+		insert(start, &group.ID, 9999, &positive, firstToken, service.RequestTypeSync, 0, 0, "token")
 	}
 	for _, n := range []int{0, -1} {
-		insert(start, &group.ID, n, &positive, service.RequestTypeSync, 0, 0, "token")
+		insert(start, &group.ID, n, &positive, &zero, service.RequestTypeSync, 0, 0, "token")
 	}
 	for _, kind := range []service.RequestType{service.RequestTypeLive, service.RequestTypeUnknown} {
-		insert(start, &group.ID, 9999, &positive, kind, 0, 0, "token")
+		insert(start, &group.ID, 9999, &positive, &zero, kind, 0, 0, "token")
 	}
-	insert(start, &group.ID, 9999, &positive, service.RequestTypeSync, 1, 0, "token")
-	insert(start, &group.ID, 9999, &positive, service.RequestTypeSync, 0, 1, "token")
-	insert(start, &group.ID, 9999, &positive, service.RequestTypeSync, 0, 0, "image")
-	insert(start.Add(-time.Second), &group.ID, 9999, &positive, service.RequestTypeSync, 0, 0, "token")
-	insert(end, &group.ID, 9999, &positive, service.RequestTypeSync, 0, 0, "token")
-	insert(start, &otherGroup.ID, 9999, &positive, service.RequestTypeSync, 0, 0, "token")
-	insert(start, nil, 50, &positive, service.RequestTypeSync, 0, 0, "token")
+	insert(start, &group.ID, 9999, &positive, &zero, service.RequestTypeSync, 1, 0, "token")
+	insert(start, &group.ID, 9999, &positive, &zero, service.RequestTypeSync, 0, 1, "token")
+	insert(start, &group.ID, 9999, &positive, &zero, service.RequestTypeSync, 0, 0, "image")
+	insert(start.Add(-time.Second), &group.ID, 9999, &positive, &zero, service.RequestTypeSync, 0, 0, "token")
+	insert(end, &group.ID, 9999, &positive, &zero, service.RequestTypeSync, 0, 0, "token")
+	insert(start, &otherGroup.ID, 9999, &positive, &zero, service.RequestTypeSync, 0, 0, "token")
+	insert(start, nil, 50, &positive, &zero, service.RequestTypeSync, 0, 0, "token")
 	repo := NewOpsRepository(integrationDB).(*opsRepository)
 	filter := &service.OpsDashboardFilter{StartTime: start, EndTime: end, Platform: " OpenAI ", GroupID: &group.ID}
 	assertStats := func(stats *service.OpsOutputTPS) {

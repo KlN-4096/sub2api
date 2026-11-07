@@ -396,7 +396,7 @@ export default {
     latencyFirstToken: 'First',
     latencyDuration: 'Total',
     outputTps: 'Average output TPS',
-    outputTpsHint: 'Output tokens divided by total request duration, in tok/s. Includes reasoning tokens and waiting time; first-token and first-answer times are not subtracted. This is end-to-end throughput, not pure decoding speed. Unavailable when data is insufficient or not applicable.',
+    outputTpsHint: 'Output tokens / (total request duration − time to first response frame), in tok/s. First-answer time and reasoning tokens are not subtracted. This is not pure decoding speed. Unavailable when first-frame timing is missing, the remaining duration is not positive, or the metric does not apply.',
     time: 'Time',
     ws: 'WS',
     stream: 'Stream',

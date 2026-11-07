@@ -173,13 +173,14 @@ const baseImageRow = {
 }
 
 describe('admin UsageTable tooltip', () => {
-  it('shows sync TPS using total duration, with missing and image data unavailable', () => {
+  it('shows TPS after the first frame, with missing timing and image data unavailable', () => {
     const row = { ...baseImageRow, request_type: 'sync', stream: false, image_count: 0, billing_mode: 'token', output_tokens: 1000, duration_ms: 20_000, first_token_ms: 10_000 }
     const wrapper = mount(UsageTable, {
       props: {
         data: [
           row,
           { ...row, request_id: 'no-duration', duration_ms: null },
+          { ...row, request_id: 'no-first-token', first_token_ms: null },
           { ...row, request_id: 'image', image_count: 1 },
           { ...row, request_id: 'image-tokens', image_output_tokens: 10 },
         ],
@@ -188,7 +189,7 @@ describe('admin UsageTable tooltip', () => {
       },
       global: { stubs: { DataTable: DataTableStub, EmptyState: true, Icon: true, Teleport: true } },
     })
-    expect(wrapper.findAll('[data-testid="usage-tps"]').map(cell => cell.text())).toEqual(['50.00', '—', '—', '—'])
+    expect(wrapper.findAll('[data-testid="usage-tps"]').map(cell => cell.text())).toEqual(['100.00', '—', '—', '—', '—'])
     expect(wrapper.text()).toContain('TPS')
     wrapper.unmount()
   })
@@ -217,7 +218,7 @@ describe('admin UsageTable tooltip', () => {
         global: { stubs: { DataTable: DataTableStub, EmptyState: true, Icon: true, Teleport: true } },
       })
       const tps = wrapper.get('[data-testid="usage-tps"]')
-      expect(tps.text()).toBe('14.29')
+      expect(tps.text()).toBe('20.00')
       expect(tps.attributes('title')).toBe(usageMessages.outputTpsHint)
       expect(tps.element.parentElement!.classList.contains('text-left')).toBe(true)
       const cells = Array.from(tps.element.parentElement!.children)

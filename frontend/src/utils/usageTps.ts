@@ -4,15 +4,16 @@ import { resolveUsageRequestType, type UsageRequestTypeLike } from '@/utils/usag
 interface UsageTpsRow extends UsageRequestTypeLike {
   output_tokens?: number | null
   duration_ms?: number | null
+  first_token_ms?: number | null
   billing_mode?: string | null
   image_count?: number
   image_output_tokens?: number | null
 }
 
 /**
- * Average output tokens per second over the full request duration, including reasoning tokens and waiting time.
- * This is end-to-end throughput, not pure decoding speed. All records use the same formula as ops queryOutputTPS
- * (its sample filters differ); first-token timing, first-answer timing and reasoning counts do not change the rate.
+ * Average output tokens per second after the first response frame.
+ * The formula matches ops queryOutputTPS (its sample filters differ).
+ * First-answer timing and reasoning counts do not change the rate.
  */
 export function usageTps(row: UsageTpsRow): number | null {
   const type = resolveUsageRequestType(row)
@@ -21,9 +22,11 @@ export function usageTps(row: UsageTpsRow): number | null {
       (row.image_count ?? 0) > 0 || (row.image_output_tokens ?? 0) > 0) return null
   const tokens = row.output_tokens
   const duration = row.duration_ms
+  const firstToken = row.first_token_ms
   if (tokens == null || !Number.isFinite(tokens) || tokens < 0 ||
-      duration == null || !Number.isFinite(duration) || duration <= 0) return null
-  const rate = tokens * 1000 / duration
+      duration == null || !Number.isFinite(duration) ||
+      firstToken == null || !Number.isFinite(firstToken) || firstToken < 0 || firstToken >= duration) return null
+  const rate = tokens * 1000 / (duration - firstToken)
   return Number.isFinite(rate) ? rate : null
 }
 
