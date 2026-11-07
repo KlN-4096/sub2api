@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -117,13 +118,14 @@ func TestCodexDirectImagesHTTPErrorFallbacksOnlyWhenEndpointUnavailable(t *testi
 func TestCodexDirectImagesStreamDeliversPlainJSON(t *testing.T) {
 	body := []byte(`{"model":"gpt-image-2","prompt":"draw","stream":true}`)
 	c, rec := newOpenAIImagesTestContext(t, body)
-	svc := newOpenAIImagesTestService(&httpUpstreamRecorder{resp: openAIImagesJSONResponse()})
+	svc := newOpenAIImagesTestService(nil)
 	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
 	require.NoError(t, err)
-	result, err := svc.ForwardImages(context.Background(), c, directImagesTestAccount(), body, parsed, "")
+	// Exercise the JSON-to-SSE handler independently of the OAuth routing policy.
+	usage, count, _, _, err := svc.handleOpenAIImagesStreamingResponse(openAIImagesJSONResponse(), c, time.Now(), parsed)
 	require.NoError(t, err)
-	require.Equal(t, 1, result.ImageCount)
-	require.Equal(t, 20, result.Usage.ImageOutputTokens)
+	require.Equal(t, 1, count)
+	require.Equal(t, 20, usage.ImageOutputTokens)
 	require.Equal(t, "text/event-stream", rec.Header().Get("Content-Type"))
 	require.Contains(t, rec.Body.String(), "event: image_generation.completed")
 	require.Contains(t, rec.Body.String(), `"b64_json":"aGVsbG8="`)
