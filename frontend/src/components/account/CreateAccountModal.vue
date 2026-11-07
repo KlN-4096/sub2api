@@ -6103,7 +6103,9 @@ const handleSubmit = async () => {
       credentials.admin_base_url = cprAdminBaseUrl.value.trim().replace(/\/+$/, '')
     }
 
-    await createAccountAndFinish('openai', 'cpr' as AccountType, credentials)
+    const extra: Record<string, unknown> = {}
+    applyOpenAIImageSizeTiersToExtra(extra, openAIImageSizeTiers.value)
+    await createAccountAndFinish('openai', 'cpr' as AccountType, credentials, Object.keys(extra).length ? extra : undefined)
     return
   }
 

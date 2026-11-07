@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -44,4 +45,34 @@ func TestOpenAIRawRelayBodyLimitIsLocal413NotAccountFault(t *testing.T) {
 	require.True(t, errors.As(err, &tooLarge))
 	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
 	require.Contains(t, rec.Body.String(), "request_too_large")
+}
+
+func TestOpenAIRawRelayReusesIngressNormalizedBody(t *testing.T) {
+	body := []byte("{\"model\":\"gpt-6.1-sol\",\"input\":\"a\x00b\"}")
+	ctx, release := httputil.WithRequestBodyMemoryBudget(context.Background(), httputil.NewBodyMemoryBudget(4096))
+	defer release()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/responses", bytes.NewReader(body)).WithContext(ctx)
+	normalized, err := httputil.ReadLenientJSONRequestBodyWithPrealloc(c.Request, 0)
+	require.NoError(t, err)
+
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	out, plain, _, err := svc.openAIRawRelayOutboundBody(ctx, c, account, normalized)
+	require.NoError(t, err)
+	require.Equal(t, body, out, "unmodified relay still sends original wire bytes")
+	require.Equal(t, normalized, plain)
+	require.Same(t, &normalized[0], &plain[0], "do not allocate the normalized body twice")
+}
+
+func TestOpenAIRawRelayChargesFallbackNormalization(t *testing.T) {
+	body := []byte("{\"model\":\"gpt-6.1-sol\",\"input\":\"a\x00b\"}")
+	ctx, release := httputil.WithRequestBodyMemoryBudget(context.Background(), httputil.NewBodyMemoryBudget(1))
+	defer release()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/responses", bytes.NewReader(body)).WithContext(ctx)
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	_, _, _, err := svc.openAIRawRelayOutboundBody(ctx, c, account, body)
+	require.ErrorIs(t, err, httputil.ErrRequestBodyMemoryBudget)
 }
