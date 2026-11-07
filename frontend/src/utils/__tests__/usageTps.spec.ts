@@ -4,27 +4,27 @@ import { formatUsageTps, usageTps } from '../usageTps'
 const row = { output_tokens: 100, duration_ms: 7000, first_token_ms: 2000, stream: true }
 
 describe('usage TPS', () => {
-  it('uses total duration for every supported request type, including older records', () => {
+  it('subtracts the first response frame for every applicable request type', () => {
     for (const request_type of [undefined, 'stream', 'ws_v2', 'sync', 'cyber', 'live', 'unknown']) {
-      expect(formatUsageTps({ ...row, request_type })).toBe('14.29')
-      expect(formatUsageTps({ ...row, request_type, stream: false })).toBe('14.29')
+      expect(formatUsageTps({ ...row, request_type })).toBe('20.00')
+      expect(formatUsageTps({ ...row, request_type, stream: false })).toBe('20.00')
     }
     expect(formatUsageTps({ ...row, output_tokens: 0 })).toBe('0.00')
-    expect(formatUsageTps({ ...row, duration_ms: 1500 })).toBe('66.67')
-    expect(formatUsageTps({ ...row, output_tokens: 17, duration_ms: 5440 })).toBe('3.13')
+    expect(formatUsageTps({ ...row, first_token_ms: 0 })).toBe('14.29')
+    expect(formatUsageTps({ ...row, output_tokens: 17, duration_ms: 7440 })).toBe('3.13')
   })
 
-  it('includes hidden reasoning and waiting time instead of timing only the final answer window', () => {
+  it('keeps reasoning and uses the first response frame instead of the first answer', () => {
     const hiddenReasoning = {
       output_tokens: 1984, reasoning_tokens: 516, duration_ms: 40928,
       first_token_ms: 349, first_answer_ms: 26153,
     }
-    expect(formatUsageTps(hiddenReasoning)).toBe('48.48')
+    expect(formatUsageTps(hiddenReasoning)).toBe('48.89')
 
     const bufferedAnswer = {
-      output_tokens: 158, reasoning_tokens: 0, duration_ms: 7933, first_answer_ms: 7556,
+      output_tokens: 158, reasoning_tokens: 0, duration_ms: 7933, first_token_ms: 400, first_answer_ms: 7556,
     }
-    expect(formatUsageTps(bufferedAnswer)).toBe('19.92')
+    expect(formatUsageTps(bufferedAnswer)).toBe('20.97')
   })
 
   it.each([
@@ -35,12 +35,12 @@ describe('usage TPS', () => {
     { reasoning_tokens: 40, first_answer_ms: 7000 }, { reasoning_tokens: 40, first_answer_ms: 8000 },
     { reasoning_tokens: NaN, first_answer_ms: 3000 }, { reasoning_tokens: 40, first_answer_ms: NaN },
   ])('does not change the rate based on reasoning counts or first-answer timing: %j', patch => {
-    expect(formatUsageTps({ ...row, ...patch })).toBe('14.29')
+    expect(formatUsageTps({ ...row, ...patch })).toBe('20.00')
   })
 
-  it.each([null, -1, 0, 7000, 8000, NaN, Infinity])('ignores time to first token %s', first_token_ms => {
+  it.each([undefined, null, -1, 7000, 8000, NaN, Infinity])('does not fall back with invalid or missing time to first token %s', first_token_ms => {
     const input = { ...row, first_token_ms }
-    expect(formatUsageTps(input)).toBe('14.29')
+    expect(formatUsageTps(input)).toBe('—')
   })
 
   it.each([
