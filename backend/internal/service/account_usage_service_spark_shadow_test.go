@@ -131,8 +131,10 @@ func TestGetOpenAIUsage_SparkShadow_WritesExtraAndReturnsNonEmptyWindows(t *test
 		"QueryUsage must use parent's chatgpt-account-id for spark shadow accounts")
 
 	// Assertion A-2: shadow Extra was persisted with codex_5h_used_percent.
+	var persistedUpdates map[string]any
 	select {
 	case updates := <-updateExtraCh:
+		persistedUpdates = updates
 		require.Contains(t, updates, "codex_5h_used_percent",
 			"persisted extra must contain codex_5h_used_percent")
 		require.InDelta(t, 42.5, updates["codex_5h_used_percent"], 0.01,
@@ -151,11 +153,14 @@ func TestGetOpenAIUsage_SparkShadow_WritesExtraAndReturnsNonEmptyWindows(t *test
 	require.Equal(t, "active", usage.Source)
 	require.Empty(t, usage.Error)
 	require.NotNil(t, usage.UpdatedAt)
-	stamp, ok := shadow.Extra["codex_usage_updated_at"].(string)
+	// The fork reads an outbound snapshot instead of mutating the caller's
+	// account object; assert the observation timestamp on the persisted patch.
+	stamp, ok := persistedUpdates["codex_usage_updated_at"].(string)
 	require.True(t, ok, "snapshot observation time must be stored as a string")
 	observedAt, err := time.Parse(time.RFC3339, stamp)
 	require.NoError(t, err)
 	require.True(t, usage.UpdatedAt.Equal(observedAt))
+	require.NotContains(t, shadow.Extra, "codex_usage_updated_at", "usage reads must not mutate the caller's account")
 }
 
 func TestGetOpenAIUsage_SparkShadow_FailedOrEmptyQueryDoesNotRefreshSnapshot(t *testing.T) {

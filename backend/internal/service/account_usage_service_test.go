@@ -235,8 +235,14 @@ func TestAccountUsageService_GetOpenAIUsage_PreservesSnapshotObservationTime(t *
 			} else if usage.UpdatedAt != nil {
 				t.Fatalf("unknown observation time must not become the request time: %v", usage.UpdatedAt)
 			}
-			if usage.Source != "passive" || usage.Error != "" {
-				t.Fatalf("snapshot read should be passive, not a failed refresh: %#v", usage)
+			// The fork refreshes stale OAuth snapshots through /wham/usage even
+			// without WSv2. With no quota service, retain the observation but
+			// report the failed refresh instead of treating old/unknown data as fresh.
+			if usage.Source != "passive" || usage.ErrorCode != "quota_refresh_failed" || usage.Error == "" {
+				t.Fatalf("failed refresh must preserve the passive snapshot and expose its failure: %#v", usage)
+			}
+			if account.Extra["codex_usage_updated_at"] != stamp {
+				t.Fatal("failed refresh must not mutate the original observation timestamp")
 			}
 		})
 	}
