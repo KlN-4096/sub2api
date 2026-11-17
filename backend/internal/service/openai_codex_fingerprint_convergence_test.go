@@ -181,7 +181,7 @@ func TestCodexFingerprintConvergence_UnifiedAcrossCarriers(t *testing.T) {
 	// HTTP 非透传：Forward() 先对解码后的 body 派生，再由 buildUpstreamRequest 出头。
 	var decoded map[string]any
 	require.NoError(t, json.Unmarshal(rawBody, &decoded))
-	require.True(t, applyCodexAccountIdentityClientMetadataMap(decoded, account, 77))
+	require.True(t, applyCodexAccountIdentityClientMetadataMap(decoded, account, 77, ""))
 	scopedBody, err := json.Marshal(decoded)
 	require.NoError(t, err)
 	c := newConvTestContext(t, rawBody)
@@ -190,7 +190,7 @@ func TestCodexFingerprintConvergence_UnifiedAcrossCarriers(t *testing.T) {
 	requireConvergenceInvariants(t, convOutbound{"HTTP", httpReq.Header, scopedBody})
 
 	// 透传：在原始字节上派生，再构造请求。
-	scopedRaw, changed, err := applyCodexAccountIdentityClientMetadataRaw(rawBody, account, 77)
+	scopedRaw, changed, err := applyCodexAccountIdentityClientMetadataRaw(rawBody, account, 77, "")
 	require.NoError(t, err)
 	require.True(t, changed)
 	c = newConvTestContext(t, rawBody)
@@ -294,7 +294,7 @@ func TestCodexFingerprintConvergence_OffMatchesUpstream(t *testing.T) {
 
 	var decoded map[string]any
 	require.NoError(t, json.Unmarshal(rawBody, &decoded))
-	require.True(t, applyCodexAccountIdentityClientMetadataMap(decoded, account, 77))
+	require.True(t, applyCodexAccountIdentityClientMetadataMap(decoded, account, 77, ""))
 	scopedBody, err := json.Marshal(decoded)
 	require.NoError(t, err)
 	cm := gjson.GetBytes(scopedBody, "client_metadata")
@@ -390,7 +390,7 @@ func TestCodexFingerprintConvergence_WithDeviceMode(t *testing.T) {
 	// HTTP 非透传：identity → device 分段 → buildUpstreamRequest。
 	var decoded map[string]any
 	require.NoError(t, json.Unmarshal(rawBody, &decoded))
-	require.True(t, applyCodexAccountIdentityClientMetadataMap(decoded, account, 77))
+	require.True(t, applyCodexAccountIdentityClientMetadataMap(decoded, account, 77, ""))
 	c := newConvTestContext(t, rawBody)
 	fp := resolveCodexFingerprintIDsFromRequest(c, account, nil)
 	require.NotNil(t, fp)
@@ -404,7 +404,7 @@ func TestCodexFingerprintConvergence_WithDeviceMode(t *testing.T) {
 	requireDevice("HTTP+device", httpReq.Header, scopedBody)
 
 	// 透传：raw 字节上同样顺序。
-	scopedRaw, changed, err := applyCodexAccountIdentityClientMetadataRaw(rawBody, account, 77)
+	scopedRaw, changed, err := applyCodexAccountIdentityClientMetadataRaw(rawBody, account, 77, "")
 	require.NoError(t, err)
 	require.True(t, changed)
 	c = newConvTestContext(t, rawBody)
@@ -462,7 +462,7 @@ func TestCodexFingerprintConvergence_KeepsSessionCorrelationWithoutInboundHeader
 		account := convTestAccount(enabled)
 		var decoded map[string]any
 		require.NoError(t, json.Unmarshal(rawBody, &decoded))
-		applyCodexAccountIdentityClientMetadataMap(decoded, account, 77)
+		applyCodexAccountIdentityClientMetadataMap(decoded, account, 77, "")
 		scopedBody, err := json.Marshal(decoded)
 		require.NoError(t, err)
 
@@ -472,7 +472,7 @@ func TestCodexFingerprintConvergence_KeepsSessionCorrelationWithoutInboundHeader
 			"开关=%v：入站无会话头时出站仍须携带会话关联头，实际 session-id=%q session_id=%q conversation_id=%q",
 			enabled, httpReq.Header.Get("session-id"), httpReq.Header.Get("session_id"), httpReq.Header.Get("conversation_id"))
 
-		scopedRaw, _, err := applyCodexAccountIdentityClientMetadataRaw(rawBody, account, 77)
+		scopedRaw, _, err := applyCodexAccountIdentityClientMetadataRaw(rawBody, account, 77, "")
 		require.NoError(t, err)
 		ptReq, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), newCtx(), account, scopedRaw, "tok")
 		require.NoError(t, err)
@@ -499,7 +499,7 @@ func TestCodexFingerprintConvergence_ReconstructsSessionHeadersFromBody(t *testi
 
 	var decoded map[string]any
 	require.NoError(t, json.Unmarshal(rawBody, &decoded))
-	require.True(t, applyCodexAccountIdentityClientMetadataMap(decoded, account, 77))
+	require.True(t, applyCodexAccountIdentityClientMetadataMap(decoded, account, 77, ""))
 	scopedBody, err := json.Marshal(decoded)
 	require.NoError(t, err)
 	c := newCtx()
@@ -508,7 +508,7 @@ func TestCodexFingerprintConvergence_ReconstructsSessionHeadersFromBody(t *testi
 	require.NoError(t, err)
 	requireConvergenceInvariants(t, convOutbound{"HTTP 中继剥头", httpReq.Header, scopedBody})
 
-	scopedRaw, changed, err := applyCodexAccountIdentityClientMetadataRaw(rawBody, account, 77)
+	scopedRaw, changed, err := applyCodexAccountIdentityClientMetadataRaw(rawBody, account, 77, "")
 	require.NoError(t, err)
 	require.True(t, changed)
 	c = newCtx()
@@ -539,7 +539,7 @@ func TestCodexFingerprintConvergence_PromptCacheKeySharesSessionSource(t *testin
 	})
 	require.NoError(t, err)
 
-	scopedRaw, changed, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77)
+	scopedRaw, changed, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77, "")
 	require.NoError(t, err)
 	require.True(t, changed)
 	scopedKey := gjson.GetBytes(scopedRaw, "prompt_cache_key").String()
@@ -664,7 +664,7 @@ func TestCodexFingerprintConvergence_AstraNoClientMetadataWithInboundHeaders(t *
 	})
 	require.NoError(t, err)
 
-	scopedRaw, _, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77)
+	scopedRaw, _, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77, "")
 	require.NoError(t, err)
 	c := newConvTestContext(t, body) // 入站保留 session-id / thread-id
 	stageCodexConvergenceBodyIdentityRaw(c, account, scopedRaw)
@@ -699,7 +699,7 @@ func TestCodexFingerprintConvergence_AstraSessionModeSyncsPromptCacheKey(t *test
 	for _, name := range []string{"session-id", "thread-id", "x-client-request-id", "x-codex-parent-thread-id"} {
 		c.Request.Header.Del(name)
 	}
-	scopedRaw, _, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77)
+	scopedRaw, _, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77, "")
 	require.NoError(t, err)
 	fp := resolveCodexFingerprintIDsFromRequest(c, account, nil)
 	require.NotNil(t, fp)
@@ -761,7 +761,7 @@ func convRunPassthrough(t *testing.T, account *Account, body []byte, stripInboun
 		}
 	}
 	fp := resolveCodexFingerprintIDsWithBody(c, account, nil, gjson.GetBytes(body, "client_metadata"))
-	scoped, _, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77)
+	scoped, _, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77, "")
 	require.NoError(t, err)
 	if fp != nil {
 		next, _, fpErr := applyCodexFingerprintClientMetadataRaw(scoped, fp)
@@ -803,7 +803,7 @@ func TestCodexFingerprintConvergence_CodexClientMetadataWithoutSession(t *testin
 			// 普通路径同样的判定
 			var decoded map[string]any
 			require.NoError(t, json.Unmarshal(body, &decoded))
-			applyCodexAccountIdentityClientMetadataMap(decoded, account, 77)
+			applyCodexAccountIdentityClientMetadataMap(decoded, account, 77, "")
 			c := newConvTestContext(t, body)
 			for _, name := range []string{"session-id", "thread-id", "x-client-request-id"} {
 				c.Request.Header.Del(name)
@@ -892,7 +892,7 @@ func TestCodexFingerprintConvergence_R3TurnMetadataBeatsCustomCacheKey(t *testin
 	for _, name := range []string{"session-id", "thread-id", "x-client-request-id", "x-codex-parent-thread-id", "x-codex-turn-metadata"} {
 		c.Request.Header.Del(name)
 	}
-	scoped, _, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77)
+	scoped, _, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 77, "")
 	require.NoError(t, err)
 	stageCodexConvergenceBodyIdentityRaw(c, account, scoped)
 	req, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), c, account, scoped, "tok")

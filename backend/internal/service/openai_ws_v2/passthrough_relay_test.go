@@ -1559,7 +1559,7 @@ func TestRelay_OnTurnComplete_FirstTokenMsRecordedForEveryTurn(t *testing.T) {
 	}
 }
 
-func TestRelay_IsFirstTokenEventDecidesEveryTurnFirstToken(t *testing.T) {
+func TestRelay_FirstResponseFrameTimingDoesNotUseSemanticTokenRule(t *testing.T) {
 	t.Parallel()
 
 	clientConn := newPassthroughTestFrameConn(nil, false)
@@ -1617,7 +1617,7 @@ func TestRelay_IsFirstTokenEventDecidesEveryTurnFirstToken(t *testing.T) {
 	sendUpstream(firstTurnAt.Add(2*time.Second), `{"type":"response.completed","response":{"id":"resp_first","usage":{"input_tokens":1,"output_tokens":2}}}`)
 	firstTurn := waitTurn("resp_first")
 	require.NotNil(t, firstTurn.FirstTokenMs)
-	require.Equal(t, 300, *firstTurn.FirstTokenMs, "the injected rule picks the first-token event")
+	require.Equal(t, 100, *firstTurn.FirstTokenMs, "first-frame reporting does not wait for the injected token rule")
 
 	clock.Store(secondTurnAt.UnixNano())
 	clientConn.readCh <- passthroughTestFrame{
@@ -1628,7 +1628,8 @@ func TestRelay_IsFirstTokenEventDecidesEveryTurnFirstToken(t *testing.T) {
 	sendUpstream(secondTurnAt.Add(100*time.Millisecond), `{"type":"response.created","response":{"id":"resp_second"}}`)
 	sendUpstream(secondTurnAt.Add(2*time.Second), `{"type":"response.completed","response":{"id":"resp_second","usage":{"input_tokens":1,"output_tokens":0}}}`)
 	secondTurn := waitTurn("resp_second")
-	require.Nil(t, secondTurn.FirstTokenMs, "terminal events never mark the first token")
+	require.NotNil(t, secondTurn.FirstTokenMs)
+	require.Equal(t, 100, *secondTurn.FirstTokenMs, "even a turn without token deltas has a first response frame")
 
 	cancel()
 	select {
