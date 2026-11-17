@@ -88,8 +88,9 @@ type RelayOptions struct {
 	BeforeRelayCancel               func(exit RelayExit)
 	ReadClientFrame                 func(ctx context.Context, clientConn FrameConn) (coderws.MessageType, []byte, error)
 	OnTrace                         func(event RelayTraceEvent)
-	// IsFirstTokenEvent decides which upstream event marks the first token.
-	// Nil keeps the built-in delta-based rule.
+	// IsFirstTokenEvent is retained for upstream source compatibility.
+	// Deprecated: this fork reports the first response frame via IsResponseFrameEvent,
+	// independently of semantic-token selection.
 	IsFirstTokenEvent func(eventType string, message []byte) bool
 	Now               func() time.Time
 }
@@ -121,7 +122,6 @@ type relayState struct {
 	turnTimingByID          map[string]*relayTurnTiming
 	activeTurn              *relayTurnTiming
 	pendingBareError        *observedUpstreamEvent
-	isFirstTokenEvent       func(eventType string, message []byte) bool
 	bareErrorEndsTurn       bool
 }
 
@@ -188,7 +188,7 @@ func Relay(
 		firstMessageType = coderws.MessageText
 	}
 	startAt := nowFn()
-	state := &relayState{requestModel: result.RequestModel, isFirstTokenEvent: options.IsFirstTokenEvent, bareErrorEndsTurn: options.BareErrorEndsTurn}
+	state := &relayState{requestModel: result.RequestModel, bareErrorEndsTurn: options.BareErrorEndsTurn}
 	if isClientResponseCreateFrame(firstMessageType, firstClientMessage) {
 		firstTurnStartedAt := options.FirstTurnStartedAt
 		if firstTurnStartedAt.IsZero() {
@@ -1334,13 +1334,6 @@ func shouldParseUsage(eventType string) bool {
 		return true
 	}
 	return strings.HasPrefix(eventType, "response.") && !strings.HasSuffix(eventType, ".delta")
-}
-
-func (s *relayState) startsFirstToken(eventType string, message []byte) bool {
-	if s.isFirstTokenEvent != nil {
-		return !isTerminalEvent(eventType) && s.isFirstTokenEvent(eventType, message)
-	}
-	return isTokenEvent(eventType)
 }
 
 func isTokenEvent(eventType string) bool {

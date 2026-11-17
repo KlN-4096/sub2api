@@ -28,7 +28,7 @@ func convRunMap(t *testing.T, account *Account, raw []byte, stripInbound bool) (
 	require.NoError(t, json.Unmarshal(raw, &body))
 	originalKey, _ := body["prompt_cache_key"].(string)
 	ids := resolveCodexFingerprintIDsWithBody(c, account, nil, body["client_metadata"])
-	applyCodexAccountIdentityClientMetadataMap(body, account, 77)
+	applyCodexAccountIdentityClientMetadataMap(body, account, 77, "")
 	applyCodexFingerprintClientMetadata(body, ids)
 	stageCodexFingerprintIDs(c, ids)
 	stageCodexConvergenceBodyIdentityMap(c, account, body)
@@ -115,7 +115,7 @@ func TestCodexFingerprintConvergence_UnprovenCacheKeyIsNotSession(t *testing.T) 
 				if path == "map" {
 					var body map[string]any
 					require.NoError(t, json.Unmarshal(raw, &body))
-					applyCodexAccountIdentityClientMetadataMap(body, account, 77)
+					applyCodexAccountIdentityClientMetadataMap(body, account, 77, "")
 					applyCodexFingerprintClientMetadata(body, ids)
 					stageCodexConvergenceBodyIdentityMap(c, account, body)
 					var err error
@@ -123,7 +123,7 @@ func TestCodexFingerprintConvergence_UnprovenCacheKeyIsNotSession(t *testing.T) 
 					require.NoError(t, err)
 				} else {
 					var err error
-					finalBody, _, err = applyCodexAccountIdentityClientMetadataRaw(raw, account, 77)
+					finalBody, _, err = applyCodexAccountIdentityClientMetadataRaw(raw, account, 77, "")
 					require.NoError(t, err)
 					finalBody, _, err = applyCodexFingerprintClientMetadataRaw(finalBody, ids)
 					require.NoError(t, err)
