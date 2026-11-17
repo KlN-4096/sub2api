@@ -1131,6 +1131,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	emit := func(sse string, release bool) error {
 		if !clientOutputStarted && !release {
 			_, err := pending.WriteString(sse)
+			if err != nil {
+				streamNonFailoverErr = err
+			}
 			return err
 		}
 		writeStreamHeaders()
@@ -1244,7 +1247,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 					MarkResponseCommitted(c)
 				}
 				if !clientDisconnected {
-					if !clientOutputStarted && held.Len() == 0 {
+					if !clientOutputStarted && pending.Buffered() == 0 {
 						writeAnthropicError(c, errStatus, errType, errMsg)
 						clientOutputStarted = true
 					} else if emit(buildAnthropicStreamErrorSSE(errType, errMsg), true) == nil {
@@ -1269,6 +1272,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 					continue
 				}
 				if err := emit(sse, isTerminalEvent || evt.Type == "content_block_delta"); err != nil {
+					if streamNonFailoverErr != nil {
+						return true
+					}
 					clientDisconnected = true
 					logger.L().Info("openai messages stream: client disconnected, continuing to drain upstream for billing",
 						zap.String("request_id", requestID),

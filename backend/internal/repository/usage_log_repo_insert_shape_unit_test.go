@@ -175,10 +175,10 @@ func TestPrepareUsageLogInsert_TurnStateArgWiring(t *testing.T) {
 	require.Len(t, prepared.args, len(usageLogInsertArgTypes))
 
 	n := len(prepared.args)
-	// 尾部顺序：... native_compaction_v2, turn_state, turn_state_overridden, turn_state_source,
+	// 尾部顺序：... native_compaction_v2, cache buckets ×2, turn_state, turn_state_overridden, turn_state_source,
 	// turn_state_sent, safety_buffering ×2, route_gateway, route_pair, route_pair_overridden,
 	// route_pair_pool_gateway, route_pair_pool_version, first_answer_ms, reasoning_tokens, created_at
-	require.Equal(t, "boolean", usageLogInsertArgTypes[n-15], "native_compaction_v2 必须仍在倒数第 15")
+	require.Equal(t, "boolean", usageLogInsertArgTypes[n-17], "native_compaction_v2 必须仍在倒数第 17")
 
 	tsArg, ok := prepared.args[n-14].(sql.NullString)
 	require.True(t, ok, "turn_state 应是 sql.NullString，实际 %T", prepared.args[n-14])
