@@ -34,27 +34,7 @@ func openAIWSTTFTModeTestTurn(responseID string, startDelay, reasoningDelay time
 	}
 }
 
-// openAIWSTTFTModeHTTPExpectedMs is the first-token time the SSE path would
-// report for the same events: the delay up to the first event that
-// openAIStreamDataStartsTTFT accepts. codex.* frames only exist on WebSocket.
-func openAIWSTTFTModeHTTPExpectedMs(t *testing.T, events []openAIWSTTFTModeTestEvent, mode string) time.Duration {
-	t.Helper()
-	var elapsed time.Duration
-	for _, event := range events {
-		elapsed += event.delay
-		eventType := gjson.Get(event.payload, "type").String()
-		if strings.HasPrefix(eventType, "codex.") {
-			continue
-		}
-		if openAIStreamDataStartsTTFT(event.payload, eventType, false, mode) {
-			return elapsed
-		}
-	}
-	t.Fatalf("no first-token event for mode %s", mode)
-	return 0
-}
-
-func TestOpenAIWSPassthroughFirstTokenFollowsTTFTMode(t *testing.T) {
+func TestOpenAIWSPassthroughFirstFrameIgnoresTTFTMode(t *testing.T) {
 	for _, mode := range []string{OpenAITTFTModeSemantic, OpenAITTFTModeVisible} {
 		t.Run(mode, func(t *testing.T) {
 			runOpenAIWSPassthroughTTFTModeCase(t, mode)
@@ -164,11 +144,20 @@ func runOpenAIWSPassthroughTTFTModeCase(t *testing.T, mode string) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("turn %d result was not reported", i+1)
 		}
-		expected := openAIWSTTFTModeHTTPExpectedMs(t, turn, mode)
-		require.NotNil(t, result.FirstTokenMs, "turn %d must record first token", i+1)
+		// first_token_ms reports response.created, not the semantic/visible
+		// output selector. Buffering visible output must not change this metric.
+		expected := turn[0].delay
+		require.NotNil(t, result.FirstTokenMs, "turn %d must record its first response frame", i+1)
 		got := time.Duration(*result.FirstTokenMs) * time.Millisecond
-		require.GreaterOrEqual(t, got, expected, "turn %d first token must not precede the SSE first-token event", i+1)
-		require.Less(t, got, expected+tolerance, "turn %d first token must match the SSE rule for mode %s", i+1, mode)
+		// The next upstream read can start just before response.create is
+		// accepted; allow bounded scheduling skew without waiting for reasoning.
+		const startSkew = 50 * time.Millisecond
+		lowerBound := expected - startSkew
+		if lowerBound < 0 {
+			lowerBound = 0
+		}
+		require.GreaterOrEqual(t, got, lowerBound, "turn %d first-frame lower bound", i+1)
+		require.Less(t, got, expected+tolerance, "turn %d first frame must be independent of mode %s", i+1, mode)
 	}
 	_ = clientConn.Close(coderws.StatusNormalClosure, "done")
 }
