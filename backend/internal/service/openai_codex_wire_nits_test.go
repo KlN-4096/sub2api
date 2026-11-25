@@ -32,7 +32,7 @@ func TestHeaderOverrideCannotForgeContentEncoding(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("Content-Encoding", "zstd")
 
-	account.ApplyHeaderOverrides(headers)
+	account.ApplyHeaderOverrides(context.Background(), headers)
 
 	require.Equal(t, []string{"zstd"}, headerValuesFold(headers, "content-encoding"),
 		"覆写不得改写实际体编码，也不得追加第二个同名头")

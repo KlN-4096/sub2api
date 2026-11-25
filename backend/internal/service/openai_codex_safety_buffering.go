@@ -25,18 +25,6 @@ var openAICodexSafetyBufferingHeaders = [...]string{
 	openAICodexSafetyBufferingFasterModelHeader,
 }
 
-// headerValuesFold 取 h 里与 name 大小写无关匹配的全部值；上游响应头经 net/http 已规范化，
-// 手工构造的 http.Header 可能不是，两种都认。
-func headerValuesFold(h http.Header, name string) []string {
-	var out []string
-	for key, values := range h {
-		if strings.EqualFold(key, name) {
-			out = append(out, values...)
-		}
-	}
-	return out
-}
-
 // relayOpenAICodexSafetyBufferingHeaders 把上游的两个头原样写到 dst；上游缺失时清除 dst 上
 // 可能残留的上一 failover attempt 的值（与 turn-state 同一套理由）。
 func relayOpenAICodexSafetyBufferingHeaders(dst http.Header, upstream http.Header) {

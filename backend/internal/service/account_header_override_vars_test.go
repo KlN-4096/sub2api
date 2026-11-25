@@ -258,7 +258,7 @@ func TestOpenAIWSHandshakeCompatibilitySeparatesReportedIdentity(t *testing.T) {
 	build := func(ctx context.Context) openAIWSHandshakeCompatibilityKey {
 		h := http.Header{}
 		acc.ApplyHeaderOverrides(withHeaderOverrideConnectionScope(ctx), h)
-		return normalizeOpenAIWSHandshakeCompatibility(acc, h)
+		return normalizeOpenAIWSHandshakeCompatibility(openAIWSAcquireRequest{Account: acc, Headers: h})
 	}
 	userA := build(WithHeaderOverrideRequestScope(context.Background(), 7, 31, nil))
 	userAOtherKey := build(WithHeaderOverrideRequestScope(context.Background(), 7, 32, nil))
