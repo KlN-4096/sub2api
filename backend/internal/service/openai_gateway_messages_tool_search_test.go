@@ -125,8 +125,8 @@ const toolSearchNoopSSE = "data: {\"type\":\"response.completed\",\"response\":{
 // function_call; both must carry the same upstream name.
 func TestForwardAsAnthropic_CodexOAuthRevealedToolNameMatchesReplay(t *testing.T) {
 	for _, tc := range []struct{ name, want string }{
-		{"python", "python__sub2api"},
-		{"Python", "python__sub2api"},
+		{"python", "python_tool"},
+		{"Python", "python_tool"},
 		{"Echo", "Echo"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
