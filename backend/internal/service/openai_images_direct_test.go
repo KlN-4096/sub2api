@@ -138,10 +138,11 @@ func TestCodexDirectImagesStreamKeepsPrettyPrintedUsageOnOneLine(t *testing.T) {
 	c, rec := newOpenAIImagesTestContext(t, body)
 	resp := openAIImagesJSONResponse()
 	resp.Body = io.NopCloser(strings.NewReader("{\n  \"created\": 1710000000,\n  \"data\": [\n    {\n      \"b64_json\": \"aGVsbG8=\"\n    }\n  ],\n  \"usage\": {\n    \"input_tokens\": 10,\n    \"output_tokens\": 20\n  }\n}\n"))
-	svc := newOpenAIImagesTestService(&httpUpstreamRecorder{resp: resp})
+	svc := newOpenAIImagesTestService(nil)
 	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
 	require.NoError(t, err)
-	_, err = svc.ForwardImages(context.Background(), c, directImagesTestAccount(), body, parsed, "")
+	// Verify JSON-to-SSE framing independently of the fork's OAuth routing policy.
+	_, _, _, _, err = svc.handleOpenAIImagesStreamingResponse(resp, c, time.Now(), parsed)
 	require.NoError(t, err)
 
 	out := strings.TrimRight(rec.Body.String(), "\n")
